@@ -430,14 +430,41 @@ void TheTableService::chapterAsync(const QString &bookId, int chapter, int token
                 numbers.append(row.toMap().value(QStringLiteral("number")).toInt());
             if (!numbers.isEmpty()
                 && sourceFor(tableLibrary(library_), bookId, chapter, numbers, all)) {
+                const SlideBuilder::WarmRequest request{ epoch, key, templateBlocks, all, rows };
                 // Held already (the same key) means nothing is cut again: the same key is
                 // the same answer, and a step into a read-ahead sermon only moves the pin.
-                SlideBuilder::warmChapter(
-                    SlideBuilder::WarmRequest{ epoch, key, templateBlocks, all, rows });
+                SlideBuilder::warmChapter(request);
                 warmed = SlideBuilder::warmedItemCount(key);
                 // The sermon's own rows carry that cut, so the paragraph list reaches the
                 // screen already divided (SlideBuilder::attachSplit).
                 SlideBuilder::attachSplit(rows, key);
+                // ...AND A CUT THAT DIVIDED NOTHING, FOR A TAB THAT SAYS DIVIDE, IS CUT
+                // ONCE MORE FROM SCRATCH. A held cut is never re-made (SlideBuilder::hold
+                // answers the same key with the same entry), so a division that came out
+                // empty — cut before the option was turned on, or while the text under it
+                // was being replaced — stayed empty for as long as that entry lived. That
+                // is the reported "the divide snaps back when I leave The Table; I have to
+                // toggle Divide long paragraphs off and on": the toggle works only because
+                // it changes the key, and a new key is a new cut. Dropping the held cuts
+                // and cutting this sermon again gives the same fresh answer without the
+                // toggle. It is bounded: once per open, and only when the tab asked for a
+                // division and NOT ONE row got one.
+                if (key.options.splitLongItems) {
+                    bool anySplit = false;
+                    for (const QVariant &row : rows)
+                        if (row.toMap().value(QStringLiteral("split")).toList().size() > 1) {
+                            anySplit = true;
+                            break;
+                        }
+                    if (!anySplit) {
+                        SlideBuilder::dropWarm();
+                        SlideBuilder::warmChapter(
+                            SlideBuilder::WarmRequest{ SlideBuilder::warmEpoch(), key,
+                                                       templateBlocks, all, rows });
+                        warmed = SlideBuilder::warmedItemCount(key);
+                        SlideBuilder::attachSplit(rows, key);
+                    }
+                }
                 cut = true;
             }
             warmMs = clock.elapsed();

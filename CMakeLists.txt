@@ -16,11 +16,46 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# ---------------------------------------------------------------------------
+# AddressSanitizer (opt-in, OFF by default) — the app has been crashing
+# repeatedly with Windows STATUS_HEAP_CORRUPTION (0xc0000374: confirmed via
+# Windows' own Application Error log, dozens of times since 2026-10-24), and
+# that exception is a Windows fail-fast — it bypasses normal SEH, so the
+# app's own CrashHandler never runs and build/logs's crash.log is left with
+# just a BOOT line and nothing after it. Worse, the crash always reports at
+# ntdll.dll (the SAME offset every time) because that is only where Windows
+# NOTICES the corrupted heap metadata, on some later unrelated allocation —
+# not where the actual bad write happened.
+#
+# ASan instruments every read/write against its own allocator and aborts
+# WITH A STACK TRACE at the exact bad access, so it turns "the app vanished
+# with no clue why" into a real bug report. It is diagnostic, not the
+# everyday build: it roughly doubles memory use and slows the app down, and
+# this toolchain is MinGW (ucrt64) g++, which needs libasan on PATH at
+# runtime (MSYS2's ucrt64-gcc package ships it — same /c/msys64/ucrt64/bin
+# dev_cycle.sh already puts on PATH to launch).
+#
+#   cmake -DBPS_ENABLE_ASAN=ON -B build
+#   cmake --build build
+#   (then reproduce the crash — do NOT mix an ASan and a non-ASan build in
+#   the same build/ directory; reconfigure a fresh one, or OFF again and
+#   reconfigure, when switching)
+option(BPS_ENABLE_ASAN
+    "Build with AddressSanitizer (diagnostic; localizes heap corruption at the real bad access)" OFF)
+if(BPS_ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address)
+endif()
+
 # Multimedia: the media-on-air player (LiveOutputService's QMediaPlayer decode
 # of a taken video/image — the engine's render pipeline composites rasters only).
 # QuickEffects: MultiEffect's live blur, behind the Settings scrim
 # (ModalScrim's optional blurSource — see its own comment).
-find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes QuickEffects Multimedia)
+# ShaderTools: qsb, which compiles the edit canvas's slide-filter shader
+# (qml/shaders/slidefilter.frag) into the .qsb package a Qt 6 ShaderEffect
+# requires — Qt 6 dropped inline GLSL source strings, so the effect has to be
+# built at build time like every other shader in a Qt 6 app.
+find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes QuickEffects Multimedia ShaderTools)
 
 qt_standard_project_setup(REQUIRES 6.11)
 
@@ -203,6 +238,7 @@ set(BPS_CORE_SOURCES
     # Song & Lyrics Engine (Phase 13, docs/specs/25)
     ${BPS_ROOT}/modules/songs/SongEngine.cpp
     ${BPS_ROOT}/modules/songs/SongProviders.cpp
+    ${BPS_ROOT}/modules/songs/ProPresenterFile.cpp
     ${BPS_ROOT}/modules/songs/Chord.cpp
     # Service Flow, Playlist & Automation Engine (Phase 14, docs/specs/26)
     ${BPS_ROOT}/modules/automation/FlowEngine.cpp
@@ -529,6 +565,17 @@ qt_add_qml_module(appVGRPresenterUI
     RESOURCES
         ${APP_ASSET_FILES}
     RESOURCE_PREFIX /qt/qml
+)
+
+# The Edit canvas's slide-filter shader (qml/shaders/slidefilter.frag, used by
+# qml/components/SlideFilterEffect.qml). Qt 6's ShaderEffect takes a .qsb
+# package, not GLSL text, so qsb compiles it here and it is referenced as
+# qrc:/shaders/slidefilter.frag.qsb. One shader, one resource path — the effect
+# file names it exactly once.
+qt_add_shaders(appVGRPresenterUI "qml_slide_filter"
+    PREFIX "/shaders"
+    BASE "qml/shaders"
+    FILES qml/shaders/slidefilter.frag
 )
 
 # The executable's File-Explorer/taskbar icon + version resource. RC_ICONS was

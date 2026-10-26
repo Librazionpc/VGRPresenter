@@ -226,7 +226,9 @@ Result<TextLayoutResult> RenderCache::Layout(const std::string& text,
     key.wrap = style.wrapWidth;
     key.wrapOn = style.wrap;
     key.letterSpacing = style.letterSpacing;
+    key.wordSpacing = style.wordSpacing;
     key.lineSpacing = style.lineSpacing;
+    key.lineGap = style.lineGap;
     key.bold = style.bold;
     key.italic = style.italic;
     auto it = layouts_.find(key);

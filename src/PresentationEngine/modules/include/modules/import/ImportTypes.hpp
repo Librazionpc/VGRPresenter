@@ -74,6 +74,16 @@ struct ImportedShow {
     std::string notes;
     std::vector<ImportedSection> sections;      // in the order they are sung / shown (a repeated chorus appears again)
     std::string origin;                         // the format it came from ("txt", "chordpro"...)
+    // The folder the file came from ("Only Believe SongBook"), or "" when it did not come from one.
+    // The import files each show under it, so a library arrives as a batch named after its source
+    // instead of thousands of loose shows in "song".
+    std::string sourceFolder;
+    // Full paths of the pictures/videos the source document references and that exist on this
+    // machine: a ProPresenter deck's Media/Assets artwork (found by URL, by relative path or by
+    // the media NAME the cue carries), or a FreeShow slide's own image/video item. The import
+    // copies them into the media library, so the artwork arrives with the show instead of staying
+    // behind with the old library.
+    std::vector<std::string> mediaRefs;
 };
 
 struct ImportResult {

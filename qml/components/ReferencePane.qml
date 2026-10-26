@@ -119,6 +119,16 @@ Item {
     property var pendingGoTo: null
     property var selected: []            // verse numbers, ascending
     property int anchorVerse: 0
+    // THE NAME LiveOutputService WAS STAGED/GONE LIVE UNDER, captured at the
+    // moment of the pick — NOT root.referenceText read live, which (for
+    // Scripture) is itself DERIVED FROM root.selected ("Genesis 1:1" ->
+    // "Genesis 1:2" as the pick changes) and would drift the instant
+    // followLiveStep below updates root.selected to follow a step,
+    // breaking its OWN ownership check on the very next change. The
+    // Table's reference string happens to be the sermon's fixed citation
+    // line regardless of which paragraph is selected, so it would not have
+    // shown this — Scripture would have. See followLiveStep.
+    property string lineStepOwnerRef: ""
     property bool optionsOpen: false
     property bool searching: false
     // EXACT WORDS (the padlock at the far end of the pill's search field — user
@@ -482,6 +492,25 @@ Item {
     readonly property var currentPreviewSlide: root.previewSlides.length > 0
         ? root.previewSlides[Math.max(0, Math.min(root.previewSlideIndex, root.previewSlides.length - 1))]
         : null
+
+    // THE LIVE READING FLOW, when this pane's own pick is what the tile is
+    // actually showing — as opposed to currentPreviewSlide/preview above,
+    // which are a fresh, STATIC adapter.preview() render of whichever one
+    // paragraph/part is selected, with no flowText/flowScroll on it at all.
+    // The Main Output tile's own scroll (OutputMonitorTile's DesignPreview)
+    // reads those two fields straight from LiveOutputService's staged/on-air
+    // slide — this pane's own preview box was reading from the static query
+    // instead, so a step there had nothing to animate from and just redrew a
+    // new snapshot each press (user report: "it['s] not scrolling[,] it
+    // act[s] as a sliding"). null when nothing of ours is staged/on air yet
+    // (browsing before any pick), so the box falls back to the static query.
+    readonly property var liveFlowSlide: {
+        if (root.lineStepOwnerRef === "")
+            return null
+        if (LiveOutputService.live)
+            return LiveOutputService.onAirTitle === root.lineStepOwnerRef ? LiveOutputService.onAirSlide : null
+        return LiveOutputService.stagedIsOurs(root.lineStepOwnerRef) ? LiveOutputService.stagedSlide : null
+    }
     onPreviewChanged: {
         if (root.previewSlideIndex >= root.previewSlides.length)
             root.previewSlideIndex = 0
@@ -612,6 +641,11 @@ Item {
     // screen (paragraph + piece — see topRowIdentity).
     property var restorePicked: []
     property var restoreRow: null
+    // This tab's own split choice as it was when the pane was last on screen — put
+    // back on activation if something wrote the key while the tab was away (see the
+    // re-apply in onVisibleChanged). Per pane, so each tab remembers its own.
+    property bool rememberedSplit: false
+    property bool hasRememberedSplit: false
     // The fill options the rows ON SCREEN were cut with, captured when their chapter
     // was opened; and the one stale state a re-read was already tried for.
     property string openFillSignature: ""
@@ -1142,6 +1176,55 @@ Item {
     function stageSubpart(number, partIndex) {
         root.selectSubpart(number, partIndex)
         root.playSlideAt(root.previewSlideIndex)
+    }
+
+    // FOLLOW THE LINE STEPPER. Alt+Down/Alt+Up (LiveOutputService.lineStep)
+    // walks the on-air/staged picture on its own, entirely inside that
+    // service — nothing calls back into this pane as it crosses from one
+    // paragraph's slide into the next one's, so the list kept showing
+    // whatever was ORIGINALLY picked as "active" no matter how far the
+    // reader had actually stepped (user report: "the scroll is working but
+    // it's stuck at paragraph one" — the WORDS were moving; the list's own
+    // highlight never was). Whenever the tile's content changes and it is
+    // still THIS pick (stagedIsOurs / onAirTitle), re-point root.selected
+    // and previewSlideIndex at whatever is actually showing now — the same
+    // lookup selectSubpart already does for a direct click — so the
+    // highlight and the auto-scroll (centerRow) follow the step.
+    function followLiveStep() {
+        if (!root.book)
+            return
+        const raw = LiveOutputService.live ? LiveOutputService.onAirSlideRaw : LiveOutputService.stagedSlideRaw
+        const parts = (raw && raw.parts) || []
+        if (parts.length === 0)
+            return
+        const number = parts[0].number
+        const partIndex = parts[0].partIndex ?? 0
+        if (root.selected.length !== 1 || root.selected[0] !== number) {
+            root.selected = [number]
+            root.anchorVerse = number
+        }
+        const slides = root.adapter.preview(root.sourceId, root.book.id, root.chapterNumber, [number]).slides || []
+        for (let i = 0; i < slides.length; ++i) {
+            const p = slides[i].parts || []
+            if (p.some((part) => part.number === number && (part.partIndex ?? 0) === partIndex)) {
+                root.previewSlideIndex = i
+                root.centerRow(number, partIndex)
+                return
+            }
+        }
+    }
+    Connections {
+        target: LiveOutputService
+        function onStagedChanged() {
+            if (root.lineStepOwnerRef !== "" && !LiveOutputService.live
+                    && LiveOutputService.stagedIsOurs(root.lineStepOwnerRef))
+                root.followLiveStep()
+        }
+        function onOnAirChanged() {
+            if (root.lineStepOwnerRef !== "" && LiveOutputService.live
+                    && LiveOutputService.onAirTitle === root.lineStepOwnerRef)
+                root.followLiveStep()
+        }
     }
 
     // Search hits identify the stored paragraph, while The Table can split that
@@ -2230,6 +2313,33 @@ Item {
             root.convertToShowRequested(root.referenceText, slides)
     }
 
+    // The WHOLE chapter's output, one row at a time — the array
+    // LiveOutputService.lineStep (Alt+Down/Alt+Up) and the arrow-step/
+    // continuation-row staging below need to have somewhere to step into.
+    //
+    // ONE ITEM PER adapter.slides() CALL, not the whole chapter in one
+    // request (buildSlides()'s own "screenful" packing): asked for many
+    // verse/paragraph numbers at once, the engine packs consecutive ones
+    // onto a single "screenful" slide — exactly what "Convert to show"
+    // wants, but it also means lineStep's "lines" count for that slide (its
+    // AUTHORED line count) came out as the whole packed passage's flowing
+    // prose, 1 line, regardless of how many verses/paragraphs were crammed
+    // into it — so stepping could only ever jump between a couple of giant
+    // screenfuls, never between the rows the list itself shows (user
+    // report: "the table doesn't move past paragraph one"). Asking one
+    // number at a time avoids the packing and keeps every row (including a
+    // split continuation like "4-1") its own step, matching the list's own
+    // granularity and chapterVerses' own numbering.
+    function chapterOutputSlides() {
+        const output = []
+        for (const v of root.chapterVerses) {
+            const piece = root.adapter.slides(root.sourceId, root.book.id, root.chapterNumber, [v.number])
+            for (const s of piece)
+                output.push(s)
+        }
+        return output
+    }
+
     // THE ON-AIR PICK (FreeShow's verse dblclick -> playScripture): the picked
     // verses' slides go straight to the live output. The adapter (or the host)
     // decides how — ScripturePane/TheTablePane hand it to LiveOutputService,
@@ -2247,8 +2357,35 @@ Item {
             return
         }
         const slides = root.buildSlides()
-        if (slides.length > 0)
-            root.goLiveRequested(root.referenceText, slides)
+        if (slides.length === 0)
+            return
+        // THE WHOLE CHAPTER, not just the picked verse(s): so Alt+Down/Alt+Up
+        // (LiveOutputService.lineStep) has somewhere to step into once the
+        // pick runs out — the same reason ShowCenter.qml's takeSlideLive
+        // stages a show's whole slide array instead of one slide, and
+        // playSlideAt/stageSubpart above do the same for a continuation row.
+        // (user report: "the table and bible keeps return[ing] to this and
+        // doesn't move" — the lineStep diagnostic's "set=1" meant only the
+        // picked verse(s) were ever staged, with nothing beyond them to step
+        // into.)
+        const firstParts = slides[0].parts || []
+        if (firstParts.length > 0 && root.chapterVerses.length > 0) {
+            const number = firstParts[0].number
+            const partIndex = firstParts[0].partIndex ?? 0
+            const output = root.chapterOutputSlides()
+            for (let i = 0; i < output.length; ++i) {
+                const parts = output[i].parts || []
+                if (parts.some((part) => part.number === number && (part.partIndex ?? 0) === partIndex)) {
+                    root.lineStepOwnerRef = root.referenceText
+                    LiveOutputService.stageSlideSet(root.referenceText, output, i)
+                    return
+                }
+            }
+        }
+        // Falls back to the picked-only slides if the per-item rebuild
+        // can't find a match (no chapter loaded, parts missing).
+        root.lineStepOwnerRef = root.referenceText
+        root.goLiveRequested(root.referenceText, slides)
     }
 
     // Floating pill buttons: previous / next picked passage (FreeShow's
@@ -2334,6 +2471,9 @@ Item {
     // The OUTPUT slide a preview slide stands for. Both lists name a
     // continuation by the paragraph it belongs to plus its part, so that pair is
     // the identity to match on (the same mapping selectSubpart makes).
+    // Returns { slide, output, index } — the matching slide, the WHOLE output
+    // array it came from, and its position in that array — or null. The
+    // array+position (not just the one slide) is what playSlideAt below needs.
     function outputSlideAt(index) {
         const slides = root.previewSlides
         if (index < 0 || index >= slides.length)
@@ -2343,22 +2483,33 @@ Item {
             return null
         const number = parts[0].number
         const partIndex = parts[0].partIndex ?? 0
-        const output = root.buildSlides()
-        for (const slide of output) {
+        const output = root.chapterOutputSlides()
+        for (let i = 0; i < output.length; ++i) {
+            const slide = output[i]
             if ((slide.parts || []).some((part) => part.number === number
                                                    && (part.partIndex ?? 0) === partIndex))
-                return slide
+                return { slide: slide, output: output, index: i }
         }
         return null
     }
 
-    // ONE slide — exactly the pick a continuation row's click makes (see
-    // selectSubpart), so the pane's preview and the tile/air agree on which part
-    // of the passage is being shown rather than the tile sitting on part one.
+    // ONE slide on the tile/air — exactly the pick a continuation row's click
+    // makes (see selectSubpart), so the pane's preview and the tile/air agree
+    // on which part of the passage is being shown rather than the tile
+    // sitting on part one.
+    //
+    // Stages the WHOLE output set via stageSlideSet, not stageSlides(name,
+    // [slide]): the line stepper (Alt+Down/Alt+Up, LiveOutputService.
+    // lineStep) reads its neighbour slide's lines from that whole set, same
+    // as ShowCenter.qml's takeSlideLive — a single-slide stage left it with
+    // no neighbour to step into (user report: "when I press Alt[+]down it
+    // doesn't step in lines").
     function playSlideAt(index) {
-        const slide = root.outputSlideAt(index)
-        if (slide)
-            root.goLiveRequested(root.referenceText, [slide])
+        const hit = root.outputSlideAt(index)
+        if (hit) {
+            root.lineStepOwnerRef = root.referenceText
+            LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
+        }
     }
 
     // ---- The wall's ‹ ›: is THIS tab the one that can step the tile? --------
@@ -2879,6 +3030,16 @@ Item {
                                            : ListRows.stripeOverlay(verseRow.index)
                     border.width: verseRow.active ? 1.5 : 0
                     border.color: verseRow.active ? Qt.alpha(Theme.accentLight, 0.95) : "transparent"
+                    // GLIDES, not a hard cut — the line stepper (followLiveStep)
+                    // can flip `active` off this row and onto the next one in the
+                    // same tick, and the two Behaviors crossfade them: this row's
+                    // highlight fades out while the next row's fades in, instead
+                    // of the selection snapping straight from one to the other
+                    // (user call: "make the selector gliding between to[the]
+                    // list[s] so it shows that it['s] in between two").
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                    Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                    Behavior on border.width { NumberAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                     HoverGlow {
                         anchors.fill: parent
                         radius: parent.radius
@@ -4089,14 +4250,23 @@ Item {
                         // active edge to paint.
                         DesignPreview {
                             anchors.fill: parent
-                            blocks: root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks
+                            // THE READING STEP SLIDES HERE TOO (see
+                            // root.liveFlowSlide's own comment) — the same
+                            // reason OutputMonitorTile's on-air DesignPreview
+                            // sets this, so this pane's own preview box
+                            // scrolls instead of cutting from one snapshot to
+                            // the next on every press.
+                            animateLineSteps: true
+                            blocks: root.liveFlowSlide ? (root.liveFlowSlide.blocks ?? [])
+                                : (root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks)
                             // THE DESIGN'S OWN ANSWER, not an opaque plate of
                             // this pane's: an unpainted background keeps
                             // painting nothing, and the shared transparency
                             // convention (DesignPreview's checkerboard) shows
                             // there — the canvas's rule, not a black slab
                             // standing in for a keyable frame.
-                            background: root.preview.background ?? "transparent"
+                            background: root.liveFlowSlide ? (root.liveFlowSlide.background ?? "transparent")
+                                : (root.preview.background ?? "transparent")
                         }
                         Text {
                             visible: root.selected.length === 0
@@ -4264,6 +4434,54 @@ Item {
                                     TapHandler { onTapped: num.nudge(num.step) }
                                 }
                             }
+                        }                        // A setting with a few known values, as small pills on the
+                        // right — the same pick-one language the rest of Settings
+                        // uses, sized for this card. Everything it shows and writes
+                        // comes from the engine's own definition.
+                        component OptionChoice: Item {
+                            id: pick
+                            property string settingKey: ""
+                            width: parent.width; height: 40
+                            readonly property var def: SettingsService.definitions[pick.settingKey]
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.borderSubtle }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - pickRow.width - 8
+                                elide: Text.ElideRight
+                                text: pick.def ? pick.def.label : ""
+                                color: Theme.textPrimary
+                                font.family: Theme.fontFamily; font.pixelSize: Theme.textSm
+                            }
+                            Row {
+                                id: pickRow
+                                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                spacing: 4
+                                Repeater {
+                                    model: pick.def ? pick.def.choices : []
+                                    delegate: Rectangle {
+                                        id: pillChoice
+                                        required property var modelData
+                                        readonly property bool on:
+                                            String(root.options[pick.settingKey]) === String(modelData.value)
+                                        width: pillLabel.implicitWidth + 14; height: 24; radius: 6
+                                        color: pillChoice.on ? Theme.accent
+                                               : (pillHover.hovered ? Theme.hoverBg : Theme.surface)
+                                        border.width: 1
+                                        border.color: pillChoice.on ? Theme.accentLight : Theme.border
+                                        Text {
+                                            id: pillLabel
+                                            anchors.centerIn: parent
+                                            text: pillChoice.modelData.label
+                                            color: pillChoice.on ? Theme.controlInk : Theme.textPrimary
+                                            font.family: Theme.fontFamily; font.pixelSize: Theme.textSub
+                                        }
+                                        HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
+                                        TapHandler {
+                                            onTapped: SettingsService.setValue(pick.settingKey, pillChoice.modelData.value)
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // No "... on individual lines", "Smart split" or "Tolerance"
@@ -4285,8 +4503,18 @@ Item {
                             // next slide at exactly this many words.
                             OptionNumber { settingKey: root.adapter.optionsPrefix + ".wordsPerSlide"; step: 5 }
                         }
+                        // ---- THE READING STEP (Alt+Down / Alt+Up) ----
+                        // The SAME two rows on every tab: this is how the words
+                        // travel when the operator steps a line, not a property of
+                        // the content, so Scripture, The Table and a show share one
+                        // setting (see AppSettings' "reading." keys). They sit at
+                        // the bottom of this card because they are the step's pace,
+                        // next to the options that decide how much text a slide
+                        // carries.
+                        OptionNumber { settingKey: "reading.stepMs"; step: 10 }
+                        OptionChoice { settingKey: "reading.stepEasing" }
+                        }
                     }
-                }
             }
 
             // ---- Convert to show, with the round options button beside it - always present, part of the scroll flow ----
@@ -4577,12 +4805,40 @@ Item {
     onVisibleChanged: {
         if (!root.visible) {
             templatePicker.open = false
+            // ...and the moment to remember this tab's own split choice (see the
+            // re-apply on the way back in, below).
+            const p = root.adapter ? String(root.adapter.optionsPrefix || "") : ""
+            if (p !== "") {
+                root.rememberedSplit = root.options[p + ".splitLongVerses"] === true
+                root.hasRememberedSplit = true
+            }
             // Leaving the tab is the moment to have the place in the store.
             root.saveReading()
             return
         }
         // Coming back is when the split is most likely to be stale (the template was
         // edited while this pane was hidden — see refillIfStale).
+        //
+        // THE TAB RE-APPLIES ITS OWN SPLIT SETTING ON ACTIVATION (user call: "make the
+        // tab remember and re-apply its split setting per tab so switching tabs never
+        // changes how a passage is divided").
+        //
+        // The choice already LIVES in this tab's own key (scripture.* / table.* /
+        // shows.*, see AppSettings' fill-tab table), so it survives a visit elsewhere
+        // by itself. What is remembered here is the value this pane had when it was
+        // last on screen: if anything wrote that key while the pane was hidden, the
+        // tab puts its own answer back on the way in, and the division the operator
+        // left with is the division they return to. Nothing flickers when the values
+        // agree — this writes only when they don't.
+        const p = root.adapter ? String(root.adapter.optionsPrefix || "") : ""
+        if (p !== "" && root.hasRememberedSplit
+                && (root.options[p + ".splitLongVerses"] === true) !== root.rememberedSplit) {
+            SettingsService.setValue(p + ".splitLongVerses", root.rememberedSplit)
+        }
+        // A NEW VISIT IS A NEW CHANCE to re-cut a passage whose rows came back
+        // undivided (see refillIfStale, and the re-cut TheTableService makes when a
+        // tab that says divide gets no division at all).
+        root.refillTriedFor = ""
         root.refillIfStale()
     }
 }

@@ -3,6 +3,8 @@
 //   ./bps_unit_tests import
 #include "TestHarness.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <set>
 
 #include "modules/import/ImportEngine.hpp"
@@ -23,6 +25,56 @@ std::vector<std::string> Groups(const im::ImportedShow& s) {
     std::vector<std::string> out;
     for (const auto& sec : s.sections) out.push_back(sec.group);
     return out;
+}
+
+// ---- a ProPresenter 7/8 .pro document, written field by field --------------
+// ProPresenter 7 replaced the XML of Pro6 with protocol buffers, and a library
+// folder is full of them; the fixture is built here so the reader is exercised
+// on the same wire shape the real files carry (a slide's text is the RTF of a
+// graphics text element, and the slide's NOTES are RTF too but must not be
+// imported as lyrics).
+std::string PbVarint(uint64_t value) {
+    std::string out;
+    do {
+        unsigned char byte = static_cast<unsigned char>(value & 0x7F);
+        value >>= 7;
+        if (value) byte |= 0x80;
+        out.push_back(static_cast<char>(byte));
+    } while (value);
+    return out;
+}
+std::string PbBytes(int field, std::string_view data) {
+    return PbVarint(static_cast<uint64_t>(field) << 3 | 2) + PbVarint(data.size()) + std::string(data);
+}
+std::string PbInt(int field, uint64_t value) {
+    return PbVarint(static_cast<uint64_t>(field) << 3) + PbVarint(value);
+}
+std::string PbUuid(std::string_view id) { return PbBytes(1, id); }   // rv.data.UUID = { string }
+// cue -> action -> slide -> base slide -> element -> graphics element -> text -> rtf
+std::string PbCue(std::string_view id, std::string_view rtf, std::string_view notesRtf,
+                  std::string_view mediaUrl = {}) {
+    const std::string text = PbBytes(5, rtf);
+    const std::string graphicsElement = PbBytes(1, PbUuid("elem")) + PbBytes(2, "Verse") + PbBytes(13, text);
+    const std::string slideElement = PbBytes(1, graphicsElement);
+    const std::string baseSlide = PbBytes(1, slideElement);
+    const std::string presentationSlide = PbBytes(1, baseSlide) + PbBytes(2, PbBytes(1, notesRtf));
+    const std::string action = PbBytes(1, PbUuid("action")) + PbInt(9, 11) + PbBytes(23, PbBytes(2, presentationSlide));
+    const std::string cue = PbBytes(1, PbUuid(id)) + PbBytes(10, action) +
+                            (mediaUrl.empty() ? std::string() : PbBytes(6, mediaUrl));
+    return PbBytes(13, cue);   // Presentation.cues
+}
+
+// rv.data.URL of an image the machine that made the deck had: the absolute Mac
+// path it was saved from, the platform tag, and the path relative to the
+// presentation's own root (which is the one that can still resolve here).
+std::string PbMediaUrl(std::string_view relative) {
+    const std::string local = PbBytes(1, PbInt(1, 10)) + PbBytes(2, relative);   // ROOT_SHOW
+    return PbBytes(1, std::string("file:///Users/old/ProPresenter/") + std::string(relative)) +
+           PbInt(3, 1) + PbBytes(4, local);
+}
+std::string PbGroup(std::string_view name, std::string_view cueId) {
+    const std::string group = PbBytes(1, PbUuid("group")) + PbBytes(2, name);
+    return PbBytes(12, PbBytes(1, group) + PbBytes(2, PbUuid(cueId)));
 }
 
 } // namespace
@@ -147,6 +199,56 @@ void TestImportFiles() {
         CHECK(s.sections[0].slides[1].text == "There is no shadow");
     }
 
+    // ---- FreeShow's pictures: a slide's media item keeps its file ----
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = fs::temp_directory_path() / "vgr-freeshow-media";
+        fs::remove_all(root);
+        fs::create_directories(root / "media");
+        std::ofstream(root / "media" / "inline.png", std::ios::binary) << "pixels";
+        std::ofstream(root / "media" / "a1b2c3d4e5f.mp4", std::ios::binary) << "frames";
+        const fs::path outside = root / "cross.jpg";
+        std::ofstream(outside, std::ios::binary) << "pixels";
+
+        std::string absolute = outside.string();
+        for (char& c : absolute) if (c == '\\') c = '/';   // forward slashes need no JSON escaping
+        const std::string showJson =
+            std::string("{\"name\":\"With Pictures\",\"slides\":{\"a\":{\"group\":\"verse\",\"items\":[") +
+            "{\"lines\":[{\"text\":[{\"value\":\"a line of words\"}]}]}," +
+            "{\"type\":\"media\",\"src\":\"" + absolute + "\"}," +
+            "{\"type\":\"image\",\"src\":\"media/inline.png\"}]}}}";
+        im::ImportFile showFile = File("With Pictures", "show", showJson);
+        showFile.path = (root / "With Pictures.show").string();
+
+        // A slide's VIDEO item stored as the media id the app itself gave it
+        // (what a native FreeShow export carries) resolves against media/.
+        const std::string idJson =
+            "{\"name\":\"By Id\",\"slides\":{\"b\":{\"group\":\"verse\",\"items\":["
+            "{\"lines\":[{\"text\":[{\"value\":\"words\"}]}]},"
+            "{\"type\":\"media\",\"src\":\"a1b2c3d4e5f\"}]}}}";
+        im::ImportFile idFile = File("By Id", "show", idJson);
+        idFile.path = (root / "By Id.show").string();
+
+        auto withMedia = im::ImportFiles("freeshow", { showFile, idFile });
+        CHECK(withMedia.ok() && withMedia.value().shows.size() == 2 && withMedia.value().warnings.empty());
+        if (withMedia.ok() && withMedia.value().shows.size() == 2) {
+            const std::vector<std::string>& refs = withMedia.value().shows[0].mediaRefs;
+            CHECK(refs.size() == 2);
+            bool stored = false, relative = false;
+            for (const std::string& ref : refs) {
+                if (ref.find("cross.jpg") != std::string::npos) stored = true;
+                if (ref.find("inline.png") != std::string::npos) relative = true;
+            }
+            CHECK(stored && relative);
+            CHECK(withMedia.value().shows[1].mediaRefs.size() == 1);
+            if (withMedia.value().shows[1].mediaRefs.size() == 1)
+                CHECK(withMedia.value().shows[1].mediaRefs[0].find("a1b2c3d4e5f.mp4") != std::string::npos);
+            // ...and the words still come through
+            CHECK(withMedia.value().shows[0].sections[0].slides[0].text == "a line of words");
+        }
+        fs::remove_all(root);
+    }
+
     // ---- the song providers the engine already had ----
     auto cho = im::ImportFiles("chordpro", { File("Grace", "cho", "{title: Amazing Grace}\n{author: John Newton}\n\n[Verse 1]\n[C]Amazing [G]grace how [C]sweet\n\n[Chorus]\nMy chains are gone\n") });
     CHECK(cho.ok() && cho.value().shows.size() == 1);
@@ -223,6 +325,96 @@ void TestImportFiles() {
                 CHECK(bundle.value().shows[0].sections[0].slides[0].text == "Bundle line one");
             }
         }
+    }
+
+    // ---- ProPresenter 7/8 .pro: a protobuf presentation ----
+    {
+        const std::string chorusRtf =
+            "{\\rtf1\\ansi{\\fonttbl\\f0\\fnil Arial;}{\\*\\expandedcolortbl;;\\csgenericrgb\\c0;}"
+            "\\pard Only believe, only believe,\\par All things are possible}";
+        const std::string verseRtf =
+            "{\\rtf1\\ansi\\pard Fear not, little flock,\\par from the cross to the throne}";
+        const std::string presentation =
+            PbBytes(3, "Only Believe") +
+            PbGroup("Chorus", "cue-chorus") + PbGroup("Verse 1", "cue-verse") +
+            PbCue("cue-verse", verseRtf, "{\\rtf1\\ansi Private speaker note}") +
+            PbCue("cue-chorus", chorusRtf, "{\\rtf1\\ansi}");
+        im::ImportFile proFile = File("1 ONLY BELIEVE", "pro", presentation);
+        proFile.path = "C:/Users/me/Documents/ProPresenter/Libraries/Only Believe SongBook/1 ONLY BELIEVE.pro";
+        auto imported = im::ImportFiles("propresenter", { proFile });
+        CHECK(imported.ok() && imported.value().shows.size() == 1 && imported.value().warnings.empty());
+        if (imported.ok() && imported.value().shows.size() == 1) {
+            const im::ImportedShow& show = imported.value().shows[0];
+            CHECK(show.name == "Only Believe");
+            // filed under the folder it came from, not a catch-all category
+            CHECK(show.sourceFolder == "Only Believe SongBook");
+            CHECK(show.sections.size() == 2);
+            if (show.sections.size() == 2) {
+                // the cue groups are the running order, so the chorus is first
+                CHECK(show.sections[0].group == "chorus");
+                CHECK(show.sections[1].group == "verse");
+                // one cue is one slide, with its lines separated by \par
+                CHECK(show.sections[0].slides.size() == 1);
+                CHECK(show.sections[0].slides[0].text == "Only believe, only believe,\nAll things are possible");
+                CHECK(show.sections[1].slides[0].text == "Fear not, little flock,\nfrom the cross to the throne");
+                // the slide's NOTES are not lyrics
+                CHECK(show.sections[1].slides[0].text.find("Private") == std::string::npos);
+            }
+            // ...and it becomes a real show: one slide per cue, in the same order
+            const auto presentation = im::ShowFromImported(show);
+            CHECK(presentation.name == "Only Believe" && presentation.slides.size() == 2);
+            if (presentation.slides.size() == 2) {
+                CHECK(presentation.slides[0].title == "Chorus");
+                CHECK(presentation.slides[0].text == "Only believe, only believe,\nAll things are possible");
+                CHECK(presentation.slides[1].title == "Verse");   // the section family, numbered by ShowFromImported
+            }
+        }
+        // ---- the deck's artwork: resolved against the library it sits in ----
+        {
+            namespace fs = std::filesystem;
+            const fs::path root = fs::temp_directory_path() / "vgr-propresenter-media";
+            fs::remove_all(root);
+            fs::create_directories(root / "Media" / "Assets");
+            std::ofstream(root / "Media" / "Assets" / "logo.png", std::ios::binary) << "pixels";
+            // A media library stores a file under its id PREFIXED to the display
+            // name, while the document names only the display name — the shape a
+            // lower third's own artwork arrives in.
+            std::ofstream(root / "Media" / "Assets" / "1559c5d1-d259-408e-84a2-e3256b9686f5Sermon background.jpg",
+                          std::ios::binary)
+                << "pixels";
+
+            const std::string art = PbBytes(3, "Deck With Art") +
+                                    PbCue("cue-art", "{\\rtf1\\ansi\\pard A slide with a picture}", "{\\rtf1\\ansi}",
+                                          PbMediaUrl("Media/Assets/logo.png")) +
+                                    PbCue("cue-gone", "{\\rtf1\\ansi\\pard A slide whose picture is gone}", "{\\rtf1\\ansi}",
+                                          PbMediaUrl("Media/Assets/gone.png")) +
+                                    PbCue("cue-name", "{\\rtf1\\ansi\\pard A slide naming its picture}", "{\\rtf1\\ansi}",
+                                          "Sermon background.jpg");
+            im::ImportFile deck = File("Deck With Art", "pro", art);
+            deck.path = (root / "Libraries" / "Deck" / "Deck With Art.pro").string();
+            auto withArt = im::ImportFiles("propresenter", { deck });
+            CHECK(withArt.ok() && withArt.value().shows.size() == 1);
+            if (withArt.ok() && !withArt.value().shows.empty()) {
+                const std::vector<std::string>& refs = withArt.value().shows[0].mediaRefs;
+                // The pictures that are really there are carried — by relative
+                // path and by display NAME (the id-prefixed file) — and the one
+                // that is not there is dropped.
+                CHECK(refs.size() == 2);
+                bool relative = false, named = false;
+                for (const std::string& ref : refs) {
+                    if (ref.find("logo.png") != std::string::npos) relative = true;
+                    if (ref.find("Sermon background.jpg") != std::string::npos) named = true;
+                }
+                CHECK(relative && named);
+            }
+            fs::remove_all(root);
+        }
+
+        // A .pro that is not a presentation at all is refused, not half-imported.
+        auto junk = im::ImportFiles("propresenter", { File("junk", "pro", "this is not a presentation") });
+        CHECK(junk.ok() && junk.value().shows.empty() && junk.value().warnings.size() == 1);
+        if (junk.ok() && !junk.value().warnings.empty())
+            CHECK(junk.value().warnings[0].find("unsupported ProPresenter payload") != std::string::npos);
     }
 
     // ---- Bibles go to the BibleEngine ----

@@ -850,15 +850,21 @@ float TextLayout::MeasureLine(const std::string& text, const TextStyle& style,
     // agree with the folded line text the atlas draw loop actually renders.
     const std::string& folded = FoldToAtlasAscii(text);
     if (folded.empty()) return 0.0f;
+    // Word spacing is PER SPACE GLYPH (the same additive convention
+    // letterSpacing uses per gap), and it is added here so a single-line
+    // measure and the drawn line agree.
+    float wordExtra = 0.0f;
+    for (char c : folded)
+        if (c == ' ') wordExtra += style.wordSpacing;
     if (auto real = RealAdvances(folded, style, fonts); !real.empty()) {
         float w = 0.0f;
         for (float a : real) w += a;
-        return w + static_cast<float>(folded.size() - 1) * style.letterSpacing;
+        return w + static_cast<float>(folded.size() - 1) * style.letterSpacing + wordExtra;
     }
     Font f = fonts.Resolve(style.fontId);
     const float advance = UniformAdvance(style, f);
     return static_cast<float>(folded.size()) * advance +
-           static_cast<float>(folded.size() - 1) * style.letterSpacing;
+           static_cast<float>(folded.size() - 1) * style.letterSpacing + wordExtra;
 }
 
 TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& style,
@@ -877,7 +883,7 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     // painted every line onto one baseline. One line's worth of space is the
     // floor — natural spacing — so a degenerate style still renders a readable
     // block instead of an overlap. Legitimately tight positive steps pass.
-    const float step = style.size + style.lineSpacing;
+    const float step = style.size + style.lineSpacing + style.lineGap;
     const float lineHeight = step > 0.0f ? step : style.size;
     const float advance = UniformAdvance(style, f);
     // REAL vertical ink extent when the style names a resolvable system
@@ -897,9 +903,17 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     const bool haveReal = !family.empty() && fonts.HasSystemFont(family)
                           && fonts.SystemLineMetrics(family, style.size, style.bold,
                                                      style.italic, fm);
-    const float ink = haveReal ? fm.inkHeight : lineHeight;
+    // BUILTIN FALLBACK: one line box, NOT lineHeight — lineHeight now includes
+    // lineGap, and a gap is air BETWEEN line boxes: letting the last line's ink
+    // carry it measured a taller block than the frames paint (and the fit solver
+    // then squeezed type smaller than needed on every gapped block). With no
+    // gap this is exactly the old value, so nothing else moves.
+    const float ink = haveReal ? fm.inkHeight : (style.size + style.lineSpacing);
     result.totalHeight = 0.0f;
     result.lineStep = lineHeight;   // the step every line below advances by
+    // One line BOX, for the per-line background band (see TextLayoutResult):
+    // the same ink extent the last line's measurement uses.
+    result.lineBox = ink;
 
     for (const auto& rawLine : raw) {
         // Real per-character advances for THIS line (empty = no real font
@@ -913,8 +927,15 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
         const auto widthOf = [&](size_t start, size_t end) {
             if (end <= start) return 0.0f;
             float w = 0.0f;
-            for (size_t k = start; k < end; ++k) w += charAdvance(k);
-            return w + static_cast<float>(end - start - 1) * style.letterSpacing;
+            size_t spaces = 0;
+            for (size_t k = start; k < end; ++k) {
+                w += charAdvance(k);
+                if (rawLine[k] == ' ') ++spaces;
+            }
+            // Same two additive terms DrawTextObject applies per glyph: one
+            // letterSpacing per gap, one wordSpacing per space.
+            return w + static_cast<float>(end - start - 1) * style.letterSpacing
+                     + static_cast<float>(spaces) * style.wordSpacing;
         };
 
         if (!style.wrap || style.wrapWidth <= 0.0f || rawLine.empty()) {
@@ -944,7 +965,8 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
             while (j < rawLine.size() && rawLine[j] != ' ') ++j;
             const std::string word = rawLine.substr(i, j - i);
             const float wordWidth = widthOf(i, j);
-            const float spaceWidth = charAdvance(i > 0 ? i - 1 : 0) + style.letterSpacing;
+            const float spaceWidth = charAdvance(i > 0 ? i - 1 : 0) + style.letterSpacing
+                                   + style.wordSpacing;
             if (!current.empty()) {
                 if (currentWidth + spaceWidth + wordWidth > style.wrapWidth) {
                     flush(current, currentWidth);

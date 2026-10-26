@@ -99,6 +99,15 @@ Item {
     readonly property color styleBorderColor: style ? style.borderColor : "#ffffff"
     readonly property string styleBorderStyle: style ? style.borderStyle : "line"
     readonly property real styleCornerRadius: style ? style.cornerRadius : 0
+    readonly property real styleOpacity: style ? style.opacity : 1
+
+    // Applied at the root so the whole item — content, fill/border, the
+    // demarcation line above — fades together, same as the selection/resize
+    // chrome fading lightly along with a very transparent item is standard
+    // editor behaviour. (Live output never sees this item at all — see
+    // DesignPreview.qml, which reads the SAME style.opacity for its own
+    // rendering independently.)
+    opacity: root.styleOpacity
 
     // Fill, full bounds (not inset by padding — same footprint as the
     // border below it shares corner radius with). Declared before
@@ -152,14 +161,27 @@ Item {
     // shared item menu from here; nothing listens for a right-click on an item
     // any more, on the canvas or anywhere else.
 
-    // NO ALWAYS-ON OUTLINE, NO HOVER WASH (user request: "the fake border
-    // around both text and shape items — remove it completely … let me set it
-    // myself"). An item's edge is now exactly what its own style says: fill,
-    // border, or nothing. The two decorations that used to live here drew a
-    // 2px white frame at 22% around EVERY item and a white 5% wash on hover,
-    // so a design with no border still showed one on the canvas — and it was
-    // drawn by the canvas, not by the design, so it never appeared on any
-    // output either. Selection (below) is the only state the canvas marks.
+    // DEMARCATION LINE — brought back by a later user request ("I need all
+    // items to have demarcation lines that only show in edit canvas... it
+    // does[n't] get to show in monitor output or anywhere else, only in edit
+    // canvas"), reversing the earlier "remove it completely" call above this
+    // component still uses for the right-click menu. Same shape as before (a
+    // faint white frame around EVERY item, regardless of the item's own
+    // fill/border or drawsOwnBody), just without the hover wash, which
+    // nobody has asked to have back. Drawn by DraggableCanvasText itself —
+    // the ONE place every edit-canvas item passes through and the ONLY
+    // consumer of this component (see its own header) — so it is
+    // structurally impossible for this line to reach DesignPreview's
+    // rendering (the monitor tile, the output window, design-card
+    // thumbnails all go through DesignPreview instead, never this file).
+    Rectangle {
+        anchors.fill: parent
+        color: "transparent"
+        border.color: "#ffffff"
+        border.width: 2
+        opacity: 0.22
+        radius: root.styleCornerRadius
+    }
 
     // True bounds, no edgeMargin offset — has to match where contentHolder
     // actually clips. Purple accent, and the ONE outline the canvas draws.

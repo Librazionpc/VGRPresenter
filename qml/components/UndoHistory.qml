@@ -151,6 +151,49 @@ QtObject {
         })
     }
 
+    // commit() WITHOUT the callLater deferral: capture-and-push right now.
+    //
+    // For the callers that must have the in-flight step ON the stack BEFORE
+    // they pop it — undo()/redo() below would otherwise abandon an open
+    // typing (or drag) bracket that is itself the edit Ctrl+Z is supposed to
+    // revert, and skip back over it to an older command instead. That was a
+    // real report: Ctrl+Z while typing into a canvas text item left the text
+    // exactly as typed and only closed the edit, because the pre-typing
+    // snapshot had been thrown away.
+    //
+    // Only call this from somewhere that is NOT inside a delegate's own event
+    // dispatch (the reason commit() defers at all — see its comment):
+    // EditScreen defers its undoRedoRequested path with Qt.callLater for
+    // exactly that reason.
+    //
+    // Returns true when a step was actually pushed. A bracket that changed
+    // nothing (a drag that never moved, edit mode entered and left) is NOT a
+    // step: pushing it would fill the stack with no-ops for Ctrl+Z to spend
+    // presses on.
+    function commitNow() {
+        if (history._pendingBefore === null || !history.capture || !history.apply)
+            return false
+        const before = history._pendingBefore
+        const label = history._pendingLabel
+        history._pendingBefore = null
+        history._pendingLabel = ""
+        history._settleTimer.stop()
+        // Invalidates a commit() already queued for this same bracket (see
+        // _epoch), so it cannot push a second command for one edit.
+        history._epoch++
+        const after = history.capture()
+        // Snapshots are plain data by contract (see `capture`'s note: colors
+        // are stringified before they get here), so this compare is exact.
+        if (JSON.stringify(before) === JSON.stringify(after))
+            return false
+        EngineBridge.pushCommand(label,
+            function () { history.apply(after) },
+            function () { history.apply(before) })
+        EventBus.publish("undo.pushed", { label: label })
+        history.committed()
+        return true
+    }
+
     function abandonPending() {
         history._epoch++
         // Discards an open push(label, false) bracket — the pending "before"

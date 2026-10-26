@@ -47,6 +47,11 @@ QString FontService::defaultFamily() const
     return answer;
 }
 
+QString FontService::defaultContentFamily()
+{
+    return QStringLiteral("Cambria");
+}
+
 QString FontService::monoFamily() const
 {
     const QString key = QStringLiteral("\x01mono");
@@ -63,8 +68,13 @@ QString FontService::monoFamily() const
 QString FontService::resolve(const QString &requested) const
 {
     const QString family = requested.trimmed();
+    // A block with no fontFamily resolves to the CONTENT default (Cambria),
+    // not defaultFamily (the host's UI face, Theme.fontFamily's own value).
+    // Must match SceneBuilder.cpp's literal exactly — that is the real
+    // render path, this is the canvas/preview's, and the whole point of this
+    // service is that the two cannot draw a plain block with different fonts.
     if (family.isEmpty())
-        return defaultFamily();
+        return defaultContentFamily();
     if (const auto it = cache_.constFind(family); it != cache_.constEnd())
         return it.value();
     // FontManager::SubstituteFamily: requested when installed, else the host's

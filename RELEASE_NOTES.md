@@ -1,4 +1,4 @@
-# VGRPresenter 0.0.9
+# VGRPresenter 0.1.0
 
 ## Improvements
 
@@ -6,6 +6,7 @@
 - **A blackout is reported on every output.** While the stage is blacked out, every enabled row says "· blackout up" — not only the NDI feed — and every row drops it again the moment the blackout ends.
 - **An NDI output created mid-session starts sending on its own.** It no longer stays dark until the app is restarted: the feed re-reads the roster every tenth of a second, so a row added, enabled, renamed or switched off while live reaches the wire within a poll.
 - **NDI reports name the output they are about.** Rate drops, recoveries, sustained drift and stalls are measured per output, so the message points at the output that is actually behind instead of always naming "New Screen 2".
+- Added The Table, Bible and Only Believe Songs
 
 ## What's new
 

@@ -100,6 +100,76 @@ if ! "$NODE_BIN" "$ROOT/tools/make_seed_config.mjs"; then
     exit 1
 fi
 
+# ---- 1c. SEED: this machine's Shows library, Bibles and The Table -----------
+# installer/README.md's own framing: "your show files, sermon library, Bibles,
+# settings... so nobody starts from an empty app" — but until now nothing
+# actually copied the library/Bibles/Table content itself, only the catalogs
+# and configuration above. A fresh install's Scripture and The Table tabs came
+# up EMPTY (user report), because seed-data/local never had the_table.json
+# and seed-data/roaming/enginedata never had bibles.json. Runs on EVERY
+# release build — the content on whichever machine builds the release is what
+# ships, not a one-off manual copy — and still only ever lands on a FRESH
+# install (installer.iss's onlyifdoesntexist): an existing user's own shows,
+# Bibles and Table are never touched.
+echo "== bundling this machine's Shows library, Bibles and The Table =="
+DOCS="$(cygpath -u "$(cygpath -F 0x05)")"         # Documents (OneDrive-redirect-safe)
+ROAMING_SRC="$(cygpath -u "$APPDATA")/VGR/VGRPresenter"
+LOCAL_SRC="$(cygpath -u "$LOCALAPPDATA")/bps"
+
+# Shows library (the song/sermon categories a show-list screenshot showed
+# empty on a fresh install) -> its OWN seed path, not roaming/local:
+# ShowService's default library lives in Documents\VGR Presenter\Shows (see
+# its own header comment), a different folder than either of those two.
+# .deleted is the library's own recycle bin — never starter content.
+SHOWS_SRC="$DOCS/VGR Presenter/Shows"
+if [ -d "$SHOWS_SRC" ]; then
+    rm -rf "$SEED_DIR/shows"
+    mkdir -p "$SEED_DIR/shows"
+    find "$SHOWS_SRC" -mindepth 1 -maxdepth 1 ! -name '.deleted' \
+        -exec cp -r {} "$SEED_DIR/shows/" \;
+    echo "  shows library: $(du -sh "$SEED_DIR/shows" 2>/dev/null | cut -f1)"
+fi
+
+# Bibles -> seed-data/roaming/enginedata (an existing seed path — kernel.json
+# already lives there). bibles.userdata.json is personal marks/notes, not
+# starter content, and is deliberately left out.
+if [ -f "$ROAMING_SRC/enginedata/bibles.json" ]; then
+    mkdir -p "$SEED_DIR/roaming/enginedata"
+    cp "$ROAMING_SRC/enginedata/bibles.json" "$SEED_DIR/roaming/enginedata/bibles.json"
+    echo "  bibles: $(du -sh "$SEED_DIR/roaming/enginedata/bibles.json" | cut -f1)"
+fi
+
+# The Table (sermon library) -> seed-data/local (an existing seed path).
+# Only the live json + its converted-texts cache ship; the .bak* variants and
+# the cache/backups/recovery folders are this machine's own safety nets, not
+# content for a new user.
+if [ -f "$LOCAL_SRC/the_table.json" ]; then
+    cp "$LOCAL_SRC/the_table.json" "$SEED_DIR/local/the_table.json"
+    rm -rf "$SEED_DIR/local/the_table_texts"
+    if [ -d "$LOCAL_SRC/the_table_texts" ]; then
+        cp -r "$LOCAL_SRC/the_table_texts" "$SEED_DIR/local/the_table_texts"
+    fi
+    echo "  the table: $(du -sh "$SEED_DIR/local/the_table.json" | cut -f1)"
+fi
+
+# The user's OWN templates -> seed-data/local (an existing seed path, same
+# file name bps_cli --dump-catalogs would otherwise write). Templates ship
+# EMPTY from the engine's own built-in catalog by design (see
+# DesignCatalogs.hpp: "ships nothing: the user's own layouts and categories
+# only") — unlike overlays, there is no shipped starter set to dump, so the
+# only way a fresh install gets any templates at all is bundling the
+# operator's own live file, same as The Table above. This DOES carry
+# whatever font names the templates reference (the exact risk
+# SeedStoreJson's header comment warns about for the built-in catalogs) —
+# deliberately accepted here per an explicit user call, not the accidental
+# machine-fonts leak that comment describes. A font genuinely MISSING on a
+# recipient's machine just falls back to a default font; it does not break
+# anything.
+if [ -f "$LOCAL_SRC/templates.json" ]; then
+    cp "$LOCAL_SRC/templates.json" "$SEED_DIR/local/templates.json"
+    echo "  templates: $(du -sh "$SEED_DIR/local/templates.json" | cut -f1)"
+fi
+
 # ---- 2. clean transient state the smoke test wrote into dist/ ----------------
 rm -rf "$DIST/logs" "$DIST/enginedata" "$DIST/crashes"
 
@@ -107,8 +177,14 @@ rm -rf "$DIST/logs" "$DIST/enginedata" "$DIST/crashes"
 echo "== compiling installer (Inno Setup) =="
 # MSYS2_ARG_CONV_EXCL: without it bash rewrites the /D define into a Windows
 # path and ISCC sees "more than one script filename".
+# Streamed through `tee`, not silently redirected: ISCC's own per-file compile/
+# compress lines (this is the slowest step — LZMA2 solid-compressing the whole
+# deployed app) now print live instead of the terminal sitting blank until it
+# either finishes or fails (user report: "so I can [tell] if it's moving").
+# `set -euo pipefail` (top of file) makes `if !` see ISCC's own exit code, not
+# tee's, so a real failure still trips this branch.
 if ! MSYS2_ARG_CONV_EXCL="*" "$ISCC" "/DAPP_VERSION=$VER" "$(cygpath -w "$ROOT/tools/installer.iss")" \
-        > /tmp/iscc.log 2>&1; then
+        2>&1 | tee /tmp/iscc.log; then
     echo "ISCC FAILED:"
     tail -25 /tmp/iscc.log
     echo "INSTALLER: FAIL compile"

@@ -66,6 +66,7 @@ void TestStyleBackgroundImage();
 // Clear all's carrier (Slide::clearStage): the engine paints NOTHING for it,
 // while the GO-LIVE-with-nothing carrier beside it keeps the style painting.
 void TestClearCarrierPaintsNothing();
+void TestPlacedImageBlock();
 void TestBlockScenes();
 void TestBlockTextBox();
 void TestBlockCornerRadius();
@@ -224,3 +225,4 @@ void TestBroadcastEngine();
 void TestBroadcastSenders();
 void TestBroadcastFeatures();
 void TestBroadcastNdiRuntime();
+void TestLineSpacingAndLineBands();

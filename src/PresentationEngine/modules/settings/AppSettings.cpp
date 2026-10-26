@@ -212,6 +212,25 @@ std::vector<SettingDef> BuildDefinitions() {
         C("fill", "Fill", "Stretch to the frame"),
     }, "The shape for a picture whose own file does not name one."));
 
+    // ---- The reading step (Alt+Down / Alt+Up) ----
+    // ONE pair of keys for every tab: the step is the MOTION of the words, not a
+    // property of what they say, so Scripture, The Table and a show all read the
+    // same number. They are shown in the shared SLIDE OPTIONS card (ReferencePane)
+    // beside the tab's own fill options.
+    //
+    // SPEED is the length of one line's travel in milliseconds. The shipped 190ms
+    // is what the step has always used; slower reads calmer for an audience
+    // following along, which is the whole point of the control.
+    d.push_back(IntRange("reading.stepMs", "reading", "Reading step speed", 190, 60, 600,
+                         "How long one line takes to travel, in milliseconds. Slower is calmer to read along with. Shown beside the tab's own slide options."));
+    // MOTION is the ease. "Smooth" is the default: it leaves the key press at a
+    // readable speed and settles into the line, which is what a prompter does.
+    d.push_back(Choice("reading.stepEasing", "reading", "Reading step motion", "smooth", {
+        C("smooth", "Smooth", "Eases out of the key press and lands - the default."),
+        C("settle", "Settle", "Moves at once, then slows into the new line."),
+        C("even", "Even", "One constant speed, no acceleration."),
+    }, "How the words accelerate and settle during a line step."));
+
     // ---- Resource profile ----
     d.push_back(Choice("resources.profile", "resources", "Resource profile", "performance", {
         C("performance", "Performance"), C("balanced", "Balanced"), C("powerSaver", "Power Saver"),

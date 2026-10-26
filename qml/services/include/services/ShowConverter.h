@@ -58,6 +58,13 @@ QVariantMap fillFromMeta(const QVariantMap &meta);
 bps::presentation::Category categoryFromVariant(const QVariantMap &category);
 bps::presentation::Overlay overlayFromVariant(const QVariantMap &overlay);
 bps::presentation::Slide slideFromVariant(const QVariantMap &slide);
+
+// Reads a slide-wide filter map ({ hueRotate, invert, blur, grayscale,
+// brightness, contrast, saturate } — see rendering::SlideFilterValues) into
+// `slide`, leaving any key the map does not name at its identity default. One
+// implementation for the two doors that take one: a whole slide
+// (slideFromVariant) and the Edit panel's live patch (ShowService::updateSlide).
+void applyFilters(bps::presentation::Slide &slide, const QVariantMap &filters);
 bps::presentation::ContentBlock blockFromVariant(const QVariantMap &block);
 QVariantMap blockToVariant(const bps::presentation::ContentBlock &block);
 QVariantList blocksToVariant(const std::vector<bps::presentation::ContentBlock> &blocks);

@@ -125,6 +125,24 @@ public:
     // Test seam: render one frame now (the loop body's single iteration).
     Result<void> RenderOnce();
 
+    // ---- THE READING SCROLL (Alt+Down / Alt+Up) ----------------------------
+    //
+    // The reading block's flow is slid under its box by ONE number, in line
+    // heights of that text (see RenderOptions::contentScrollLines). The monitor
+    // tile animates the step in QML; the HDMI window, the NDI feed and the
+    // recordings are THIS loop's raster, so the loop has to be told the same
+    // number every frame. That is what this is: the interface thread's animator
+    // (LiveOutputService::readingScroll) pushes the number, and while it is
+    // moving the loop stops skipping unchanged frames so the projector sees a
+    // scroll rather than a cut.
+    //
+    // Safe from the GUI thread: two atomic stores (no lock, no device, no engine
+    // call), which is what lets the QML step call it directly.
+    void SetLineScroll(float lines) { LineScrollPush(lines); }
+    // The offset the outputs are drawn with: the stored number, and whether it is
+    // still moving ("keep composing" — see LineScrollMoving).
+    float LineScrollLines() const { return lineScroll_.load(); }
+
     // The preview output the loop feeds (its name in the RenderEngine's
     // OutputManager). Registered at first StartFromOpenShow and kept (a
     // disabled output receives nothing — empty frames before go-live are
@@ -224,6 +242,11 @@ private:
     // 60Hz burned a whole core and dragged the whole app down with it.
     std::string lastRenderedScene_;
     uint64_t lastStyleRevision_ = 0;
+    // The filters the last composed frame was rendered with. They never touch a
+    // scene id or the style revision (they run on the finished frame), so this
+    // is what lets a filter edit break the change-driven skip instead of leaving
+    // the previous picture on air until something else moves.
+    rendering::SlideFilterValues lastFilters_;
     // WHICH SCENE THE LAST COMPOSE WAS OF, so the loop can ask the renderer for
     // that scene's cost profile AFTER RenderOnce returns. The name is a small
     // string under its own mutex on purpose: the loop must not call across the
@@ -241,6 +264,19 @@ private:
     // removed.
     std::chrono::steady_clock::time_point lastRaster_{};
     static constexpr int kHeartbeatMs = 1000;
+
+    // THE READING SCROLL (see SetLineScroll): the offset itself, when it last
+    // moved, and the store that keeps the two together. While the offset is
+    // within kLineScrollSettleMs of its last move the loop composes every tick
+    // (a scroll in flight must not be skipped as "nothing changed"), and one
+    // frame past that it composes once more so the LAST value of the move lands
+    // instead of the second-to-last.
+    void LineScrollPush(float lines);
+    bool LineScrollMoving(int64_t nowMs);
+    std::atomic<float> lineScroll_{0.0f};
+    std::atomic<int64_t> lineScrollAtMs_{0};
+    std::atomic<bool> lineScrollSettle_{false};
+    static constexpr int kLineScrollSettleMs = 60;
 
     // IDLE PREVIEW: its own worker + flag, kept out of the live path's state
     // on purpose (see StartIdlePreview). One frame a second — the same light
@@ -272,7 +308,11 @@ private:
     // monitor tiles read their output's buffer; the main pass keeps feeding
     // the active output + preview. Buffers register on first use and are
     // re-resolved by name every frame (a push can add/rename entries).
-    void RenderPerOutputPasses();
+    // `contentScrollLines` is the reading scroll for this frame (see
+    // SetLineScroll): an output with its OWN styled scene rasterises it
+    // separately, so it needs the same offset or the scroll would reach only the
+    // outputs that copy the program frame.
+    void RenderPerOutputPasses(float contentScrollLines = 0.0f, bool contentScrollFromScene = false);
 };
 
 } // namespace bps::live

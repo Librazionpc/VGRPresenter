@@ -34,7 +34,30 @@ struct TextStyle {
     bool wrap = false;
     float wrapWidth = 0.0f;           // 0 = no wrap
     float letterSpacing = 0.0f;
+    // Extra advance added after every SPACE glyph, in the same units as
+    // letterSpacing (an additive px value whose neutral is 0). Measured and
+    // drawn from this one field, and carried in the layout cache key, so a
+    // layout measured with it can never be served to a style without it.
+    float wordSpacing = 0.0f;
     float lineSpacing = 0.0f;
+    // Extra space BETWEEN lines, additive px, on top of lineSpacing — which
+    // carries the line-height multiplier. Two fields because they answer two
+    // different questions: lineSpacing sets how tall a LINE BOX is (and so how
+    // tall a per-line background band is), lineGap is blank air inserted
+    // between one line box and the next (FreeShow's "line spacing" row).
+    // Neutral 0 = no extra gap.
+    float lineGap = 0.0f;
+    // Per-LINE background band (FreeShow's lineBg): the fill drawn behind EACH
+    // line's own ink width, so a verse can be highlighted line by line instead
+    // of painting one rectangle behind the whole block (that is the item's own
+    // background, a different control). Alpha 0 = none.
+    Color lineBg{0, 0, 0, 0};
+    // Corner radius of those bands, in DESTINATION pixels (FreeShow's
+    // `lineRadius`). 0 draws plain rectangles — the cheap path — and anything
+    // above it goes out as a rounded DrawShape, which both backends rasterize.
+    // Clamped to half the band's height (a radius past that is a stadium, not a
+    // different shape).
+    float lineRadius = 0.0f;
     bool bold = false;
     bool italic = false;              // skews glyphs when rendering
     bool underline = false;
@@ -220,6 +243,14 @@ struct TextLayoutResult {
     // and painted spacing that disagrees with measured spacing un-does the
     // fit solve above (fit says it fits; the paint spreads and clips).
     float lineStep = 0.0f;
+    // The height of ONE line BOX — the visible band a per-line background
+    // (TextStyle::lineBg) covers. It is the font's own ascent+descent, NOT
+    // lineStep: Qt paints a rich-text span's background at the natural line
+    // box, so the extra line height shows as air between the bands. The canvas
+    // and the previews draw their bands with Qt's own painting for exactly that
+    // reason, so the engine must band the same box or the output's bands are
+    // taller than the ones the operator approved on screen.
+    float lineBox = 0.0f;
     bool truncated = false;
 };
 

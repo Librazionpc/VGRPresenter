@@ -89,6 +89,10 @@ public:
     // Stable id of the slide at `index`, or -1 when out of range. Lets QML
     // map a model row to archive keys without a JS-side shadow of the model.
     Q_INVOKABLE int slideIdAt(int index) const;
+    // Row of the ACTIVE slide, or -1 when the roster is empty. What a keyboard
+    // command that acts on "the focused slide" needs — the list's Ctrl+D / Del
+    // (see EditScreen's slide-list Shortcuts) name a row index, not an id.
+    Q_INVOKABLE int activeIndex() const;
 
     // ---- Engine projection ---------------------------------------------------
     // The engine owns the show; this model is its projection for the slide list.
@@ -129,7 +133,6 @@ signals:
 private:
     void renumber(int fromIndex);
     int nextId();
-    int activeIndex() const;
     const SlideItem *activeItem() const;
 
     QList<SlideItem> m_slides;

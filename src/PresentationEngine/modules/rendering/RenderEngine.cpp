@@ -567,7 +567,10 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
     if (!obj || !obj->Visible() || obj->EffectiveAlpha() <= 0.0f) return;
 
     DrawCommand base;
-    base.blend = static_cast<int>(BlendMode::Alpha);
+    // THE OBJECT'S OWN BLEND, not a hardcoded Alpha: the Edit screen's MEDIA tab
+    // writes a blend mode onto the item, SceneBuilder puts it on the object, and
+    // every command this object emits carries it into the rasterizer.
+    base.blend = static_cast<int>(obj->Blend());
     base.color = obj->Tint();
 
     switch (obj->Kind()) {
@@ -721,6 +724,10 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
             break;
         }
         case ObjectKind::Text: {
+            // THE READING SCROLL is DrawTextObject's own business: a block that
+            // carries a flow slides its layout under its box by the frame's
+            // contentScrollLines_ and clips to the box (see that function). An
+            // ordinary block has no flow and draws exactly as it always did.
             DrawTextObject(static_cast<TextObject*>(obj), cmds);
             break;
         }
@@ -730,6 +737,36 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
             break;
     }
 }
+
+namespace {
+
+// A QUAD CUT TO A CLIP RECT — destination AND source together, so the piece that
+// survives still samples the texels that belong to it. Returns false when
+// nothing is left (the command is dropped entirely).
+//
+// This is how a scrolled reading line leaves its box: the glyph row at the edge
+// loses just the slice that crossed the boundary, instead of the whole line
+// vanishing at once — the visible difference between scrolling and stepping.
+// A command with no source (a fill, a band, a shadow) passes a zero-size src and
+// only its destination is cut.
+bool ClipQuad(const Rect& clip, Rect& dest, Rect& src) {
+    const float x0 = std::max(dest.x, clip.x);
+    const float y0 = std::max(dest.y, clip.y);
+    const float x1 = std::min(dest.Right(), clip.Right());
+    const float y1 = std::min(dest.Bottom(), clip.Bottom());
+    if (x1 <= x0 || y1 <= y0 || dest.width <= 0.0f || dest.height <= 0.0f)
+        return false;
+    if (src.width > 0.0f && src.height > 0.0f) {
+        const float sx = src.width / dest.width;
+        const float sy = src.height / dest.height;
+        src = Rect(src.x + (x0 - dest.x) * sx, src.y + (y0 - dest.y) * sy,
+                   (x1 - x0) * sx, (y1 - y0) * sy);
+    }
+    dest = Rect(x0, y0, x1 - x0, y1 - y0);
+    return true;
+}
+
+} // namespace
 
 void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmds) {
     if (!obj || obj->Text().empty() || obj->EffectiveAlpha() <= 0.0f) return;
@@ -807,15 +844,99 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     // the legacy formula only for a zero-value result (never produced by
     // Measure today, but a safe default if a caller hand-builds one).
     const float lineHeight = result.lineStep > 0.0f ? result.lineStep
-                                                    : style.size + style.lineSpacing;
+                                                    : style.size + style.lineSpacing + style.lineGap;
     const Rect bounds = obj->Bounds();
 
-    // Vertical alignment offset.
-    float startY = bounds.y;
+    // A BLOCK CARRYING A READING FLOW is a VIEWPORT: its text is a continuous
+    // passage (see TextObject::SetReadingFlow), the frame's scroll slides that
+    // layout under the box, and the box clips it. Everything else about the
+    // geometry is untouched — the box, the fitted size and the alignment are the
+    // PAGE's, so the page sits exactly where the design put it and only the
+    // words travel. `flowing` false is the ordinary text object, which draws
+    // byte-for-byte what it always drew.
+    const bool flowing = obj->HasReadingFlow();
+    // ALIGNMENT MEASURES THE PAGE, not the whole passage: the fit solver sized
+    // the box to hold one page, so one page is what it centres (or bottoms), and
+    // the rest of the flow lives above and below that.
+    const float alignHeight = flowing
+        ? static_cast<float>(obj->FlowPageLines()) * lineHeight
+        : result.totalHeight;
+    // The scroll itself, in the text's OWN line heights — the same advance the
+    // lines below step by, so one line of the number is one line of the picture.
+    const float scrollLines = !flowing ? 0.0f
+                             : contentScrollFromScene_ ? obj->FlowScrollLines()
+                                                       : contentScrollLines_;
+    const float scrollPx = scrollLines * lineHeight;
+
+    // WHERE THE PAGE SITS — the top edge of the reading window.
+    float pageTop = bounds.y;
     if (style.valign == TextVAlign::Middle)
-        startY = bounds.y + (bounds.height - result.totalHeight) / 2.0f;
+        pageTop = bounds.y + (bounds.height - alignHeight) / 2.0f;
     else if (style.valign == TextVAlign::Bottom)
-        startY = bounds.y + (bounds.height - result.totalHeight);
+        pageTop = bounds.y + (bounds.height - alignHeight);
+
+    // THE VIEWPORT IS THE PAGE'S OWN RECTANGLE, not the block's box. A design's
+    // box can be taller than the page it was fitted for (a shrink-mode page
+    // leaves slack at the bottom), and clipping to the BOX would leak the lines
+    // below into that slack — a passage would show the next page's text on a
+    // slide nobody has stepped yet. Clipping to the page's rectangle means
+    // offset 0 IS the page, exactly as the operator built it, and a step moves
+    // the words inside that window and nothing else.
+    const Rect clipRect = flowing
+        ? Rect(bounds.x, pageTop, bounds.width, alignHeight)
+        : bounds;
+
+    // Vertical alignment offset.
+    const float startY = pageTop - scrollPx;
+
+    // PER-LINE BACKGROUND BANDS (FreeShow's lineBg) — drawn UNDER the glyphs,
+    // one rectangle per visual line, each as wide as that line's own ink. This
+    // is deliberately not the item's background: that one fill covers the whole
+    // block, while this follows the text line by line (a verse highlighted as
+    // it is read).
+    //
+    // The band is one LINE BOX tall — the measured `lineBox`, the font's own
+    // ascent+descent — while the lines STEP by the line height. The two differ
+    // on purpose, and the difference is the air between bands: the canvas and
+    // the tile previews band the same box (Qt paints a rich-text span's
+    // background at the natural line box), so a taller band here would make the
+    // output's highlight fatter than the one approved on screen, and folding
+    // lineGap into it would make neighbouring bands touch.
+    if (style.lineBg.a > 0.0f) {
+        const float bandHeight = result.lineBox > 0.0f ? result.lineBox
+                                                       : style.size + style.lineSpacing;
+        float by = startY;
+        for (const auto& line : result.lines) {
+            float lx = bounds.x;
+            if (style.align == TextAlign::Center)
+                lx = bounds.x + (bounds.width - line.width) / 2.0f;
+            else if (style.align == TextAlign::Right)
+                lx = bounds.x + (bounds.width - line.width);
+            DrawCommand c;
+            // A RADIUS turns the band into a rounded shape; without one the plain
+            // FillRect is both cheaper and byte-for-byte what earlier builds drew,
+            // so an item that never asked for rounding cannot change.
+            c.type = style.lineRadius > 0.0f ? DrawCommand::Type::DrawShape
+                                            : DrawCommand::Type::FillRect;
+            c.blend = static_cast<int>(BlendMode::Alpha);
+            c.rect = Rect(lx, by, line.width, bandHeight);
+            // Past half the band's height a radius is a stadium and nothing else;
+            // clamping here keeps the software and D3D11 rasterizers handed the
+            // same number (each clamps too, but the command is what the GPU path
+            // uploads).
+            c.cornerRadius = style.lineRadius > 0.0f
+                                 ? std::min(style.lineRadius, bandHeight * 0.5f)
+                                 : 0.0f;
+            c.color = style.lineBg;
+            c.color.a *= obj->Opacity();
+            // A band rides the same clip as its words: a scrolled band that
+            // stayed whole would band air below the box.
+            Rect src;
+            if (!flowing || ClipQuad(clipRect, c.rect, src))
+                cmds.push_back(c);
+            by += lineHeight;
+        }
+    }
 
     // Shadow pass (offset, dark).
     if (style.shadowEnabled) {
@@ -832,7 +953,9 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             c.rect = Rect(lx, sy + style.shadowOffset.y, line.width, style.size);
             c.color = style.shadowColor;
             c.color.a *= obj->Opacity();
-            cmds.push_back(c);
+            Rect src;
+            if (!flowing || ClipQuad(clipRect, c.rect, src))
+                cmds.push_back(c);
             sy += lineHeight;
         }
     }
@@ -880,9 +1003,21 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             c.srcRect = Rect(static_cast<float>(g.x), static_cast<float>(g.y),
                              static_cast<float>(g.width), static_cast<float>(g.height));
             c.color = style.color;
-            c.blend = static_cast<int>(BlendMode::Alpha);
+            // The glyphs are the text object's own marks, so a blended text
+            // object blends its letters (its highlight bands and drop shadow
+            // stay plain alpha — they sit UNDER the words, not in them).
+            c.blend = static_cast<int>(obj->Blend());
+            // A glyph the viewport's edge only half covers is cut, source and
+            // all, so the top line of a scrolling block leaves the box a pixel
+            // at a time instead of disappearing a whole line at a time.
+            if (flowing && !ClipQuad(clipRect, c.rect, c.srcRect))
+                continue;
             cmds.push_back(c);
+            // A SPACE also carries the word spacing, exactly as TextLayout's
+            // width math counts it — the drawn line and the measured line are
+            // the same sum, so a wrapped block can never drift from its box.
             cx += static_cast<float>(g.advance) + style.letterSpacing;
+            if (ch == ' ') cx += style.wordSpacing;
         }
         ly += lineHeight;
     }
@@ -1022,6 +1157,13 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // driven externally (modules call Anim().Update per frame) — the engine
     // owns the animator, modules own the schedule.
     auto objects = CollectObjects(sceneId);
+    // THE READING SCROLL for this frame (see RenderOptions::contentScrollLines):
+    // one number, read by DrawTextObject when it meets the block that carries a
+    // reading flow. It lives under renderMutex_ for the length of this render
+    // (the block below holds it) and is cleared as the frame finishes, so a
+    // frame can never leave the shared scene slid.
+    contentScrollLines_ = opts.contentScrollLines;
+    contentScrollFromScene_ = opts.contentScrollFromScene;
     const auto layers = scene.value()->LayersSorted();
     // WHERE THE FRAME'S WORK WENT (see FrameCostProfile): the pipeline hands the
     // objects over one at a time, so the commands an object appended are exactly
@@ -1061,6 +1203,10 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
             costs.push_back(std::move(cost));
         }
     });
+    // The scroll is over for this frame: nothing outside the draw loop may see a
+    // scene drawn at an offset (see the member's comment in the header).
+    contentScrollLines_ = 0.0f;
+    contentScrollFromScene_ = false;
 
     // ONE-SHOT PER SCENE PER STATE: what this render actually had to draw. A
     // frame that comes out black is either "the pipeline drew nothing" (no
@@ -1131,6 +1277,15 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
         auto rb = backend_->Readback();
         if (!rb.ok()) return rb.error();
         frame = rb.value();
+        // Slide-wide filters (opts.filters, from the slide being shown) run on
+        // the FINISHED frame — after the scene has been composited, before any
+        // output or capture reads a pixel. Deliberately here and not in the
+        // caller: Distribute below feeds every enabled output from this one
+        // frame, so filtering at this point is what keeps the program output,
+        // the per-output passes and the previews showing one identical picture.
+        // A no-op for an unfiltered slide (ApplyFilters checks IsIdentity).
+        if (!frame.empty())
+            ApplyFilters(frame, opts.filters);
         // Transparency inspection (opt-in): make the alpha VISIBLE downstream.
         if (alphaInspect_.load(std::memory_order_relaxed) && !frame.empty())
             CompositeOverCheckerboard(frame);

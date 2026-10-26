@@ -25,6 +25,34 @@ Item {
     property real maxValue: 100
     property string suffix: ""
     property int decimals: 0
+    // The label/value inks are properties so a consumer can adopt FreeShow's
+    // field language (label in the accent, value in primary ink at a step up
+    // from it — see its edit panel's "Font size / 100" rows) without every
+    // other slider in the app silently changing tone. Defaults are the
+    // colours this row has always drawn.
+    property color labelColor: Theme.textSecondary
+    property color valueColor: "#aeb6c8"
+    // FreeShow's per-row ^ / v pair (its "step" arrows, drawn at the row's
+    // extreme right): a positive `step` shows them, each click reporting ONE
+    // step through `moved` — clamped to min/max and bracketed by dragStarted/
+    // dragFinished, so a click lands as one undo entry, not one per repaint.
+    // 0 (the default) draws nothing, which leaves every existing caller
+    // looking exactly as it did.
+    property real step: 0
+    readonly property bool hasSteppers: root.step > 0 && root.enabled
+
+    function nudge(direction) {
+        const raw = root.value + direction * root.step
+        const clamped = Math.max(root.minValue, Math.min(root.maxValue, raw))
+        // Round off the float drift a fractional step accumulates
+        // (0.30000000000000004), so the row's own readout stays clean.
+        const snapped = root.step < 1 ? Math.round(clamped * 100) / 100 : clamped
+        if (Math.abs(snapped - root.value) < 1e-9)
+            return
+        root.dragStarted()
+        root.moved(snapped)
+        root.dragFinished()
+    }
 
     signal moved(real value)
     // Brackets one whole drag (or a single track click) as a single
@@ -46,17 +74,66 @@ Item {
         anchors.left: parent.left
         anchors.top: parent.top
         text: root.label
-        color: "#aeb6c8"
+        color: root.labelColor
         font.family: Theme.fontFamily
-        font.pixelSize: 14
+        font.pixelSize: 13
+        font.weight: Font.Medium
     }
     Text {
-        anchors.right: parent.right
+        anchors.right: root.hasSteppers ? stepperCol.left : parent.right
+        anchors.rightMargin: root.hasSteppers ? 8 : 0
         anchors.top: parent.top
         text: (root.decimals > 0 ? root.value.toFixed(root.decimals) : Math.round(root.value)) + root.suffix
-        color: "#aeb6c8"
+        color: root.valueColor
         font.family: Theme.fontFamily
         font.pixelSize: 14
+        font.weight: Font.Medium
+    }
+
+    // The stepper pair — two hit-targets stacked at the row's right edge, so a
+    // precise value is reachable without dragging the track (FreeShow's
+    // filters rows: a 360deg hue-rotate is not a drag-only control).
+    Column {
+        id: stepperCol
+        visible: root.hasSteppers
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.topMargin: -4
+        spacing: 1
+
+        Repeater {
+            model: [1, -1]   // up, then down
+            delegate: Rectangle {
+                id: stepBtn
+                required property int modelData
+                readonly property int direction: stepBtn.modelData
+                // Dimmed while the whole row is disabled — the two arrows are
+                // a row control, not a separate one.
+                opacity: root.enabled ? 1 : 0.4
+                width: 16
+                height: 11
+                radius: 3
+                color: stepArea.containsMouse ? Theme.hoverBg : "transparent"
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                IconGlyph {
+                    anchors.centerIn: parent
+                    name: stepBtn.direction > 0 ? "chevronUp" : "chevronDown"
+                    color: stepArea.containsMouse ? Theme.textPrimary : Theme.textMuted
+                    width: 9
+                    height: 9
+                }
+
+                MouseArea {
+                    id: stepArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    enabled: root.enabled
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.nudge(stepBtn.direction)
+                }
+            }
+        }
     }
 
     Item {

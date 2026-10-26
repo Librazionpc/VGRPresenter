@@ -1583,11 +1583,13 @@ Rectangle {
                         confirmLabel: qsTr("Delete")
                         confirmVariant: "danger"
                         onConfirmed: {
+                            showDeleteConfirm.close()
                             if (showDeleteConfirm.targetPath) {
                                 ShowService.deleteShow(showDeleteConfirm.targetPath)
                                 ShowService.refreshLibrary()
                             }
                         }
+                        onDismissed: showDeleteConfirm.close()
                     }
 
                     // The old NAME/MODIFIED column header is gone — Scripture
@@ -1860,6 +1862,27 @@ Rectangle {
                                             type: "show", ref: showRef,
                                             name: showName, layout: ""
                                         }
+                                        // Stage the show's first slide onto the monitor
+                                        // preview tile immediately (user call: a double-
+                                        // click should move it to the monitor preview right
+                                        // away), via the same read-only peekShow this pane
+                                        // already opens the show through, so nothing here
+                                        // touches the engine's shared "open document" the
+                                        // Edit screen owns.
+                                        //
+                                        // stageSlideSet(name, WHOLE set, index), not
+                                        // stageSlides(name, [one slide]): the line stepper
+                                        // (Alt+Down/Alt+Up, LiveOutputService.lineStep) reads
+                                        // its neighbour slide's lines from that whole set —
+                                        // staging a single-slide array left it with no
+                                        // neighbour to step into (reported: "when I press Alt
+                                        // [+] down it doe[sn't] step in lines"). Same call
+                                        // ShowCenter.qml's takeSlideLive already uses for its
+                                        // own double-click.
+                                        const peeked = ShowService.peekShow(showRef)
+                                        if (peeked && peeked.ok && peeked.show
+                                                && peeked.show.slides && peeked.show.slides.length > 0)
+                                            LiveOutputService.stageSlideSet(showName, peeked.show.slides, 0)
                                     }
                                     onContextRequested: (x, y) => {
                                         const p = rowMouse.mapToItem(media_table, x, y)

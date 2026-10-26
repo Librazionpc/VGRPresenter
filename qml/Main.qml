@@ -789,6 +789,22 @@ ApplicationWindow {
         onActivated: quickSearch.openSearch()
     }
 
+    // THE READING STEP (Alt+Down / Alt+Up) — see LiveOutputService::lineStep.
+    // Window-level on purpose: it acts on whatever pick is staged or on air
+    // (a show's slides, a passage's verses, a Table section), so every pane
+    // gets the behaviour without owning a binding of its own. Right/Left keep
+    // their plain next/previous-slide meaning, so the two moves stay distinct
+    // (user: "if I press > next slide; if I press alt+down it means take the
+    // next slide first line and move the current slide first line out").
+    Shortcut {
+        action: "lineStepNext"
+        onActivated: LiveOutputService.lineStep(1)
+    }
+    Shortcut {
+        action: "lineStepPrevious"
+        onActivated: LiveOutputService.lineStep(-1)
+    }
+
     AppMenuBar {
         id: appMenuBar
         // Same scaled space as the header it draws in. Sized so that, once scaled,
@@ -825,9 +841,14 @@ ApplicationWindow {
         }
     }
 
-    // Ctrl+I: File > Import.
+    // Ctrl+I: File > Import — EXCEPT while the edit canvas is styling a text
+    // item, where Ctrl+I is italic (see EditScreen's textStyleKeysLive and
+    // Hotkeys' italicText). Two live window bindings on one sequence are
+    // ambiguous and Qt then fires neither, so this yields the chord outright
+    // for that state instead of competing for it.
     Shortcut {
         action: "importShow"
+        enabled: !editScreen.textStyleKeysLive
         onActivated: importDialog.open = true
     }
 
@@ -5039,7 +5060,13 @@ ApplicationWindow {
     //          drop that answer so the next read is the new file (the timer);
     //   timer  apply it, then read the peek again and expect the timer in it;
     //   copy   the recovery copy, the one write nobody asked for.
-    property var showIo: ({ savePath: "showio_probe.vgr", copyPath: "showio_probe_recovery.vgr",
+    // The probe's NAME carries a right single quote on purpose: a real library
+    // is full of them ("WE’LL TALK IT OVER"), and the Windows filesystem PAL
+    // used to hand such a name to the OS as narrow bytes — the save wrote a
+    // mangled "WEâ€™LL…" and the publishing rename then failed, so every
+    // non-ASCII import silently stayed behind as a .vgr.tmp. Saving, opening
+    // and peeking a quoted name here keeps that whole route honest.
+    property var showIo: ({ savePath: "showio_probe\u2019s.vgr", copyPath: "showio_probe\u2019s_recovery.vgr",
                             saveToken: 0, openToken: 0, timerToken: 0, copyToken: 0,
                             saveOk: false, openOk: false, peekOk: false, timerSeen: false,
                             timerPeekPending: false })

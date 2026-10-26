@@ -158,10 +158,12 @@ Item {
     // unsaved).
     function takeSlideLive(index, slide, styledPreview) {
         root.selectedSlide = index
-        if (styledPreview && !LiveOutputService.live)
-            LiveOutputService.stageSlidesWithPreview(root.item ? root.item.name : "", [slide], styledPreview)
-        else
-            LiveOutputService.stageSlides(root.item ? root.item.name : "", [slide])
+        // The WHOLE show goes over, with `index` saying which slide is being
+        // read: that is what gives Alt+Down (LiveOutputService.lineStep) the
+        // neighbour slide whose first line comes in at the bottom of this one.
+        // Staging only the slide itself left the stepper with no next line, so
+        // the reading step could not cross a show's slide boundary at all.
+        LiveOutputService.stageSlideSet(root.item ? root.item.name : "", root.slides, index)
     }
 
     // ---- The wall's ‹ › while a SHOW slide is on the tile -------------------
@@ -181,9 +183,7 @@ Item {
         const next = at + direction
         if (next < 0 || next >= slides.length)
             return false               // the show's first/last slide: nothing that way
-        const styled = LiveOutputService.live ? null
-                       : LiveOutputService.previewWithActiveStyle(slides[next])
-        takeSlideLive(next, slides[next], styled)
+        takeSlideLive(next, slides[next], null)
         return true
     }
 
@@ -367,7 +367,6 @@ Item {
                                 // monitor wall, the output window and these
                                 // thumbnails alike.
                                 showCheckerboard: cell.styled.frameTransparent === true
-                                checkerSize: 32
                             }
                             Rectangle { anchors.fill: parent; color: Theme.hoverBg; visible: cellHover.hovered }      // the hover veil
                             // the slide's next timer
@@ -452,7 +451,6 @@ Item {
                             background: listRow.styled.background ?? "transparent"
                             // Same one answer as the grid cell above.
                             showCheckerboard: listRow.styled.frameTransparent === true
-                            checkerSize: 24
                         }
                     }
                     Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }

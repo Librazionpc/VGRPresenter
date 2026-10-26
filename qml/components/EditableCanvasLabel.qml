@@ -54,6 +54,12 @@ Item {
     // real cancel.
     property string preEditText: ""
     property bool editing: false
+    // Set by the owning DraggableCanvasText from its own `selected` (the
+    // canvas's selection state, not tracked here) — a plain click on an
+    // ALREADY-selected item goes straight to editing instead of requiring a
+    // double-click (see onClicked below: the user has already told us which
+    // item they mean, so re-selecting it does nothing new).
+    property bool selected: false
     // Exposed so the owning DraggableCanvasText can drive its hover-wash
     // highlight from this MouseArea's own hover tracking instead of
     // layering a second, overlapping hoverEnabled MouseArea on top of it
@@ -117,6 +123,32 @@ Item {
     // their box via anchors.fill: parent, worked fine).
     anchors.fill: parent
 
+    // ---- the per-LINE background band (the Lines card's "Background color") --
+    // `bandColor` is a CSS colour; "" means none. It is drawn by the SAME text
+    // in a transparent rich-text Text UNDER the glyphs: Qt paints a span's
+    // background per line fragment, so the bands follow this font's own
+    // wrapping exactly — no second wrap engine, and no hand-placed rectangles
+    // that would drift from the words the moment a line broke elsewhere.
+    //
+    // `bandCase` is the item's textCase, applied to the band's own string: the
+    // label draws its case through font.capitalization, which a rich-text Text
+    // ignores, and an UPPERCASED verse bands at the lower-case widths without
+    // it (bands narrower than the words they sit behind).
+    property string bandColor: ""
+    property string bandCase: "none"
+    // The band's corner radius (FreeShow's lineRadius). 0 keeps the cheap
+    // rich-text band; above 0 each line is drawn as a rounded rectangle from the
+    // label's own measured line boxes (see LineBandLayer.qml).
+    property real bandRadius: 0
+
+    LineBandLayer {
+        anchors.fill: parent
+        layout: displayText
+        color: root.bandColor
+        radius: root.bandRadius
+        textCase: root.bandCase
+    }
+
     Text {
         id: displayText
         anchors.fill: parent
@@ -141,6 +173,12 @@ Item {
         horizontalAlignment: displayText.horizontalAlignment
         wrapMode: displayText.wrapMode
         selectByMouse: true
+        // The theme's own accent, not Qt's platform-default blue (user call:
+        // "this selector all around the app should be blue[,] it sh[oul]d
+        // [use] the base color from the[me]") — the select-all on entering
+        // edit mode (onVisibleChanged below) is exactly where this showed.
+        selectionColor: Theme.accent
+        selectedTextColor: Theme.controlInk
 
             // Fixed-color blinking caret — TextEdit draws its cursor using its
             // own `color` (the text color) unless given a cursorDelegate, so
@@ -369,10 +407,16 @@ Item {
         onClicked: (mouse) => {
             if (dragMoved)
                 return
-            // Neither branch opens a TextInput anymore (that's
-            // onDoubleClicked's job now), so this always has to steal
-            // focus itself to commit/exit whatever else might be mid-edit.
             root.forceActiveFocus()
+            // Already selected, plain click (no multi-select modifiers):
+            // one more click now enters editing directly — user call ("when
+            // the item is selected just one click should make it enter edit
+            // mode"). A modified click still just extends/toggles the
+            // selection, same as a fresh click always has.
+            if (root.selected && !(mouse.modifiers & (Qt.ShiftModifier | Qt.ControlModifier))) {
+                root.editing = true
+                return
+            }
             root.selectRequested(mouse.modifiers, mouse.x, mouse.y)
         }
         onDoubleClicked: (mouse) => {

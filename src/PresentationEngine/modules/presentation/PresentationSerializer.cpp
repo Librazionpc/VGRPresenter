@@ -136,6 +136,20 @@ js::Value SlideToJson(const Slide& s) {
     o["transitionMs"] = js::Value::Number(s.transitionMs);
     o["durationMs"] = js::Value::Number(s.durationMs);
     o["background"] = Str(s.background);
+    // Slide-wide filters — written only when actually dialled in, so a show that
+    // never used them keeps producing exactly the slide JSON it always did
+    // (and older builds read the file unchanged).
+    if (!s.filters.IsIdentity()) {
+        js::Value::Object f;
+        f["hueRotate"] = js::Value::Number(s.filters.hueRotateDeg);
+        f["invert"] = js::Value::Number(s.filters.invert);
+        f["blur"] = js::Value::Number(s.filters.blurPx);
+        f["grayscale"] = js::Value::Number(s.filters.grayscale);
+        f["brightness"] = js::Value::Number(s.filters.brightness);
+        f["contrast"] = js::Value::Number(s.filters.contrast);
+        f["saturate"] = js::Value::Number(s.filters.saturate);
+        o["filters"] = js::Value(std::move(f));
+    }
     if (!s.categoryId.empty()) o["categoryId"] = Str(s.categoryId);
     o["meta"] = MetaToValue(s.metaJson);
     o["blocks"] = js::Value(std::move(blocks));
@@ -158,6 +172,15 @@ Slide SlideFromJson(const js::Value& o, size_t index) {
     s.transitionMs = GetNum(o, "transitionMs", 500.0);
     s.durationMs = GetNum(o, "durationMs", 0.0);
     s.background = GetStr(o, "background", "transparent");
+    if (const js::Value* f = o.Find("filters"); f && f->asObject()) {
+        s.filters.hueRotateDeg = GetNum(*f, "hueRotate", 0.0);
+        s.filters.invert = GetNum(*f, "invert", 0.0);
+        s.filters.blurPx = GetNum(*f, "blur", 0.0);
+        s.filters.grayscale = GetNum(*f, "grayscale", 0.0);
+        s.filters.brightness = GetNum(*f, "brightness", 1.0);
+        s.filters.contrast = GetNum(*f, "contrast", 1.0);
+        s.filters.saturate = GetNum(*f, "saturate", 1.0);
+    }
     s.categoryId = GetStr(o, "categoryId");
     s.metaJson = MetaFromValue(o, "meta");
     if (const js::Value* blocks = o.Find("blocks"); blocks && blocks->asArray()) {

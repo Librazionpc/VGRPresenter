@@ -257,7 +257,18 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
     const QString body = s.value(QStringLiteral("body")).toString();
     slide.text = utf8(!body.isEmpty() ? body
                                       : (line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2));
+    // THE READING FLOW — the passage this page was cut from (see
+    // LiveOutputService's line step and Slide::flowText). Its own fields, not
+    // meta: a passage is full of the characters a JSON meta value must escape,
+    // and the engine has to receive it exactly as typed. Absent on every slide
+    // that is not part of a step-able pick, which is every ordinary slide.
+    slide.flowText = utf8(s.value(QStringLiteral("flowText")).toString());
+    slide.flowScroll = static_cast<float>(s.value(QStringLiteral("flowScroll")).toDouble());
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
+    // Slide-wide filters (see applyFilters — the same door the Edit panel's live
+    // patch comes through).
+    if (s.contains(QStringLiteral("filters")))
+        ShowConverter::applyFilters(slide, s.value(QStringLiteral("filters")).toMap());
     slide.categoryId = utf8(s.value(QStringLiteral("categoryId")).toString());
     // A CLEAR carrier (Slide::clearStage): the engine paints an empty frame for
     // it — no style colour, no style image. Clear all no longer sends one (it
@@ -292,6 +303,21 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
     if (s.contains(QStringLiteral("nextTimer")))
         slide.durationMs = s.value(QStringLiteral("nextTimer")).toDouble() * 1000.0;
     return slide;
+}
+
+void ShowConverter::applyFilters(bp::Slide &slide, const QVariantMap &filters)
+{
+    const auto num = [&filters](const char *k, double fallback) {
+        const auto it = filters.constFind(QLatin1String(k));
+        return it == filters.constEnd() ? fallback : it.value().toDouble();
+    };
+    slide.filters.hueRotateDeg = num("hueRotate", 0.0);
+    slide.filters.invert = num("invert", 0.0);
+    slide.filters.blurPx = num("blur", 0.0);
+    slide.filters.grayscale = num("grayscale", 0.0);
+    slide.filters.brightness = num("brightness", 1.0);
+    slide.filters.contrast = num("contrast", 1.0);
+    slide.filters.saturate = num("saturate", 1.0);
 }
 
 bp::ContentBlock ShowConverter::blockFromVariant(const QVariantMap &b)
@@ -367,6 +393,17 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
             { QStringLiteral("line2"), meta.value(QStringLiteral("line2")).toString() },
             { QStringLiteral("ref"), meta.value(QStringLiteral("ref")).toString() },
             { QStringLiteral("background"), qstr(s.background) },
+            // The slide's filter set travels with it, for the Edit panel's rows
+            // and for the canvas preview shader — the on-air pass applies the
+            // engine's own copy, so these numbers are what both sides read.
+            { QStringLiteral("filters"), QVariantMap{
+                { QStringLiteral("hueRotate"), s.filters.hueRotateDeg },
+                { QStringLiteral("invert"), s.filters.invert },
+                { QStringLiteral("blur"), s.filters.blurPx },
+                { QStringLiteral("grayscale"), s.filters.grayscale },
+                { QStringLiteral("brightness"), s.filters.brightness },
+                { QStringLiteral("contrast"), s.filters.contrast },
+                { QStringLiteral("saturate"), s.filters.saturate } } },
             { QStringLiteral("categoryId"), qstr(s.categoryId) },
             { QStringLiteral("blocks"), blocksToVariant(s.blocks) },
             // A SAVED SLIDE KEEPS ITS FILL. show slides whose content rode in

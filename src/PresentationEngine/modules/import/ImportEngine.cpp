@@ -4,12 +4,15 @@
 #include "modules/bible/BibleEngine.hpp"
 #include "modules/import/Archive.hpp"
 #include "modules/import/SongText.hpp"
+#include "modules/media/MediaLibrary.hpp"
 #include "modules/songs/ISongProvider.hpp"
+#include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <format>
 #include <map>
+#include <mutex>
 
 namespace bps::import {
 
@@ -153,10 +156,181 @@ std::string ChordsJsonOf(const song::SongSection& section) {
     return any ? out : std::string();
 }
 
+// The folder the file came from — the category its show is filed under, so a
+// ProPresenter library (or any folder of song files) arrives as one batch named
+// after its source instead of thousands of loose shows in "song". A bundle
+// member ("pack.probundle::shows/x.pro") takes the bundle's own folder.
+std::string ParentFolderName(std::string_view path) {
+    if (const size_t member = path.find("::"); member != std::string_view::npos) path = path.substr(0, member);
+    const size_t leaf = path.find_last_of("/\\");
+    if (leaf == std::string_view::npos) return {};
+    const std::string_view parent = path.substr(0, leaf);
+    const size_t slash = parent.find_last_of("/\\");
+    std::string name(parent.substr(slash == std::string_view::npos ? 0 : slash + 1));
+    // A category name may not carry path characters or end in a space or dot.
+    for (char& c : name)
+        if (std::string_view("/\\:*?\"<>|").find(c) != std::string_view::npos ||
+            static_cast<unsigned char>(c) < 0x20)
+            c = '-';
+    while (!name.empty() && (name.back() == ' ' || name.back() == '.')) name.pop_back();
+    if (name == "." || name == "..") return {};
+    return name;
+}
+
+// The name part of a path, whatever separator the reference used.
+std::string LeafName(std::string_view path) {
+    const size_t cut = path.find_last_of("/\\");
+    return std::string(cut == std::string_view::npos ? path : path.substr(cut + 1));
+}
+
+bool EndsWithNoCase(std::string_view text, std::string_view tail) {
+    if (tail.empty() || tail.size() > text.size()) return false;
+    const size_t offset = text.size() - tail.size();
+    for (size_t i = 0; i < tail.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(text[offset + i])) !=
+            std::tolower(static_cast<unsigned char>(tail[i]))) return false;
+    return true;
+}
+
+bool EqualsNoCase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    return true;
+}
+
+// What one folder holds, cached for the run.
+//
+// A ProPresenter sweep asks the same Media/Assets folder once per referenced
+// picture of once per deck — a library of 1144 shows re-reads it thousands of
+// times, which is the difference between a minute and an afternoon. The names
+// are only CANDIDATES: every hit is re-checked against the disk by the caller,
+// so a cached name that has since been deleted cannot resurrect a missing file.
+std::mutex& FolderCacheMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::map<std::string, std::vector<std::string>>& FolderCache() {
+    static std::map<std::string, std::vector<std::string>> cache;
+    return cache;
+}
+
+const std::vector<std::string>& FolderEntries(const std::string& folder) {
+    {
+        std::lock_guard<std::mutex> lock(FolderCacheMutex());
+        const auto it = FolderCache().find(folder);
+        if (it != FolderCache().end()) return it->second;
+    }
+    std::vector<std::string> entries;
+    // Outside the lock: a directory read is a PAL call and must never be held
+    // under a lock this process can re-enter (lock-scope rule).
+    if (auto listed = platform::PlatformAccessor::Get().Filesystem().Enumerate(folder); listed.ok())
+        entries = std::move(listed.value());
+    std::lock_guard<std::mutex> lock(FolderCacheMutex());
+    return FolderCache().emplace(folder, std::move(entries)).first->second;
+}
+
+// One SWEEP's worth of listings: a media folder can gain files between imports
+// (the operator drops a new picture into the library), so ImportFiles clears
+// this before it reads anything.
+void ResetFolderCache() {
+    std::lock_guard<std::mutex> lock(FolderCacheMutex());
+    FolderCache().clear();
+}
+
+// Where a referenced media file actually is, here and now.
+//
+// A ProPresenter document carries the absolute path of the machine that made it
+// (a Mac path, usually meaningless here), a path relative to the presentation's
+// root ("Media/Assets/logo.png"), and very often nothing but the media's NAME.
+// The relative one is tried against each folder above the presentation file,
+// nearest first — that is what lets a library copied from another computer
+// still find its artwork.
+//
+// When none of that answers, the library's own media folders are searched by
+// name, because that is where a ProPresenter media library keeps its files and
+// under the names the documents use for them: either the plain name
+// ("CBC_Mark_White-2.png") or the media id prefixed to it
+// ("1559c5d1-…Sermon background.jpg"). Matching the END of the file name is
+// what lets a lower-third's own PNG come along instead of only its words.
+// "" when nothing matches, so a missing file is simply not brought along
+// instead of pointing at something that isn't there.
+std::string ResolveMediaPath(const std::string& reference, const std::string& filePath) {
+    if (reference.empty()) return {};
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string name = LeafName(reference);
+    const bool absolute = reference.size() > 2 &&
+                          (reference[1] == ':' || reference[0] == '/' || reference[0] == '\\');
+
+    // The folder the file (or the reference) names, above the document.
+    std::vector<std::string> ancestors;
+    {
+        std::string dir = filePath;
+        for (int level = 0; level < 6; ++level) {
+            const size_t cut = dir.find_last_of("/\\");
+            if (cut == std::string::npos) break;
+            dir.resize(cut);
+            if (dir.empty()) break;
+            ancestors.push_back(dir);
+        }
+    }
+
+    // 1. Exactly where it says, for a path that still holds here.
+    if (absolute && fs.IsRegularFile(reference)) return reference;
+    if (!absolute) {
+        for (const std::string& dir : ancestors) {
+            const std::string candidate = fs.Join(dir, reference);
+            if (fs.IsRegularFile(candidate)) return candidate;
+        }
+    }
+
+    // 2. The library's media folders, by the file's own name.
+    if (!name.empty()) {
+        for (const std::string& dir : ancestors)
+            for (const char* sub : { "/Media/Assets/", "/Media/", "/media/" }) {
+                const std::string candidate = dir + sub + name;
+                if (fs.IsRegularFile(candidate)) return candidate;
+            }
+        // 3. Under the media id prefixed to that name (ProPresenter's own
+        //    storage), or — for a reference that is just an id — a file whose
+        //    stem IS the id.
+        const size_t dot = name.find_last_of('.');
+        const bool nameHasExtension = dot != std::string::npos && dot + 1 < name.size();
+        for (const std::string& dir : ancestors)
+            for (const char* sub : { "/Media/Assets", "/Media", "/media" }) {
+                for (const std::string& entry : FolderEntries(dir + sub)) {
+                    const std::string leaf = LeafName(entry);
+                    bool named = false;
+                    if (nameHasExtension) {
+                        named = EndsWithNoCase(leaf, name);
+                    } else {
+                        // A reference that is just an id (FreeShow's own media
+                        // library names its files after it): the entry's STEM
+                        // is that id, whatever extension the file kept.
+                        const size_t entryDot = leaf.find_last_of('.');
+                        const std::string entryStem = entryDot == std::string::npos ? leaf : leaf.substr(0, entryDot);
+                        named = EqualsNoCase(entryStem, name);
+                    }
+                    if (!named) continue;
+                    if (fs.IsRegularFile(entry)) return entry;
+                }
+            }
+    }
+    return {};
+}
+
 ImportedShow SongToImported(const song::Song& s, const ImportFile& file, const std::string& origin) {
     ImportedShow show;
     show.origin = origin;
     show.category = "song";
+    show.sourceFolder = ParentFolderName(file.path);
+    for (const song::MediaRef& ref : s.metadata.mediaRefs) {
+        const std::string path = ResolveMediaPath(ref.mediaId, file.path);
+        if (path.empty() || !media::MediaKindOf(path)) continue;   // only files the library can show
+        if (std::find(show.mediaRefs.begin(), show.mediaRefs.end(), path) == show.mediaRefs.end())
+            show.mediaRefs.push_back(path);
+    }
     const song::SongMetadata& m = s.metadata;
     show.name = m.title.empty() ? file.name : m.title;
     show.meta["title"] = show.name;
@@ -220,6 +394,44 @@ std::string ItemsText(const J& items) {
     return out;
 }
 
+// The pictures and videos a FreeShow show puts on its slides.
+//
+// A FreeShow slide's picture (or video) is an ITEM of kind "media" / "image" /
+// "video" whose `src` is either the absolute path of a file dragged in from the
+// disk or the id the app's own media library gave it. Both are resolved the way
+// a ProPresenter deck's artwork is, and the files that exist here are recorded
+// on the imported show — which is what makes the import copy them into the
+// media library. Without this the import kept the words and left the pictures
+// behind (the report: "not just the text").
+void CollectFreeShowMedia(const J& showJson, const ImportFile& file, ImportedShow& out) {
+    const J* slides = showJson.Find("slides");
+    if (!slides || !slides->asObject()) return;
+    auto add = [&](const J& slide) {
+        const J* items = slide.Find("items");
+        if (!items || !items->asArray()) return;
+        for (const J& item : *items->asArray()) {
+            const J* type = item.Find("type");
+            if (!type || type->type() != J::Type::String) continue;
+            const std::string kind = std::string(type->asString());
+            if (kind != "media" && kind != "image" && kind != "video") continue;
+            const J* src = item.Find("src");
+            if (!src || src->type() != J::Type::String) continue;
+            const std::string path = ResolveMediaPath(std::string(src->asString()), file.path);
+            if (path.empty() || !media::MediaKindOf(path)) continue;
+            if (std::find(out.mediaRefs.begin(), out.mediaRefs.end(), path) == out.mediaRefs.end())
+                out.mediaRefs.push_back(path);
+        }
+    };
+    for (const auto& [id, slide] : *slides->asObject()) {
+        if (!slide.asObject()) continue;
+        add(slide);
+        // A group's children are their own slides, with their own items.
+        if (const J* kids = slide.Find("children"); kids && kids->asArray())
+            for (const J& child : *kids->asArray())
+                if (const J* cs = slides->Find(std::string(child.asString()))) add(*cs);
+    }
+}
+
 Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     auto parsed = json::Parse(file.content);
     if (!parsed.ok())
@@ -227,8 +439,20 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     const J* root = &parsed.value();
     // a show file is either the show itself, or [id, show]
     if (root->asArray() && root->asArray()->size() >= 2) root = &(*root->asArray())[1];
-    if (!root->asObject() || !root->Find("slides"))
-        return Error::Make(Err::ParseError, kModule, std::format("'{}' has no slides", file.name));
+    if (!root->asObject() || !root->Find("slides")) {
+        // A DANGLING REFERENCE — ["<id>",{"category":"song"}] with no show body
+        // at all — is what FreeShow leaves behind when a show was deleted or
+        // lives elsewhere; the honest thing to say is that the file holds
+        // nothing to import, not that the show it names has no slides.
+        bool onlyReference = root->asObject() != nullptr;
+        if (onlyReference)
+            for (const auto& [key, value] : *root->asObject())
+                if (key != "category" && key != "name" && key != "timestamps") onlyReference = false;
+        return Error::Make(Err::ParseError, kModule,
+                           onlyReference
+                               ? std::format("'{}' holds no show data (an empty reference, nothing to import)", file.name)
+                               : std::format("'{}' has no slides", file.name));
+    }
 
     ImportedShow show;
     show.origin = "freeshow";
@@ -323,6 +547,7 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
         section.slides = std::move(r.slides);
         show.sections.push_back(std::move(section));
     }
+    CollectFreeShowMedia(*root, file, show);
     return show;
 }
 
@@ -375,6 +600,7 @@ Result<ImportResult> ImportFiles(std::string_view formatId, const std::vector<Im
 
     ImportResult result;
     result.files = files.size();
+    ResetFolderCache();
     for (const ImportFile& file : files) {
         auto fail = [&](const std::string& why) { result.warnings.push_back(std::format("{}: {}", file.name, why)); };
 

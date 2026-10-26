@@ -38,6 +38,10 @@ class LivePreviewProvider;
 class LiveMediaFrameProvider;
 class QTimer;
 class QMediaPlayer;
+// The reading step's one animator (see readingScrollAnim_): a QVariantAnimation
+// keeps the pace, the curve and the frame cadence in Qt's hands, and every value
+// it produces is pushed to the engine's live loop as well as to QML.
+class QVariantAnimation;
 class QAudioOutput;
 class QVideoSink;
 namespace bps::rendering { struct Frame; }
@@ -437,6 +441,54 @@ public:
     Q_INVOKABLE void stageSlides(const QString &name, const QVariantList &slides);
     Q_INVOKABLE void stageSlidesWithPreview(const QString &name, const QVariantList &slides,
                                             const QVariantMap &styledPreview);
+
+    // ---- LINE STEP (the "telecaster" reading step: Alt+Down / Alt+Up) -------
+    //
+    // A NEXT SLIDE replaces the picture; a LINE STEP scrolls the words. Pressing
+    // Alt+Down takes the line at the top of the box out and brings the next one
+    // up from below it, so a reader who has just finished the last line on
+    // screen carries on reading downward instead of having to find their place
+    // again in a fresh slide. Alt+Up walks back.
+    //
+    // NOT A WINDOW OF TEXT. Every earlier version cut the page at the stepped
+    // line and refilled the box from the next slide, which re-ran the fit solver
+    // on each press (the type size and the wrapping changed while the words were
+    // supposed to travel) and left nothing below the last line to scroll in. The
+    // page is now left exactly as the operator built it: the reading block gets
+    // the PASSAGE it begins in (see readingFlowText), and a step is an offset
+    // into that one layout — the engine draws it (Slide::flowText), the monitor
+    // tile draws it (DesignPreview), and both read one number.
+    //
+    // The pick (a show's slides, a passage's verses, a Table section) is the
+    // unit: stageSlideSet() hands over the WHOLE set plus which slide is being
+    // read. A slide with no neighbouring line in that direction is the end of
+    // the step — the caller then falls back to plain next/previous slide
+    // behaviour.
+    Q_INVOKABLE void stageSlideSet(const QString &name, const QVariantList &slides, int index);
+    // Returns true when the words moved (a new offset, and the page re-staged or
+    // live-committed where the step crossed into the next page).
+    Q_INVOKABLE bool lineStep(int direction);
+    // ---- WHAT THE FLOW IS (the surfaces that DRAW it read these) -----------
+    // `readingFlowText` is the passage the reading block is a page of — this page
+    // followed by the next one, joined by the page break — and `readingScroll` is
+    // where it rests or is travelling to, in LINE HEIGHTS of the reading text.
+    // DesignPreview draws exactly this text, clipped to the block's own box and
+    // translated by `readingScroll` lines; the engine draws the same passage at
+    // the same offset on the HDMI window, the NDI feed and every recording. Two
+    // views of ONE number, instead of two animations trying to agree.
+    Q_PROPERTY(QString readingFlowText READ readingFlowText NOTIFY readingScrollChanged)
+    Q_PROPERTY(qreal readingScroll READ readingScroll NOTIFY readingScrollChanged)
+    bool readingFlowActive() const { return !readingFlowText_.isEmpty(); }
+    QString readingFlowText() const { return readingFlowText_; }
+    qreal readingScroll() const { return readingScroll_; }
+    // The step's pulse, still emitted once per applied step and still carrying
+    // the direction (+1 = the words travel up, the next line arrives from below;
+    // -1 = back down). A surface that only needs to know "it moved" reads this;
+    // a surface that draws the move reads `readingScroll` above.
+    Q_PROPERTY(int lineStepSerial READ lineStepSerial NOTIFY lineStepChanged)
+    Q_PROPERTY(int lineStepDirection READ lineStepDirection NOTIFY lineStepChanged)
+    int lineStepSerial() const { return lineStepSerial_; }
+    int lineStepDirection() const { return lineStepDirection_; }
     // Wipes a pending stage without touching live_/onAirSlide_ — stop()
     // alone never did this (staging and live are independent: a NEXT pick
     // can sit staged while the CURRENT one is still live), which is
@@ -584,6 +636,12 @@ signals:
     // probe, not once per frame.
     void outputRuntimeChanged();
     void stagedChanged();
+    // One applied line step (see lineStepSerial / lineStepDirection).
+    void lineStepChanged();
+    // The reading passage, or where it sits, changed — every frame of a step
+    // (see readingFlowText / readingScroll). The surface that draws the step
+    // binds to `readingScroll`, so this fires at the animator's own cadence.
+    void readingScrollChanged();
     void inputChanged();
     void overlaysChanged();
     // clearAll() took a snapshot / restoreCleared() consumed it.
@@ -709,6 +767,80 @@ private:
     QString stagedName_;
     QVariantList stagedSlidesRaw_;
     QVariantMap stagedSlide_;
+
+    // ---- the line stepper (see stageSlideSet/lineStep) --------------------
+    // The set the step walks, and WHERE it is: which page is on screen and how
+    // many of that page's lines have already left at the top (offset 0 is the
+    // plain page; offset == its line count means the NEXT page's first line has
+    // taken the top of the box, and the page change is committed as the move
+    // lands).
+    QString lineSetName_;
+    QVariantList lineSetRaw_;
+    int lineSlideIndex_ = 0;
+    int lineOffset_ = 0;
+    // Counts applied steps and remembers which way the last one went — see the
+    // Q_PROPERTYs above (the surfaces' animation pulse).
+    int lineStepSerial_ = 0;
+    int lineStepDirection_ = 1;
+    // THE PASSAGE the reading block is a page of (see the Q_PROPERTYs above) and
+    // where it rests, in line heights of the reading text.
+    QString readingFlowText_;
+    qreal readingScroll_ = 0.0;
+    // The page change a landing step owes (a forward step that crossed a page
+    // boundary): committed when the move finishes, so the boundary is ONE move
+    // and never a cut followed by a scroll. -1 = nothing owed.
+    int readingRebaseSlide_ = -1;
+    // The one animator EVERY surface rides: it changes readingScroll_, and its
+    // every value is pushed to the engine's live loop (SetLineScroll) — so the
+    // tile and the HDMI/NDI frame are two views of the same number instead of
+    // two animations that have to agree.
+    QVariantAnimation *readingScrollAnim_ = nullptr;
+    // The passage for one page (that page followed by the next), and the store
+    // both this service and the engine read.
+    QString flowTextFor(int slideIndex) const;
+    void applyReadingScroll(qreal lines);
+    void animateReadingScroll(qreal from, qreal to);
+    // Settles a page change a landing step owes (readingRebaseSlide_), the
+    // same commit readingScrollAnim_'s own finished handler makes when a
+    // step's glide completes naturally. Also called synchronously at the
+    // top of lineStep(): a rapid second press stops the in-flight animation
+    // before it reaches finished() (QAbstractAnimation::stop() does not
+    // emit it), so a press that interrupts a page-boundary-crossing step
+    // must settle that owed commit itself or it is lost — lineOffset_ is
+    // then stuck one past the slide's last line forever, and every
+    // following step's own bounds check silently fails (reported:
+    // stepping freezes after a fast double press). A no-op when nothing
+    // is owed.
+    void commitPendingRebase();
+    // Re-stage the page being read with its passage and offset. `commitPage` is
+    // false for a step INSIDE one page: on air that needs no new presentation at
+    // all (the offset travels on its own), and only a PAGE change has to be
+    // committed for the reference/heading around the words to follow.
+    void applyReadingRestage(bool commitPage = true);
+    // A slide's READING lines — one entry per line ON SCREEN, not per authored
+    // newline: the step moves by what the operator can see, so the text is
+    // wrapped at the box the composed picture draws it in (see the .cpp).
+    QStringList readingLines(const QVariantMap &slide) const;
+    // Same answer, for the slide AT this index in the current pick
+    // (lineSetRaw_) — cached, so the SAME index is never composed/wrapped
+    // twice. Every real call site works in terms of an index into
+    // lineSetRaw_ anyway (see the .cpp callers), which is also what makes a
+    // stable cache key possible without hashing the slide's own content.
+    QStringList readingLinesAt(int index) const;
+    // Populates readingLinesCache_ for a few slides on EITHER side of
+    // lineSlideIndex_ (prewarmReadingLinesRadius), so a step that reaches
+    // one of them finds its wrapped-line count already known instead of
+    // composing the picture and wrapping the text at that exact moment —
+    // the readingLines() work (previewWithActiveStyle + the real text
+    // layout) is real enough that doing it cold, synchronously, in the
+    // frame a step lands, is itself a plausible source of the residual
+    // boundary stutter (user call: "if the s[l]ide can be build like 4
+    // list[s] ahead... both for forward and backward movement"). Queued via
+    // QTimer::singleShot(0, ...) from applyReadingRestage so it runs on the
+    // NEXT event-loop turn — after the step that triggered it has already
+    // painted — rather than adding its own cost to that press's response.
+    void prewarmReadingLines();
+    mutable QHash<int, QStringList> readingLinesCache_;
 
     // ---- Clear all's undo (see clearAll/restoreCleared) -------------------
     // A plain snapshot of each content layer at the moment Clear all ran.

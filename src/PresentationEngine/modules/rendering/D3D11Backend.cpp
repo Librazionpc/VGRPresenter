@@ -93,12 +93,101 @@ cbuffer DrawCB : register(b0)
     float4 gUV;      // u0, v0, u1, v1
     float4 gColor;   // straight fill colour / texture tint
     float4 gParams;  // x = corner radius, y = effect id, z = effect param, w = mode
-    float4 gFrame;   // x = frame width, y = frame height, z/w unused
-    float4 gDir;     // xy = one blur step in pixels, z = blur radius
+    float4 gFrame;   // x = frame width, y = frame height, z/w = blend pass: mode, flags
+    float4 gDir;     // xy = one blur step / blend pass: region origin, z = blur radius
 };
 
 Texture2D gTex : register(t0);
+// THE BACKDROP, for the blend pass only (mode 4): a copy of the frame as it was
+// before this object drew. The blend unit cannot read where it is writing, so a
+// CSS blend mode (screen, overlay, soft light, hue…) has to be computed per
+// pixel against this copy — exactly what the software rasterizer does with its
+// destination pixels.
+Texture2D gBack : register(t1);
 SamplerState gSamp : register(s0);
+
+// ---- the CSS blend functions (separated, then the four non-separable ones) ---
+// Each matches SoftwareGraphicsBackend's BlendPixel term for term: one picture
+// on screen must be one picture on air, whichever rasterizer drew it.
+float BMultiply(float b, float s) { return b * s; }
+float BScreen(float b, float s)   { return b + s - b * s; }
+float BOverlay(float b, float s)  { return b <= 0.5 ? 2.0 * b * s : 1.0 - 2.0 * (1.0 - b) * (1.0 - s); }
+float BHardLight(float b, float s) { return s <= 0.5 ? 2.0 * b * s : 1.0 - 2.0 * (1.0 - b) * (1.0 - s); }
+float BSoftLight(float b, float s)
+{
+    float d = b <= 0.25 ? ((16.0 * b - 12.0) * b + 4.0) * b : sqrt(b);
+    return s <= 0.5 ? b - (1.0 - 2.0 * s) * b * (1.0 - b)
+                    : b + (2.0 * s - 1.0) * (d - b);
+}
+float BDodge(float b, float s)
+{
+    if (b <= 0.0) return 0.0;
+    if (s >= 1.0) return 1.0;
+    return min(1.0, b / (1.0 - s));
+}
+float BBurn(float b, float s)
+{
+    if (b >= 1.0) return 1.0;
+    if (s <= 0.0) return 0.0;
+    return 1.0 - min(1.0, (1.0 - b) / s);
+}
+
+float LumB(float3 c) { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+
+float3 ClipColorB(float3 c)
+{
+    float l = LumB(c);
+    float n = min(c.r, min(c.g, c.b));
+    float x = max(c.r, max(c.g, c.b));
+    float3 o = c;
+    if (n < 0.0 && l - n > 0.000001)
+        o = l + (o - l) * l / (l - n);
+    if (x > 1.0 && x - l > 0.000001)
+        o = l + (o - l) * (1.0 - l) / (x - l);
+    return o;
+}
+
+float3 SetLumB(float3 c, float l) { return ClipColorB(c + (l - LumB(c))); }
+
+float SatB(float3 c) { return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b)); }
+
+// Rank the channels, not their VALUES: the biggest gets s, the smallest 0, the
+// middle one keeps its distance in between (the spec's SetSat). Compared against
+// the original channels so the result lands back on the right component.
+float3 SetSatB(float3 c, float s)
+{
+    float lo = min(c.r, min(c.g, c.b));
+    float hi = max(c.r, max(c.g, c.b));
+    if (hi - lo <= 0.000001)
+        return float3(0.0, 0.0, 0.0);
+    float3 o;
+    o.r = c.r >= hi ? s : (c.r <= lo ? 0.0 : (c.r - lo) * s / (hi - lo));
+    o.g = c.g >= hi ? s : (c.g <= lo ? 0.0 : (c.g - lo) * s / (hi - lo));
+    o.b = c.b >= hi ? s : (c.b <= lo ? 0.0 : (c.b - lo) * s / (hi - lo));
+    return o;
+}
+
+// The blend mode ids are bps::rendering::BlendMode's integers. Alpha, Additive
+// and Multiply never arrive here — they are real blend states on this backend,
+// and NeedsBlendPass() keeps them off this pass.
+float3 BlendFn(int m, float3 cb, float3 cs)
+{
+    if (m == 3)  return float3(BScreen(cb.r, cs.r), BScreen(cb.g, cs.g), BScreen(cb.b, cs.b));
+    if (m == 4)  return float3(BOverlay(cb.r, cs.r), BOverlay(cb.g, cs.g), BOverlay(cb.b, cs.b));
+    if (m == 5)  return float3(BSoftLight(cb.r, cs.r), BSoftLight(cb.g, cs.g), BSoftLight(cb.b, cs.b));
+    if (m == 6)  return float3(BHardLight(cb.r, cs.r), BHardLight(cb.g, cs.g), BHardLight(cb.b, cs.b));
+    if (m == 7)  return float3(BDodge(cb.r, cs.r), BDodge(cb.g, cs.g), BDodge(cb.b, cs.b));
+    if (m == 8)  return float3(BBurn(cb.r, cs.r), BBurn(cb.g, cs.g), BBurn(cb.b, cs.b));
+    if (m == 9)  return max(cb, cs);
+    if (m == 10) return min(cb, cs);
+    if (m == 11) return abs(cb - cs);
+    if (m == 12) return cb + cs - 2.0 * cb * cs;                       // exclusion
+    if (m == 13) return SetLumB(SetSatB(cs, SatB(cb)), LumB(cb));      // hue
+    if (m == 14) return SetLumB(SetSatB(cb, SatB(cs)), LumB(cb));      // saturation
+    if (m == 15) return SetLumB(cs, LumB(cb));                        // color
+    if (m == 16) return SetLumB(cb, LumB(cs));                        // luminosity
+    return cs;                                                        // normal
+}
 
 struct VSOut
 {
@@ -124,6 +213,56 @@ float4 PSMain(VSOut i) : SV_Target
     int mode = (int)(gParams.w + 0.5);
     int effect = (int)(gParams.y + 0.5);
     float param = gParams.z;
+
+    if (mode == 4)
+    {
+        // BLEND PASS: the object's picture composited against a copy of the
+        // frame underneath it, written back as the FINAL pixel (premultiplied),
+        // so the blend state is a replace. gFrame.z = blend mode id,
+        // gFrame.w = flags (1 textured source, 2 rounded rect).
+        int bm = (int)(gFrame.z + 0.5);
+        int flags = (int)(gFrame.w + 0.5);
+
+        // The target holds PREMULTIPLIED pixels (see the blend states); the
+        // blend maths is authored in STRAIGHT space, so un-premultiply first.
+        // The backdrop copy holds this quad's REGION at the same frame-sized
+        // coordinates, so the sample is the pixel itself.
+        float4 b = gBack.Sample(gSamp, (i.pos.xy - gDir.xy) / gFrame.xy);
+        float ab = b.a;
+        float3 Cb = ab > 0.0001 ? b.rgb / ab : b.rgb;
+
+        float4 s = gColor;
+        if ((flags & 1) != 0)
+        {
+            float4 t = gTex.Sample(gSamp, i.uv);
+            s = float4(t.rgb * gColor.rgb, t.a * gColor.a);
+        }
+
+        // Coverage: a rounded rectangle fades at its own anti-aliased edge, and
+        // where it does not cover, the backdrop must come back UNTOUCHED.
+        float cov = 1.0;
+        if ((flags & 2) != 0)
+        {
+            float r = min(gParams.x, 0.5 * min(gRect.z, gRect.w));
+            if (r >= 0.5)
+            {
+                float2 half = gRect.zw * 0.5;
+                float2 q = abs(i.local - half) - (half - r);
+                float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+                cov = saturate(0.5 - d);
+            }
+        }
+
+        float as_ = s.a;
+        float3 Cs = s.rgb;
+        float3 B = BlendFn(bm, Cb, Cs);
+        float ao = as_ + ab * (1.0 - as_);
+        // co = as(1-ab)Cs + as·ab·B(Cb,Cs) + (1-as)ab·Cb — the same formula the
+        // software rasterizer runs (it comes out premultiplied, which is what
+        // this target stores).
+        float3 co = as_ * (1.0 - ab) * Cs + as_ * ab * B + (1.0 - as_) * ab * Cb;
+        return lerp(float4(b.rgb, ab), float4(co, ao), cov);
+    }
 
     if (mode == 3)
     {
@@ -791,6 +930,82 @@ private:
         context_->Draw(4, 0);
     }
 
+    // A mode the fixed-function blend unit CANNOT express. Alpha, Additive and
+    // Multiply are hardware states (multiply through the inverted-source trick
+    // above); everything else in the CSS set is per-pixel maths over the
+    // BACKDROP — which the blend unit cannot read — so those take the shader's
+    // blend pass against a copy of the frame.
+    static bool NeedsBlendPass(BlendMode m) {
+        return m != BlendMode::Alpha && m != BlendMode::Additive && m != BlendMode::Multiply;
+    }
+
+    // shape: 0 = solid, 1 = textured, 2 = rounded rect (the shader's numbering).
+    void BlendQuad(int shape, const Rect& rect, const Rect& uv, const Color& color, float radius,
+                   ID3D11ShaderResourceView* srv, BlendMode blend) {
+        if (!context_)
+            return;
+        if (!scratchB || !scratchBSrv || !rt_) {
+            // No backdrop copy to blend against: draw it as a plain picture here
+            // rather than leaving a hole in the frame.
+            DrawQuad(shape, rect, uv, color, radius, srv, BlendMode::Alpha, 0.0f, 0.0f);
+            return;
+        }
+        // ONLY THE QUAD'S OWN REGION is copied, not the whole frame: one
+        // picture per item is cheap, and a blended TEXT object (hundreds of
+        // glyphs a frame) must not cost a full-frame copy per glyph.
+        const int x0 = std::clamp(static_cast<int>(rect.x), 0, frameWidth_);
+        const int y0 = std::clamp(static_cast<int>(rect.y), 0, frameHeight_);
+        const int x1 = std::clamp(static_cast<int>(rect.Right()), 0, frameWidth_);
+        const int y1 = std::clamp(static_cast<int>(rect.Bottom()), 0, frameHeight_);
+        if (x1 <= x0 || y1 <= y0)
+            return;
+        // A texture cannot be a copy DESTINATION while it is bound as a shader
+        // resource, and the previous blend pass left this one bound on slot 1.
+        ID3D11ShaderResourceView* none[1] = {nullptr};
+        context_->PSSetShaderResources(1, 1, none);
+        const D3D11_BOX box{static_cast<UINT>(x0), static_cast<UINT>(y0), 0u,
+                            static_cast<UINT>(x1), static_cast<UINT>(y1), 1u};
+        context_->CopySubresourceRegion(scratchB.Get(), 0, 0, 0, 0, rt_.Get(), 0, &box);
+
+        DrawConstants cb{};
+        cb.rect[0] = rect.x;
+        cb.rect[1] = rect.y;
+        cb.rect[2] = rect.width;
+        cb.rect[3] = rect.height;
+        cb.uv[0] = uv.x;
+        cb.uv[1] = uv.y;
+        cb.uv[2] = uv.x + uv.width;
+        cb.uv[3] = uv.y + uv.height;
+        cb.color[0] = color.r;
+        cb.color[1] = color.g;
+        cb.color[2] = color.b;
+        cb.color[3] = color.a;
+        cb.params[0] = radius;
+        cb.params[3] = 4.0f;   // mode: blend pass
+        cb.frame[0] = static_cast<float>(frameWidth_);
+        cb.frame[1] = static_cast<float>(frameHeight_);
+        cb.frame[2] = static_cast<float>(static_cast<int>(blend));   // blend mode id
+        // flags: 1 = the source is a texture, 2 = rounded-rect coverage.
+        cb.frame[3] = static_cast<float>((srv ? 1 : 0) | (shape == 2 ? 2 : 0));
+        // The backdrop copy sits at the frame's own coordinates, so the shader
+        // needs the region's origin to sample it.
+        cb.dir[0] = static_cast<float>(x0);
+        cb.dir[1] = static_cast<float>(y0);
+        context_->UpdateSubresource(constantBuffer.Get(), 0, nullptr, &cb, 0, 0);
+        ID3D11ShaderResourceView* srvs[2] = {srv, scratchBSrv.Get()};
+        context_->PSSetShaderResources(0, 2, srvs);
+        // The shader already produced the FINAL pixel, so this is a replace —
+        // blending again would composite the result with itself.
+        context_->OMSetBlendState(blendNone.Get(), nullptr, 0xFFFFFFFFu);
+        // Write only this quad's pixels; the backdrop everywhere else stays.
+        SetScissor(rect);
+        context_->Draw(4, 0);
+        // Hand the scissor back at the frame size — the commands that follow are
+        // entitled to the whole target, and none of them may rely on this pass
+        // having narrowed it.
+        SetScissor(rect_full());
+    }
+
     void Execute(const DrawCommand& cmd) {
         const Rect full(0, 0, static_cast<float>(frameWidth_), static_cast<float>(frameHeight_));
         switch (cmd.type) {
@@ -808,9 +1023,14 @@ private:
                 // EDGE-SNAPPED (RenderTypes' SnapRectToPixelEdges) — the CPU
                 // path's rule, so abutting fills share one pixel boundary.
                 const Rect r = SnapRectToPixelEdges(cmd.rect);
+                const BlendMode blend = static_cast<BlendMode>(cmd.blend);
+                if (NeedsBlendPass(blend)) {
+                    BlendQuad(0, r, Rect(0, 0, 0, 0), cmd.color, 0.0f, nullptr, blend);
+                    break;
+                }
                 DrawQuad(cmd.blend == static_cast<int>(BlendMode::Multiply) ? 8 : 0,
                          r, Rect(0, 0, 0, 0), cmd.color, 0.0f, nullptr,
-                         static_cast<BlendMode>(cmd.blend), 0.0f, 0.0f);
+                         blend, 0.0f, 0.0f);
                 break;
             }
             case DrawCommand::Type::BlitImage:
@@ -853,9 +1073,16 @@ private:
                                static_cast<float>(static_cast<int>(cmd.rect.height)));
 
                 SetScissor(full);
+                const BlendMode blend = static_cast<BlendMode>(cmd.blend);
+                if (NeedsBlendPass(blend)) {
+                    // The picture's mode (the MEDIA tab's Blend dropdown) is
+                    // computed against the frame underneath it.
+                    BlendQuad(1, dst, uv, cmd.color, 0.0f, it->second.srv.Get(), blend);
+                    break;
+                }
                 const int mode = (cmd.blend == static_cast<int>(BlendMode::Multiply) ? 8 : 0) + 1;
                 DrawQuad(mode, dst, uv, cmd.color, 0.0f, it->second.srv.Get(),
-                         static_cast<BlendMode>(cmd.blend), 0.0f, 0.0f);
+                         blend, 0.0f, 0.0f);
                 break;
             }
             case DrawCommand::Type::DrawShape: {
@@ -867,8 +1094,14 @@ private:
                 // bands that touch on the stage (they are authored flush; the
                 // old int-cast of y and height separately opened a hole).
                 const Rect r = SnapRectToPixelEdges(cmd.rect);
-                DrawQuad(cmd.cornerRadius >= 0.5f ? 2 : 0, r,
-                         Rect(0, 0, 0, 0), cmd.color, cmd.cornerRadius, nullptr, BlendMode::Alpha,
+                const BlendMode blend = static_cast<BlendMode>(cmd.blend);
+                const int shape = cmd.cornerRadius >= 0.5f ? 2 : 0;
+                if (NeedsBlendPass(blend)) {
+                    BlendQuad(shape, r, Rect(0, 0, 0, 0), cmd.color, cmd.cornerRadius, nullptr,
+                              blend);
+                    break;
+                }
+                DrawQuad(shape, r, Rect(0, 0, 0, 0), cmd.color, cmd.cornerRadius, nullptr, blend,
                          0.0f, 0.0f);
                 break;
             }

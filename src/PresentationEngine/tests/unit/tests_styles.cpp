@@ -1272,6 +1272,117 @@ void TestStyleBackgroundImage() {
 }
 
 // ---------------------------------------------------------------------------
+// A PLACED MEDIA ITEM — the Edit canvas's Media chip → Picture / Video.
+//
+// The item is a block of kind "image" (or "video") whose meta `src` names the
+// file. Until the scene builder grew a branch for those kinds, the block fell
+// through its kind switch and every real output showed an EMPTY HOLE where the
+// canvas showed the operator's picture — the previews drew a stand-in card, and
+// the outputs drew nothing at all.
+//
+// Pinned at both levels: the object exists, letterboxed INSIDE the item's own
+// box (a placed item is a window, so nothing may spill outside its rect — the
+// engine has no clipping), and its pixels really are the file's.
+// ---------------------------------------------------------------------------
+void TestPlacedImageBlock() {
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    // A real 4x2 PNG: left half red, right half blue. The block's box is a
+    // LANDSCAPE 2:1 stage rect, so a 4:2 picture fills it exactly — the fit
+    // assertions below then describe the picture, not a letterbox.
+    const std::filesystem::path img =
+        std::filesystem::temp_directory_path() / "bps_placed_media_test.png";
+    {
+        r::RgbaImage px;
+        px.width = 4;
+        px.height = 2;
+        px.pixels = {0xFF0000FF, 0xFF0000FF, 0xFFFF0000, 0xFFFF0000,
+                     0xFF0000FF, 0xFF0000FF, 0xFFFF0000, 0xFFFF0000};
+        auto encoded = r::EncodePngRgba8(reinterpret_cast<const uint8_t*>(px.pixels.data()),
+                                         px.width, px.height);
+        CHECK(encoded.ok());
+        std::ofstream file(img, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(encoded.value().data()),
+                   static_cast<std::streamsize>(encoded.value().size()));
+        CHECK(file.good());
+    }
+
+    p::Presentation pres;
+    pres.id = "pres-placed-media";
+    p::Slide slide;
+    slide.id = "pm-1";
+    p::ContentBlock picture;
+    picture.id = "m1";
+    picture.kind = "image";
+    // 300x150 of the 754x428 stage grid — 2:1, the picture's own shape.
+    picture.x = 200; picture.y = 140; picture.width = 300; picture.height = 150;
+    picture.metaJson = std::string(R"({"src":")") + img.generic_string() + R"("})";
+    slide.blocks = { picture };
+
+    p::SceneBuilder builder;
+    p::OutputStyleSpec style;
+    style.templateKey = "fullscreen";
+    style.backgroundColor = "#ff000000";
+
+    auto built = builder.BuildSlideScene(pres, slide, style, engine);
+    CHECK(built.ok());
+    if (!built.ok()) {
+        std::error_code ec;
+        (void)std::filesystem::remove(img, ec);
+        return;
+    }
+
+    const float bx = 200.0f / 754.0f * 1920.0f;
+    const float by = 140.0f / 428.0f * 1080.0f;
+    const float bw = 300.0f / 754.0f * 1920.0f;
+    const float bh = 150.0f / 428.0f * 1080.0f;
+
+    const r::ImageObject* found = nullptr;
+    for (const r::RenderObject* obj : engine.CollectObjects(built.value()))
+        if (const auto* image = dynamic_cast<const r::ImageObject*>(obj); image && obj->Id() == "blk1")
+            found = image;
+    CHECK(found != nullptr);
+    if (found) {
+        const r::Rect& b = found->Bounds();
+        // INSIDE the item's box, never outside it (the engine has no clip, so
+        // the fit itself has to stay in) — centred in it, and its HEIGHT is
+        // the box's: a 2:1 picture in a box that comes out 2.02:1 at output
+        // scale is height-limited, so it letterboxes a couple of pixels at the
+        // sides rather than overflowing them.
+        CHECK(b.x >= bx - 1.0f);
+        CHECK(b.y >= by - 1.0f);
+        CHECK(b.Right() <= bx + bw + 1.0f);
+        CHECK(b.Bottom() <= by + bh + 1.0f);
+        CHECK(std::abs((b.x + b.width / 2.0f) - (bx + bw / 2.0f)) < 2.0f);
+        CHECK(std::abs(b.height - bh) < 2.0f);
+        // The file's own pixels came through (the cache the style background
+        // uses — one decoder, one answer).
+        CHECK(found->Source() != nullptr);
+        CHECK(found->Source() && found->Source()->source.image.width == 4);
+        CHECK(found->Source() && found->Source()->source.image.height == 2);
+    }
+    (void)engine.DestroyScene(built.value());
+
+    // An item with NO file draws NOTHING — a guessed box would be a lie about
+    // content that is not there.
+    p::Slide empty = slide;
+    empty.id = "pm-2";
+    empty.blocks[0].metaJson = "{}";
+    auto bare = builder.BuildSlideScene(pres, empty, style, engine);
+    CHECK(bare.ok());
+    if (bare.ok()) {
+        for (const r::RenderObject* obj : engine.CollectObjects(bare.value()))
+            CHECK(obj->Id() != "blk1");
+        (void)engine.DestroyScene(bare.value());
+    }
+
+    std::error_code ec;
+    (void)std::filesystem::remove(img, ec);
+}
+
+// ---------------------------------------------------------------------------
 // Block-aware scenes — positioned template blocks render as objects
 // ---------------------------------------------------------------------------
 void TestBlockScenes() {

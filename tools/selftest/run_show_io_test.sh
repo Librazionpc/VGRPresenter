@@ -9,9 +9,13 @@
 # whole chain in the REAL app, against REAL files, and checks both halves — the
 # verdict each step reported AND the artifact on disk:
 #
-#   save   a new two-slide show saved to build/showio_probe.vgr: the verdict must
+#   save   a new two-slide show saved to build/showio_probe’s.vgr: the verdict must
 #          arrive (not just be requested), the show must read clean afterwards, and
-#          the file must exist when the verdict says so;
+#          the file must exist when the verdict says so. The name is not ASCII on
+#          purpose: the Windows PAL used to hand a UTF-8 name to the OS as narrow
+#          bytes, so the save wrote a mangled file and the publishing rename failed
+#          — a ProPresenter import of 1144 shows left all 194 non-ASCII titles
+#          behind as .vgr.tmp (engine.log, 2026-10-24);
 #   open   that same file opened back through the call the show screen uses, and the
 #          payload must carry its slides;
 #   peek   the centre page's read: a MISS must answer `pending` (not "no such show"),
@@ -45,8 +49,8 @@ BUILD="$ROOT/build"
 APP="appVGRPresenterUI.exe"
 LOG="$BUILD/showio_test.log"
 WAIT_SECS="${1:-60}"
-SHOW_FILE="showio_probe.vgr"
-COPY_FILE="showio_probe_recovery.vgr"
+SHOW_FILE="showio_probe’s.vgr"
+COPY_FILE="showio_probe’s_recovery.vgr"
 
 if [ -d /c/msys64/ucrt64/bin ]; then
     MINGW_BIN="${MINGW_BIN:-/c/msys64/ucrt64/bin}"

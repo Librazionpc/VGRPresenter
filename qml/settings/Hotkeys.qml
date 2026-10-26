@@ -75,7 +75,25 @@ QtObject {
         copy: "Ctrl+C",
         paste: "Ctrl+V",
         duplicateSelected: "Ctrl+D",
+        // Del — the slide list's own delete (the canvas reads Delete straight
+        // from its Keys handler, so this name is the LIST's binding).
+        deleteSelected: "Del",
+        // The canvas menu's "Select all" row lists this chord too — one
+        // binding, so the menu hint and the shortcut cannot disagree.
+        selectAll: "Ctrl+A",
         addText: "T",
+        // Text style, applied to the selected TEXT item — FreeShow's own chords
+        // for its B/I/U toggles (see its edit/values/boxes.ts).
+        //
+        // Ctrl+I is ALSO File › Import. They cannot both be live: two
+        // window-level bindings on one sequence are ambiguous and Qt fires
+        // neither. So the edit screen owns Ctrl+I while a text item is being
+        // styled on the canvas, and Import's binding switches itself off for
+        // exactly that state (see Main.qml's import Shortcut and EditScreen's
+        // textStyleKeysLive). Outside the canvas, Ctrl+I still imports.
+        boldText: "Ctrl+B",
+        italicText: "Ctrl+I",
+        underlineText: "Ctrl+U",
         // Reference pane (Scripture / The Table) — the arrow keys over the
         // passage list. Up/Down walk the PICK: the pane's own preview follows,
         // and nothing is staged, so what is going out cannot change. Left/Right
@@ -86,6 +104,15 @@ QtObject {
         nextPassage: "Down",
         previousSlide: "Left",
         nextSlide: "Right",
+        // THE READING STEP (the "telecaster" step): the same pick, moved one
+        // LINE at a time instead of one picture at a time. Alt+Down pushes the
+        // current slide's first line out at the top and brings the NEXT slide's
+        // first line in at the bottom, so an operator reading to the end of a
+        // slide continues downward instead of hunting for their place in a
+        // fresh picture; Alt+Up walks back. Right/Left stay the plain
+        // next/previous slide — two different moves, both available.
+        lineStepNext: "Alt+Down",
+        lineStepPrevious: "Alt+Up",
         // The library dock's tab row (Shows, Media, Overlays, Templates,
         // Scripture, The Table, Calendar, Functions) — Ctrl+1 through the
         // last tab, in the row's own left-to-right order. ONE array entry,

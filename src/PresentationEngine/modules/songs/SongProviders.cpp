@@ -1,6 +1,7 @@
 #include "modules/songs/ISongProvider.hpp"
 
 #include "core/config/Json.hpp"
+#include "modules/songs/ProPresenterFile.hpp"
 #include "modules/songs/Chord.hpp"
 #include "modules/xml/Xml.hpp"
 
@@ -329,14 +330,17 @@ class ProPresenterProvider final : public ISongProvider {
 public:
     const char* Name() const noexcept override { return "propresenter"; }
     const char* Format() const noexcept override { return "propresenter"; }
-    std::vector<std::string> SupportedExtensions() const override { return {".pro", ".xml", ".json"}; }
+    std::vector<std::string> SupportedExtensions() const override { return {".pro", ".pro6", ".xml", ".json"}; }
     Result<Song> Parse(std::string_view source, std::string_view) const override {
-        // ProPresenter 6/7 XML is OpenSong-shaped at the <song> level.
+        // ProPresenter 6 (and Pro7's own XML exports) are OpenSong-shaped at the
+        // <song> level.
         if (Lower(source.substr(0, 64)).contains("<rvb") ||
             Lower(source.substr(0, 64)).contains("<song"))
             return ParseOpenSongLike(source);
-        return Error::Make(Err::Song_UnsupportedFormat, "SongProvider",
-                           "unsupported ProPresenter payload");
+        // ProPresenter 7/8 documents are protobuf, not XML — a ProPresenter
+        // library folder is full of them, and reading them here is what makes
+        // "Import from ProPresenter" work on a current library at all.
+        return ParseProPresenterFile(source);
     }
 };
 

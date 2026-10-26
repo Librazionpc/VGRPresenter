@@ -101,6 +101,47 @@ struct RenderOptions {
     double timeSec = 0.0;      // explicit time (else engine clock used)
     bool distribute = true;    // feed enabled outputs
     bool capture = false;      // also return the frame (preview/thumbnail path)
+    // Slide-WIDE filters applied to the FINISHED frame, after readback and
+    // before the frame is captured or distributed (see
+    // Effects.hpp::ApplyFilters). This is where they have to live: the frame
+    // that leaves here is the one every output receives, so filtering here is
+    // what makes the HDMI/NDI feed, the preview buffers and the monitor tiles
+    // show the same picture — filtering in the caller could only ever reach the
+    // copies it made itself. Identity by default (the ordinary slide pays
+    // nothing: ApplyFilters returns immediately).
+    SlideFilterValues filters;
+
+    // THE READING SCROLL (the Alt+Down / Alt+Up reading step).
+    //
+    // Where the scene's READING text sits inside its own flow, in LINE HEIGHTS
+    // of that text (0 = the top of the passage; an ordinary frame passes the
+    // resting value, which is not necessarily 0). The reading block holds the
+    // WHOLE passage set below its page (see TextObject::SetReadingFlow), so a
+    // scroll is a window: this number slides that one layout under the block's
+    // box and the box clips it. Nothing is re-laid out, no string is rebuilt,
+    // so the type size, the wrapping and the design's geometry are the same at
+    // every offset — which is what makes the move a scroll instead of a
+    // succession of re-fitted snapshots.
+    //
+    // ONE number drives every surface. The live loop stores it from the
+    // interface thread's animator (LiveOutputController::SetLineScroll), so the
+    // HDMI window, the NDI feed, the recordings and the QML monitor tile — which
+    // animates the same offset itself, from the same settings — travel together.
+    //
+    // In LINE units, not pixels, because a line height is the text's own
+    // (`TextEngine` advances every line by size + lineSpacing). Applied to the
+    // ONE object that carries a flow: a title, a reference, a clock, the design's
+    // shapes and its background stay exactly where they are — the words travel
+    // inside their block, they do not drag the slide.
+    float contentScrollLines = 0.0f;
+    // Is this the FIRST frame of a freshly built scene? Then the offset comes
+    // from the scene itself (Slide::flowScroll, carried on the text object) and
+    // `contentScrollLines` above is ignored — so a page change lands at the
+    // offset the slide was committed with, without waiting for the interface
+    // thread's next animation tick. On every later frame the pushed number
+    // wins, which is what keeps an in-page step (no rebuild, no new slide) at
+    // the offset it just moved to.
+    bool contentScrollFromScene = false;
 };
 
 class RenderEngine final : public IService {
@@ -325,6 +366,15 @@ private:
     mutable std::mutex backendNameMutex_;
     std::string requestedBackendName_;
     std::string activeBackendName_;
+
+    // THE READING SCROLL for the frame being drawn (see
+    // RenderOptions::contentScrollLines): how far the reading block's flow is
+    // slid, in its own line heights. Set at the top of Render under renderMutex_
+    // and cleared at the end of it, so a frame can never leave the shared scene
+    // in a moved state — the same scene is rasterised again by every other
+    // output's pass.
+    float contentScrollLines_ = 0.0f;
+    bool contentScrollFromScene_ = false;
 
     SceneGraph scenes_;
     RenderPipeline pipeline_;

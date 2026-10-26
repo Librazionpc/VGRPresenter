@@ -6,6 +6,7 @@
 // (Phase 7). Contains presentation logic only — no WinUI/XAML/HWND.
 
 #include "core/common/Common.hpp"
+#include "modules/rendering/Effects.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 
 #include <chrono>
@@ -167,6 +168,27 @@ struct Slide {
     std::string id;                    // stable uuid
     std::string title;
     std::string text;                  // primary content (lyrics / verse / notes)
+    // ---- THE READING FLOW (the Alt+Down / Alt+Up teleprompter step) ---------
+    //
+    // `text` above is a PAGE of a passage; these two describe the passage it was
+    // cut from, so the outputs can scroll it instead of replacing it:
+    //   flowText    the continuous run of words this page begins in (this page
+    //               and the one after it, joined by the page break). Empty = an
+    //               ordinary slide, which renders exactly as it always has.
+    //   flowScroll  where that passage rests, in line heights of the reading
+    //               text (0 = this page's first line at the top of its box). It
+    //               belongs HERE and not only in the frame's render options
+    //               because it has to survive a rebuild: a step that lands on the
+    //               next page commits a NEW slide, and the scene for it is built
+    //               from this number — one atomic fact, so the boundary cannot
+    //               show the new page at the old offset for a frame.
+    //
+    // Why on the slide and not inside `text`: a step must show the line arriving
+    // from below the page, and only the passage knows it. They travel as their
+    // own fields (ShowConverter), never inside metaJson, because a passage is
+    // full of the very characters a JSON meta value has to escape.
+    std::string flowText;
+    float flowScroll = 0.0f;
     std::string notes;
     std::vector<std::string> tags;
     std::vector<std::string> sections;
@@ -177,6 +199,12 @@ struct Slide {
     double durationMs = 0.0;           // auto-advance in Timed/Automatic modes (0 = manual)
     std::vector<ContentBlock> blocks;  // positioned content (see ContentBlock)
     std::string background = "transparent";   // slide background colour
+    // Slide-WIDE filters (FreeShow's edit-panel filter set; see
+    // rendering::SlideFilterValues). Applied by the live path to the composed
+    // frame for this slide, not per block, so every output — and the saved
+    // show — carries one set of numbers per slide. Identity by default, which
+    // is also what lets the live path skip the pass entirely.
+    rendering::SlideFilterValues filters;
     // Frontend-specific slide fields as a JSON object string (a slide list's
     // label colour, preview lines, scripture reference...). Opaque to the engine.
     std::string metaJson = "{}";

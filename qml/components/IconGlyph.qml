@@ -19,7 +19,7 @@ Item {
     // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
-    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next", "shows", "newShow", "media", "template", "bible", "book", "calendar", "overlay", "layoutDashboard", "layers", "folder", "penTool", "fileText", "close", "presentation", "home", "cpu", "activity", "memoryStick", "thermometer", "gauge", "eye", "eyeOff", "cornerDownLeft", "zap"].indexOf(name) >= 0
+    readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "actions", "clickAction", "lineReveal", "timeIn", "timeOut", "rearrange", "toFront", "toBack", "moveUp", "moveDown", "paste", "selectAll", "duplicate", "delete", "edit", "groups", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next", "shows", "newShow", "media", "template", "bible", "book", "calendar", "overlay", "layoutDashboard", "layers", "folder", "penTool", "fileText", "close", "presentation", "home", "cpu", "activity", "memoryStick", "thermometer", "gauge", "eye", "eyeOff", "cornerDownLeft", "zap"].indexOf(name) >= 0
     implicitWidth: 14
     implicitHeight: 14
 
@@ -109,6 +109,23 @@ Item {
             case "slide": return slideC
             case "scripture": return scriptureC
             case "timerFill": return timerFillC
+            // FreeShow's menu glyphs (see their components above).
+            case "actions": return actionsC
+            case "clickAction": return clickActionC
+            case "lineReveal": return lineRevealC
+            case "timeIn": return timeInC
+            case "timeOut": return timeOutC
+            case "rearrange": return rearrangeC
+            case "toFront": return toFrontC
+            case "toBack": return toBackC
+            case "moveUp": return moveUpC
+            case "moveDown": return moveDownC
+            case "paste": return pasteC
+            case "selectAll": return selectAllC
+            case "duplicate": return duplicateC
+            case "delete": return deleteC
+            case "edit": return editC
+            case "groups": return groupsC
             case "cpu": return cpuC
             case "activity": return activityC
             case "memoryStick": return memoryStickC
@@ -255,21 +272,21 @@ Item {
         }
     }
 
-    // Tabler "template" (template.svg): a title bar over a boxed block with
-    // three stacked lines beside it. The Templates tab's own mark - that tab
-    // carried the generic "layoutTemplate" glyph before.
+    // The Templates mark, redrawn from the reference glyph: a SOLID rounded
+    // frame split into a tall left pane and two stacked right panes — the shape
+    // a slide template actually is (a panes layout), and solid so it reads at
+    // 14px where the old stroked "title bar over a box" dissolved into lines.
+    // Three filled blocks on the same 24 grid, with the 14/24 scale the other
+    // 24-grid glyphs use, so it lines up with its neighbours and still honours
+    // the icon's `fit` sizing (the grid24 wrapper reads this item's `scale`).
     Component {
         id: templateC
-        StrokeIcon {
-            width: 24; height: 24; scale: 0.5833 // 14/24, like the other 24-grid glyphs
-            ShapePath {
-                fillColor: "transparent"
-                strokeColor: root.color
-                strokeWidth: 2
-                capStyle: ShapePath.RoundCap
-                joinStyle: ShapePath.RoundJoin
-                PathSvg { path: "M4 5a1 1 0 0 1 1 -1h14a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1l0 -2 M4 13a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -6 M14 12l6 0 M14 16l6 0 M14 20l6 0" }
-            }
+        Item {
+            width: 24; height: 24
+            scale: 0.5833 // 14/24, like the other 24-grid glyphs
+            Rectangle { x: 3;  y: 3;  width: 8; height: 18; radius: 2; color: root.color }
+            Rectangle { x: 13; y: 3;  width: 8; height: 8;  radius: 2; color: root.color }
+            Rectangle { x: 13; y: 13; width: 8; height: 8;  radius: 2; color: root.color }
         }
     }
 
@@ -1182,6 +1199,141 @@ Item {
         FillIcon {
             width: 24; height: 24; scale: 0.5833
             svgPath: "M19.03,7.39l1.42-1.42c-0.43-0.51-0.9-0.99-1.41-1.41l-1.42,1.42C16.07,4.74,14.12,4,12,4c-4.97,0-9,4.03-9,9 c0,4.97,4.02,9,9,9s9-4.03,9-9C21,10.88,20.26,8.93,19.03,7.39z M13,14h-2V8h2V14z M9,1h6v2H9z"
+        }
+    }
+
+    // ---- FreeShow's own menu glyphs (its values/icons.ts) ------------------
+    // The icons FreeShow draws in its right-click menus, ported verbatim: the
+    // same Material path data, filled the same way. They exist so a menu row
+    // here reads as the SAME action it is there — an operator moving between
+    // the two apps sees one visual language — and so the app has one glyph per
+    // action instead of a second, differently-shaped one per surface. Names
+    // match FreeShow's icon keys, camel-cased for QML.
+
+    // "actions" — a flagged bookmark; the Item-actions submenu's own mark.
+    Component {
+        id: actionsC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z"
+        }
+    }
+    // "click_action" — a cursor over a radiating ring (reveal on click).
+    Component {
+        id: clickActionC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M11.71,17.99C8.53,17.84,6,15.22,6,12c0-3.31,2.69-6,6-6c3.22,0,5.84,2.53,5.99,5.71l-2.1-0.63C15.48,9.31,13.89,8,12,8 c-2.21,0-4,1.79-4,4c0,1.89,1.31,3.48,3.08,3.89L11.71,17.99z M22,12c0,0.3-0.01,0.6-0.04,0.9l-1.97-0.59C20,12.21,20,12.1,20,12 c0-4.42-3.58-8-8-8s-8,3.58-8,8s3.58,8,8,8c0.1,0,0.21,0,0.31-0.01l0.59,1.97C12.6,21.99,12.3,22,12,22C6.48,22,2,17.52,2,12 C2,6.48,6.48,2,12,2S22,6.48,22,12z M18.23,16.26L22,15l-10-3l3,10l1.26-3.77l4.27,4.27l1.98-1.98L18.23,16.26z"
+        }
+    }
+    // "line_reveal" — lines appearing one at a time.
+    Component {
+        id: lineRevealC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M2 9v2h19V9H2zm0 6h5v-2H2v2zm7 0h5v-2H9v2zm7 0h5v-2h-5v2z"
+        }
+    }
+    // "time_in" / "time_out" — a clock with an arriving / leaving hand pair
+    // ("time until show" / "time until hide").
+    Component {
+        id: timeInC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zM12.5 7H11v6l5.25 3.15.75-1.23-4.5-2.67z"
+        }
+    }
+    Component {
+        id: timeOutC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M15.1,19.37l1,1.74c-0.96,0.44-2.01,0.73-3.1,0.84v-2.02C13.74,19.84,14.44,19.65,15.1,19.37z M4.07,13H2.05 c0.11,1.1,0.4,2.14,0.84,3.1l1.74-1C4.35,14.44,4.16,13.74,4.07,13z M15.1,4.63l1-1.74C15.14,2.45,14.1,2.16,13,2.05v2.02 C13.74,4.16,14.44,4.35,15.1,4.63z M19.93,11h2.02c-0.11-1.1-0.4-2.14-0.84-3.1l-1.74,1C19.65,9.56,19.84,10.26,19.93,11z M8.9,19.37l-1,1.74c0.96,0.44,2.01,0.73,3.1,0.84v-2.02C10.26,19.84,9.56,19.65,8.9,19.37z M11,4.07V2.05 c-1.1,0.11-2.14,0.4-3.1,0.84l1,1.74C9.56,4.35,10.26,4.16,11,4.07z M18.36,7.17l1.74-1.01c-0.63-0.87-1.4-1.64-2.27-2.27 l-1.01,1.74C17.41,6.08,17.92,6.59,18.36,7.17z M4.63,8.9l-1.74-1C2.45,8.86,2.16,9.9,2.05,11h2.02C4.16,10.26,4.35,9.56,4.63,8.9z M19.93,13c-0.09,0.74-0.28,1.44-0.56,2.1l1.74,1c0.44-0.96,0.73-2.01,0.84-3.1H19.93z M16.83,18.36l1.01,1.74 c0.87-0.63,1.64-1.4,2.27-2.27l-1.74-1.01C17.92,17.41,17.41,17.92,16.83,18.36z M7.17,5.64L6.17,3.89 C5.29,4.53,4.53,5.29,3.9,6.17l1.74,1.01C6.08,6.59,6.59,6.08,7.17,5.64z M5.64,16.83L3.9,17.83c0.63,0.87,1.4,1.64,2.27,2.27 l1.01-1.74C6.59,17.92,6.08,17.41,5.64,16.83z M13,7h-2v5.41l4.29,4.29l1.41-1.41L13,11.59V7z"
+        }
+    }
+    // "rearrange" — a looping arrow beside a two-box stack.
+    Component {
+        id: rearrangeC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3,11c0,2.45,1.76,4.47,4.08,4.91l-1.49-1.49L7,13l4,4.01L7,21l-1.41-1.41l1.58-1.58l0-0.06C3.7,17.54,1,14.58,1,11 c0-3.87,3.13-7,7-7h3v2H8C5.24,6,3,8.24,3,11z M22,11V4h-9v7H22z M20,9h-5V6h5V9z M13 13H22V20H13Z"
+        }
+    }
+    // "to_front" / "to_back" — the same two-box stack with the front / back box
+    // picked out; the Rearrange submenu's first and last rows.
+    Component {
+        id: toFrontC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3 13h2v-2H3v2zm0 4h2v-2H3v2zm2 4v-2H3c0 1.1.89 2 2 2zM3 9h2V7H3v2zm12 12h2v-2h-2v2zm4-18H9c-1.11 0-2 .9-2 2v10c0 1.1.89 2 2 2h10c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 12H9V5h10v10zm-8 6h2v-2h-2v2zm-4 0h2v-2H7v2z"
+        }
+    }
+    Component {
+        id: toBackC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M9 7H7v2h2V7zm0 4H7v2h2v-2zm0-8c-1.11 0-2 .9-2 2h2V3zm4 12h-2v2h2v-2zm6-12v2h2c0-1.1-.9-2-2-2zm-6 0h-2v2h2V3zM9 17v-2H7c0 1.1.89 2 2 2zm10-4h2v-2h-2v2zm0-4h2V7h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zM5 7H3v12c0 1.1.89 2 2 2h12v-2H5V7zm10-2h2V3h-2v2zm0 12h2v-2h-2v2z"
+        }
+    }
+    // "up" / "down" — the single-step arrows between them.
+    Component {
+        id: moveUpC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"
+        }
+    }
+    Component {
+        id: moveDownC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"
+        }
+    }
+    // "paste" / "select" / "duplicate" / "delete" — the clipboard rows.
+    Component {
+        id: pasteC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M19 2h-4.18C14.4.84 13.3 0 12 0c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 18H5V4h2v3h10V4h2v16z"
+        }
+    }
+    Component {
+        id: selectAllC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3 5h2V3c-1.1 0-2 .9-2 2zm0 8h2v-2H3v2zm4 8h2v-2H7v2zM3 9h2V7H3v2zm10-6h-2v2h2V3zm6 0v2h2c0-1.1-.9-2-2-2zM5 21v-2H3c0 1.1.9 2 2 2zm-2-4h2v-2H3v2zM9 3H7v2h2V3zm2 18h2v-2h-2v2zm8-8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zm0-12h2V7h-2v2zm0 8h2v-2h-2v2zm-4 4h2v-2h-2v2zm0-16h2V3h-2v2zM7 17h10V7H7v10zm2-8h6v6H9V9z"
+        }
+    }
+    Component {
+        id: duplicateC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm-1 4l6 6v10c0 1.1-.9 2-2 2H7.99C6.89 23 6 22.1 6 21l.01-14c0-1.1.89-2 1.99-2h7zm-1 7h5.5L14 6.5V12z"
+        }
+    }
+    Component {
+        id: deleteC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"
+        }
+    }
+    // "edit" — the pencil FreeShow marks its own Edit row with (the slide row's
+    // "Edit", the same action its slide menu leads with).
+    Component {
+        id: editC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"
+        }
+    }
+    // "groups" — a two-row stack; FreeShow's Change-group row (and its slide
+    // menu's group submenu).
+    Component {
+        id: groupsC
+        FillIcon {
+            width: 24; height: 24; scale: 0.5833
+            svgPath: "M3,17v-2c0-1.1,0.9-2,2-2h14c1.1,0,2,0.9,2,2v2c0,1.1-0.9,2-2,2H5C3.9,19,3,18.1,3,17z M3,7v2c0,1.1,0.9,2,2,2h14c1.1,0,2-0.9,2-2V7c0-1.1-0.9-2-2-2H5C3.9,5,3,5.9,3,7z"
         }
     }
 

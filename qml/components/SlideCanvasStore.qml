@@ -33,6 +33,34 @@ QtObject {
         // (transparentValue); this is the state-side equivalent for a slide
         // that has never had a background picked — keep the two in sync.
         property string background: "transparent"
+        // The slide's filter set — the seven values of the engine's
+        // rendering::SlideFilterValues, in the units its UI rows use (hue in
+        // degrees, blur in pixels, invert/grayscale as 0–1, and
+        // brightness/contrast/saturate as multipliers where 1 is identity).
+        // It is a SLIDE value, not an item one: the on-air pass applies it to
+        // the composed frame for this slide alone (see Effects.hpp's
+        // ApplyFilters), which is why it is archived with the slide next to its
+        // background. Replaced, never mutated, so every binding that reads it
+        // re-evaluates on a slider move.
+        property var filters: ({ hueRotate: 0.0, invert: 0.0, blur: 0.0, grayscale: 0.0,
+                                 brightness: 1.0, contrast: 1.0, saturate: 1.0 })
+    }
+
+    // A FRESH identity filter set. Shared objects would be a trap here: the
+    // panel writes a new value by reassigning the whole map, but a consumer that
+    // ever mutates one would then be editing every unfiltered slide at once.
+    function identityFilters() {
+        return ({ hueRotate: 0.0, invert: 0.0, blur: 0.0, grayscale: 0.0,
+                  brightness: 1.0, contrast: 1.0, saturate: 1.0 })
+    }
+
+    // True when the map is every value's identity — the state in which neither
+    // the canvas effect nor the engine's filter pass runs at all.
+    function filtersAreIdentity(f) {
+        if (!f)
+            return true
+        return f.hueRotate === 0 && f.invert === 0 && f.blur === 0 && f.grayscale === 0
+            && f.brightness === 1 && f.contrast === 1 && f.saturate === 1
     }
 
     // Explicit property, not a bare child — QtObject has no default/children
@@ -50,7 +78,8 @@ QtObject {
         const items = store.current.items
         if (items.length > 0 || store.slides[store.activeSlideId] !== undefined)
             store.slides = Object.assign({}, store.slides,
-                { [store.activeSlideId]: { items: items, background: store.current.background } })
+                { [store.activeSlideId]: { items: items, background: store.current.background,
+                                           filters: store.current.filters } })
     }
 
     // Makes `slideId` active: re-archives the outgoing slide, then installs
@@ -61,6 +90,9 @@ QtObject {
         const entry = store.slides[slideId]
         store.current.items = entry ? entry.items : []
         store.current.background = entry ? entry.background : store.current.background
+        // A slide that has never had a filter dialled keeps the identity set —
+        // the incoming slide's own values, never the outgoing one's.
+        store.current.filters = entry && entry.filters ? entry.filters : store.identityFilters()
     }
 
     // ---- Slide lifecycle ---------------------------------------------------
@@ -92,8 +124,12 @@ QtObject {
         if (!entry || entry.items.length === 0)
             return
         const clones = entry.items.map((it) => store.cloneItem(it, 0, 0))
+        // A duplicate is a copy of the slide, filters included (a filtered
+        // backdrop duplicated should not come out clean) — a fresh map, so the
+        // two slides never share one object.
         store.slides = Object.assign({}, store.slides,
-            { [toSlideId]: { items: clones, background: entry.background } })
+            { [toSlideId]: { items: clones, background: entry.background,
+                             filters: Object.assign({}, entry.filters || store.identityFilters()) } })
     }
 
     // Forgets EVERY archive and empties the working set ("New show"). Call
@@ -107,6 +143,7 @@ QtObject {
         store.save()
         store.current.items = []
         store.current.background = "transparent"
+        store.current.filters = store.identityFilters()
         for (const id in store.slides)
             store.slides[id].items.forEach((it) => it.destroy())
         store.slides = {}
@@ -153,6 +190,8 @@ QtObject {
             item.style.borderStyle = styleFrom.borderStyle
             item.style.cornerRadius = styleFrom.cornerRadius
             item.style.borderColor = styleFrom.borderColor
+            item.style.opacity = styleFrom.opacity
+            item.style.mediaFit = styleFrom.mediaFit
         }
         return item
     }
@@ -192,7 +231,8 @@ QtObject {
                 padding: it.style.padding, backgroundColor: it.style.backgroundColor.toString(),
                 cornerRadius: it.style.cornerRadius, borderEnabled: it.style.borderEnabled,
                 borderWidth: it.style.borderWidth, borderStyle: it.style.borderStyle,
-                borderColor: it.style.borderColor.toString()
+                borderColor: it.style.borderColor.toString(),
+                opacity: it.style.opacity, mediaFit: it.style.mediaFit
             }
         }))
     }
@@ -218,6 +258,17 @@ QtObject {
             item.style.borderWidth = d.style.borderWidth
             item.style.borderStyle = d.style.borderStyle
             item.style.borderColor = d.style.borderColor
+            // Defensive defaults: a show saved before this field existed has
+            // no opacity/mediaFit in its .vgr block data at all.
+            item.style.opacity = d.style.opacity !== undefined ? d.style.opacity : 1.0
+            // Fit reads from meta.media.fit when the block carries no style value:
+            // the ENGINE's ContentStyle has no mediaFit field, so a saved show comes
+            // back with the fit only in the meta mirror the MEDIA tab writes (and
+            // SceneBuilder reads). Without this a cover-fit picture reopened as
+            // contain on the canvas while the output kept covering.
+            const metaFit = d.meta && d.meta.media && d.meta.media.fit ? String(d.meta.media.fit) : ""
+            item.style.mediaFit = d.style.mediaFit !== undefined ? d.style.mediaFit
+                                : metaFit !== "" ? metaFit : "contain"
         }
         return item
     }
@@ -246,14 +297,32 @@ QtObject {
         const entry = store.slides[slideId]
         return entry ? entry.background : "transparent"
     }
+    // The slide's filter set (see `current.filters`). The engine's patch shape
+    // reads it through ShowSession.slidePatch, so a filter edit reaches the
+    // on-air pass by the same door an item edit does.
+    function filtersOf(slideId) {
+        if (slideId === store.activeSlideId)
+            return store.current.filters
+        const entry = store.slides[slideId]
+        return entry && entry.filters ? entry.filters : store.identityFilters()
+    }
+    // One value of the ACTIVE slide's filter set. Reassigns the map (not a
+    // nested write) so bindings reading `current.filters` — the canvas effect,
+    // the panel's rows, the thumbnail — all see the change.
+    function setFilter(key, value) {
+        if (store.activeSlideId < 0)
+            return
+        store.current.filters = Object.assign({}, store.current.filters, { [key]: value })
+    }
     // Archives a NON-active slide built from engine data (a duplicate, or every slide
     // of an opened show). Replaces any existing archive (destroying its items).
-    function archiveSlide(slideId, blocks, background) {
+    function archiveSlide(slideId, blocks, background, filters) {
         const old = store.slides[slideId]
         if (old)
             old.items.forEach((it) => it.destroy())
         store.slides = Object.assign({}, store.slides,
-            { [slideId]: { items: store.itemsFromBlocks(blocks), background: background || "transparent" } })
+            { [slideId]: { items: store.itemsFromBlocks(blocks), background: background || "transparent",
+                           filters: filters ? Object.assign({}, filters) : store.identityFilters() } })
     }
 
     // ---- Live thumbnails -----------------------------------------------------

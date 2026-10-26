@@ -116,6 +116,10 @@ Source: "..\dist\VGRPresenter\*"; DestDir: "{app}"; Flags: recursesubdirs create
 ; every install gets the new one and merges it under the user's own choices.
 Source: "..\installer\seed-data\roaming\*"; DestDir: "{userappdata}\VGR\VGRPresenter"; Flags: recursesubdirs createallsubdirs skipifsourcedoesntexist onlyifdoesntexist uninsneveruninstall ignoreversion
 Source: "..\installer\seed-data\local\*"; DestDir: "{localappdata}\bps"; Flags: recursesubdirs createallsubdirs skipifsourcedoesntexist onlyifdoesntexist uninsneveruninstall ignoreversion
+; The Shows library (song/sermon categories) — its own seed path: ShowService's
+; default library lives in Documents\VGR Presenter\Shows, not roaming or local.
+; Bundled by tools/make_installer.sh from whichever machine builds the release.
+Source: "..\installer\seed-data\shows\*"; DestDir: "{userdocs}\VGR Presenter\Shows"; Flags: recursesubdirs createallsubdirs skipifsourcedoesntexist onlyifdoesntexist uninsneveruninstall ignoreversion
 
 [Icons]
 Name: "{autoprograms}\VGRPresenter"; Filename: "{app}\appVGRPresenterUI.exe"

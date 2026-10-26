@@ -125,6 +125,9 @@ private:
         float wrap = 0;
         bool wrapOn = false;
         float letterSpacing = 0;
+        // Same reasoning as letterSpacing: it changes every measured width and
+        // therefore every wrap decision.
+        float wordSpacing = 0;
         // Layout-affecting and therefore key-relevant: lineSpacing changes the
         // line height (totalHeight), bold/italic change the real-font advances
         // (SystemCharAdvances takes them) and with them every wrap decision.
@@ -132,6 +135,10 @@ private:
         // was laid out twice under styles differing only here — measured
         // fitting, drawn overflowing.
         float lineSpacing = 0;
+        // The additive gap BETWEEN line boxes changes the same total height
+        // lineSpacing does, so it belongs in the key for the same reason: two
+        // layouts that differ only here must never share a cache entry.
+        float lineGap = 0;
         bool bold = false;
         bool italic = false;
         bool operator<(const LayoutKey& o) const {
@@ -141,7 +148,9 @@ private:
             if (wrap != o.wrap) return wrap < o.wrap;
             if (wrapOn != o.wrapOn) return wrapOn < o.wrapOn;
             if (letterSpacing != o.letterSpacing) return letterSpacing < o.letterSpacing;
+            if (wordSpacing != o.wordSpacing) return wordSpacing < o.wordSpacing;
             if (lineSpacing != o.lineSpacing) return lineSpacing < o.lineSpacing;
+            if (lineGap != o.lineGap) return lineGap < o.lineGap;
             if (bold != o.bold) return bold < o.bold;
             return italic < o.italic;
         }

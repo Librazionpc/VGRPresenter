@@ -7,6 +7,7 @@
 #include "modules/presentation/BookFill.hpp"
 #include "modules/presentation/PresentationTemplates.hpp"
 #include "modules/presentation/SlideRules.hpp"
+#include "modules/rendering/Effects.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderObject.hpp"
 #include "modules/rendering/Scene.hpp"
@@ -16,6 +17,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -222,6 +224,342 @@ rendering::RgbaImage LoadImageCached(const std::string& path) {
     std::lock_guard<std::mutex> lock(g_imageMutex);
     g_imageCache[path] = image;
     return image;
+}
+
+// ---- a placed video item's poster frame -----------------------------------
+// A "video" block on a slide is the FILE the operator placed. The engine has no
+// file-video transport of its own (a playing media file is decoded by the UI and
+// handed over as the compositor's frame — see CompositorState), so what a slide
+// build can honestly paint is the video's OWN still: the same poster frame the
+// canvas shows, made by the same platform frame source (Media Foundation), which
+// is what makes the canvas and the outputs one picture instead of two opinions.
+//
+// Cached like the style background images: a scene is rebuilt per slide, and
+// pulling a frame out of a 4K file is not something to repeat on every build.
+std::map<std::string, rendering::RgbaImage> g_videoPosterCache;
+
+rendering::RgbaImage LoadVideoPosterUncached(const std::string& path) {
+    rendering::RgbaImage slot;
+    auto pic = bps::media::MakePlatformFrameSource()->Grab(
+        path, bps::media::MediaKind::Video, 0.0, 1920);
+    if (pic.ok() && !pic.value().empty()) {
+        slot.width = pic.value().width;
+        slot.height = pic.value().height;
+        slot.pixels.resize(static_cast<size_t>(pic.value().width) * pic.value().height);
+        for (size_t i = 0; i < slot.pixels.size(); ++i) {
+            const size_t o = i * 4;
+            slot.pixels[i] = rendering::Color(pic.value().rgba[o] / 255.0f,
+                                              pic.value().rgba[o + 1] / 255.0f,
+                                              pic.value().rgba[o + 2] / 255.0f,
+                                              pic.value().rgba[o + 3] / 255.0f).Pack();
+        }
+        return slot;
+    }
+    // A file Media Foundation will not open as video still has a shell picture
+    // (the WIC/shell path LoadImageUncached already owns) — the same fallback
+    // the media library's own tiles use for such files.
+    return LoadImageCached(path);
+}
+
+rendering::RgbaImage LoadVideoPosterCached(const std::string& path) {
+    {
+        std::lock_guard<std::mutex> lock(g_imageMutex);
+        auto it = g_videoPosterCache.find(path);
+        if (it != g_videoPosterCache.end())
+            return it->second;
+    }
+    rendering::RgbaImage poster = LoadVideoPosterUncached(path);
+    std::lock_guard<std::mutex> lock(g_imageMutex);
+    g_videoPosterCache[path] = poster;
+    return poster;
+}
+
+// Contain-fit INSIDE a rect: the whole picture inside the item's own box, centred,
+// never cropped. A placed media item is a window the operator sized — a portrait
+// photo in a landscape box keeps its whole frame and letterboxes, which is the
+// one rule the canvas applies to the same item (Image.PreserveAspectFit) and the
+// one the engine already applies to a taken media file. Nothing here may exceed
+// `box`: the engine has no clipping, so a cover fit would paint outside it.
+rendering::Rect ContainRectIn(int imgW, int imgH, const rendering::Rect& box) {
+    if (imgW <= 0 || imgH <= 0 || box.width <= 0 || box.height <= 0)
+        return box;
+    const float scale = std::min(box.width / imgW, box.height / imgH);
+    const float w = imgW * scale, h = imgH * scale;
+    return rendering::Rect(box.x + (box.width - w) / 2.0f,
+                           box.y + (box.height - h) / 2.0f, w, h);
+}
+
+// The file a placed media item carries (its meta `src`). Empty = nothing to
+// paint (an item whose picker never completed), which draws nothing at all
+// rather than a guessed box.
+std::string MediaSrcOf(const ContentBlock& block) {
+    return MetaString(block.metaJson, "src");
+}
+
+// ---------------------------------------------------------------------------
+// A placed media file's OWN values (the Edit screen's MEDIA tab)
+// ---------------------------------------------------------------------------
+// The tab writes them into the block's meta JSON under "media" — the one place
+// the engine persists verbatim, since ContentStyle has no room for a flip, a
+// crop or a filter set:
+//
+//   "media": { "fit": "cover", "flipH": true, "flipV": false,
+//              "crop":   { "top": 0, "right": 0, "bottom": 0, "left": 0 },
+//              "filter": { "hueRotate": 0, "invert": 0, "blur": 0,
+//                          "grayscale": 0, "sepia": 0, "brightness": 1,
+//                          "contrast": 1, "saturate": 1 } }
+//
+// The QML canvas draws from the same numbers (EditScreen's media picture), so a
+// flip on screen is a flip on air — the point of doing the pixel work HERE, on
+// the decoded file, rather than teaching every backend a new transform.
+struct MediaItemValues {
+    std::string fit;   // "" (contain) | contain | cover | fill | blur
+    bool flipH = false;
+    bool flipV = false;
+    // Percentages of the source picture, 0–90.
+    double cropTop = 0, cropRight = 0, cropBottom = 0, cropLeft = 0;
+    rendering::SlideFilterValues filter;
+    double sepia = 0.0;    // 0–1 (not part of the slide filter set)
+    double opacity = 1.0;  // 0–1, the file's own transparency (a filter row)
+    // FreeShow's own blend name ("normal", "screen", "soft-light" …) — how the
+    // picture composites onto what is already under it. Empty = normal.
+    std::string blend;
+
+    bool HasCrop() const {
+        return cropTop > 0 || cropRight > 0 || cropBottom > 0 || cropLeft > 0;
+    }
+    bool HasFilter() const { return !filter.IsIdentity() || sepia > 0.0 || opacity < 1.0; }
+};
+
+// The "media" object's own text, so a key lookup below can never wander into a
+// neighbouring field (`top`/`left` are ordinary enough words to appear in other
+// block metas). Brace-counted from the object's opening brace.
+std::string_view MediaObjectOf(std::string_view metaJson) {
+    const std::string needle = "\"media\"";
+    const size_t at = metaJson.find(needle);
+    if (at == std::string_view::npos)
+        return {};
+    size_t i = metaJson.find(':', at + needle.size());
+    if (i == std::string_view::npos)
+        return {};
+    ++i;
+    while (i < metaJson.size() && (metaJson[i] == ' ' || metaJson[i] == '\t'))
+        ++i;
+    if (i >= metaJson.size() || metaJson[i] != '{')
+        return {};
+    const size_t start = i;
+    int depth = 0;
+    for (; i < metaJson.size(); ++i) {
+        if (metaJson[i] == '{')
+            ++depth;
+        else if (metaJson[i] == '}' && --depth == 0)
+            return metaJson.substr(start, i - start + 1);
+    }
+    return {};
+}
+
+// The value after "key":, whitespace tolerated (a re-serialised meta may carry
+// a space the compact writer does not).
+std::string_view MediaRawValue(std::string_view obj, std::string_view key) {
+    const std::string needle = "\"" + std::string(key) + "\"";
+    const size_t at = obj.find(needle);
+    if (at == std::string_view::npos)
+        return {};
+    size_t i = obj.find(':', at + needle.size());
+    if (i == std::string_view::npos)
+        return {};
+    ++i;
+    while (i < obj.size() && (obj[i] == ' ' || obj[i] == '\t'))
+        ++i;
+    const size_t end = obj.find_first_of(",}", i);
+    if (end == std::string_view::npos)
+        return {};
+    return obj.substr(i, end - i);
+}
+
+double MediaNumber(std::string_view obj, std::string_view key, double dflt) {
+    const std::string_view raw = MediaRawValue(obj, key);
+    if (raw.empty())
+        return dflt;
+    const std::string num(raw);
+    char* end = nullptr;
+    const double out = std::strtod(num.c_str(), &end);
+    return end == num.c_str() ? dflt : out;
+}
+
+bool MediaBool(std::string_view obj, std::string_view key, bool dflt) {
+    const std::string_view raw = MediaRawValue(obj, key);
+    if (raw == "true")
+        return true;
+    if (raw == "false")
+        return false;
+    return dflt;
+}
+
+std::string MediaText(std::string_view obj, std::string_view key) {
+    const std::string_view raw = MediaRawValue(obj, key);
+    if (raw.size() < 2 || raw.front() != '"' || raw.back() != '"')
+        return {};
+    return std::string(raw.substr(1, raw.size() - 2));
+}
+
+MediaItemValues ParseMediaItemValues(std::string_view metaJson) {
+    MediaItemValues v;
+    const std::string_view obj = MediaObjectOf(metaJson);
+    if (obj.empty())
+        return v;
+    v.fit = MediaText(obj, "fit");
+    v.flipH = MediaBool(obj, "flipH", false);
+    v.flipV = MediaBool(obj, "flipV", false);
+    v.cropTop = std::clamp(MediaNumber(obj, "top", 0.0), 0.0, 90.0);
+    v.cropRight = std::clamp(MediaNumber(obj, "right", 0.0), 0.0, 90.0);
+    v.cropBottom = std::clamp(MediaNumber(obj, "bottom", 0.0), 0.0, 90.0);
+    v.cropLeft = std::clamp(MediaNumber(obj, "left", 0.0), 0.0, 90.0);
+    v.filter.hueRotateDeg = std::clamp(MediaNumber(obj, "hueRotate", 0.0), 0.0, 360.0);
+    v.filter.invert = std::clamp(MediaNumber(obj, "invert", 0.0), 0.0, 1.0);
+    v.filter.blurPx = std::clamp(MediaNumber(obj, "blur", 0.0), 0.0, 100.0);
+    v.filter.grayscale = std::clamp(MediaNumber(obj, "grayscale", 0.0), 0.0, 1.0);
+    v.sepia = std::clamp(MediaNumber(obj, "sepia", 0.0), 0.0, 1.0);
+    v.filter.brightness = std::clamp(MediaNumber(obj, "brightness", 1.0), 0.0, 2.0);
+    v.filter.contrast = std::clamp(MediaNumber(obj, "contrast", 1.0), 0.0, 2.0);
+    v.filter.saturate = std::clamp(MediaNumber(obj, "saturate", 1.0), 0.0, 2.0);
+    v.opacity = std::clamp(MediaNumber(obj, "opacity", 1.0), 0.0, 1.0);
+    v.blend = MediaText(obj, "blend");
+    return v;
+}
+
+// ---- the pixel work those values describe ---------------------------------
+// The engine's packed pixel is 0xAABBGGRR (Color::Pack), the same convention
+// Effects.cpp's filter pass uses, so the channel helpers here are its own.
+inline uint32_t PxChannel(uint32_t px, int shift) { return (px >> shift) & 0xFFu; }
+inline uint32_t PxClamp(double v) {
+    if (v <= 0.0) return 0;
+    if (v >= 255.0) return 255;
+    return static_cast<uint32_t>(v + 0.5);
+}
+
+rendering::RgbaImage CropPixels(const rendering::RgbaImage& src, const MediaItemValues& v) {
+    if (!v.HasCrop() || src.width <= 0 || src.height <= 0)
+        return src;
+    const int w0 = src.width;
+    const int h0 = src.height;
+    const int x0 = std::clamp(static_cast<int>(w0 * v.cropLeft / 100.0), 0, w0 - 1);
+    const int y0 = std::clamp(static_cast<int>(h0 * v.cropTop / 100.0), 0, h0 - 1);
+    const int x1 = std::clamp(static_cast<int>(w0 * v.cropRight / 100.0), 0, w0 - 1);
+    const int y1 = std::clamp(static_cast<int>(h0 * v.cropBottom / 100.0), 0, h0 - 1);
+    const int w = w0 - x0 - x1;
+    const int h = h0 - y0 - y1;
+    if (w <= 0 || h <= 0)
+        return src;
+    rendering::RgbaImage out;
+    out.width = w;
+    out.height = h;
+    out.pixels.resize(static_cast<size_t>(w) * h);
+    for (int y = 0; y < h; ++y) {
+        std::memcpy(&out.pixels[static_cast<size_t>(y) * w],
+                    &src.pixels[static_cast<size_t>(y0 + y) * w0 + x0],
+                    sizeof(uint32_t) * static_cast<size_t>(w));
+    }
+    return out;
+}
+
+rendering::RgbaImage FlipPixels(const rendering::RgbaImage& src, bool flipH, bool flipV) {
+    if ((!flipH && !flipV) || src.width <= 0 || src.height <= 0)
+        return src;
+    rendering::RgbaImage out;
+    out.width = src.width;
+    out.height = src.height;
+    out.pixels.resize(src.pixels.size());
+    for (int y = 0; y < src.height; ++y) {
+        const int sy = flipV ? src.height - 1 - y : y;
+        for (int x = 0; x < src.width; ++x) {
+            const int sx = flipH ? src.width - 1 - x : x;
+            out.pixels[static_cast<size_t>(y) * src.width + x] =
+                src.pixels[static_cast<size_t>(sy) * src.width + sx];
+        }
+    }
+    return out;
+}
+
+// CSS sepia(amount): the published matrix, mixed by `amount` — the same op the
+// canvas preview's shader runs, so the two surfaces agree on the tone.
+void ApplySepiaPixels(rendering::RgbaImage& img, double amount) {
+    if (amount <= 0.0 || img.empty())
+        return;
+    const double k = std::clamp(amount, 0.0, 1.0);
+    for (uint32_t& px : img.pixels) {
+        const double r = PxChannel(px, 0);
+        const double g = PxChannel(px, 8);
+        const double b = PxChannel(px, 16);
+        const uint32_t a = PxChannel(px, 24);
+        const double sr = 0.393 * r + 0.769 * g + 0.189 * b;
+        const double sg = 0.349 * r + 0.686 * g + 0.168 * b;
+        const double sb = 0.272 * r + 0.534 * g + 0.131 * b;
+        px = (a << 24)
+            | (PxClamp(b + (std::clamp(sb, 0.0, 255.0) - b) * k) << 16)
+            | (PxClamp(g + (std::clamp(sg, 0.0, 255.0) - g) * k) << 8)
+            | PxClamp(r + (std::clamp(sr, 0.0, 255.0) - r) * k);
+    }
+}
+
+// The centre crop that makes a picture the box's own aspect ratio — how "cover"
+// fills a box the engine cannot clip (see ContainRectIn's note): crop the SOURCE
+// instead of painting outside the item, then contain-fit what is left, which is
+// exactly the box.
+rendering::RgbaImage CropToAspect(const rendering::RgbaImage& src, double boxW, double boxH) {
+    if (src.width <= 0 || src.height <= 0 || boxW <= 0 || boxH <= 0)
+        return src;
+    const double srcAspect = static_cast<double>(src.width) / src.height;
+    const double boxAspect = boxW / boxH;
+    if (std::abs(srcAspect - boxAspect) < 0.001)
+        return src;
+    MediaItemValues crop;
+    if (srcAspect > boxAspect) {
+        // Wider than the box: take the sides in.
+        const double keep = boxAspect / srcAspect;             // 0–1 of the width
+        crop.cropLeft = crop.cropRight = (1.0 - keep) * 50.0;  // percentages
+    } else {
+        const double keep = srcAspect / boxAspect;
+        crop.cropTop = crop.cropBottom = (1.0 - keep) * 50.0;
+    }
+    return CropPixels(src, crop);
+}
+
+// Crop, then flips, then the filter set in CSS order (hue, invert, blur,
+// grayscale, sepia, brightness, contrast, saturate) — the order the canvas
+// preview's shader applies, and the order FreeShow's CSS filter list does.
+rendering::RgbaImage ApplyMediaPixelWork(rendering::RgbaImage picture, const MediaItemValues& v) {
+    if (picture.empty())
+        return picture;
+    picture = CropPixels(picture, v);
+    if (v.flipH || v.flipV)
+        picture = FlipPixels(picture, v.flipH, v.flipV);
+    if (v.filter.hueRotateDeg != 0 || v.filter.invert != 0 || v.filter.blurPx != 0
+        || v.filter.grayscale != 0) {
+        rendering::SlideFilterValues pre;
+        pre.hueRotateDeg = v.filter.hueRotateDeg;
+        pre.invert = v.filter.invert;
+        pre.blurPx = v.filter.blurPx;
+        pre.grayscale = v.filter.grayscale;
+        rendering::ApplyFilters(picture, pre);
+    }
+    ApplySepiaPixels(picture, v.sepia);
+    if (v.filter.brightness != 1.0 || v.filter.contrast != 1.0 || v.filter.saturate != 1.0) {
+        rendering::SlideFilterValues post;
+        post.brightness = v.filter.brightness;
+        post.contrast = v.filter.contrast;
+        post.saturate = v.filter.saturate;
+        rendering::ApplyFilters(picture, post);
+    }
+    // The filter list's last row: the FILE's own opacity (CSS filter opacity).
+    // Over the picture's alpha, which is what the canvas's item opacity does.
+    if (v.opacity < 1.0) {
+        for (uint32_t& px : picture.pixels) {
+            const uint32_t a = PxChannel(px, 24);
+            px = (PxClamp(a * v.opacity) << 24) | (px & 0x00FFFFFFu);
+        }
+    }
+    return picture;
 }
 
 // Contain-fit math: the WHOLE image fits inside `stage`, centered, letterboxed
@@ -597,6 +935,11 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
         const float radiusOut = static_cast<float>(
             std::max(0.0, block.style.cornerRadius) / kBlockStageW * size.width);
         const bool boxKind = IsBoxKind(block);
+        // A placed media FILE — the two kinds that paint a picture. "audio" is
+        // deliberately not one of them: sound has nothing to draw, and a slide
+        // whose item is a song draws the slide's other blocks over an empty box
+        // exactly as the operator laid it out.
+        const bool mediaKind = (block.kind == "image" || block.kind == "video");
         // AN EXPLICIT CHOICE BEATS THE INFERENCE. The geometry above is right for
         // the designs the app ships, but a design author who means something else
         // says so in the block's own meta and is obeyed: "underVideo": true puts
@@ -648,7 +991,19 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 box->SetLayer(std::string(blockLayer));
                 (void)engine.AddObject(sceneId, box, std::string(blockLayer));
             }
-            auto text = std::make_shared<rendering::TextObject>(objId, objId, block.text);
+            // "TEXT ON ONE LINE" (TextItemPanel's Text card): the canvas draws
+            // this item with Text.NoWrap, so the output must too. NoWrap alone
+            // is not enough — a literal newline in the content still breaks a
+            // line under NoWrap — so the line breaks are folded to spaces HERE,
+            // in the one string every later stage reads (layout, measure, draw,
+            // and the same text the QML surfaces show folded).
+            const bool oneLine = MetaBool(block.metaJson, "oneLine");
+            std::string textBody = block.text;
+            if (oneLine) {
+                for (char& ch : textBody)
+                    if (ch == '\n' || ch == '\r') ch = ' ';
+            }
+            auto text = std::make_shared<rendering::TextObject>(objId, objId, textBody);
             text->SetBounds(rect);
             auto styleComp = std::make_shared<rendering::TextStyleComponent>();
             styleComp->style.size = static_cast<float>(
@@ -673,26 +1028,36 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // first (RenderEngine::DrawTextObject / GlyphAtlas), degrading
             // to the builtin bitmap font only when it can't resolve — the
             // block's own fontFamily when the canvas set one, else the
-            // app's own UI default so plain/legacy blocks with no family
-            // still get real typography instead of reading as "no font
-            // chosen, so no real font" and falling all the way back.
+            // show/template CONTENT default so plain/legacy blocks with no
+            // family still get real typography instead of reading as "no
+            // font chosen, so no real font" and falling all the way back.
             //
             // FONT-AGNOSTIC BY CONSTRUCTION: the block's family stays the
             // REQUEST here and every consumer resolves it through
             // FontManager::SubstituteFamily, so a design that names a font this
             // machine lacks draws with an installed face at the same size
             // instead of collapsing into the 5x7 bitmap (the giant pixel-block
-            // verse reported from another install). The no-family default is
-            // the host's own UI face for the same reason — not a literal name.
+            // verse reported from another install).
+            //
+            // The no-family default is a LITERAL name now ("Cambria"), not
+            // the host's UI face (RenderEngine::...::DefaultFamily()) — user
+            // call: "make the app[']s shows or default template['s font] be
+            // Cambria, Segoe UI is for the app['s] UI". Content and chrome
+            // are two different questions: Theme.fontFamily (every QML
+            // button/label) still reads DefaultFamily() directly and is
+            // untouched by this; this is ONLY the render path a slide's own
+            // text takes, so the canvas, the preview and the real output
+            // cannot disagree about which font a plain block draws with —
+            // the exact mismatch FontManager/FontService exist to prevent
+            // (see qml/services/FontService.h and its defaultContentFamily,
+            // the QML-side twin of this literal).
             {
                 const std::string family = MetaString(block.metaJson, "fontFamily");
-                styleComp->style.fontId = family.empty()
-                    ? rendering::RenderEngine::Instance().Fonts().DefaultFamily()
-                    : family;
+                styleComp->style.fontId = family.empty() ? "Cambria" : family;
             }
             styleComp->style.italic = MetaBool(block.metaJson, "italic");
-            styleComp->style.wrap = true;
-            styleComp->style.wrapWidth = text->Bounds().width;
+            styleComp->style.wrap = !oneLine;
+            styleComp->style.wrapWidth = oneLine ? 0.0f : text->Bounds().width;
             // The typography knobs the canvas/DesignPreview honor and the
             // engine silently dropped — lineHeight (no added spacing: the
             // font's own line height, an empty line of black serif made a
@@ -757,6 +1122,35 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 const double ls = MetaNumber(block.metaJson, "letterSpacing", 0.0);
                 styleComp->style.letterSpacing = static_cast<float>(ls * size.width / kBlockStageW);
             }
+            // Word spacing: the canvas's own value is in STAGE px (QML Text's
+            // font.wordSpacing), so it scales to the output exactly as
+            // letterSpacing and fontSize do.
+            {
+                const double ws = MetaNumber(block.metaJson, "wordSpacing", 0.0);
+                styleComp->style.wordSpacing = static_cast<float>(ws * size.width / kBlockStageW);
+            }
+            // LINE SPACING — blank air BETWEEN line boxes, on top of the line
+            // height above (FreeShow's own split: line-height sizes the line,
+            // line spacing opens the gap). Stage px like letter/word spacing, so
+            // the canvas value and the output value are the same number scaled
+            // once.
+            {
+                const double gap = MetaNumber(block.metaJson, "lineSpacing", 0.0);
+                styleComp->style.lineGap = static_cast<float>(gap * size.width / kBlockStageW);
+            }
+            // LINE BACKGROUND — a band behind EACH line (TextStyle::lineBg),
+            // not behind the block: the block's own fill is the box above.
+            // An empty/unparseable value leaves alpha 0, i.e. no band at all.
+            styleComp->style.lineBg =
+                StyleBuilder::ParseColor(MetaString(block.metaJson, "lineBg"));
+            // ...and how round those bands are (FreeShow's lineRadius). Stage px,
+            // scaled like every other length here, so the canvas radius and the
+            // output radius are the same number at two sizes.
+            {
+                const double lr = MetaNumber(block.metaJson, "lineRadius", 0.0);
+                styleComp->style.lineRadius =
+                    static_cast<float>(std::max(0.0, lr) * size.width / kBlockStageW);
+            }
             // autoSize — the FULL vocabulary the template editor writes
             // (TextItemPanel: "none" | "shrinkToFit" | "growToFit"; legacy
             // "shrink"/"grow" from DesignCatalogs arrive too, and
@@ -807,6 +1201,75 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             text->AddComponent(styleComp);
             text->SetLayer(std::string(layer));
             (void)engine.AddObject(sceneId, text, std::string(layer));
+        } else if (mediaKind) {
+            // A MEDIA ITEM THE OPERATOR PLACED (the Edit canvas's Media chip ->
+            // Picture / Video): the FILE's own picture, in the item's box. Until
+            // this branch existed the block fell through the kind switch and
+            // every real output — NDI, HDMI, recordings — showed an empty hole
+            // where the canvas showed the picture; only the in-app previews
+            // drew anything, and they drew a stand-in card.
+            //
+            // A picture paints its decoded pixels; a video paints its poster
+            // frame (see LoadVideoPosterCached — this engine has no file-video
+            // transport, the UI's decoder owns that and hands over the
+            // compositor's frame). An item with no file paints nothing: a
+            // guessed box would be a lie about content that is not there.
+            const std::string src = MediaSrcOf(block);
+            rendering::RgbaImage picture;
+            if (!src.empty())
+                picture = (block.kind == "video") ? LoadVideoPosterCached(src)
+                                                  : LoadImageCached(src);
+            if (picture.width > 0 && picture.height > 0) {
+                // THE ITEM'S OWN MEDIA VALUES (the Edit screen's MEDIA tab):
+                // crop, flips and the filter set are applied to the DECODED
+                // PIXELS here, and `fit` decides the box they end up in — so the
+                // picture the outputs draw is the one the canvas drew, without a
+                // backend having to learn a new transform.
+                const MediaItemValues media = ParseMediaItemValues(block.metaJson);
+                const bool identity = !media.HasCrop() && !media.flipH && !media.flipV
+                                   && !media.HasFilter();
+                rendering::RgbaImage sharp = identity ? std::move(picture)
+                                                     : ApplyMediaPixelWork(std::move(picture), media);
+                const std::string& fit = media.fit;
+                rendering::Rect outBox = ContainRectIn(sharp.width, sharp.height, rect);
+                if (fit == "cover") {
+                    // Cover inside a box the engine cannot clip: crop the SOURCE to
+                    // the box's own aspect and let the contain fit fill it exactly.
+                    sharp = CropToAspect(sharp, rect.width, rect.height);
+                    outBox = ContainRectIn(sharp.width, sharp.height, rect);
+                } else if (fit == "fill") {
+                    // Stretched to the box, aspect ignored — the canvas draws the
+                    // same file with Image.Stretch.
+                    outBox = rect;
+                } else if (fit == "blur") {
+                    // Blur fill (FreeShow's fourth fit): the file fills the box
+                    // softened and a sharp copy sits on top of it. The backdrop is
+                    // its own object, painted first on the same layer.
+                    rendering::RgbaImage backdrop = CropToAspect(sharp, rect.width, rect.height);
+                    rendering::SlideFilterValues soft;
+                    soft.blurPx = 24.0;
+                    soft.brightness = 0.85;
+                    rendering::ApplyFilters(backdrop, soft);
+                    auto bg = std::make_shared<rendering::ImageObject>(objId + "-blur",
+                                                                      block.kind + "-blur");
+                    bg->SetBounds(rect);
+                    bg->SetImage(std::move(backdrop), src);
+                    bg->SetLayer(std::string(blockLayer));
+                    (void)engine.AddObject(sceneId, bg, std::string(blockLayer));
+                }
+                auto image = std::make_shared<rendering::ImageObject>(objId, block.kind);
+                image->SetBounds(outBox);
+                image->SetImage(std::move(sharp), src);
+                image->SetLayer(std::string(blockLayer));
+                // THE MEDIA TAB'S BLEND MODE, on the OBJECT: the rasterizer
+                // composites this picture against the frame already under it,
+                // so Screen/Multiply/Overlay actually change the broadcast
+                // picture instead of being a stored-but-ignored value. The
+                // blur-fill backdrop above stays plain alpha — it is the box's
+                // own backdrop, not the item's picture.
+                image->SetBlendMode(rendering::ParseBlendMode(media.blend));
+                (void)engine.AddObject(sceneId, image, std::string(blockLayer));
+            }
         } else if (boxKind) {
             auto shape = std::make_shared<rendering::ShapeObject>(objId, objId);
             shape->SetRectangle(StyleBuilder::ParseColor(
@@ -1406,6 +1869,83 @@ SceneBuilder::BlockLayerPlan SceneBuilder::PlanBlockLayers(const std::vector<Con
 // (Title, Body). Both preset paths — a family riding a preset key, and the
 // style's own key with no baked blocks — draw exactly these, so they draw them
 // through one function rather than two copies of the same eight lines.
+// THE READING FLOW (Alt+Down / Alt+Up — see Slide::flowText): hand the passage
+// to the ONE text object that draws this slide's reading text, so the outputs
+// scroll it under the block's own box instead of the step replacing the whole
+// picture with a re-fitted window of it.
+//
+// WHICH OBJECT. The reading text is the LONGEST text in the composition — the
+// same rule the QML stepper (LiveOutputService::contentTextBlock) and the
+// monitor tile (DesignPreview::readingBlock) use to choose the block they move.
+// It has to be found by a rule rather than an id, because there are three
+// carriers for one idea: a show's own slide keeps its words in one of its own
+// blocks (id <blk3>…), a Table/Bible slide receives them through the style's
+// template slot (<tplf2>…), and the legacy preset draws them as "body".
+//
+// THE GUARD IS A PREFIX TEST: the flow must BEGIN with the page the object is
+// showing. If it does not — a style that rewrote the words, a flow left over
+// from another pick — the object is left alone and the outputs draw the page
+// exactly as before, which is the honest answer: a scroll with the wrong words
+// in it would be worse than no scroll at all.
+void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneId,
+                      const Slide& slide) {
+    if (slide.flowText.empty())
+        return;
+    rendering::TextObject* reading = nullptr;
+    size_t longest = 0;
+    for (auto* obj : engine.CollectObjects(sceneId)) {
+        auto* text = dynamic_cast<rendering::TextObject*>(obj);
+        if (!text || text->HasReadingFlow() || text->Text().empty())
+            continue;
+        if (text->Text().size() > longest) {
+            longest = text->Text().size();
+            reading = text;
+        }
+    }
+    if (!reading)
+        return;
+    if (slide.flowText.rfind(reading->Text(), 0) != 0) {
+        // ONE LINE PER SCENE per state change — the live loop rebuilds on every
+        // fingerprint move, so a repeating diagnostic would flood the log the
+        // operator is asked to read (the blank-slide report above says the same).
+        static std::mutex gateMutex;
+        static std::set<std::string> logged;
+        std::lock_guard<std::mutex> lock(gateMutex);
+        if (logged.insert(sceneId).second)
+            Logger::Instance().Debug(std::format(
+                "reading flow skipped: the passage does not begin with this slide's "
+                "reading text ({} chars of page, {} of flow) — the outputs render the page",
+                reading->Text().size(), slide.flowText.size()), "SceneBuilder");
+        return;
+    }
+    // HOW MANY LINES ONE PAGE TAKES is MEASURED, here, with the style the object
+    // actually draws with — not counted by the front end. The block's own
+    // vertical alignment keeps using the page's extent (the box was fitted to a
+    // page, not to the passage), so this number has to be the engine's own
+    // reading of that page or a centred block would drift off its design.
+    const auto* styleComp = reading->FindComponent<rendering::TextStyleComponent>();
+    const rendering::TextStyle style = styleComp ? styleComp->style : rendering::TextStyle{};
+    const auto pageLayout = rendering::TextLayout::Measure(reading->Text(), style, engine.Fonts());
+    const int pageLines = static_cast<int>(pageLayout.lines.size());
+    // The PAGE stays the layout's reference (the fit solver already sized it), and
+    // the passage becomes what is drawn: one layout, one size, one offset into it
+    // (RenderOptions::contentScrollLines, resting at Slide::flowScroll).
+    reading->SetReadingFlow(pageLines, slide.flowScroll);
+    reading->SetText(slide.flowText);
+    // ONE LINE PER SCENE (the live loop rebuilds on every fingerprint move): the
+    // numbers a "the step does nothing / jumps a page" report turns on — how many
+    // lines the page takes, and how much passage it was given to scroll into.
+    {
+        static std::mutex flowLogMutex;
+        static std::set<std::string> flowLogged;
+        std::lock_guard<std::mutex> lock(flowLogMutex);
+        if (flowLogged.insert(sceneId).second)
+            Logger::Instance().Debug(std::format(
+                "reading flow attached: page {} line(s), passage {} char(s), resting at line {:.2f}",
+                pageLines, slide.flowText.size(), slide.flowScroll), "SceneBuilder");
+    }
+}
+
 void AddPresetTextObjects(rendering::RenderEngine& engine, const std::string& sceneId,
                           const rendering::Size& size, const StyleBuilder::Layout& layout,
                           const Slide& slide) {
@@ -2116,58 +2656,66 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     // slide's own blocks, and last the style's own preset key. A slide with NO
     // content at all never wears a template: the blank GO LIVE carrier's history
     // is on ComposeSlide, and the rule that keeps it that way is one line there.
-    switch (comp.source) {
-    case SlideComposition::Source::FamilyTemplate: {
-        const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf");
-        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
-                                            sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
-        return sceneId;
-    }
-    case SlideComposition::Source::StyleTemplate: {
-        const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl");
-        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
-                                            sceneId, style.name, n), "SceneBuilder");
-        return sceneId;
-    }
-    case SlideComposition::Source::FamilyPreset: {
-        AddPresetTextObjects(engine, sceneId, size, comp.preset, slide);
-        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} preset '{}')",
-                                            sceneId, style.name, comp.familyIdx, comp.presetKey),
-                                 "SceneBuilder");
-        return sceneId;
-    }
-    case SlideComposition::Source::SlideBlocks: {
-        const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk");
-        Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
-                                            sceneId, style.name, n), "SceneBuilder");
-        return sceneId;
-    }
-    case SlideComposition::Source::Cleared:
-        // A CLEAR: the composition already switched the style's colour and
-        // image off (see ComposeSlide), and there are no blocks to draw, so the
-        // scene is left EMPTY — the frame the outputs show is keyable/black,
-        // which is what clearing means. Logged because "the output is black"
-        // and "the output shows nothing on purpose" have to be told apart.
-        Logger::Instance().Debug(std::format("Scene built: {} (clear — the frame paints nothing)", sceneId),
-                                 "SceneBuilder");
-        return sceneId;
-    case SlideComposition::Source::StylePreset:
-        break;   // the style's own built-in layout: the two text regions below
-    case SlideComposition::Source::Refused:
-        // Only reachable through the gated build, which returns before this
-        // point (see ComposeSlide's `applyGates`); the plain styled build
-        // renders the slide's content as it always has.
-        break;
-    }
+    // A LAMBDA, not a bare switch: the reading flow has to be attached AFTER
+    // whichever layout branch ran (see ApplyReadingFlow) — and every branch used
+    // to return straight out of this function with the scene finished.
+    auto addContent = [&]() {
+        switch (comp.source) {
+        case SlideComposition::Source::FamilyTemplate: {
+            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf");
+            Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
+                                                sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
+            return;
+        }
+        case SlideComposition::Source::StyleTemplate: {
+            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl");
+            Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
+                                                sceneId, style.name, n), "SceneBuilder");
+            return;
+        }
+        case SlideComposition::Source::FamilyPreset: {
+            AddPresetTextObjects(engine, sceneId, size, comp.preset, slide);
+            Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} preset '{}')",
+                                                sceneId, style.name, comp.familyIdx, comp.presetKey),
+                                     "SceneBuilder");
+            return;
+        }
+        case SlideComposition::Source::SlideBlocks: {
+            const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk");
+            Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
+                                                sceneId, style.name, n), "SceneBuilder");
+            return;
+        }
+        case SlideComposition::Source::Cleared:
+            // A CLEAR: the composition already switched the style's colour and
+            // image off (see ComposeSlide), and there are no blocks to draw, so
+            // the scene is left EMPTY — the frame the outputs show is
+            // keyable/black, which is what clearing means. Logged because "the
+            // output is black" and "the output shows nothing on purpose" have
+            // to be told apart.
+            Logger::Instance().Debug(std::format("Scene built: {} (clear — the frame paints nothing)", sceneId),
+                                     "SceneBuilder");
+            return;
+        case SlideComposition::Source::StylePreset:
+            break;   // the style's own built-in layout: the two text regions below
+        case SlideComposition::Source::Refused:
+            // Only reachable through the gated build, which returns before this
+            // point (see ComposeSlide's `applyGates`); the plain styled build
+            // renders the slide's content as it always has.
+            break;
+        }
 
-    // ---- The style's own layout preset ------------------------------------
-    // Two text regions on the preset's own rectangles (LayoutFor). This is also
-    // where a style whose templateKey names a design that no longer exists
-    // lands: LayoutFor falls back to the safe default full layout for an
-    // unknown key.
-    AddPresetTextObjects(engine, sceneId, size, comp.preset, slide);
-    Logger::Instance().Debug(std::format("Scene built: {} (style '{}')", sceneId, style.name),
-                             "SceneBuilder");
+        // ---- The style's own layout preset ------------------------------------
+        // Two text regions on the preset's own rectangles (LayoutFor). This is also
+        // where a style whose templateKey names a design that no longer exists
+        // lands: LayoutFor falls back to the safe default full layout for an
+        // unknown key.
+        AddPresetTextObjects(engine, sceneId, size, comp.preset, slide);
+        Logger::Instance().Debug(std::format("Scene built: {} (style '{}')", sceneId, style.name),
+                                 "SceneBuilder");
+    };
+    addContent();
+    ApplyReadingFlow(engine, sceneId, slide);
     return sceneId;
 }
 

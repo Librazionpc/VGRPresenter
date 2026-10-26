@@ -112,6 +112,10 @@ QtObject {
             return null
         return Object.assign({}, session.slideModel.slideFieldsAt(row), {
             background: session.slideStore.backgroundOf(slideId).toString(),
+            // The slide's per-slide filter set (the SLIDE tab's Filters rows) —
+            // part of the same patch, so a filter edit is flushed, saved and
+            // applied on air exactly like the background it sits beside.
+            filters: session.slideStore.filtersOf(slideId),
             blocks: session.slideStore.blocksOf(slideId)
         })
     }
@@ -185,7 +189,8 @@ QtObject {
         })
         result.added.forEach((a) => {
             const s = show.slides.find((x) => x.id === a.engineId)
-            session.slideStore.archiveSlide(a.slideId, s ? s.blocks : [], s ? s.background : "transparent")
+            session.slideStore.archiveSlide(a.slideId, s ? s.blocks : [], s ? s.background : "transparent",
+                                            s ? s.filters : undefined)
         })
         session._applying = false
 
@@ -208,7 +213,8 @@ QtObject {
         const result = session.slideModel.syncFromEngine(show.slides)
         result.added.forEach((a) => {
             const s = show.slides.find((x) => x.id === a.engineId)
-            session.slideStore.archiveSlide(a.slideId, s ? s.blocks : [], s ? s.background : "transparent")
+            session.slideStore.archiveSlide(a.slideId, s ? s.blocks : [], s ? s.background : "transparent",
+                                            s ? s.filters : undefined)
         })
         session._applying = false
         if (session.slideModel.rowCount() > 0)

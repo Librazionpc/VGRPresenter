@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace bps::rendering {
 
@@ -118,7 +119,95 @@ struct Color {
 // ---------------------------------------------------------------------------
 // Blending
 // ---------------------------------------------------------------------------
-enum class BlendMode : int { Alpha = 0, Additive, Multiply };
+// HOW A DRAW COMBINES WITH WHAT IS ALREADY ON THE FRAME.
+//
+// Alpha/Additive/Multiply are the engine's own three, and their VALUES are part
+// of the contract (DrawCommand::blend carries the int across the backend seam),
+// so the CSS-media modes the Edit screen's MEDIA tab offers are appended after
+// them, never inserted. The names match CSS/FreeShow's own list, which is what
+// makes "the dropdown says Overlay" mean the same picture in the app and on the
+// outputs; GraphicsBackends' BlendPixel implements the W3C formulas.
+enum class BlendMode : int {
+    Alpha = 0,
+    Additive,
+    Multiply,
+    Screen,
+    Overlay,
+    SoftLight,
+    HardLight,
+    ColorDodge,
+    ColorBurn,
+    Lighten,
+    Darken,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+};
+
+// ---- blend modes travel as NAMES, render as numbers -------------------------
+//
+// The Edit screen's MEDIA tab stores FreeShow's own lower-case name
+// ("normal", "soft-light", "color-dodge" …), that name is what a saved show
+// carries, and only the rasterizer cares about the integer. Both directions
+// live next to the enum so a new mode is added in ONE place and the QML list,
+// the scene builder and the compositor cannot drift apart.
+inline const char* BlendModeName(BlendMode m) {
+    switch (m) {
+        case BlendMode::Additive: return "additive";
+        case BlendMode::Multiply: return "multiply";
+        case BlendMode::Screen: return "screen";
+        case BlendMode::Overlay: return "overlay";
+        case BlendMode::SoftLight: return "soft-light";
+        case BlendMode::HardLight: return "hard-light";
+        case BlendMode::ColorDodge: return "color-dodge";
+        case BlendMode::ColorBurn: return "color-burn";
+        case BlendMode::Lighten: return "lighten";
+        case BlendMode::Darken: return "darken";
+        case BlendMode::Difference: return "difference";
+        case BlendMode::Exclusion: return "exclusion";
+        case BlendMode::Hue: return "hue";
+        case BlendMode::Saturation: return "saturation";
+        case BlendMode::Color: return "color";
+        case BlendMode::Luminosity: return "luminosity";
+        case BlendMode::Alpha:
+        default: return "normal";
+    }
+}
+
+// Case/separator tolerant: "soft-light", "SoftLight", "soft light" and
+// "soft_light" all land on the same mode, so the name a stored show carries
+// never depends on how a writer spelled it.
+inline BlendMode ParseBlendMode(std::string_view name) {
+    std::string k;
+    k.reserve(name.size());
+    for (const char ch : name) {
+        if (ch == '-' || ch == '_' || ch == ' ')
+            continue;
+        k.push_back(static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch));
+    }
+    if (k.empty() || k == "normal" || k == "sourceover" || k == "alpha")
+        return BlendMode::Alpha;
+    if (k == "additive" || k == "add") return BlendMode::Additive;
+    if (k == "multiply") return BlendMode::Multiply;
+    if (k == "screen") return BlendMode::Screen;
+    if (k == "overlay") return BlendMode::Overlay;
+    if (k == "softlight") return BlendMode::SoftLight;
+    if (k == "hardlight") return BlendMode::HardLight;
+    if (k == "colordodge" || k == "dodge") return BlendMode::ColorDodge;
+    if (k == "colorburn" || k == "burn") return BlendMode::ColorBurn;
+    if (k == "lighten" || k == "lighter") return BlendMode::Lighten;
+    if (k == "darken" || k == "darker") return BlendMode::Darken;
+    if (k == "difference") return BlendMode::Difference;
+    if (k == "exclusion") return BlendMode::Exclusion;
+    if (k == "hue") return BlendMode::Hue;
+    if (k == "saturation" || k == "saturate") return BlendMode::Saturation;
+    if (k == "color") return BlendMode::Color;
+    if (k == "luminosity" || k == "luminance") return BlendMode::Luminosity;
+    return BlendMode::Alpha;   // unknown name = draw it normally, never hide it
+}
 
 // ---------------------------------------------------------------------------
 // Shape / geometry kinds

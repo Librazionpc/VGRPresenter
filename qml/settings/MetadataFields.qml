@@ -217,4 +217,143 @@ QtObject {
         const n = Number(v)
         return (v === undefined || v === null || isNaN(n)) ? root.naturalLetterSpacing : n
     }
+
+    // The same additive px-value rule for the gap after every SPACE. QML's Text
+    // carries it as font.wordSpacing, the engine as TextStyle::wordSpacing, and
+    // both neutral at 0 — read here so the panel, the fit solver, the canvas
+    // label, the tile previews and the output all state one number.
+    readonly property real naturalWordSpacing: 0
+    function wordSpacing(meta) {
+        const v = meta ? meta.wordSpacing : undefined
+        const n = Number(v)
+        return (v === undefined || v === null || isNaN(n)) ? root.naturalWordSpacing : n
+    }
+
+    // The same additive px-value rule for the air BETWEEN line boxes —
+    // FreeShow's "line spacing" row, separate from the line height above: the
+    // height sizes a line box, this opens a gap before the next one. Neutral 0.
+    readonly property real naturalLineSpacing: 0
+    function lineSpacing(meta) {
+        const v = meta ? meta.lineSpacing : undefined
+        const n = Number(v)
+        return (v === undefined || v === null || isNaN(n)) ? root.naturalLineSpacing : n
+    }
+
+    // THE LINE STEP QML MUST DRAW WITH. QML's Text has no additive gap — only a
+    // lineHeight MULTIPLIER of the font's own line box — so a block whose gap is
+    // 4px is drawn at multiplier (natural × lineHeight + gap) / natural:
+    // naturalHeightPx is that font's own line box at the size being drawn
+    // (ascent + descent from a TextMetrics beside the Text). With no gap the
+    // multiplier is exactly lineHeight, so this never perturbs an item that
+    // does not use the control.
+    function lineHeightWithGap(meta, naturalHeightPx) {
+        const lh = root.lineHeight(meta)
+        const gap = root.lineSpacing(meta)
+        if (Math.abs(gap) < 0.0001 || !(naturalHeightPx > 0))
+            return lh
+        return lh + gap / naturalHeightPx
+    }
+
+    // The typed case, applied to a string — QML's font.capitalization does this
+    // for a PLAIN Text, and the band layer below is rich text, where it does
+    // nothing: an upper-cased label would otherwise band at the lower-case
+    // widths of the same words.
+    function applyTextCase(text, mode) {
+        const s = String(text === undefined || text === null ? "" : text)
+        if (mode === "upper")
+            return s.toUpperCase()
+        if (mode === "lower")
+            return s.toLowerCase()
+        if (mode === "capitalize")
+            return s.replace(/(^|\s)(\S)/g, (m, pre, ch) => pre + ch.toUpperCase())
+        return s
+    }
+
+    // THE PER-LINE BACKGROUND BAND, as rich text for a transparent Text drawn
+    // UNDER the label. Qt paints a span's background per line FRAGMENT, so one
+    // span around a paragraph bands every visual line it wraps onto, at exactly
+    // that line's own width — the same wrapping and the same font as the label
+    // beside it, which is why this is a second Text and not a hand-computed
+    // list of rectangles (a rectangle list would be a second wrap engine, and
+    // the two would disagree the first time a word did not fit). Empty when no
+    // band colour is set, so an item that never used the control draws nothing.
+    function lineBandText(text, color, textCase) {
+        const hex = String(color === undefined || color === null ? "" : color).trim()
+        if (hex === "" || hex === "transparent")
+            return ""
+        const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        return root.applyTextCase(text, textCase)
+            .split("\n")
+            .map((line) => '<span style="background-color:' + hex + '">' + escape(line) + "</span>")
+            .join("<br/>")
+    }
+
+    // ---- line boxes, for a ROUNDED per-line band -------------------------
+    // FreeShow's `lineRadius` needs one rounded rectangle per line, and QML's
+    // rich text can band a line but not round it. These boxes are those lines:
+    // a greedy word wrap measured with the SAME font the label draws, so the
+    // rectangles land on the words Qt wrapped. `maxWidth` is the label's own
+    // content width; a line whose text already fits is its own line.
+    //
+    // Only the ROUNDED path uses this. The default (radius 0) band is painted by
+    // Qt's own rich-text fragment backgrounds and never asks these questions.
+    property var _lineMetrics: null
+    function lineBoxes(text, maxWidth, font, caseMode) {
+        if (!(maxWidth > 0))
+            return []
+        if (!root._lineMetrics) {
+            // A measurer that cannot be created must not take the band with it:
+            // returning no boxes makes the caller fall back to the rich-text
+            // band (square corners) rather than to no band at all.
+            try {
+                root._lineMetrics = Qt.createQmlObject('import QtQuick; TextMetrics { }', root, "lineBoxMetrics")
+            } catch (e) {
+                console.warn("MetadataFields: no TextMetrics for rounded line bands — " + e)
+                return []
+            }
+        }
+        const m = root._lineMetrics
+        m.font = font
+        const advance = function (t) {
+            m.text = t
+            return m.advanceWidth
+        }
+        const s = root.applyTextCase(text === undefined || text === null ? "" : text, caseMode)
+        const lines = []
+        // Paragraphs are hard breaks; only the text inside one is wrapped.
+        for (const para of s.split("\n")) {
+            let current = ""
+            const tokens = para.match(/\s+|\S+/g) || []
+            for (const token of tokens) {
+                const candidate = current + token
+                if (current !== "" && advance(candidate) > maxWidth) {
+                    lines.push(current.replace(/\s+$/, ""))
+                    current = /^\s+$/.test(token) ? "" : token
+                } else {
+                    current = candidate
+                }
+            }
+            lines.push(current.replace(/\s+$/, ""))
+        }
+        const out = []
+        for (const line of lines)
+            out.push({ text: line, width: advance(line) })
+        return out
+    }
+
+    // The band's corner radius (FreeShow's lineRadius): 0 = square corners, the
+    // rich-text path. Neutral 0, so an item that never named it is unchanged.
+    readonly property real naturalLineRadius: 0
+    function lineRadius(meta) {
+        const v = meta ? meta.lineRadius : undefined
+        const n = Number(v)
+        return (v === undefined || v === null || isNaN(n) || n <= 0) ? root.naturalLineRadius : n
+    }
+
+    // "Text on one line": the canvas draws the item with Text.NoWrap, and the
+    // engine folds the content's newlines to spaces before laying it out. One
+    // reading of the flag, so no surface can honour it differently.
+    function oneLine(meta) {
+        return meta ? meta.oneLine === true : false
+    }
 }

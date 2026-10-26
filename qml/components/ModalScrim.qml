@@ -30,21 +30,32 @@ Rectangle {
 
     signal dismissed()
 
+    // A BLUR NEEDS A SHADER-CAPABLE SCENE GRAPH. MultiEffect is a ShaderEffect:
+    // on a machine whose Qt Quick runs the SOFTWARE backend it paints nothing,
+    // and because the blur is what the scrim's own dim was handed over to, the
+    // backdrop came out at 32% instead of 60% — a modal that no longer read as
+    // modal. Where the blur cannot run, this falls back to the SAME flat 60%
+    // scrim every other dialog in the app uses: no blur, unchanged contrast, on
+    // any backend. (api Unknown = the scene graph has not decided yet; leave the
+    // blur alone then.)
+    readonly property bool canBlur: GraphicsInfo.api !== GraphicsInfo.Software
+    readonly property bool blurActive: root.blurSource !== null && root.canBlur
+
     anchors.fill: parent
     // Dark enough to read as a backdrop even over this app's own near-black panels, not just over a bright screen - 60% was
     // correct but close to invisible against a background already this dark.
     // Transparent instead when blurring: the MultiEffect + its own dim
     // Rectangle below become the backdrop, so this would otherwise paint
     // UNDER a blur that already covers the whole scrim for nothing.
-    color: root.blurSource !== null ? "transparent" : "#cc000000"
+    color: root.blurActive ? "transparent" : "#cc000000"
 
     // Live blur of whatever's behind this scrim — only built when a caller
     // actually sets blurSource, so every other dialog in the app pays
     // nothing for this.
     MultiEffect {
         anchors.fill: parent
-        visible: root.blurSource !== null
-        source: root.blurSource
+        visible: root.blurActive
+        source: root.blurActive ? root.blurSource : null
         autoPaddingEnabled: false
         blurEnabled: true
         blurMax: 48
@@ -54,7 +65,7 @@ Rectangle {
     // itself already separates the dialog from the page, so less darkening
     // reads as modal without flattening the blur to near-black.
     Rectangle {
-        visible: root.blurSource !== null
+        visible: root.blurActive
         anchors.fill: parent
         color: "#80000000"
     }

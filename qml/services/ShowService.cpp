@@ -931,6 +931,14 @@ bool ShowService::updateSlide(const QString &id, const QVariantMap &patch)
             else merged.tags.front() = str("tag");
         }
         if (has("background")) merged.background = str("background");
+        // Slide-wide filters (the SLIDE tab's Filters card): one map of the
+        // seven values, read through the same converter a whole slide uses so
+        // the two doors can never disagree about a key's name or default. A key
+        // the patch leaves out keeps what the engine already had? No — the map
+        // IS the whole filter set (the panel always sends all seven), and the
+        // identity defaults make a partial map safe either way.
+        if (has("filters"))
+            ShowConverter::applyFilters(merged, patch.value(QStringLiteral("filters")).toMap());
         if (has("categoryId")) merged.categoryId = str("categoryId");
         if (has("nextTimer")) merged.durationMs = std::clamp(patch.value(QStringLiteral("nextTimer")).toDouble(), 0.0, 3600.0) * 1000.0;
         if (has("blocks")) {

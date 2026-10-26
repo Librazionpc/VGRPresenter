@@ -87,7 +87,6 @@ Rectangle {
             blocks: root.previewItems || []
             background: root.previewBackground
             now: ticker.now
-            checkerSize: 32
         }
 
         // A slide with nothing on it yet (over the background, so it reads on a colour or the checkerboard alike).

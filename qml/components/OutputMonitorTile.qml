@@ -385,9 +385,11 @@ Rectangle {
             // painting, so the tile shows the same "no picture" texture it shows
             // for an empty frame, instead of the style backdrop.
             visible: root.blacked || root.onAirSlide.frameTransparent === true
-            tileSize: 9
-            shadeA: "#3a3c48"
-            shadeB: "#25262f"
+            // NO local shades or cell size: this used to paint two OPAQUE greys
+            // (#3a3c48 / #25262f) at 9px, which made the tile's board a solid
+            // pattern of boxes while every other surface showed the app's faint
+            // one-half-transparent board — the same slide reading two ways. It
+            // is the shared board now, FreeShow's own values, like the previews.
         }
 
         // The style's background IMAGE above the colour, under the content —
@@ -485,6 +487,150 @@ Rectangle {
             }
         }
 
+        // ---- AUDIO CENTRE PREVIEW --------------------------------------
+        // An audio file has no picture, so the tile used to show whatever the
+        // slide's own text blocks happened to say (the file's PATH, wrapping
+        // across the frame) over an empty background — the operator's whole
+        // read of "is the music running" was a file path. This is the centre
+        // preview for audio, the way a media player shows a track that has no
+        // artwork: the file's NAME, one big play/pause, and the scrubber with
+        // elapsed / total underneath. It is drawn only while audio is what's
+        // on the wall (mediaIsAudio), so a slide, a video or a taken camera
+        // never grows a track card.
+        Item {
+            id: audioCentre
+            objectName: "selfTestTileAudioCentre"
+            anchors.fill: parent
+            // Above every sibling layer: the slide the engine builds for a
+            // taken audio file still carries the file's PATH as a text block,
+            // and that block is what used to be the whole "audio" preview.
+            // The card is the honest picture of a track, so it must not sit
+            // under the path it replaces.
+            z: 50
+            visible: root.mediaOnAir && LiveOutputService.mediaIsAudio && !root.blacked
+
+            readonly property bool playing: LiveOutputService.mediaState === "playing"
+            readonly property real progress: LiveOutputService.mediaDuration > 0
+                ? Math.max(0, Math.min(1, LiveOutputService.mediaPosition / LiveOutputService.mediaDuration))
+                : 0
+
+            // A quiet wash so the card reads over a checkerboard or a style
+            // background without pretending to be video.
+            Rectangle {
+                anchors.fill: parent
+                // Near-solid on purpose: it covers the slide's file-path text
+                // block, which must not read through the track card.
+                color: Qt.alpha(Theme.panelBg, 0.94)
+            }
+
+            Column {
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 40, 300)
+                spacing: 8
+
+                IconGlyph {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    name: "audio"
+                    color: Theme.textSecondary
+                    width: 40; height: 40; fit: true
+                    strokeWidth: 1.4
+                }
+
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideMiddle
+                    maximumLineCount: 2
+                    wrapMode: Text.Wrap
+                    text: LiveOutputService.mediaName
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 13
+                    font.weight: Font.Medium
+                }
+
+                // One big control — play/pause is the only thing a person
+                // reaches for on a track card.
+                Item {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 40; height: 40
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: width / 2
+                        color: Qt.alpha(Theme.accent, playHover.hovered ? 0.22 : 0.14)
+                        border.width: 1
+                        border.color: Qt.alpha(Theme.accent, 0.35)
+                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                    }
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: LiveOutputService.mediaState === "playing" ? "pause" : "play"
+                        color: Theme.textPrimary
+                        width: 16; height: 16; fit: true
+                    }
+                    HoverHandler { id: playHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: LiveOutputService.mediaTogglePlay() }
+                }
+
+                // Scrubber + both times, the same read as the toolbar's own
+                // audio strip under the wall (anchors, not fixed widths, so
+                // the track is whatever the two time labels leave).
+                Item {
+                    width: parent.width
+                    height: 14
+
+                    Text {
+                        id: tileElapsed
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: LiveOutputService.formatMediaTime(LiveOutputService.mediaPosition)
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 10
+                    }
+                    Text {
+                        id: tileTotal
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: LiveOutputService.formatMediaTime(LiveOutputService.mediaDuration)
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 10
+                    }
+                    Item {
+                        id: tileSeek
+                        anchors.left: tileElapsed.right
+                        anchors.right: tileTotal.left
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 14
+                        function seekTo(x) {
+                            if (tileSeek.width <= 0) return
+                            LiveOutputService.mediaSeek(Math.max(0, Math.min(1, x / tileSeek.width)))
+                        }
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width; height: 3; radius: 1.5
+                            color: Theme.chip
+                        }
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width * audioCentre.progress
+                            height: 3; radius: 1.5
+                            color: Theme.accent
+                        }
+                        TapHandler {
+                            onTapped: function (point) { tileSeek.seekTo(point.position.x) }
+                        }
+                        DragHandler {
+                            onCentroidChanged: if (active) tileSeek.seekTo(centroid.position.x)
+                        }
+                    }
+                }
+            }
+        }
+
         // MEDIA-ON-AIR IS NOT DRAWN HERE ANY MORE. The tile used to paint its
         // own copy of the taken file's frames from image://mediaplay (the
         // service's decoder), while every real output got theirs from the
@@ -523,6 +669,11 @@ Rectangle {
             objectName: "selfTestTileDesignPreview"
             anchors.fill: parent
             visible: !root.blacked && root.hasSlidePreview && !root.framePriority
+            // THE READING STEP SLIDES HERE: this IS the picture of what Alt+Down
+            // just re-staged (a text slide draws block-true, on air as well as
+            // staged), so the words travel one line and settle instead of the
+            // tile cutting to the next line on the key press.
+            animateLineSteps: true
             // This IS on-air content, never a template/library card — a
             // bound field with nothing to show renders blank, not the raw
             // "{bind}" placeholder syntax (go-live-with-nothing bakes in

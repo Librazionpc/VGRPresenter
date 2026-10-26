@@ -97,6 +97,15 @@ public:
     float RotationRad() const { return rotationRad_; }
     void SetRotationRad(float r) { rotationRad_ = r; }
 
+    // HOW THIS OBJECT COMPOSITES onto the pixels already in the frame — the
+    // Edit screen's MEDIA tab "Blend mode". The default is Alpha, so an object
+    // that never asked for a blend draws exactly as it always did; the
+    // rasterizer reads this out of the DrawCommand the object produces, which
+    // is why a media item's Screen/Multiply is a property of the OBJECT and not
+    // of one draw call.
+    BlendMode Blend() const { return blend_; }
+    void SetBlendMode(BlendMode b) { blend_ = b; }
+
     const std::string& LayerId() const { return layerId_; }
     void SetLayer(std::string layerId) { layerId_ = std::move(layerId); }
 
@@ -131,6 +140,7 @@ protected:
     Color tint_{1, 1, 1, 1};
     float opacity_ = 1.0f;
     float rotationRad_ = 0.0f;
+    BlendMode blend_ = BlendMode::Alpha;
     bool visible_ = true;
     std::string layerId_;
     std::vector<std::shared_ptr<Component>> components_;
@@ -150,8 +160,42 @@ public:
     void SetText(std::string t) { text_ = std::move(t); }
     // TextStyleComponent is set via AddComponent (defined in TextEngine.hpp).
 
+    // ---- THE READING FLOW (see SceneBuilder::ApplyReadingFlow) -------------
+    //
+    // A block whose words were cut out of a LONGER passage: its box is a
+    // VIEWPORT onto one continuous layout of Text(), and `flowPageLines_` is
+    // how many visual lines one page of that passage takes (the size the fit
+    // solver was measured against). 0 = an ordinary text object: nothing clips,
+    // nothing scrolls, and its drawing is byte-for-byte what it always was.
+    //
+    // WHY IT LIVES ON THE OBJECT. The reading step (Alt+Down / Alt+Up) can only
+    // scroll if the lines arriving from below EXIST in the layout — a block that
+    // holds just the page has nothing to show under its last line, so every
+    // earlier attempt cut a fresh window of text per press. That re-ran the fit
+    // solver, so the type size and the wrapping changed while the words were
+    // supposed to travel (the reported "it scrolls then snaps" and "it messed
+    // with the template"): one layout, one size, one offset into it is the only
+    // shape that scrolls. The offset itself is per-frame (RenderOptions), not
+    // part of this object — a scene is built once and rasterised by every
+    // output's pass.
+    // `pageLines` is how many visual lines ONE page of the passage takes — the
+    // layout the fit solver sized the box against, which is what the block's own
+    // vertical alignment has to keep using (the box holds a page, not a book).
+    // `scrollLines` is where the passage RESTS: the scene's own answer, used
+    // whenever no scroll is moving, so a rebuild (a new page, a style change)
+    // lands at exactly the offset the last step asked for.
+    void SetReadingFlow(int pageLines, float scrollLines) {
+        flowPageLines_ = pageLines > 0 ? pageLines : 0;
+        flowScroll_ = scrollLines;
+    }
+    bool HasReadingFlow() const { return flowPageLines_ > 0; }
+    int FlowPageLines() const { return flowPageLines_; }
+    float FlowScrollLines() const { return flowScroll_; }
+
 private:
     std::string text_;
+    int flowPageLines_ = 0;
+    float flowScroll_ = 0.0f;
 };
 
 class ImageObject final : public RenderObject {

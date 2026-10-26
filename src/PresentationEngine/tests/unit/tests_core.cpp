@@ -833,6 +833,33 @@ void TestPal() {
     CHECK(fs.Write(dir + "/nested/deep/leaf.txt", "x").ok());
     auto found = fs.FindFiles(dir, ".txt");
     CHECK(found.ok() && found.value().size() >= 1);
+
+    // A name outside ASCII must survive the WHOLE save path: write, read back,
+    // atomic swap, enumerating it back, rename. The Windows PAL used to hand
+    // these to the OS as narrow bytes, so the name was mangled one character
+    // per byte ("WE’LL …" was stored as "WEâ€™LL …") and the rename that
+    // publishes a save failed with ERROR_IO_DEVICE — every non-ASCII title of a
+    // 1144-show ProPresenter import stayed behind as a .vgr.tmp (engine.log,
+    // 2026-10-24).
+    const std::string unicodeName = dir + "/WE\xE2\x80\x99LL TALK IT OVER.vgr";
+    CHECK(fs.Write(unicodeName, "lyrics").ok());
+    CHECK(fs.Exists(unicodeName));
+    auto unicodeText = fs.ReadText(unicodeName);
+    CHECK(unicodeText.ok() && unicodeText.value() == "lyrics");
+    CHECK(fs.WriteAtomic(unicodeName, "lyrics v2").ok());
+    CHECK(fs.ReadText(unicodeName).value() == "lyrics v2");
+    // Enumerate reads the name back OFF THE DISK: a mangled write shows up here
+    // even if every read by the requested path still worked.
+    auto unicodeEntries = fs.Enumerate(dir);
+    bool listedOnDisk = false;
+    if (unicodeEntries.ok())
+        for (const std::string& entry : unicodeEntries.value())
+            listedOnDisk = listedOnDisk || entry.find("WE\xE2\x80\x99LL TALK IT OVER.vgr") != std::string::npos;
+    CHECK(listedOnDisk);
+    const std::string unicodeMoved = dir + "/DON\xE2\x80\x99T PUT OFF TILL TOMORROW.vgr";
+    CHECK(fs.Rename(unicodeName, unicodeMoved).ok());
+    CHECK(!fs.Exists(unicodeName) && fs.Exists(unicodeMoved));
+
     CHECK(fs.RemoveAll(dir).ok());
     CHECK(!fs.Exists(dir));
     CHECK(!fs.ReadText("/nonexistent/x").ok());

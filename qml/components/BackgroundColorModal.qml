@@ -2,9 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// Reusable color/gradient palette + picker: solid swatches, gradient
-// swatches, a custom hex field, a custom from/to gradient builder, a live
-// preview, and Apply/Cancel. Matches
+// Reusable color/gradient palette + picker, laid out the way FreeShow's own
+// colour popup is (its inputs/MaterialColorInput.svelte): a Normal / Gradient
+// TAB pair above the swatches, the palette itself, the Opacity of the pick, and
+// one "Choose custom" door to a colour outside the grid — one mode visible at a
+// time, instead of both palettes and both custom builders stacked in a column.
+// Selecting stays explicit here (Apply/Cancel), because this dialog edits
+// persisted slide/item state that is undoable; FreeShow's inline popup commits
+// on the swatch click because its values are already live. Matches
 // 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Background_Color.qml's
 // bg_modal_dim/bg_modal_card popup, which ships only as a flat PNG in the
 // ground truth export (no element-level QML to copy) — rebuilt here as real
@@ -53,6 +58,12 @@ Item {
     property int hotkeyScope: 0
     function accept() { root.applied(root.withOpacity(root.selection)) }
     onOpenChanged: {
+        if (root.open) {
+            // Open on the palette that matches what is being edited, with the
+            // custom field folded away — the compact starting state.
+            root.paletteTab = root.selection.kind === "gradient" ? 1 : 0
+            root.showCustomColor = false
+        }
         if (root.open && root.hotkeyScope === 0) {
             root.hotkeyScope = Hotkeys.open({
                 name: qsTr("Background colour"),
@@ -89,9 +100,15 @@ Item {
     // translucent preset can only render as checkerboard + faint tint, which reads
     // as a broken swatch. Opacity comes from the slider (or a typed alpha hex in
     // CUSTOM), never from a hardcoded #AARRGGBB entry here.
+    // FreeShow's own default palette (its helpers/color.ts `defaultColors`),
+    // minus nothing, plus Transparent first: that is the grid an operator
+    // already knows from FreeShow, and five columns is exactly its row length.
     property var colorSwatches: [
-        root.transparentValue, "#ffffff", "#000000", "#e74c3c", "#f39c12", "#f1c40f",
-        "#2ecc71", "#14b8a6", "#3b82f6", "#8b5cf6", "#6b7280"
+        root.transparentValue,
+        "#ffffff", "#d4d4d4", "#9ca3af", "#ef4444", "#facc15",
+        "#22c55e", "#00e676", "#4c8f6b", "#22d3ee", "#7dd3fc",
+        "#2563eb", "#0b2a6b", "#a21caf", "#e11d8f", "#6b1033",
+        "#000000"
     ]
     property var gradientSwatches: [
         { name: "Gradient #1", subtitle: "Purple → Blue", from: "#8b5cf6", to: "#3b82f6" },
@@ -106,6 +123,15 @@ Item {
     property string customHex: "#1B2440"
     property string customGradFrom: "#3b82f6"
     property string customGradTo: "#8b5cf6"
+
+    // Which palette tab is open — FreeShow's `normal` / `gradient` pair (see its
+    // inputs/MaterialColorInput.svelte Tabs). Seeded from the value being
+    // edited when the dialog opens, so a gradient reopens on its own swatches.
+    property int paletteTab: 0
+    // "Choose custom" reveals the hex entry. FreeShow hands off to its own
+    // picker popup there; this dialog has no colour wheel, so the field IS the
+    // custom door and stays hidden until it is asked for.
+    property bool showCustomColor: false
 
     // "" | "color" | "gradient" — while non-empty, the preview/Apply follow
     // whatever is currently typed in the CUSTOM fields directly instead of
@@ -457,117 +483,73 @@ Item {
                 width: flick.width
                 spacing: 18
 
-                Text {
-                    width: parent.width
-                    text: qsTr("Pick a color or gradient for the slide background")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 13
-                    wrapMode: Text.Wrap
-                }
-
-            // Current-selection preview.
-            Rectangle {
-                width: parent.width
-                height: 64
-                radius: 10
-                color: Theme.inset
-                border.color: Theme.borderSubtle
-                border.width: 1
-
+                // FreeShow's palette tabs (its MaterialColorInput: a `normal` /
+                // `gradient` Tabs pair directly above the swatches). Same two
+                // modes, one panel each — instead of stacking BOTH palettes plus
+                // both custom builders in one long column, which is what made
+                // this dialog read as three screens' worth of colour controls.
                 Row {
-                    anchors.left: parent.left
-                    anchors.leftMargin: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 12
+                    width: parent.width
+                    spacing: 22
 
-                    // Checkerboard backing + the swatch on top. The
-                    // checkerboard stays useful for a colour carrying its OWN
-                    // transparency: a typed alpha hex (#80ffffff), the opacity
-                    // slider's result, or a tint a document already used.
-                    Item {
-                        width: 36
-                        height: 36
-                        anchors.verticalCenter: parent.verticalCenter
+                    Repeater {
+                        model: [
+                            { label: qsTr("Normal"), icon: "image", tab: 0 },
+                            { label: qsTr("Gradient"), icon: "blend", tab: 1 }
+                        ]
+                        delegate: Item {
+                            id: tabItem
+                            required property var modelData
+                            readonly property bool active: root.paletteTab === tabItem.modelData.tab
 
-                        Rectangle {
-                            id: previewChecker
-                            anchors.fill: parent
-                            radius: 8
-                            clip: true
-                            color: Theme.inset
+                            width: tabRow.implicitWidth
+                            height: 34
 
-                            Grid {
-                                columns: 6
-                                rows: 6
-                                Repeater {
-                                    model: 36
-                                    delegate: Rectangle {
-                                        required property int index
-                                        width: 6
-                                        height: 6
-                                        color: (Math.floor(index / 6) + (index % 6)) % 2 === 0 ? Theme.borderSubtle : Theme.surface
-                                    }
+                            Row {
+                                id: tabRow
+                                y: 6
+                                spacing: 7
+
+                                IconGlyph {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    name: tabItem.modelData.icon
+                                    color: tabItem.active ? Theme.textPrimary : Theme.textMuted
+                                    width: 14; height: 14
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: tabItem.modelData.label
+                                    color: tabItem.active ? Theme.textPrimary : Theme.textMuted
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: 13
+                                    font.weight: tabItem.active ? Font.DemiBold : Font.Medium
                                 }
                             }
-                        }
 
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 8
-                            border.color: Theme.accent
-                            border.width: 1.5
-                            color: root.selection.kind === "color" && root.selection.color !== root.transparentValue
-                                   ? root.fadedColor(root.selection.color) : "transparent"
-                            gradient: root.selection.kind === "gradient" ? gradPreview : null
-
-                            Gradient {
-                                id: gradPreview
-                                GradientStop { position: 0; color: root.fadedColor(root.selection.kind === "gradient" ? root.selection.from : root.selection.color) }
-                                GradientStop { position: 1; color: root.fadedColor(root.selection.kind === "gradient" ? root.selection.to : root.selection.color) }
+                            // The accent underline marks the open tab — the same
+                            // language the app's own tab bars use.
+                            Rectangle {
+                                anchors.bottom: parent.bottom
+                                width: parent.width
+                                height: 2
+                                radius: 1
+                                color: tabItem.active ? Theme.accent : "transparent"
                             }
-                        }
-                    }
 
-                    Column {
-                        spacing: 2
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        Text {
-                            text: {
-                                if (root.selection.kind === "gradient")
-                                    return root.selection.name
-                                if (root.selection.color === root.transparentValue)
-                                    return qsTr("Transparent")
-                                return Qt.color(root.selection.color).a < 1 ? qsTr("Tint") : qsTr("Custom color")
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.paletteTab = tabItem.modelData.tab
                             }
-                            color: Theme.textPrimary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 15
-                            font.weight: Font.Medium
-                        }
-                        Text {
-                            text: root.selection.kind === "gradient" ? root.selection.subtitle : root.selection.color
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 12
                         }
                     }
                 }
-            }
 
-            // COLORS
+            // NORMAL — the palette itself.
             Column {
                 width: parent.width
                 spacing: 8
-
-                Text {
-                    text: qsTr("COLORS")
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 10
-                    font.weight: Font.Bold
-                }
+                visible: root.paletteTab === 0
 
                 Grid {
                     columns: 5
@@ -656,6 +638,43 @@ Item {
                 }
             }
 
+            // CHOOSE CUSTOM — FreeShow's one button under its palette, opening
+            // the custom picker. Ours reveals the hex field below (there is no
+            // native colour wheel to hand off to), already focused so typing a
+            // hex works on the first keystroke.
+            Rectangle {
+                objectName: "chooseCustomColor"
+                width: parent.width
+                height: 44
+                radius: 8
+                visible: root.paletteTab === 0
+                color: chooseCustomArea.containsMouse ? Theme.controlBg : Theme.inset
+                border.color: Theme.border
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                Text {
+                    anchors.centerIn: parent
+                    text: qsTr("Choose custom")
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 14
+                    font.weight: Font.Medium
+                }
+
+                MouseArea {
+                    id: chooseCustomArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        root.showCustomColor = !root.showCustomColor
+                        if (root.showCustomColor)
+                            hexInput.forceActiveFocus()
+                    }
+                }
+            }
+
             // OPACITY - the alpha of whatever is picked (colour or gradient); 100% = as chosen.
             // GREYED OUT on the Transparent swatch: see opacityApplies. The row
             // keeps its place in the layout (nothing moves when the pick
@@ -674,18 +693,12 @@ Item {
                 opacity: root.opacityApplies ? 1 : 0.45
             }
 
-            // GRADIENTS
+            // GRADIENT tab — the preset gradients, then the custom from/to
+            // builder that used to sit at the very bottom of the dialog.
             Column {
                 width: parent.width
                 spacing: 8
-
-                Text {
-                    text: qsTr("GRADIENTS")
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 10
-                    font.weight: Font.Bold
-                }
+                visible: root.paletteTab === 1
 
                 // Flow (not Row) so it wraps onto further lines instead of
                 // overflowing the card as custom gradients get added below.
@@ -712,19 +725,13 @@ Item {
                 }
             }
 
-            // CUSTOM hex entry — committing (Enter/losing focus) both
-            // selects this color and, if it's new, adds it to COLORS above.
+            // CUSTOM hex entry — revealed by "Choose custom" above; committing
+            // (Enter/losing focus) both selects this colour and, if it's new,
+            // adds it to the palette.
             Column {
                 width: parent.width
                 spacing: 8
-
-                Text {
-                    text: qsTr("CUSTOM COLOR")
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 10
-                    font.weight: Font.Bold
-                }
+                visible: root.paletteTab === 0 && root.showCustomColor
 
                 Rectangle {
                     width: parent.width
@@ -779,20 +786,13 @@ Item {
             }
 
             // CUSTOM GRADIENT builder — two hex fields (from/to); committing
-            // either one both selects this gradient and, if it's new, adds
-            // it to GRADIENTS above. Same create-on-commit idea as the
-            // custom color field.
+            // either one both selects this gradient and, if it's new, adds it
+            // to the presets above. Same create-on-commit idea as the custom
+            // colour field.
             Column {
                 width: parent.width
                 spacing: 8
-
-                Text {
-                    text: qsTr("CUSTOM GRADIENT")
-                    color: Theme.textMuted
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 10
-                    font.weight: Font.Bold
-                }
+                visible: root.paletteTab === 1
 
                 Rectangle {
                     width: parent.width

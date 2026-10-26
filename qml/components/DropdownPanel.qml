@@ -16,6 +16,16 @@ import VGRPresenterUI
 // behavior every existing menu relies on) caps the panel's height — past
 // the cap the item list becomes a Flickable with an AppScrollBar, so a long
 // option list (a device picker) scrolls instead of running off-screen.
+// That bar is PINNED (`scrollBarPinned`, default true): it draws whenever the
+// list overflows, instead of only while the wheel is moving — the FreeShow font
+// picker's always-there rounded thumb, which is what a long alphabetical list
+// needs to read as "there is more below". Short lists show no bar at all
+// (AppScrollBar's own `visible: scrollable`).
+//
+// FONT SAMPLE ROWS: a row may carry `fontFamily` — its label is then drawn in
+// that family, so the font-family picker previews each face instead of listing
+// names in one typeface — and `accent: true`, which paints the row's label in
+// the accent and tints its ground (the currently-chosen entry).
 //
 // WINDOW-RESPONSIVE: the cap is only an UPPER bound — the panel also fits
 // itself to the room it actually has. `openAt` measures the `bounds` rect
@@ -48,6 +58,9 @@ Rectangle {
     // item list into a scrollable Flickable (see header comment). The room
     // the panel was opened into caps it further (effMaxHeight).
     property int maxHeight: 0
+    // Keep the list's scroll bar on screen whenever the list overflows (see
+    // header comment). False restores AppScrollBar's own fade-out-on-idle.
+    property bool scrollBarPinned: true
 
     // ---- measured open geometry (see _reposition) ---------------------------
     // The rect the panel was opened into (the window, or a dialog a field
@@ -107,10 +120,19 @@ Rectangle {
     // menu keeps its row hover. Emits blockersChanged so the surfaces it
     // covers settle at once, even under a stationary pointer.
     onVisibleChanged: {
-        if (root.visible)
+        if (root.visible) {
             AppCursor.pushBlocker(root)
-        else
+            // Every menu opens at its FIRST row. `contentY` is scroll residue
+            // from the previous time this panel was open — the panel object is
+            // reused, and a long list (the font-family picker is the one menu
+            // you scroll before picking) kept its old offset, so reopening it
+            // started part-way down: "the scrollbar is not starting from the
+            // top". Reset on OPEN rather than on close, so a menu that is being
+            // dismissed keeps its place on screen while it goes away.
+            itemFlick.contentY = 0
+        } else {
             AppCursor.popBlocker(root)
+        }
     }
     Component.onDestruction: AppCursor.popBlocker(root)
 
@@ -349,6 +371,14 @@ Rectangle {
     // Matches Theme.space4 — see x/y note below.
     readonly property int insetPad: 16
 
+    // Per-instance overrides for a tighter row (the font-family picker's own
+    // ask: a long, font-sample-heavy list reads better packed closer than
+    // this component's normal menu row). -1 on either leaves EVERY existing
+    // consumer exactly as it was — insetPad and the fixed 34px row stay the
+    // default until a consumer opts in.
+    property real rowInset: -1
+    property real rowHeight: -1
+
     // Content-fit width (opt-in): the panel hugs its widest row — how a
     // native menu sizes itself — instead of the fixed 480 slab the menu
     // bar's dropdowns used to render as (a "Save  Ctrl+S" row floating in
@@ -578,7 +608,7 @@ Rectangle {
                                             + (typeof modelData !== "undefined" && modelData
                                                && modelData.label ? modelData.label : index)
                                 width: itemList.width
-                                height: 34
+                                height: root.rowHeight >= 0 ? root.rowHeight : 34
                                 // STALE-ROW GUARD — the click fix: a model
                                 // rebuild (autocomplete retyping, menu
                                 // re-opening) can leave a delegate clickable
@@ -600,7 +630,9 @@ Rectangle {
                                 color: alive && !modelData.disabled && root.highlightedIndex === index
                                        ? (modelData.danger ? Qt.alpha(Theme.danger, 0.14)
                                                            : Theme.border)
-                                       : ListRows.stripeOverlay(index)
+                                       : alive && modelData.accent === true
+                                           ? Qt.alpha(Theme.accent, 0.14)
+                                           : ListRows.stripeOverlay(index)
                                 Behavior on color {
                                     ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing }
                                 }
@@ -627,22 +659,27 @@ Rectangle {
                                 }
 
                                 Text {
-                                    x: root.insetPad
+                                    x: root.rowInset >= 0 ? root.rowInset : root.insetPad
                                     anchors.verticalCenter: parent.verticalCenter
                                     // Autocomplete labels elide, but only when they genuinely
                                     // don't fit: the label reserves the ACTUAL trailing-code
                                     // width ("51-0501"), not a flat 40% of the row — the flat
                                     // reserve truncated short titles long before the row edge
                                     // (user call: the dropdown must show the full name).
-                                    width: alive ? parent.width - root.insetPad
+                                    width: alive ? parent.width - (root.rowInset >= 0 ? root.rowInset : root.insetPad)
                                             - (modelData.trailing ? rowTrailing.implicitWidth + 26 : 0) - 8
                                                  : parent.width
                                     elide: Text.ElideRight
                                     text: alive ? modelData.label : ""
                                     color: alive ? (modelData.disabled ? Theme.textMuted
-                                        : modelData.danger ? Theme.dangerLight : Theme.textPrimary)
+                                        : modelData.danger ? Theme.dangerLight
+                                        : modelData.accent === true ? Theme.accent : Theme.textPrimary)
                                         : Theme.textMuted
-                                    font.family: Theme.fontFamily
+                                    // A row can preview its own typeface (the font-family
+                                    // picker) — see the header comment. Falls back to the
+                                    // app font for every ordinary menu row.
+                                    font.family: alive && modelData.fontFamily ? modelData.fontFamily
+                                                                              : Theme.fontFamily
                                     font.pixelSize: 15 // Theme.textMd
                                     font.weight: Font.Medium
                                 }
@@ -690,13 +727,21 @@ Rectangle {
             }
         }
 
-        // Auto-hides when the list doesn't overflow (AppScrollBar's own
-        // visible binding); sits in the panel's right padding strip.
+        // Hides when the list doesn't overflow (AppScrollBar's own `visible`
+        // binding) and, unless the consumer unpins it, STAYS on screen while it
+        // does — a thumb inset from the panel's right edge with no visible
+        // track, so the list reads as scrollable without a bar cut into it.
         AppScrollBar {
             flickable: itemFlick
-            x: root.width - width - 3
-            y: content.y + headerCol.height
-            height: itemFlick.height
+            autoHide: !root.scrollBarPinned
+            trackWidth: 6
+            // No track: on a menu the ground behind the thumb is already the
+            // list, and a second surface band down the edge read as a divider.
+            trackColor: "transparent"
+            thumbColor: Theme.dark ? "#4d5363" : "#b9bfcc"
+            x: root.width - width - 4
+            y: content.y + headerCol.height + 4
+            height: Math.max(0, itemFlick.height - 8)
             z: 1
         }
     }

@@ -125,6 +125,60 @@ void TestRenderBackends() {
         r::Color::Black().Pack(), r::Color::Red().Pack(), r::BlendMode::Additive);
     CHECK(r::Color::Unpack(out).r > 0.9f);
 
+    // THE CSS BLEND SET (the MEDIA tab's dropdown) composites against the
+    // destination, not just its alpha — the difference between a stored value
+    // and a mode the outputs actually draw.
+    // Screen: any source over black is the source itself.
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color::Black().Pack(), r::Color(0.4f, 0.6f, 0.8f, 1).Pack(), r::BlendMode::Screen);
+    CHECK(std::abs(r::Color::Unpack(out).r - 0.4f) < 0.02f);
+    CHECK(std::abs(r::Color::Unpack(out).b - 0.8f) < 0.02f);
+    // Screen over white is white, whatever the source.
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color::White().Pack(), r::Color::Black().Pack(), r::BlendMode::Screen);
+    CHECK(r::Color::Unpack(out).r > 0.98f);
+    // Overlay: a light source LIGHTENS the backdrop, a dark one darkens it.
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color(0.25f, 0.25f, 0.25f, 1).Pack(), r::Color(1, 1, 1, 1).Pack(),
+        r::BlendMode::Overlay);
+    CHECK(r::Color::Unpack(out).r > 0.45f);
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color(0.25f, 0.25f, 0.25f, 1).Pack(), r::Color::Black().Pack(),
+        r::BlendMode::Overlay);
+    CHECK(r::Color::Unpack(out).r < 0.1f);
+    // Difference: black − white and white − black are both pure white.
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color::White().Pack(), r::Color::Black().Pack(), r::BlendMode::Difference);
+    CHECK(r::Color::Unpack(out).r > 0.98f);
+    // The four non-separable modes are not per-channel: Luminosity keeps the
+    // backdrop's hue and takes the SOURCE's luminance — a mid-grey source on a
+    // red backdrop stays red (r still high) while the whole colour's luma is the
+    // source's 0.5 (g and b come down to ~0.29).
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color(1.0f, 0.0f, 0.0f, 1).Pack(), r::Color(0.5f, 0.5f, 0.5f, 1).Pack(),
+        r::BlendMode::Luminosity);
+    {
+        const r::Color lum = r::Color::Unpack(out);
+        CHECK(lum.r > 0.9f);
+        CHECK(lum.g > 0.2f && lum.g < 0.4f);
+    }
+    // A transparent source leaves the backdrop alone in every mode.
+    out = r::SoftwareGraphicsBackend::BlendPixel(
+        r::Color(0.3f, 0.3f, 0.3f, 1).Pack(), r::Color(1, 1, 1, 0.0f).Pack(),
+        r::BlendMode::Luminosity);
+    CHECK(std::abs(r::Color::Unpack(out).r - 0.3f) < 0.02f);
+
+    // The NAMES the MEDIA tab stores map onto those modes, and an unknown name
+    // draws normally rather than hiding the item.
+    CHECK(r::ParseBlendMode("soft-light") == r::BlendMode::SoftLight);
+    CHECK(r::ParseBlendMode("SoftLight") == r::BlendMode::SoftLight);
+    CHECK(r::ParseBlendMode("color-burn") == r::BlendMode::ColorBurn);
+    CHECK(r::ParseBlendMode("normal") == r::BlendMode::Alpha);
+    CHECK(r::ParseBlendMode("") == r::BlendMode::Alpha);
+    CHECK(r::ParseBlendMode("not-a-mode") == r::BlendMode::Alpha);
+    CHECK(std::string_view(r::BlendModeName(r::BlendMode::Luminosity)) == "luminosity");
+    CHECK(r::ParseBlendMode(r::BlendModeName(r::BlendMode::Hue)) == r::BlendMode::Hue);
+
     // Pixel effects: brightness (gray 0.5 × 2 → white).
     r::RgbaImage img;
     img.width = 2;
@@ -1757,9 +1811,19 @@ void TestD3D11Backend() {
     img->SetBounds(r::Rect(8, 8, 16, 16));   // scaled blit: 8x8 -> 16x16
     CHECK(engine.AddObject(sceneId, img, "img").ok());
 
-    auto text = std::make_shared<r::TextObject>("g_txt", "Title", "HELLO");
-    text->SetBounds(r::Rect(2, 40, 60, 20));
-    text->AddComponent(r::MakeTextStyle(r::TextStyle{}));
+    // Text through the glyph atlas, carrying the Lines card's two extras: a
+    // PER-LINE background band (one alpha-blended FillRect per laid-out line)
+    // and a line GAP (real layout, see TextLayout::Measure). Both matter here
+    // because the CPU rasterizer is the reference every machine WITHOUT a GPU
+    // falls back to — a band or a gap the GPU path drew differently (or only
+    // there) would be wrong on exactly the laptops this test protects.
+    auto text = std::make_shared<r::TextObject>("g_txt", "Title", "HI\nHI");
+    text->SetBounds(r::Rect(2, 34, 60, 26));
+    r::TextStyle textStyle;
+    textStyle.size = 12.0f;
+    textStyle.lineGap = 2.0f;
+    textStyle.lineBg = r::Color(1.0f, 0.6f, 0.1f, 0.7f);   // alpha, so the band blends
+    text->AddComponent(r::MakeTextStyle(textStyle));
     CHECK(engine.AddObject(sceneId, text, "txt").ok());
 
     auto shape = std::make_shared<r::ShapeObject>("g_shp", "Shape");
@@ -1983,6 +2047,24 @@ void TestD3D11StageFrame() {
         shape->SetRectangle(r::Color(1.0f, 0.85f, 0.2f, 0.75f));
         shape->SetBounds(scaled(60, 60, 420, 90));
         CHECK(engine.AddObject(id, shape, "img").ok());
+
+        // A BLENDED PICTURE — the Edit screen's MEDIA tab "Blend mode" on a
+        // media item. Screen is one of the modes a fixed-function blend state
+        // CANNOT express, so on the GPU it is computed per pixel against a copy
+        // of the frame underneath; if that path were missing (or wrong) the two
+        // rasterizers would disagree here instead of in a live session. The
+        // source is FLAT on purpose: filtering differences between the paths
+        // would mask the blend itself.
+        r::RgbaImage swatch;
+        swatch.width = 8;
+        swatch.height = 8;
+        swatch.pixels.assign(static_cast<size_t>(swatch.width) * swatch.height,
+                             r::Color(0.2f, 0.45f, 0.9f, 1.0f).Pack());
+        auto blended = std::make_shared<r::ImageObject>("s_blend", "Blended picture");
+        blended->SetImage(swatch, "stage-probe-blend");
+        blended->SetBounds(scaled(1200, 620, 620, 380));
+        blended->SetBlendMode(r::BlendMode::Screen);
+        CHECK(engine.AddObject(id, blended, "img").ok());
     };
 
     struct SizeCase { int w; int h; };
@@ -2076,6 +2158,27 @@ void TestD3D11StageFrame() {
         };
         CHECK(countNonBlack(soft.value()) > 0);
         CHECK(countWhite(soft.value()) > 0);      // the reference really has its text
+        // AND THE BLEND REALLY RAN. Screen over the dark backdrop is far
+        // lighter than the swatch itself, so a picture drawn with plain alpha
+        // (the "stored but ignored" behaviour this mode used to have, and what
+        // a missing blend pass would look like) fails right here — the parity
+        // comparison alone would still pass if BOTH sides ignored the mode.
+        {
+            // Same scale buildScene derived its own sx/sy from (c.w/c.h over the
+            // 1920x1080 grid) — that pair is local to buildScene's lambda body
+            // and out of scope here, at the outer per-size-case loop.
+            const float sx = static_cast<float>(c.w) / 1920.0f;
+            const float sy = static_cast<float>(c.h) / 1080.0f;
+            const int bx = static_cast<int>((1200.0f + 310.0f) * sx);
+            const int by = static_cast<int>((620.0f + 340.0f) * sy);
+            CHECK(bx >= 0 && by >= 0 && bx < soft.value().width && by < soft.value().height);
+            if (bx >= 0 && by >= 0 && bx < soft.value().width && by < soft.value().height) {
+                const r::Color px = r::Color::Unpack(
+                    soft.value().pixels[static_cast<size_t>(by) * soft.value().width + bx]);
+                CHECK(px.r > 0.6f);                       // 0.69 backdrop + 0.2 source, screened
+                CHECK(px.g > 0.45f && px.g < 0.65f);      // 0.19 + 0.45 screened
+            }
+        }
         compare(soft.value(), softAgain.value(), "software again");
         compare(soft.value(), firstFrame.value(), "gpu first");
         compare(soft.value(), frame.value(), "gpu second");
@@ -2234,4 +2337,89 @@ void TestFeedHealth() {
     CHECK(engine.RemoveOutput("feed-probe-fed").ok());
     CHECK(engine.RemoveOutput("feed-probe-cold").ok());
     CHECK(engine.RemoveOutput("feed-probe-off").ok());
+}
+
+// LINE SPACING (the Lines card's second field) + the PER-LINE background band.
+//
+// Two claims, both about the ENGINE side of a control whose other half is QML:
+// a gap between line boxes must be real LAYOUT (measured, not a paint-time
+// nudge), and a line band must paint one rectangle per laid-out line with the
+// gap left as clear air between them — the whole point of splitting the two
+// controls is that the band follows a line box while the gap stays empty.
+void TestLineSpacingAndLineBands() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    // --- 1. the gap is LAYOUT ---------------------------------------------
+    // Measure's per-line step and the block's total height both move by it;
+    // DrawTextObject steps by the measured lineStep, so a paint-time-only gap
+    // would have left these numbers untouched.
+    r::FontManager fonts;
+    fonts.RegisterBuiltin();
+    r::TextStyle plainStyle;
+    plainStyle.fontId = "builtin";
+    plainStyle.size = 20.0f;
+    plainStyle.wrap = false;
+    const auto plain = r::TextLayout::Measure("one\ntwo\nthree", plainStyle, fonts);
+    r::TextStyle gapped = plainStyle;
+    gapped.lineGap = 12.0f;
+    const auto spaced = r::TextLayout::Measure("one\ntwo\nthree", gapped, fonts);
+    CHECK(plain.lines.size() == 3);
+    CHECK(spaced.lines.size() == 3);
+    CHECK(std::abs((spaced.lineStep - plain.lineStep) - 12.0f) < 0.01f);
+    // three lines = TWO gaps of air
+    CHECK(std::abs((spaced.totalHeight - plain.totalHeight) - 24.0f) < 0.01f);
+
+    // --- 2. the band PAINTS, one per line, gap clear ----------------------
+    // Blank lines on purpose: spaces carry advance width but paint no ink, so
+    // every pixel inside a band is the band's own colour and no glyph can be
+    // mistaken for it.
+    const auto frame = [&](bool withBand, float radius = 0.0f) {
+        const std::string id = withBand ? (radius > 0.0f ? "lineBandRound" : "lineBandOn")
+                                        : "lineBandOff";
+        CHECK(engine.CreateScene(id, id, r::Size(80, 120)).ok());
+        CHECK(engine.AddLayer(id, r::Layer("t", "Text", r::LayerKind::Text, 1)).ok());
+        auto obj = std::make_shared<r::TextObject>("body", "Body", "    \n    \n    ");
+        obj->SetBounds(r::Rect(0, 0, 80, 120));
+        r::TextStyle ts;
+        ts.fontId = "builtin";
+        ts.size = 20.0f;
+        ts.color = r::Color::White();
+        ts.align = r::TextAlign::Left;
+        ts.valign = r::TextVAlign::Top;
+        ts.lineGap = 12.0f;
+        if (withBand) ts.lineBg = r::Color::Red();
+        ts.lineRadius = radius;
+        obj->AddComponent(r::MakeTextStyle(ts));
+        CHECK(engine.AddObject(id, obj, "t").ok());
+        auto fb = engine.RenderOffscreen(id, r::Size(80, 120));
+        CHECK(fb.ok());
+        CHECK(engine.DestroyScene(id).ok());
+        return fb.value();
+    };
+    const auto on = frame(true);
+    const auto off = frame(false);
+    const auto at = [](const r::RgbaImage& img, int x, int y) {
+        return r::Color::Unpack(img.pixels[static_cast<size_t>(y) * img.width + x]);
+    };
+    // First band: one line box, y 0..20.
+    CHECK(at(on, 4, 4).r > 0.9f);
+    CHECK(at(on, 4, 4).a > 0.9f);
+    // Second band starts AFTER the 12px gap: y 32..52.
+    CHECK(at(on, 4, 36).r > 0.9f);
+    // The gap is air, not band: y 20..32.
+    CHECK(at(on, 4, 26).r < 0.1f);
+    // And the same item without a band paints none of it.
+    CHECK(at(off, 4, 4).r < 0.1f);
+    CHECK(at(off, 4, 36).r < 0.1f);
+
+    // --- 3. a RADIUS rounds the band (FreeShow's lineRadius) --------------
+    // The band is 20px tall, so a radius of 10 is a stadium: the corner is cut
+    // away while the middle of the same band is still the band's own colour.
+    const auto round = frame(true, 10.0f);
+    CHECK(at(round, 4, 10).r > 0.9f);          // middle of the first band
+    CHECK(at(round, 0, 1).r < 0.1f);           // top-left corner, cut by the arc
+    CHECK(at(round, 0, 19).r < 0.1f);          // bottom-left corner too
+    CHECK(at(round, 2, 10).r > 0.9f);          // ...but the band's edge, mid-height
 }

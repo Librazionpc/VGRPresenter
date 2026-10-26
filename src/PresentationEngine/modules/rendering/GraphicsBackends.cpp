@@ -39,6 +39,116 @@ inline uint32_t ScaleAlpha(uint32_t px, float k) {
 
 } // namespace
 
+namespace {
+
+// ---- CSS blending (W3C "Compositing and Blending Level 1") -----------------
+// The MEDIA tab offers FreeShow's own blend list, whose names ARE the CSS ones,
+// so the rasterizer implements the specification formulas rather than an
+// approximation: a picture set to Overlay in the app must be Overlay on the
+// HDMI/NDI frame, because that is the only reason the control exists.
+//
+// Separable modes work channel by channel; the last four work on the whole
+// colour, through the spec's SetLum/SetSat/ClipColor trio — which is also why
+// they live in their own helpers instead of a switch full of inline maths.
+inline float BMultiply(float cb, float cs) { return cb * cs; }
+inline float BScreen(float cb, float cs) { return cb + cs - cb * cs; }
+inline float BOverlay(float cb, float cs) { return cb <= 0.5f ? 2.0f * cb * cs : 1.0f - 2.0f * (1.0f - cb) * (1.0f - cs); }
+inline float BHardLight(float cb, float cs) {
+    return cs <= 0.5f ? BMultiply(cb, 2.0f * cs) : BScreen(cb, 2.0f * cs - 1.0f);
+}
+inline float BSoftLight(float cb, float cs) {
+    const float d = cb <= 0.25f ? ((16.0f * cb - 12.0f) * cb + 4.0f) * cb : std::sqrt(cb);
+    return cs <= 0.5f ? cb - (1.0f - 2.0f * cs) * cb * (1.0f - cb)
+                      : cb + (2.0f * cs - 1.0f) * (d - cb);
+}
+inline float BDodge(float cb, float cs) {
+    if (cb <= 0.0f) return 0.0f;
+    if (cs >= 1.0f) return 1.0f;
+    return std::min(1.0f, cb / (1.0f - cs));
+}
+inline float BBurn(float cb, float cs) {
+    if (cb >= 1.0f) return 1.0f;
+    if (cs <= 0.0f) return 0.0f;
+    return 1.0f - std::min(1.0f, (1.0f - cb) / cs);
+}
+
+struct Rgb {
+    float r, g, b;
+};
+
+inline float Lum(const Rgb& c) { return 0.3f * c.r + 0.59f * c.g + 0.11f * c.b; }
+
+inline Rgb ClipColor(const Rgb& c) {
+    const float l = Lum(c);
+    float n = std::min(c.r, std::min(c.g, c.b));
+    float x = std::max(c.r, std::max(c.g, c.b));
+    Rgb out = c;
+    if (n < 0.0f) {
+        const float k = l - n;
+        if (k > 1e-6f) {
+            out.r = l + (out.r - l) * l / k;
+            out.g = l + (out.g - l) * l / k;
+            out.b = l + (out.b - l) * l / k;
+        } else {
+            out = {l, l, l};
+        }
+    }
+    if (x > 1.0f) {
+        const float k = x - l;
+        if (k > 1e-6f) {
+            out.r = l + (out.r - l) * (1.0f - l) / k;
+            out.g = l + (out.g - l) * (1.0f - l) / k;
+            out.b = l + (out.b - l) * (1.0f - l) / k;
+        }
+    }
+    return out;
+}
+
+inline Rgb SetLum(const Rgb& c, float l) {
+    const float d = l - Lum(c);
+    return ClipColor({c.r + d, c.g + d, c.b + d});
+}
+
+inline float Sat(const Rgb& c) { return std::max(c.r, std::max(c.g, c.b)) - std::min(c.r, std::min(c.g, c.b)); }
+
+inline Rgb SetSat(const Rgb& c, float s) {
+    const float v[3] = {c.r, c.g, c.b};
+    // Rank CHANNEL INDICES (0 smallest … 2 largest) and write the result back
+    // through those indices — sorting the values themselves would lose which
+    // channel each one belonged to.
+    int rank[3] = {0, 1, 2};
+    const auto swapR = [&rank](int a, int b) { const int t = rank[a]; rank[a] = rank[b]; rank[b] = t; };
+    if (v[rank[0]] > v[rank[1]]) swapR(0, 1);
+    if (v[rank[1]] > v[rank[2]]) swapR(1, 2);
+    if (v[rank[0]] > v[rank[1]]) swapR(0, 1);
+    float out[3] = {0.0f, 0.0f, 0.0f};
+    if (v[rank[2]] - v[rank[0]] > 1e-6f) {
+        out[rank[1]] = (v[rank[1]] - v[rank[0]]) * s / (v[rank[2]] - v[rank[0]]);
+        out[rank[2]] = s;
+    }
+    out[rank[0]] = 0.0f;
+    return {out[0], out[1], out[2]};
+}
+
+inline float SeparableBlend(BlendMode mode, float cb, float cs) {
+    switch (mode) {
+        case BlendMode::Multiply: return BMultiply(cb, cs);
+        case BlendMode::Screen: return BScreen(cb, cs);
+        case BlendMode::Overlay: return BOverlay(cb, cs);
+        case BlendMode::Darken: return std::min(cb, cs);
+        case BlendMode::Lighten: return std::max(cb, cs);
+        case BlendMode::ColorDodge: return BDodge(cb, cs);
+        case BlendMode::ColorBurn: return BBurn(cb, cs);
+        case BlendMode::HardLight: return BHardLight(cb, cs);
+        case BlendMode::SoftLight: return BSoftLight(cb, cs);
+        case BlendMode::Difference: return std::fabs(cb - cs);
+        case BlendMode::Exclusion: return cb + cs - 2.0f * cb * cs;
+        default: return cs;
+    }
+}
+
+} // namespace
+
 uint32_t SoftwareGraphicsBackend::BlendPixel(uint32_t dst, uint32_t src, BlendMode mode) {
     const float sa = static_cast<float>((src >> 24) & 0xFF) / 255.0f;
     const float da = static_cast<float>((dst >> 24) & 0xFF) / 255.0f;
@@ -50,29 +160,57 @@ uint32_t SoftwareGraphicsBackend::BlendPixel(uint32_t dst, uint32_t src, BlendMo
     const float db = static_cast<float>((dst >> 16) & 0xFF) / 255.0f;
 
     float or_, og, ob, oa;
-    switch (mode) {
-        case BlendMode::Additive:
-            or_ = dr + sr * sa;
-            og = dg + sg * sa;
-            ob = db + sb * sa;
-            oa = std::max(da, sa);
-            break;
-        case BlendMode::Multiply:
-            or_ = dr * (sr + (1.0f - sr) * (1.0f - sa));
-            og = dg * (sg + (1.0f - sg) * (1.0f - sa));
-            ob = db * (sb + (1.0f - sb) * (1.0f - sa));
-            oa = std::max(da, sa);
-            break;
-        case BlendMode::Alpha:
-        default: {
-            const float outA = sa + da * (1.0f - sa);
-            if (outA <= 0.0f) return 0;
-            or_ = (sr * sa + dr * da * (1.0f - sa)) / outA;
-            og = (sg * sa + dg * da * (1.0f - sa)) / outA;
-            ob = (sb * sa + db * da * (1.0f - sa)) / outA;
-            oa = outA;
-            break;
+    if (mode == BlendMode::Additive) {
+        or_ = dr + sr * sa;
+        og = dg + sg * sa;
+        ob = db + sb * sa;
+        oa = std::max(da, sa);
+    } else if (mode == BlendMode::Alpha) {
+        const float outA = sa + da * (1.0f - sa);
+        if (outA <= 0.0f) return 0;
+        or_ = (sr * sa + dr * da * (1.0f - sa)) / outA;
+        og = (sg * sa + dg * da * (1.0f - sa)) / outA;
+        ob = (sb * sa + db * da * (1.0f - sa)) / outA;
+        oa = outA;
+    } else {
+        // ONE compositing formula for every CSS mode, exactly the spec's:
+        //   co = as*(1-ab)*Cs + as*ab*B(Cb,Cs) + (1-as)*ab*Cb
+        //   ao = as + ab*(1-as)
+        // With `as` = 1 (an opaque picture, the normal case) it collapses to
+        // B(Cb, Cs); with a transparent source it leaves the frame alone.
+        const float ao = sa + da * (1.0f - sa);
+        if (ao <= 0.0f) return 0;
+        const Rgb cb{dr, dg, db};
+        const Rgb cs{sr, sg, sb};
+        // The four NON-separable modes work on the colour as a whole; every
+        // other one (including Normal, whose B() is the source colour) goes
+        // channel by channel.
+        Rgb blended;
+        switch (mode) {
+            case BlendMode::Hue:
+                blended = SetLum(SetSat(cs, Sat(cb)), Lum(cb));
+                break;
+            case BlendMode::Saturation:
+                blended = SetLum(SetSat(cb, Sat(cs)), Lum(cb));
+                break;
+            case BlendMode::Color:
+                blended = SetLum(cs, Lum(cb));
+                break;
+            case BlendMode::Luminosity:
+                blended = SetLum(cb, Lum(cs));
+                break;
+            default:
+                blended = {SeparableBlend(mode, dr, sr), SeparableBlend(mode, dg, sg),
+                           SeparableBlend(mode, db, sb)};
+                break;
         }
+        const auto mixChannel = [sa, da, ao](float srcC, float bl, float dstC) {
+            return (sa * (1.0f - da) * srcC + sa * da * bl + (1.0f - sa) * da * dstC) / ao;
+        };
+        or_ = mixChannel(sr, blended.r, dr);
+        og = mixChannel(sg, blended.g, dg);
+        ob = mixChannel(sb, blended.b, db);
+        oa = ao;
     }
     return Pack8(To8(or_), To8(og), To8(ob), To8(oa));
 }
@@ -568,15 +706,17 @@ void SoftwareGraphicsBackend::RasterizeShape(const DrawCommand& cmd) {
     if (cmd.color.a <= 0.0f) return;
     // A rounded rectangle takes the anti-aliased path; a square one (the
     // default, and every pre-radius caller) keeps the exact old fill.
+    // The command's OWN blend mode, like every other draw: a shape that carries a
+    // blend (an object with one set) composites the same way wherever it lands.
+    const auto mode = static_cast<BlendMode>(cmd.blend);
     if (cmd.cornerRadius >= 0.5f) {
         FillRoundedRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
                                static_cast<int>(r.width), static_cast<int>(r.height),
-                               cmd.cornerRadius, cmd.color, BlendMode::Alpha);
+                               cmd.cornerRadius, cmd.color, mode);
         return;
     }
     FillRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
-                    static_cast<int>(r.width), static_cast<int>(r.height), cmd.color,
-                    BlendMode::Alpha);
+                    static_cast<int>(r.width), static_cast<int>(r.height), cmd.color, mode);
 }
 
 } // namespace bps::rendering

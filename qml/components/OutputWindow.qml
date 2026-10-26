@@ -342,10 +342,11 @@ Window {
     Checkerboard {
         anchors.fill: parent
         visible: root.alphaInspect
-        // Bigger tiles than the in-app preview: this covers a whole physical
-        // screen, and the tile count is what costs (a 64px tile is ~1/16 the
-        // items of the 16px default at 1080p).
-        tileSize: 64
+        // THE SAME BOARD AS EVERYWHERE ELSE (FreeShow draws its one .checkered
+        // behind a full-screen output preview too). It was 64px cells here to
+        // "read faster" on a physical screen, which instead made the output's
+        // empty pixels look like a different product from the preview's; the
+        // board's own maxCells guard coarsens it if a 4K surface ever needs it.
     }
 
     // THE STYLE'S COLOUR — as the composition answered it. A take owns the frame
@@ -408,6 +409,13 @@ Window {
     DesignPreview {
         anchors.fill: parent
         visible: !root.blacked && root.hasSlidePreview && !root.framePriority
+        // THE READING STEP RIDES HERE TOO. This window is what a physical
+        // screen shows for a text slide (block-true, over the engine's frame),
+        // so it has to draw the same passage at the same offset as the engine's
+        // NDI/recording raster — otherwise the audience screen and the stream
+        // would scroll at two different points, which is the very split this
+        // step exists to remove.
+        animateLineSteps: true
         showBindPlaceholders: false
         showCheckerboard: false
         backgroundImage: root.onAirSlide.styleImagePainted === true

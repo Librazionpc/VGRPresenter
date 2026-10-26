@@ -228,7 +228,7 @@ Rectangle {
     // Leaving the TEXT tab closes its font dropdowns — an open menu
     // belonging to a tab you've left is exactly the "not tied to its
     // parent" class of bug.
-    onRightPanelTabChanged: { textFontMenu.visible = false; textFontFamilyMenu.visible = false }
+    onRightPanelTabChanged: { textFontMenu.visible = false; textFontFamilyMenu.visible = false; textAutoSizeMenu.visible = false; textCaseMenu.visible = false; borderStyleMenu.visible = false }
 
     // Background-color picker (see bgColorModal near the end of this file)
     // and the current selection it applies to the "Background" row's swatch.
@@ -291,7 +291,9 @@ Rectangle {
             borderWidth: old.borderWidth,
             borderStyle: old.borderStyle,
             backgroundColor: isBorder ? old.backgroundColor : hex,
-            borderColor: isBorder ? hex : old.borderColor
+            borderColor: isBorder ? hex : old.borderColor,
+            opacity: old.opacity,
+            mediaFit: old.mediaFit
         })
         if (!next)
             return false
@@ -350,11 +352,17 @@ Rectangle {
     UndoHistory {
         id: canvasHistory
         capture: function () {
-            return { items: slideStore.snapshotItems(), background: slideStore.current.background }
+            return { items: slideStore.snapshotItems(), background: slideStore.current.background,
+                     filters: slideStore.current.filters }
         }
         apply: function (snap) {
             slideStore.restoreItems(snap.items)
             slideStore.current.background = snap.background
+            // A snapshot taken before the filter set existed (or before a filter
+            // was dialled) has no filters key; the identity set is what such a
+            // slide actually had.
+            slideStore.current.filters = snap.filters !== undefined ? snap.filters
+                                                                   : slideStore.identityFilters()
         }
         // Restored items are fresh objects; keys survive restore, object
         // references don't — the selection is transient state referencing
@@ -376,36 +384,107 @@ Rectangle {
     // the panel's TextInput still owns focus, which native-edit behavior
     // would route into that field instead of the canvas history.
     //
-    // Safe to fire mid-text-edit too (the Shortcuts below explicitly stay
-    // enabled while root.anyTextEditing): canvasHistory.undo() ABANDONS the
-    // open session's pending push before touching the engine stack (see
-    // UndoHistory.abandonPending), so no junk command can be committed from
-    // the post-undo state when the interrupted session ends.
+    // One exception: when the slide LIST owns the keyboard, the focus stays
+    // there (see the guard at the end of each function). Undo is reachable
+    // from that focus too (an undo pressed right after switching slides is
+    // the common case), and yanking the keyboard to the canvas would make
+    // the list's own Ctrl+D / Del stop working the moment an undo ran.
     //
-    // Also resets the session bookkeeping explicitly: undo()'s apply()
-    // destroys and recreates the delegates, and a TextEdit destroyed
-    // mid-edit never emits onEditingChanged — so textUndoKey/anyTextEditing
-    // would stay stale (anyTextEditing stuck true; worse, a beginTextEdit on
-    // the SAME restored key early-returns and its typing would never be
-    // undoable). The pending snapshot was already dropped inside
-    // canvasHistory.undo(); this only clears the flags.
+    // Safe to fire mid-text-edit too (the Shortcuts below explicitly stay
+    // enabled while root.anyTextEditing): the typing session's own push is
+    // COMMITTED first, so the step Ctrl+Z lands on is the edit in progress —
+    // the whole reason those keys stay enabled while typing. It used to be
+    // ABANDONED instead (UndoHistory.undo's abandonPending), which dropped
+    // the pre-typing snapshot and made Ctrl+Z skip back over the edit to some
+    // older command: the text stayed exactly as typed and only the edit mode
+    // closed, which reads as "Ctrl+Z just escapes the item".
+    //
+    // Also resets the session bookkeeping explicitly: the apply() destroys and
+    // recreates the delegates, and a TextEdit destroyed mid-edit never emits
+    // onEditingChanged — so textUndoKey/anyTextEditing would stay stale
+    // (anyTextEditing stuck true; worse, a beginTextEdit on the SAME restored
+    // key early-returns and its typing would never be undoable). The snapshot
+    // was already committed above, so the dying delegate's endTextEdit ->
+    // commit finds nothing pending and cannot push junk on top of the undo.
+    // Shared by undo()/redo(): if the item being typed into was STILL in edit
+    // mode when the key fired, it should still BE in edit mode after — not
+    // escape to the canvas (user call: "it should still remain in the mode
+    // it was when [you] did ctrl+z... if it was in edit mode it should
+    // remain there"). `apply()` destroys and recreates every delegate (see
+    // the undo()/redo() header comment), so the OLD TextEdit is already gone
+    // by the time this runs; it reopens editing on the FRESH delegate for
+    // the same key instead, same as a double-click would, once the Repeater
+    // has rebuilt (Qt.callLater — the delegates do not exist yet in this
+    // same tick). Silently does nothing if that item no longer exists after
+    // the jump (deleted earlier in the history, say).
+    //
+    // ALSO re-selects it: canvasHistory's afterRestore unconditionally clears
+    // root.selectedCanvasObjects on every undo/redo (the restored items are
+    // fresh objects — see its own comment), which otherwise left the item
+    // editing but visibly deselected (no outline/handles) — a real but
+    // separate bug from the one this function was written to fix (user
+    // report: "it remains in edit mode but it still deselects the item").
+    // Set synchronously, not inside the callLater below: selection doesn't
+    // depend on the delegates existing yet, and the outline should reappear
+    // in the SAME frame the canvas redraws, not one tick later.
+    function reopenEditAfterHistoryJump(wasEditing, editingKey) {
+        if (!wasEditing || editingKey === "")
+            return
+        if (!root.canvasObjectByKey(editingKey))
+            return
+        root.selectedCanvasObjects = [editingKey]
+        Qt.callLater(() => {
+            const d = root.delegateForKey(editingKey)
+            if (d && d.textLabel)
+                d.textLabel.editing = true
+        })
+    }
     function undo() {
+        // commitNow(), not commit(): commit() defers the push to the next tick,
+        // which would let the undo below pop the step BEFORE this one. The
+        // undoRedoRequested path is deferred with Qt.callLater already (see
+        // the delegate), so nothing here runs inside a dying TextEdit's key
+        // dispatch.
+        canvasHistory.commitNow()
+        const wasEditing = root.anyTextEditing
+        const editingKey = wasEditing && root.selectedCanvasObjects.length === 1 ? root.selectedCanvasObjects[0] : ""
         canvasHistory.undo()
         root.textUndoKey = ""
         root.anyTextEditing = false
-        mCanvas.forceActiveFocus()
+        if (wasEditing && editingKey !== "")
+            root.reopenEditAfterHistoryJump(wasEditing, editingKey)
+        else if (!slideListFlick.activeFocus)
+            mCanvas.forceActiveFocus()
     }
     function redo() {
+        // Same commit-first rule as undo() (the typed step must not be lost),
+        // and a fresh step rightly clears the redo branch — so a redo pressed
+        // from inside an open edit has nothing left to redo, exactly as a
+        // redo after any other new edit behaves.
+        canvasHistory.commitNow()
+        const wasEditing = root.anyTextEditing
+        const editingKey = wasEditing && root.selectedCanvasObjects.length === 1 ? root.selectedCanvasObjects[0] : ""
         canvasHistory.redo()
         root.textUndoKey = ""
         root.anyTextEditing = false
-        mCanvas.forceActiveFocus()
+        if (wasEditing && editingKey !== "")
+            root.reopenEditAfterHistoryJump(wasEditing, editingKey)
+        else if (!slideListFlick.activeFocus)
+            mCanvas.forceActiveFocus()
     }
 
     // Set on the first applyCanvasMove/applyCanvasResize call of a drag
     // gesture, cleared in endCanvasDrag() — collapses a whole drag into one
     // undo step instead of one per mouse-move event.
     property bool dragSnapshotTaken: false
+
+    // True while the open slide's filter set is anything but its identity.
+    // The canvas's filter layer reads it (see slideFilterHost in the canvas
+    // children below): an unfiltered slide never pays for a ShaderEffect or an
+    // extra framebuffer, exactly as the engine's ApplyFilters returns before
+    // touching a pixel for the same slide on air.
+    readonly property bool canvasFiltersActive:
+        !slideStore.filtersAreIdentity(slideStore.current.filters)
 
     // Brackets one typing session (double-click edit → commit) as a single
     // undo step. Text edits previously weren't undoable at all: every other
@@ -431,6 +510,20 @@ Rectangle {
     function endTextEdit() {
         root.textUndoKey = ""
         canvasHistory.commit()
+    }
+
+    // Flip one boolean style flag (bold / underline) on the selected TEXT item.
+    // One undo step per press — the discrete-edit shape TextItemPanel's own
+    // setMetaDiscrete uses for the same toggles, and a fresh `meta` assignment
+    // because a real QtObject property only notifies on reassignment.
+    function toggleTextStyle(key) {
+        const item = root.primarySelectedItem
+        if (!item || item.kind !== "text")
+            return
+        canvasHistory.push(qsTr("Change text style"))
+        const m = Object.assign({}, item.meta)
+        m[key] = !(m[key] === true)
+        item.meta = m
     }
 
     // ---- Copy/paste --------------------------------------------------
@@ -460,6 +553,8 @@ Rectangle {
             item.style.borderWidth = d.style.borderWidth
             item.style.borderStyle = d.style.borderStyle
             item.style.borderColor = d.style.borderColor
+            item.style.opacity = d.style.opacity
+            item.style.mediaFit = d.style.mediaFit
             newKeys.push(item.key)
         })
         root.selectedCanvasObjects = newKeys
@@ -470,6 +565,237 @@ Rectangle {
         // NotificationCenter directly and never hand-roll payload maps.
         EventBus.notify(qsTr("%1 item(s) pasted").arg(newKeys.length),
                         "success", "Edit", "ui.edit.itemsPasted")
+    }
+
+    // Duplicate is its own function, not the shortcut's body: the canvas menu
+    // (Duplicate row) and Ctrl+D must be one action, or the two drift apart the
+    // first time either changes.
+    function duplicateSelectedCanvasObjects() {
+        const src = root.canvasObjectByKey(root.selectedCanvasObjects[0])
+        if (src)
+            root.addCanvasItem(src.kind, src)
+    }
+
+    // Select all (Ctrl+A / the menu's own row): every item on the slide, in
+    // canvas order, so a following Duplicate/Delete/align acts on the lot.
+    function selectAllCanvasObjects() {
+        root.selectedCanvasObjects = slideStore.current.items.map((it) => it.key)
+        mCanvas.forceActiveFocus()
+    }
+
+    // ---- Stacking, from the canvas menu's Rearrange submenu -----------------
+    // The item array IS the paint order (the canvas Repeater draws in model
+    // order, and the engine receives a slide's blocks in it), so "move to
+    // front" is "put this entry last" — one rewrite, one undo step, one flush.
+    // `where`: "front" | "forward" | "backward" | "back".
+    function restackCanvasItem(key, where) {
+        const items = slideStore.current.items
+        let from = -1
+        for (let i = 0; i < items.length; ++i)
+            if (items[i].key === key)
+                from = i
+        if (from < 0)
+            return
+        let to = from
+        if (where === "front")
+            to = items.length - 1
+        else if (where === "back")
+            to = 0
+        else if (where === "forward")
+            to = Math.min(items.length - 1, from + 1)
+        else if (where === "backward")
+            to = Math.max(0, from - 1)
+        if (to === from)
+            return
+        canvasHistory.push(where === "front" || where === "back" ? qsTr("Reorder item") : qsTr("Move item"))
+        const next = items.slice()
+        next.splice(to, 0, next.splice(from, 1)[0])
+        slideStore.current.items = next
+        showSession.scheduleFlush()
+        mCanvas.forceActiveFocus()
+    }
+
+    // ---- Per-item triggers and timers (the menu's Item actions submenu) -----
+    // Stored on the item's own meta so they travel with the item into the show
+    // file exactly as its text, geometry and style do:
+    //   clickReveal                               bool
+    //   actions: { displayDuration, showTimer, hideTimer }   seconds, 0 = off
+    // The live presentation pass does not read them yet (slide-level timers
+    // do — see PresentationRuntime's auto-advance); they are recorded here so
+    // the values an operator sets are real, saved data rather than a menu that
+    // forgets them.
+    function setItemAction(key, field, value) {
+        const item = root.canvasObjectByKey(key)
+        if (!item)
+            return
+        canvasHistory.push(qsTr("Item action"))
+        const meta = item.meta ? Object.assign({}, item.meta) : ({})
+        if (field === "clickReveal") {
+            meta.clickReveal = !!value
+        } else {
+            const actions = Object.assign({}, meta.actions ? meta.actions : {})
+            actions[field] = value
+            meta.actions = actions
+        }
+        item.meta = meta
+        showSession.scheduleFlush()
+    }
+
+    function openItemTimer(key, field) {
+        const item = root.canvasObjectByKey(key)
+        if (!item)
+            return
+        const actions = (item.meta && item.meta.actions) ? item.meta.actions : ({})
+        itemTimerDialog.itemKey = key
+        itemTimerDialog.action = field
+        itemTimerDialog.open(String(Math.round(actions[field] ?? 0)))
+    }
+
+    // ---- The canvas right-click menu -------------------------------------
+    // FreeShow's edit-canvas context menu, narrowed to the rows this app has
+    // (its contextMenus.ts "edit_box" list): Item actions, Rearrange,
+    // Duplicate, Delete, Paste, Select all. SlideContextMenu.qml draws it — the
+    // same panel shape, section colours and submenu mechanics FreeShow uses.
+    // `canvasMenuKey` is the item the menu was opened ON: a right-click selects
+    // whatever it landed on first, so the menu's rows always act on what the
+    // operator is pointing at rather than on a stale selection.
+    property string canvasMenuKey: ""
+
+    function canvasMenuModel() {
+        const key = root.canvasMenuKey
+        const item = key !== "" ? root.canvasObjectByKey(key) : null
+        const hasItem = item !== null
+        const meta = (item && item.meta) ? item.meta : ({})
+        const actions = meta.actions ? meta.actions : ({})
+        const items = slideStore.current.items
+        let index = -1
+        for (let i = 0; i < items.length; ++i)
+            if (items[i].key === key)
+                index = i
+        const canForward = index >= 0 && index < items.length - 1
+        const canBackward = index > 0
+        // A set duration reads on the row itself (`Display duration — 5s`), so
+        // the submenu answers "what is it now" without opening the field.
+        const withSeconds = (label, seconds) => seconds > 0
+            ? label + qsTr(" — %1s").arg(seconds) : label
+        return [
+            {
+                label: qsTr("Item actions"), icon: "actions", color: "#d497ff",
+                disabled: !hasItem,
+                children: [
+                    { id: "clickReveal", label: qsTr("Reveal on click"), icon: "clickAction",
+                      color: "#d4a3f6", checked: meta.clickReveal === true },
+                    { id: "displayDuration", icon: "clock", color: "#d497ff",
+                      label: withSeconds(qsTr("Display duration"), actions.displayDuration ?? 0) },
+                    { divider: true },
+                    { id: "showTimer", icon: "timeIn", color: "#cd86ff",
+                      label: withSeconds(qsTr("Time until show"), actions.showTimer ?? 0) },
+                    { id: "hideTimer", icon: "timeOut", color: "#cd86ff",
+                      label: withSeconds(qsTr("Time until hide"), actions.hideTimer ?? 0) }
+                ]
+            },
+            {
+                label: qsTr("Rearrange"), icon: "rearrange", color: "#93f190",
+                disabled: !hasItem,
+                children: [
+                    { id: "toFront", label: qsTr("Move to front"), icon: "toFront", color: "#93f190", disabled: !canForward },
+                    { id: "forward", label: qsTr("Move forward"), icon: "moveUp", color: "#93f190", disabled: !canForward },
+                    { id: "backward", label: qsTr("Move backward"), icon: "moveDown", color: "#93f190", disabled: !canBackward },
+                    { id: "toBack", label: qsTr("Move to back"), icon: "toBack", color: "#93f190", disabled: !canBackward }
+                ]
+            },
+            { divider: true },
+            { id: "duplicate", label: qsTr("Duplicate"), icon: "duplicate", color: "#97c7ff",
+              shortcut: "Ctrl+D", disabled: root.selectedCanvasObjects.length === 0 },
+            { id: "delete", label: qsTr("Delete"), icon: "delete", color: "#ff5454",
+              shortcut: "Del", disabled: root.selectedCanvasObjects.length === 0 },
+            { divider: true },
+            { id: "paste", label: qsTr("Paste"), icon: "paste", color: "#97c7ff",
+              shortcut: "Ctrl+V", disabled: root.clipboardItems.length === 0 },
+            { id: "selectAll", label: qsTr("Select all"), icon: "selectAll",
+              shortcut: "Ctrl+A", disabled: items.length === 0 }
+        ]
+    }
+
+    // `at` is the press point in CANVAS coordinates (mCanvas's own space).
+    function openCanvasMenu(x, y, at) {
+        const under = root.canvasKeysAt(at)
+        const key = under.length > 0 ? under[0] : ""
+        if (key !== "")
+            root.handleCanvasSelect(key, 0)
+        else
+            root.selectedCanvasObjects = []
+        root.canvasMenuKey = key
+        canvasMenu.model = root.canvasMenuModel()
+        canvasMenu.openAt(mCanvas, x, y)
+    }
+
+    function canvasMenuPicked(id) {
+        const key = root.canvasMenuKey
+        switch (id) {
+        case "toFront": root.restackCanvasItem(key, "front"); break
+        case "forward": root.restackCanvasItem(key, "forward"); break
+        case "backward": root.restackCanvasItem(key, "backward"); break
+        case "toBack": root.restackCanvasItem(key, "back"); break
+        case "clickReveal": {
+            const item = root.canvasObjectByKey(key)
+            root.setItemAction(key, "clickReveal", !(item && item.meta && item.meta.clickReveal))
+            break
+        }
+        case "displayDuration": root.openItemTimer(key, "displayDuration"); break
+        case "showTimer": root.openItemTimer(key, "showTimer"); break
+        case "hideTimer": root.openItemTimer(key, "hideTimer"); break
+        case "duplicate": root.duplicateSelectedCanvasObjects(); break
+        case "delete": root.deleteSelectedCanvasObjects(); break
+        case "paste": root.pasteClipboardItems(); break
+        case "selectAll": root.selectAllCanvasObjects(); break
+        }
+    }
+
+    // The slide row's menu (see slideContextMenu): the slide the menu was
+    // opened on is `contextMenuSlideIndex`.
+    function openSlideMenu(index, source, x, y) {
+        root.contextMenuSlideIndex = index
+        slideContextMenu.openAt(source, x, y)
+    }
+
+    function slideMenuPicked(id) {
+        const index = root.contextMenuSlideIndex
+        const eid = slideModel.engineIdAt(index)
+        switch (id) {
+        case "edit":
+            slideModel.selectSlide(index)
+            break
+        case "group": {
+            // The slide's own "group" (Settings · Appearance & Actions'
+            // registry — verse, chorus...): a plain string, same field
+            // ShowCenter.qml's groupColor() already reads to colour the
+            // grid. The picker lists the registry's own names (so the colour
+            // actually matches one of them) plus "None" to clear it.
+            if (eid !== "") {
+                groupPickerMenu.slideId = eid
+                groupPickerMenu.openAt(slideContextMenu.panelRect, 0, 0, root)
+            }
+            break
+        }
+        case "nextTimer":
+            // How long this slide stays up before the show moves on by itself (0 = it waits).
+            if (eid !== "") {
+                slideTimerDialog.slideId = eid
+                slideTimerDialog.open(String(Math.round(ShowService.slideOf(eid).nextTimer ?? 0)))
+            }
+            break
+        case "duplicate":
+            // The ENGINE duplicates the slide (fresh id, its items copied); the list
+            // and the copy's canvas are rebuilt from what it made.
+            showSession.duplicateSlide(index)
+            break
+        case "delete":
+            // The engine deletes the slide (and anything scoped to it); the UI
+            // drops its archive and lands on the neighbouring slide.
+            showSession.removeSlide(index)
+            break
+        }
     }
 
     function isCanvasObjectSelected(key) {
@@ -584,14 +910,24 @@ Rectangle {
         ? root.canvasObjectByKey(root.selectedCanvasObjects[0])
         : null
 
+    // The MEDIA tab edits a picture / video / audio item, so it has something to
+    // say only while one of those is the primary selection — the same rule the
+    // TEXT tab applies to text items.
+    readonly property bool primaryIsMedia: root.primarySelectedItem !== null
+        && ["image", "video", "audio"].includes(root.primarySelectedItem.kind)
+    readonly property var primaryMediaItem: root.primaryIsMedia ? root.primarySelectedItem : null
 
-    // The font dropdowns (textFontMenu, textFontFamilyMenu) are opened FOR this item, so they must not outlive it: deleting the
-    // item, clicking empty canvas or switching slides all drop this to null, and the menus close with it instead of floating
-    // over the panel with nothing left to apply to.
+
+    // The font dropdowns (textFontMenu, textFontFamilyMenu, textAutoSizeMenu) are opened FOR this item, so they must not
+    // outlive it: deleting the item, clicking empty canvas or switching slides all drop this to null, and the menus close
+    // with it instead of floating over the panel with nothing left to apply to.
     onPrimarySelectedItemChanged: {
         if (!root.primarySelectedItem) {
             textFontMenu.visible = false
             textFontFamilyMenu.visible = false
+            textAutoSizeMenu.visible = false
+            textCaseMenu.visible = false
+            borderStyleMenu.visible = false
         }
     }
 
@@ -827,6 +1163,63 @@ Rectangle {
         root.selectedCanvasObjects = []
     }
 
+    // One step of the SLIDE tab's Arrange-items arrows (SlidePanel.qml): move an
+    // item one place through the slide's item array, which IS the paint order —
+    // the canvas Repeater draws its delegates in model order — and the order the
+    // engine receives that slide's blocks in (ShowSession's slidePatch reads
+    // SlideCanvasStore.blocksOf), so canvas, output and saved show move together.
+    // `direction` +1 = forward (towards the viewer), -1 = backward.
+    //
+    // The array is REASSIGNED, not mutated: the model is a plain var array, and
+    // only a fresh assignment re-evaluates the list bindings (the same reason
+    // addItem concatenates instead of pushing). The undo snapshot is taken
+    // before the rewrite, so one arrow is one undo step and undo restores the
+    // previous stacking order.
+    function moveCanvasItem(key, direction) {
+        const items = slideStore.current.items
+        let from = -1
+        for (let i = 0; i < items.length; ++i)
+            if (items[i].key === key)
+                from = i
+        const to = from + direction
+        if (from < 0 || to < 0 || to >= items.length)
+            return
+        root.pushUndoSnapshot()
+        const next = items.slice()
+        next.splice(to, 0, next.splice(from, 1)[0])
+        slideStore.current.items = next
+        showSession.scheduleFlush()
+        mCanvas.forceActiveFocus()
+    }
+
+    // ---- The slide's filter set (SLIDE tab · Filters) ----------------------
+    // One row of SlidePanel's Filters card moved. `value` is already in the
+    // ENGINE's units (the row divided its percentage readout back out), so this
+    // goes straight into the slide's set and out through the normal flush —
+    // the engine applies it to the composed frame for this slide alone (see
+    // Effects.cpp's ApplyFilters), and the canvas previews the very same map
+    // through SlideFilterEffect, which is what makes the two pictures one.
+    //
+    // The undo step is NOT pushed here: SlidePanel brackets a whole slider drag
+    // with undoHook (its rows call it on dragStarted), the same contract
+    // SizeStyleCard and TextItemPanel use, so a drag is one undo entry.
+    function setSlideFilter(key, value) {
+        if (!root.hasActiveSlide)
+            return
+        slideStore.setFilter(key, value)
+        showSession.scheduleFlush()
+    }
+
+    // The Filters card's Reset chip: every value back to identity, as one undo
+    // step (the snapshot is pushed BEFORE the write, so undo restores the
+    // filtered look).
+    function resetSlideFilters() {
+        canvasHistory.push(qsTr("Reset filters"))
+        slideStore.current.filters = slideStore.identityFilters()
+        showSession.scheduleFlush()
+        mCanvas.forceActiveFocus()
+    }
+
     // Entry point for the "+" Add Content menu below — creates a new item
     // of the clicked kind, drops it onto the canvas with a small cascading
     // offset per existing item (so repeated adds don't stack exactly on top
@@ -862,6 +1255,22 @@ Rectangle {
         return item
     }
 
+    // A plain "+Add Text" item (not a metadata-bound field — see
+    // addMetadataItem, which already sets a full style meta including this)
+    // starts with the show/template content default font, not whatever
+    // FontService.resolve("") falls back to for an empty meta — the HOST's
+    // own UI font, the exact same one Theme.fontFamily binds chrome to
+    // (user call: "make the app[']s shows or default template['s font] be
+    // Cambria, Segoe UI is for the app['s] UI"). Two call sites need this
+    // (the + menu's popover and the addText shortcut), so it is one
+    // function, not two copies of the same Object.assign.
+    function addTextItem() {
+        const item = root.addCanvasItem("text")
+        if (item)
+            item.meta = Object.assign({}, item.meta, { fontFamily: FontService.defaultContentFamily })
+        return item
+    }
+
     // Adds a whole-screen treatment (overlay designs): a vignette tinting the edges or corners cut round. It covers the
     // stage; its colour is the item's background (edited on the Items tab like any item's) and meta.inset is how far in it reaches.
     function addScreenTreatment(kind) {
@@ -875,6 +1284,149 @@ Rectangle {
         item.style.backgroundColor = kind === "vignette" ? "#ffffff" : "#000000"
         item.meta = { inset: kind === "vignette" ? 100 : 20 }
         return item
+    }
+
+    // A media FILE placed on the slide — what the Media chip's three kinds
+    // make once a file is picked (see the picker at the foot of this file).
+    // The item's KIND is the file's kind ("image" | "video" | "audio"), and
+    // the path lives in its meta `src`: that pair is all the engine needs to
+    // paint it, so a show saved today still opens if the picker changes.
+    function addMediaItem(kind, file) {
+        if (!file || !file.path)
+            return null
+        const item = root.addCanvasItem(kind)
+        if (!item)
+            return null
+        item.text = String(file.name !== undefined ? file.name : "")
+        // A 16:9 box — the shape most pictures and every video already are,
+        // so the common case lands ready to use instead of needing a resize.
+        item.width = 320
+        item.height = 180
+        item.meta = Object.assign({}, item.meta, { src: String(file.path), mediaKind: kind })
+        return item
+    }
+
+    // MEDIA tab's Change: while this names an item, the media picker REPLACES
+    // that item's file instead of adding a new item. "" is the ordinary
+    // adding mode (the "+" ring's Media chip), so one picker serves both and
+    // there is no second dialog to keep in step.
+    property string mediaReplaceKey: ""
+
+    // Swaps the FILE of the media item already on the slide. Its box, position,
+    // style and z-order stay exactly where the user put them — the point of a
+    // Change is "that is the wrong picture", not "add another one". Undoable
+    // like every other edit.
+    function replaceItemMedia(key, file) {
+        if (!file || !file.path)
+            return false
+        const target = root.canvasObjectByKey(key)
+        if (!target)
+            return false
+        root.pushUndoSnapshot()
+        target.text = String(file.name !== undefined ? file.name : "")
+        target.meta = Object.assign({}, target.meta, {
+                                            src: String(file.path),
+                                            mediaKind: String(target.kind || "")
+                                        })
+        return true
+    }
+
+    // ---- MEDIA tab: writing a media item's own values -----------------------
+    // Everything that tab edits lands in the item's `meta.media` bag — the
+    // engine persists a block's meta JSON verbatim, while its ContentStyle has
+    // no room for flip/crop/filter values — except Fit, which stays
+    // CanvasItemStyle.mediaFit (the field the canvas and the ITEMS tab's
+    // Filters card already speak) and is MIRRORED into meta.media.fit so the
+    // engine can read it from the same block too.
+    function setMediaMeta(patch) {
+        const item = root.primaryMediaItem
+        if (!item)
+            return
+        const media = Object.assign({}, item.meta && item.meta.media ? item.meta.media : {}, patch)
+        item.meta = Object.assign({}, item.meta ? item.meta : {}, { media: media })
+    }
+
+    // One Fit choice, applied to EVERY selected media item (the ITEMS tab's
+    // Filters card can target several at once) — style for the canvas, meta for
+    // the engine, written together so the two can never disagree.
+    function applyMediaFit(fit) {
+        root.selectedCanvasObjects.forEach((key) => {
+            const item = root.canvasObjectByKey(key)
+            if (!item || !item.style)
+                return
+            item.style.mediaFit = fit
+            const media = Object.assign({}, item.meta && item.meta.media ? item.meta.media : {},
+                                        { fit: fit })
+            item.meta = Object.assign({}, item.meta ? item.meta : {}, { media: media })
+        })
+    }
+
+    function setMediaFlag(key, on) {
+        root.setMediaMeta({ [key]: on === true })
+    }
+
+    function setMediaCrop(side, percent) {
+        const item = root.primaryMediaItem
+        if (!item)
+            return
+        const media = item.meta && item.meta.media ? item.meta.media : {}
+        const crop = Object.assign({ top: 0, right: 0, bottom: 0, left: 0 }, media.crop || {})
+        crop[side] = Math.max(0, Math.min(90, percent))
+        root.setMediaMeta({ crop: crop })
+    }
+
+    function resetMediaCrop() {
+        root.setMediaMeta({ crop: { top: 0, right: 0, bottom: 0, left: 0 } })
+    }
+
+    function setMediaFilter(key, value) {
+        const item = root.primaryMediaItem
+        if (!item)
+            return
+        const media = item.meta && item.meta.media ? item.meta.media : {}
+        const filter = Object.assign({}, media.filter || {})
+        filter[key] = value
+        root.setMediaMeta({ filter: filter })
+    }
+
+    function resetMediaFilters() {
+        root.setMediaMeta({ filter: ({}) })
+    }
+
+    // The MEDIA tab's ✕: the FILE comes off the item. Its box, position, style
+    // and z-order stay — this is "that is the wrong file", and the item itself
+    // is not what the user asked to remove.
+    function clearItemFile() {
+        const item = root.primaryMediaItem
+        if (!item)
+            return
+        root.pushUndoSnapshot()
+        const meta = Object.assign({}, item.meta ? item.meta : {})
+        delete meta.src
+        delete meta.mediaKind
+        item.text = ""
+        item.meta = meta
+    }
+
+    // The MEDIA tab's Change button: the picker, locked to the selected item's
+    // own kind (a video cannot become an MP3 through this row) and in replace
+    // mode, so the pick lands on the item the operator is looking at.
+    function pickReplacementMedia() {
+        if (!root.primaryIsMedia)
+            return
+        root.mediaReplaceKey = String(root.primaryMediaItem.key || "")
+        root.mediaPickKind = String(root.primaryMediaItem.kind || "")
+        root.mediaModalOpen = true
+    }
+
+    // The picture of a placed media file: the engine's own thumbnail cache (the
+    // one the Media library's tiles use), so the canvas and the library show ONE
+    // picture made the same way. Step -1 is the still — a picture's own image,
+    // and for a video the poster frame Media Foundation gives it.
+    function mediaPictureUrl(path) {
+        if (!path)
+            return ""
+        return "image://mediathumb/500/-1/" + encodeURIComponent(path)
     }
 
     // Finds the live Repeater delegate for a given item key — items are
@@ -892,6 +1444,19 @@ Rectangle {
 
     // Add-content chip + its popover menu (bottom of the canvas).
     property bool addMenuOpen: false
+    // The Media chip's own step: while true the ring shows a picture / video /
+    // audio choice instead of the usual kinds (see shownContentTypes). It is
+    // not a second menu — same ring, one step in — so nothing can be left
+    // floating over the canvas when the ring closes.
+    property bool mediaMenuOpen: false
+    // Which media kind the picker is asking for ("image" | "video" | "audio"),
+    // and whether it is up. A picked file becomes an item of that kind.
+    property string mediaPickKind: ""
+    property bool mediaModalOpen: false
+    onAddMenuOpenChanged: {
+        if (!root.addMenuOpen)
+            root.mediaMenuOpen = false
+    }
     // Opened instead of adding a camera/media/timer/clock/shape item
     // immediately — see cameraSourceModal/mediaSourceModal/timerSourceModal/
     // clockSourceModal/shapeSourceModal below and the matching branches in
@@ -949,7 +1514,7 @@ Rectangle {
         item.bind = String(field && field.bind ? field.bind : "")
         item.meta = Object.assign({}, item.meta, {
             color: "#ffffff",
-            fontFamily: FontService.defaultFamily,
+            fontFamily: FontService.defaultContentFamily,
             fontSize: fontSize,
             bold: false,
             italic: false,
@@ -994,6 +1559,13 @@ Rectangle {
         // them). The chip opens BusSourceModal below; the engine receives a
         // block of kind "bus" carrying that bus's stable id.
         { kind: "bus",    icon: "activity", label: "Bus" },
+        // A media FILE placed on the slide. Not one kind but three, and the
+        // chip opens them rather than adding anything (see mediaKinds below):
+        // a picture, a video and an audio file are one family to the operator
+        // and three different things to the engine, so the choice is made
+        // before the item lands. Each lands as an item of its own kind
+        // ("image" | "video" | "audio") carrying the file in its meta `src`.
+        { kind: "media",  icon: "media",  label: "Media" },
         { kind: "shape",  icon: "shape",  label: "Shape" },        { kind: "timer",  icon: "timer",  label: "Timer" },
         { kind: "clock",  icon: "clock",  label: "Clock" },
         // Not an item kind: this chip opens the METADATA palette (MetadataFields.qml)
@@ -1002,6 +1574,38 @@ Rectangle {
         // for them. See the chip handler below and addMetadataItem().
         { kind: "metadata", icon: "textLines", label: "Metadata" }
     ]
+    // The three things Media holds, in the order the submenu offers them — a
+    // picture first because that is what a service actually puts up, then the
+    // moving and sounding files.
+    readonly property var mediaKinds: [
+        { kind: "image", icon: "image",  label: "Picture" },
+        { kind: "video", icon: "play",   label: "Video" },
+        { kind: "audio", icon: "music",  label: "Audio" }
+    ]
+    // What the ring shows right now: the usual roster, or — once Media is
+    // picked — its three kinds plus a way back. `mediaBack` is not an item
+    // kind; the chip handler below only walks the ring back.
+    readonly property var shownContentTypes: root.mediaMenuOpen
+        ? root.mediaKinds.concat([{ kind: "mediaBack", icon: "arrowLeft", label: "Back" }])
+        : root.contentTypes
+    // What a placed ITEM of a given kind is called on the canvas and in the
+    // generic card (the Add ring's own labels are per-CHIP, and "media" is a
+    // chip that makes no item).
+    readonly property var itemKindLook: ({
+        image: { icon: "image", label: "Picture" },
+        video: { icon: "play",  label: "Video" },
+        audio: { icon: "music", label: "Audio" }
+    })
+    function kindInfo(kind) {
+        if (root.itemKindLook[kind] !== undefined)
+            return root.itemKindLook[kind]
+        for (let i = 0; i < root.contentTypes.length; ++i) {
+            if (root.contentTypes[i].kind === kind)
+                return root.contentTypes[i]
+        }
+        return { icon: "?", label: kind }
+    }
+
     // How the extra block kinds a library declares are shown in the Add menu (which kinds exist is the ENGINE's call -
     // DesignLibraryConfig::extraBlockKinds, via the service; this is only their icon and label).
     readonly property var extraKindLook: ({
@@ -1027,188 +1631,209 @@ Rectangle {
         width: root.centerRegionWidth
         color: Theme.surface
 
-        Rectangle {
-            id: mBack
-            x: 12
-            y: 10
-            height: 28
-            width: 28
-            color: Theme.activeBg
-            radius: 7
+        // Both clusters below used to be positioned with hand-tuned x/y magic
+        // numbers (x: 50, x: 156, x: parent.width - 204 …) and four slightly
+        // different y guesses (10/12/14/17) for what was supposed to be the
+        // same vertical center — the "looks hardcoded, doesn't line up"
+        // report. Real anchors.verticalCenter + two Rows (left-anchored,
+        // right-anchored, consistent spacing) replace all of it: every child
+        // centers itself exactly, and the right cluster can never drift
+        // under/over "Fit" or the undo/redo/zoom group the way a fixed
+        // `parent.width - N` would the moment the save label's text changes
+        // length ("Not saved yet" vs "Autosaved ✓" are not the same width).
+        Row {
+            id: mHdrLeft
+            anchors.left: parent.left
+            anchors.leftMargin: 12
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 14
 
+            Rectangle {
+                id: mBack
+                anchors.verticalCenter: parent.verticalCenter
+                height: 28
+                width: 28
+                color: Theme.activeBg
+                radius: 7
+
+                Text {
+                    anchors.centerIn: parent
+                    anchors.verticalCenterOffset: -2
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 15
+                    text: "‹"
+                }
+                // In a design (overlay / template) this is Done: back to the library it came from.
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: root.designMode
+                    cursorShape: root.designMode ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: {
+                        root.closeDesign()
+                        root.designClosed()
+                    }
+                }
+            }
             Text {
-                anchors.centerIn: parent
-                anchors.verticalCenterOffset: -2
+                anchors.verticalCenter: parent.verticalCenter
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily
                 font.pixelSize: 15
-                text: "‹"
+                font.weight: Font.Medium
+                // (the design's name follows the library: DesignBackend re-reads it whenever it changes)
+                text: root.designMode ? (showSession.designBackend.currentShow.name ?? "") : qsTr("Sunday Service")
             }
-            // In a design (overlay / template) this is Done: back to the library it came from.
-            MouseArea {
-                anchors.fill: parent
-                enabled: root.designMode
-                cursorShape: root.designMode ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: {
-                    root.closeDesign()
-                    root.designClosed()
+            Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                height: 24
+                width: 104
+                border.color: Qt.alpha(Theme.accent, 0.30)
+                border.width: 1
+                color: Qt.alpha(Theme.accent, 0.14)
+                radius: 6
+
+                Text {
+                    anchors.centerIn: parent
+                    color: Theme.accent
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 10
+                    font.weight: Font.Medium
+                    text: root.designMode ? (showSession.designKind === "template" ? qsTr("Template") : qsTr("Overlay"))
+                                          : qsTr("Template · Worship")
                 }
             }
         }
-        Text {
-            x: 50
-            y: 14
-            color: Theme.textPrimary
-            font.family: Theme.fontFamily
-            font.pixelSize: 15
-            font.weight: Font.Medium
-            // (the design's name follows the library: DesignBackend re-reads it whenever it changes)
-            text: root.designMode ? (showSession.designBackend.currentShow.name ?? "") : qsTr("Sunday Service")
-        }
-        Rectangle {
-            x: 156
-            y: 12
-            height: 24
-            width: 104
-            border.color: Qt.alpha(Theme.accent, 0.30)
-            border.width: 1
-            color: Qt.alpha(Theme.accent, 0.14)
-            radius: 6
 
+        Row {
+            id: mHdrRight
+            anchors.right: parent.right
+            anchors.rightMargin: 12
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 16
+
+            // KERNEL-DRIVEN, not baked text: reflects real project.saved events
+            // relayed from the engine (autosave flag included). Before the first
+            // save it says so honestly instead of claiming an autosave that never
+            // happened. Backfilled from the relay ring for events that fired
+            // before this screen existed.
             Text {
-                anchors.centerIn: parent
-                color: Theme.accent
+                id: saveLabelText
+                anchors.verticalCenter: parent.verticalCenter
+                color: Theme.textMuted
                 font.family: Theme.fontFamily
                 font.pixelSize: 10
-                font.weight: Font.Medium
-                text: root.designMode ? (showSession.designKind === "template" ? qsTr("Template") : qsTr("Overlay"))
-                                      : qsTr("Template · Worship")
+                // A design (overlay / template) has no Save: every settled edit is written to its library.
+                visible: !root.designMode
+                text: qsTr("Not saved yet")
+                function applySave(autosave) { text = autosave ? qsTr("Autosaved ✓") : qsTr("Saved ✓") }
+                Component.onCompleted: {
+                    const recent = EngineBridge.recentEngineEvents(200)
+                    for (let i = recent.length - 1; i >= 0; --i)
+                        if (recent[i].topic === "project.saved") {
+                            applySave(recent[i].autosave)
+                            break
+                        }
+                }
             }
-        }
-        // KERNEL-DRIVEN, not baked text: reflects real project.saved events
-        // relayed from the engine (autosave flag included). Before the first
-        // save it says so honestly instead of claiming an autosave that never
-        // happened. Backfilled from the relay ring for events that fired
-        // before this screen existed.
-        Text {
-            id: saveLabelText
-            x: parent.width - 204   // right-aligned cluster: stays put at the bar's right end
-            y: 17
-            color: Theme.textMuted
-            font.family: Theme.fontFamily
-            font.pixelSize: 10
-            // A design (overlay / template) has no Save: every settled edit is written to its library.
-            visible: !root.designMode
-            text: qsTr("Not saved yet")
-            function applySave(autosave) { text = autosave ? qsTr("Autosaved ✓") : qsTr("Saved ✓") }
-            Component.onCompleted: {
-                const recent = EngineBridge.recentEngineEvents(200)
-                for (let i = recent.length - 1; i >= 0; --i)
-                    if (recent[i].topic === "project.saved") {
-                        applySave(recent[i].autosave)
-                        break
+            Text {
+                visible: root.designMode
+                anchors.verticalCenter: parent.verticalCenter
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: 10
+                text: qsTr("Saves as you edit")
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                color: fitArea.containsMouse ? Theme.textSecondary : Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: 10
+                text: qsTr("Fit")
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                MouseArea {
+                    id: fitArea
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.canvasZoom = 1
+                }
+            }
+            Row {
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 4
+
+                Rectangle {
+                    height: 28
+                    width: 28
+                    radius: 7
+                    enabled: canvasHistory.canUndo
+                    opacity: enabled ? 1 : 0.35
+                    color: undoArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                    Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↺" }
+
+                    MouseArea {
+                        id: undoArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.undo()
                     }
+                }
+                Rectangle {
+                    height: 28
+                    width: 28
+                    radius: 7
+                    enabled: canvasHistory.canRedo
+                    opacity: enabled ? 1 : 0.35
+                    color: redoArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                    Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↻" }
+
+                    MouseArea {
+                        id: redoArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.redo()
+                    }
+                }
+                Rectangle {
+                    height: 28
+                    width: 34
+                    radius: 7
+                    color: zoomResetArea.containsMouse ? Theme.hoverBg : Theme.inset
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        color: Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 12
+                        text: Math.round(root.canvasZoom * 100) + "%"
+                    }
+
+                    MouseArea {
+                        id: zoomResetArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.canvasZoom = 1
+                    }
+                }
             }
         }
-        Text {
-            visible: root.designMode
-            x: parent.width - 204
-            y: 17
-            color: Theme.textMuted
-            font.family: Theme.fontFamily
-            font.pixelSize: 10
-            text: qsTr("Saves as you edit")
-        }
+
         Connections {
             target: EngineBridge
             function onEngineEvent(topic, payload) {
                 if (topic === "project.saved")
                     saveLabelText.applySave(payload && payload.autosave === true)
-            }
-        }
-        Text {
-            x: parent.width - 122
-            y: 17
-            color: fitArea.containsMouse ? Theme.textSecondary : Theme.textMuted
-            font.family: Theme.fontFamily
-            font.pixelSize: 10
-            text: qsTr("Fit")
-            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-            MouseArea {
-                id: fitArea
-                anchors.fill: parent
-                anchors.margins: -6
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.canvasZoom = 1
-            }
-        }
-        Row {
-            x: parent.width - 98
-            y: 10
-            spacing: 4
-
-            Rectangle {
-                height: 28
-                width: 28
-                radius: 7
-                enabled: canvasHistory.canUndo
-                opacity: enabled ? 1 : 0.35
-                color: undoArea.containsMouse ? Theme.hoverBg : Theme.inset
-                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↺" }
-
-                MouseArea {
-                    id: undoArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.undo()
-                }
-            }
-            Rectangle {
-                height: 28
-                width: 28
-                radius: 7
-                enabled: canvasHistory.canRedo
-                opacity: enabled ? 1 : 0.35
-                color: redoArea.containsMouse ? Theme.hoverBg : Theme.inset
-                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                Text { anchors.centerIn: parent; color: Theme.textSecondary; font.pixelSize: 14; text: "↻" }
-
-                MouseArea {
-                    id: redoArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.redo()
-                }
-            }
-            Rectangle {
-                height: 28
-                width: 34
-                radius: 7
-                color: zoomResetArea.containsMouse ? Theme.hoverBg : Theme.inset
-                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                Text {
-                    anchors.centerIn: parent
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 12
-                    text: Math.round(root.canvasZoom * 100) + "%"
-                }
-
-                MouseArea {
-                    id: zoomResetArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.canvasZoom = 1
-                }
             }
         }
     }
@@ -1279,11 +1904,20 @@ Rectangle {
         // sits behind slideBgLayer so it reads through wherever the slide
         // background is transparent or less than fully opaque, and gets
         // fully covered once a solid, fully-opaque background is chosen.
-        // The shared Checkerboard component (also on design previews) —
-        // same shades, same fixed-tile rule, one definition.
+        // The shared Checkerboard component (also on design previews) — one
+        // definition for the whole app, FreeShow's own board: a single 15% tint,
+        // 13px cells, centred phase. This item sits inside the canvas's own
+        // zoom/fit transform, so it is TOLD that scale: the board counter-scales
+        // itself and rasterizes at 13px per real screen pixel, instead of
+        // painting in stage units for the transform to magnify (which smeared
+        // every cell edge into what read as a second, offset grid, and at 300%
+        // zoom cost tens of thousands of fills a repaint).
         Checkerboard {
             id: checkerGrid
             anchors.fill: parent
+            // Cell size is the board's own (13px, FreeShow's) — stated once in
+            // Checkerboard.qml so no surface can drift to its own value.
+            hostScale: root.canvasZoom * root.canvasFitScale
         }
 
         // Decorative alignment-grid dots — declared here, before
@@ -1305,16 +1939,8 @@ Rectangle {
             }
         }
 
-        // The actual slide background — driven by slideStore.current.background (see
-        // the "Background" row's Change button in the right panel). A
-        // dedicated layer, not mCanvas's own color: the checkerboard shows
-        // through when the background is deliberately set to Transparent
-        // (a real swatch in the picker, not just an unset default).
-        Rectangle {
-            id: slideBgLayer
-            anchors.fill: parent
-            color: slideStore.current.background
-        }
+        // The slide background layer is declared INSIDE slideFilterHost below (with
+        // every canvas item), because it is part of the slide the filter set paints.
 
         // Arrow-key nudge / Delete / Escape for the selected canvas
         // object(s) — guarded so it never fires while a label is actually
@@ -1420,189 +2046,311 @@ Rectangle {
         // root.contentTypes (not just its bare kind name) so each kind at
         // least reads as visually distinct until real per-kind content
         // (a real media player frame, audio waveform, etc.) gets built out.
-        Repeater {
-            id: canvasItemsRepeater
-            model: slideStore.current.items
-            delegate: DraggableCanvasText {
-                id: canvasItemObject
-                required property var modelData
-                // The delegate names itself after the engine's stable item key:
-                // every handle and dot hangs its own objectName off this (see
-                // DraggableCanvasText.handleSuffix), so a scenario reaches THIS
-                // item's adjustment points — not another item's.
-                objectName: "canvasItem_" + modelData.key
-                // Named so the canvas can reach whichever delegate matches a
-                // selected item and enter edit mode on it directly, without a
-                // fixed/named id the way the old title/verse/ref/date objects had.
-                property alias textLabel: itemTextLabel
-                // The bus this item carries — resolved from the STABLE id in its
-                // meta (ids survive renames and row moves), then read exactly
-                // as the picker and the Media › Inputs card read it, so the
-                // picture and the light on the canvas are the same two answers
-                // the operator chose from.
-                BusMonitor {
-                    id: busMonitor
-                    busRow: canvasItemObject.modelData.kind === "bus"
-                        ? busMonitor.rowForBusId(canvasItemObject.modelData.meta
-                                                 ? (canvasItemObject.modelData.meta.busId ?? 0) : 0)
-                        : -1
-                }
-                x: modelData.x
-                y: modelData.y
-                width: modelData.width
-                height: modelData.height
-                style: modelData.style
-                // A circle / line / glyph shape, a vignette and screen corners draw their own body (see below); the box behind
-                // every other kind is the item's fill and border.
-                drawsOwnBody: modelData.kind === "vignette" || modelData.kind === "corners" || modelData.kind === "bus"
-                    || (modelData.kind === "shape" && ["circle", "line", "triangle", "arrow", "star", "hexagon"].includes(modelData.meta.shapeType ?? "rectangle"))
-                selected: root.isCanvasObjectSelected(modelData.key)
-                // Sourced from whichever content MouseArea is actually
-                // present for this kind — not a second MouseArea of this
-                // item's own (see DraggableCanvasText's contentHovered doc).
-                contentHovered: modelData.kind === "text" ? itemTextLabel.hovered
-                    : modelData.kind === "camera" ? camDragArea.containsMouse
-                    : modelData.kind === "clock" ? clockDragArea.containsMouse
-                    : modelData.kind === "timer" ? timerDragArea.containsMouse
-                    : modelData.kind === "shape" ? shapeDragArea.containsMouse
-                    : modelData.kind === "bus" ? busDragArea.containsMouse
-                    : placeholderDragArea.containsMouse
-                onSelectedRequested: (mods) => root.handleCanvasSelect(modelData.key, mods)
-                onResizing: (geom) => root.applyCanvasResize(modelData.key, geom)
-                onMoving: (dx, dy, snapDisabled) => root.applyCanvasMove(modelData.key, dx, dy, snapDisabled)
-                onDragEnded: root.endCanvasDrag()
-
-                EditableCanvasLabel {
-                    id: itemTextLabel
-                    readonly property var tmeta: canvasItemObject.modelData.meta
-                    // Auto-size mode, FreeShow's textFit semantics (see
-                    // InspirationOrResources/FreeShow-main/.../autosize.ts):
-                    // the BOX is always the master — the user sizes it
-                    // freely and the FONT adapts, never the other way
-                    // around. "shrinkToFit" renders at the set font size and
-                    // only shrinks on overflow; "growToFit" scales the text
-                    // to fill the box; "none" is fully fixed. Legacy values
-                    // from items saved before the rename map across.
-                    readonly property string autoSizeMode: {
-                        const v = itemTextLabel.tmeta.autoSize
-                        return v === "shrink" ? "shrinkToFit"
-                            : v === "grow" ? "growToFit"
-                            : v === "shrinkToFit" || v === "growToFit" || v === "none" ? v
-                            : "none"
+        // ---- the slide itself, as ONE filtered picture ----------------------
+        // Everything that IS the slide lives under this host and nothing else does:
+        // the background layer and every placed item. A slide filter set is a
+        // property of the SLIDE (SlidePanel's own Filters card, SlideFilterEffect.qml),
+        // so it may tint, soften or grey out the slide's own pixels - never the
+        // checkerboard it sits on, the alignment dots, the snap guides or a
+        // selection handle, which are the operator's instruments rather than the
+        // picture. The layer is enabled ONLY while a filter differs from its
+        // default, so an ordinary unfiltered canvas pays nothing for this.
+        Item {
+            id: slideFilterHost
+            anchors.fill: parent
+            // NO GPU, STILL A CANVAS. A ShaderEffect needs a shader-capable scene
+            // graph; under Qt Quick's SOFTWARE backend neither the effect nor the
+            // layer around it can be drawn, so enabling it there turned a
+            // filtered slide into a blank canvas — the worst answer on a laptop
+            // without GPU drivers. The layer is therefore enabled only where an
+            // effect can actually run (api Unknown counts as "not decided yet",
+            // and is left alone). Where it cannot, the canvas draws the slide
+            // unfiltered and the Filters card says so; the OUTPUT stays filtered
+            // either way, because the engine's filter pass is plain CPU pixel
+            // work (rendering::ApplyFilters) and never needed a GPU at all.
+            readonly property bool canShader: GraphicsInfo.api !== GraphicsInfo.Software
+            layer.enabled: root.canvasFiltersActive && slideFilterHost.canShader
+            layer.effect: SlideFilterEffect {
+                filters: slideStore.current.filters
+                stageWidth: StageGrid.w
+                stageHeight: StageGrid.h
+            }
+            // The actual slide background — driven by slideStore.current.background (see
+            // the "Background" row's Change button in the right panel). A
+            // dedicated layer, not mCanvas's own color: the checkerboard shows
+            // through when the background is deliberately set to Transparent
+            // (a real swatch in the picker, not just an unset default).
+            Rectangle {
+                id: slideBgLayer
+                anchors.fill: parent
+                color: slideStore.current.background
+            }
+            Repeater {
+                id: canvasItemsRepeater
+                model: slideStore.current.items
+                delegate: DraggableCanvasText {
+                    id: canvasItemObject
+                    required property var modelData
+                    // The delegate names itself after the engine's stable item key:
+                    // every handle and dot hangs its own objectName off this (see
+                    // DraggableCanvasText.handleSuffix), so a scenario reaches THIS
+                    // item's adjustment points — not another item's.
+                    objectName: "canvasItem_" + modelData.key
+                    // Named so the canvas can reach whichever delegate matches a
+                    // selected item and enter edit mode on it directly, without a
+                    // fixed/named id the way the old title/verse/ref/date objects had.
+                    property alias textLabel: itemTextLabel
+                    // The bus this item carries — resolved from the STABLE id in its
+                    // meta (ids survive renames and row moves), then read exactly
+                    // as the picker and the Media › Inputs card read it, so the
+                    // picture and the light on the canvas are the same two answers
+                    // the operator chose from.
+                    BusMonitor {
+                        id: busMonitor
+                        busRow: canvasItemObject.modelData.kind === "bus"
+                            ? busMonitor.rowForBusId(canvasItemObject.modelData.meta
+                                                     ? (canvasItemObject.modelData.meta.busId ?? 0) : 0)
+                            : -1
                     }
+                    x: modelData.x
+                    y: modelData.y
+                    width: modelData.width
+                    height: modelData.height
+                    style: modelData.style
+                    // A circle / line / glyph shape, a vignette and screen corners draw their own body (see below); the box behind
+                    // every other kind is the item's fill and border.
+                    drawsOwnBody: modelData.kind === "vignette" || modelData.kind === "corners" || modelData.kind === "bus"
+                        // A placed picture (or a video's poster) IS the body: the
+                        // item's fill and border would only frame it with a box the
+                        // file itself should be showing.
+                        || modelData.kind === "image" || modelData.kind === "video"
+                        || (modelData.kind === "shape" && ["circle", "line", "triangle", "arrow", "star", "hexagon"].includes(modelData.meta.shapeType ?? "rectangle"))
+                    selected: root.isCanvasObjectSelected(modelData.key)
+                    // Sourced from whichever content MouseArea is actually
+                    // present for this kind — not a second MouseArea of this
+                    // item's own (see DraggableCanvasText's contentHovered doc).
+                    contentHovered: modelData.kind === "text" ? itemTextLabel.hovered
+                        : modelData.kind === "camera" ? camDragArea.containsMouse
+                        : modelData.kind === "clock" ? clockDragArea.containsMouse
+                        : modelData.kind === "timer" ? timerDragArea.containsMouse
+                        : modelData.kind === "shape" ? shapeDragArea.containsMouse
+                        : modelData.kind === "bus" ? busDragArea.containsMouse
+                        : modelData.kind === "image" || modelData.kind === "video" ? mediaDragArea.containsMouse
+                        : placeholderDragArea.containsMouse
+                    onSelectedRequested: (mods) => root.handleCanvasSelect(modelData.key, mods)
+                    onResizing: (geom) => root.applyCanvasResize(modelData.key, geom)
+                    onMoving: (dx, dy, snapDisabled) => root.applyCanvasMove(modelData.key, dx, dy, snapDisabled)
+                    onDragEnded: root.endCanvasDrag()
 
-                    // ---- the font size actually rendered: an explicit solver ----
-                    // NOT Qt's Text.Fit: Fit converged differently on the canvas than
-                    // in the scaled-down DesignPreview subtree (lineHeight + wrap at
-                    // large sizes) and the canvas could still spill text below the box.
-                    // A bound placeholder is drawn at the item's OWN type size and
-                    // clipped to its box instead of being squeezed into it (see the
-                    // exception in recomputeFit), so a box too small for that size shows
-                    // the token running past its edge rather than shrinking the type
-                    // behind the operator's back — and it can never overlap a
-                    // neighbouring block either way.
-                    clip: MetadataFields.isToken(itemTextLabel.shownText)
-
-                    // recomputeFit() bisects candidate sizes, re-measuring through the
-                    // twin at each step (each write re-lays the twin's text out,
-                    // wrapping included) and stores the largest size whose REAL laid-
-                    // out size fits the box — containment is guaranteed by the last
-                    // measurement, not by a formula's assumption. ~11 probes over
-                    // [3, 400] converge to sub-pixel. It is IMPERATIVE on purpose: a
-                    // binding doing this would write its own dependency (the twin's
-                    // pixelSize) mid-evaluation and QML would kill it as a loop.
-                    readonly property real baseFontSize: itemTextLabel.tmeta.fontSize ?? 16
-                    property real measureSize: baseFontSize     // the twin's current probe size
-                    property real fittedSize: baseFontSize      // the solver's answer
-                    property bool solving: false
-                    // Every input the solution depends on, in one binding: text, box
-                    // geometry, and every font knob (direct meta-field writes — the
-                    // sliders — mutate `tmeta` in place without replacing it, so the
-                    // per-field reads here are what make those live).
-                    readonly property var fitInputs: [
-                        itemTextLabel.shownText, itemTextLabel.width,
-                        canvasItemObject.modelData.height, canvasItemObject.modelData.width,
-                        autoSizeMode, baseFontSize,
-                        itemTextLabel.tmeta.fontFamily, itemTextLabel.tmeta.fontWeight, itemTextLabel.tmeta.bold,
-                        itemTextLabel.tmeta.italic, itemTextLabel.tmeta.textCase,
-                        MetadataFields.letterSpacing(itemTextLabel.tmeta),
-                        MetadataFields.lineHeight(itemTextLabel.tmeta)
-                    ]
-                    onFitInputsChanged: if (!solving)
-                        Qt.callLater(itemTextLabel.recomputeFit)
-                    Component.onCompleted: itemTextLabel.recomputeFit()
-                    function recomputeFit() {
-                        if (solving)
-                            return
-                        solving = true
-                        // EVERY mode solves ("none" included): the box is the master and
-                        // the text must always sit inside it — a block renders at its set
-                        // size while that fits and SQUEEZES the moment it doesn't. Nothing
-                        // is ever cut or spilled on any surface.
-                        //
-                        // ONE EXCEPTION, and it is why the branch below exists: A BOUND
-                        // PLACEHOLDER IS NOT CONTENT (MetadataFields.isToken).
-                        // "{table_code_paragraphs}" is 23 characters standing in for a
-                        // value of ANOTHER length, and the frame sizes the real value
-                        // ("47-0412 3", 9 characters) at the item's own fontSize — so
-                        // squeezing the TOKEN to fit made this canvas show a type size the
-                        // output never uses. Measured on a Table template: the token was
-                        // squeezed to ~18 stage units here while the NDI frame drew the
-                        // value at ~26 — same box, same centre, ~1.5x the size. A bound
-                        // block therefore renders at its OWN size (clipped to its box
-                        // above), whatever the auto-size mode, so what is sized here is what
-                        // the frame will draw.
-                        // "growToFit" and the other modes keep shaping the CONTENT: the
-                        // engine fits the real value to the box on air.
-                        const pad = canvasItemObject.modelData.style ? (canvasItemObject.modelData.style.padding ?? 0) : 0
-                        const bw = canvasItemObject.modelData.width - pad * 2
-                        const bh = canvasItemObject.modelData.height - pad * 2
-                        // A BOUND PLACEHOLDER IS NOT CONTENT, so the size is the DECLARED
-                        // one in EVERY mode — including growToFit. The question this branch
-                        // asks is "is this text a stand-in?", not "which mode is it?": the
-                        // modes describe what may happen to CONTENT (the box caps it, or it
-                        // fills the box), and a token is not content — the canvas has nothing
-                        // to size. Growing a placeholder to fill its box told the operator
-                        // nothing about the real value, which on air is what gets fitted
-                        // (the engine still solves every mode for the VALUE). Special-casing
-                        // "grow" here would also have to be spelled twice — "grow" here,
-                        // "growToFit" in DesignPreview — which is how one rule becomes two.
-                        if (bw <= 0 || bh <= 0) {
-                            fittedSize = baseFontSize
-                        } else if (MetadataFields.isToken(itemTextLabel.shownText)) {
-                            fittedSize = baseFontSize
-                            measureSize = baseFontSize
-                        } else {
-                            let lo = 3, hi = 400
-                            for (let i = 0; i < 11; ++i) {
-                                const mid = (lo + hi) / 2
-                                measureSize = mid
-                                if (fitMeasure.contentWidth <= bw && fitMeasure.contentHeight <= bh)
-                                    lo = mid
-                                else
-                                    hi = mid
-                            }
-                            // growToFit fills the box; shrinkToFit/none cap at the set size.
-                            fittedSize = autoSizeMode === "growToFit" ? lo : Math.min(baseFontSize, lo)
-                            measureSize = fittedSize
+                    EditableCanvasLabel {
+                        id: itemTextLabel
+                        selected: canvasItemObject.selected
+                        readonly property var tmeta: canvasItemObject.modelData.meta
+                        // THE LINES CARD'S TWO EXTRAS, drawn by the label's own
+                        // band layer: the per-LINE background colour ("" = none)
+                        // and the typed case that band must apply itself (see
+                        // EditableCanvasLabel's bandText).
+                        bandColor: String(itemTextLabel.tmeta.lineBg ?? "")
+                        bandCase: itemTextLabel.tmeta.textCase ?? "none"
+                        // ...and the band's corner radius (the Lines card's "Line
+                        // radius"): 0 keeps Qt's per-fragment rich-text bands.
+                        bandRadius: MetadataFields.lineRadius(itemTextLabel.tmeta)
+                        // The font's own line box at the size being drawn — the
+                        // denominator that turns a px "Line spacing" gap into the
+                        // lineHeight MULTIPLIER QML's Text can express (see
+                        // MetadataFields.lineHeightWithGap). One glyph at line
+                        // height 1, measured by a Text (TextMetrics exposes no
+                        // ascent/descent); it reads the label's own font, so it
+                        // tracks weight/italic/size with it.
+                        Text {
+                            id: labelLineBox
+                            visible: false
+                            text: "Xg"
+                            font: itemTextLabel.font
+                            lineHeight: 1
+                            lineHeightMode: Text.ProportionalHeight
                         }
-                        solving = false
-                    }
+                        // Auto-size mode, FreeShow's textFit semantics (see
+                        // InspirationOrResources/FreeShow-main/.../autosize.ts):
+                        // the BOX is always the master — the user sizes it
+                        // freely and the FONT adapts, never the other way
+                        // around. "shrinkToFit" renders at the set font size and
+                        // only shrinks on overflow; "growToFit" scales the text
+                        // to fill the box; "none" is fully fixed. Legacy values
+                        // from items saved before the rename map across.
+                        readonly property string autoSizeMode: {
+                            const v = itemTextLabel.tmeta.autoSize
+                            return v === "shrink" ? "shrinkToFit"
+                                : v === "grow" ? "growToFit"
+                                : v === "shrinkToFit" || v === "growToFit" || v === "none" ? v
+                                : "none"
+                        }
 
-                    // Fit solver measurement twin: an invisible Text rendering the same
-                    // content at the current PROBE size (`measureSize` above) so the solver
-                    // can measure whether that size really fits the box (wrapping included)
-                    // before committing it to the visible label. Measuring the visible label
-                    // itself would oscillate (its content size depends on its already-
-                    // applied size). Mirrors the display font's properties explicitly —
-                    // keep in sync with the displayText bindings below.
-                    Text {
-                        id: fitMeasure
-                        visible: false
-                        width: itemTextLabel.width
-                        text: itemTextLabel.shownText          // what is on screen, list markers included
+                        // ---- the font size actually rendered: an explicit solver ----
+                        // NOT Qt's Text.Fit: Fit converged differently on the canvas than
+                        // in the scaled-down DesignPreview subtree (lineHeight + wrap at
+                        // large sizes) and the canvas could still spill text below the box.
+                        // A bound placeholder is drawn at the item's OWN type size and
+                        // clipped to its box instead of being squeezed into it (see the
+                        // exception in recomputeFit), so a box too small for that size shows
+                        // the token running past its edge rather than shrinking the type
+                        // behind the operator's back — and it can never overlap a
+                        // neighbouring block either way.
+                        clip: MetadataFields.isToken(itemTextLabel.shownText)
+
+                        // recomputeFit() bisects candidate sizes, re-measuring through the
+                        // twin at each step (each write re-lays the twin's text out,
+                        // wrapping included) and stores the largest size whose REAL laid-
+                        // out size fits the box — containment is guaranteed by the last
+                        // measurement, not by a formula's assumption. ~11 probes over
+                        // [3, 400] converge to sub-pixel. It is IMPERATIVE on purpose: a
+                        // binding doing this would write its own dependency (the twin's
+                        // pixelSize) mid-evaluation and QML would kill it as a loop.
+                        readonly property real baseFontSize: itemTextLabel.tmeta.fontSize ?? 16
+                        property real measureSize: baseFontSize     // the twin's current probe size
+                        property real fittedSize: baseFontSize      // the solver's answer
+                        property bool solving: false
+                        // Every input the solution depends on, in one binding: text, box
+                        // geometry, and every font knob (direct meta-field writes — the
+                        // sliders — mutate `tmeta` in place without replacing it, so the
+                        // per-field reads here are what make those live).
+                        readonly property var fitInputs: [
+                            itemTextLabel.shownText, itemTextLabel.width,
+                            canvasItemObject.modelData.height, canvasItemObject.modelData.width,
+                            autoSizeMode, baseFontSize,
+                            itemTextLabel.tmeta.fontFamily, itemTextLabel.tmeta.fontWeight, itemTextLabel.tmeta.bold,
+                            itemTextLabel.tmeta.italic, itemTextLabel.tmeta.textCase,
+                            MetadataFields.letterSpacing(itemTextLabel.tmeta),
+                            MetadataFields.wordSpacing(itemTextLabel.tmeta),
+                            MetadataFields.oneLine(itemTextLabel.tmeta),
+                            MetadataFields.lineHeight(itemTextLabel.tmeta),
+                            MetadataFields.lineSpacing(itemTextLabel.tmeta)
+                        ]
+                        onFitInputsChanged: if (!solving)
+                            Qt.callLater(itemTextLabel.recomputeFit)
+                        Component.onCompleted: itemTextLabel.recomputeFit()
+                        function recomputeFit() {
+                            if (solving)
+                                return
+                            solving = true
+                            // EVERY mode solves ("none" included): the box is the master and
+                            // the text must always sit inside it — a block renders at its set
+                            // size while that fits and SQUEEZES the moment it doesn't. Nothing
+                            // is ever cut or spilled on any surface.
+                            //
+                            // ONE EXCEPTION, and it is why the branch below exists: A BOUND
+                            // PLACEHOLDER IS NOT CONTENT (MetadataFields.isToken).
+                            // "{table_code_paragraphs}" is 23 characters standing in for a
+                            // value of ANOTHER length, and the frame sizes the real value
+                            // ("47-0412 3", 9 characters) at the item's own fontSize — so
+                            // squeezing the TOKEN to fit made this canvas show a type size the
+                            // output never uses. Measured on a Table template: the token was
+                            // squeezed to ~18 stage units here while the NDI frame drew the
+                            // value at ~26 — same box, same centre, ~1.5x the size. A bound
+                            // block therefore renders at its OWN size (clipped to its box
+                            // above), whatever the auto-size mode, so what is sized here is what
+                            // the frame will draw.
+                            // "growToFit" and the other modes keep shaping the CONTENT: the
+                            // engine fits the real value to the box on air.
+                            const pad = canvasItemObject.modelData.style ? (canvasItemObject.modelData.style.padding ?? 0) : 0
+                            const bw = canvasItemObject.modelData.width - pad * 2
+                            const bh = canvasItemObject.modelData.height - pad * 2
+                            // A BOUND PLACEHOLDER IS NOT CONTENT, so the size is the DECLARED
+                            // one in EVERY mode — including growToFit. The question this branch
+                            // asks is "is this text a stand-in?", not "which mode is it?": the
+                            // modes describe what may happen to CONTENT (the box caps it, or it
+                            // fills the box), and a token is not content — the canvas has nothing
+                            // to size. Growing a placeholder to fill its box told the operator
+                            // nothing about the real value, which on air is what gets fitted
+                            // (the engine still solves every mode for the VALUE). Special-casing
+                            // "grow" here would also have to be spelled twice — "grow" here,
+                            // "growToFit" in DesignPreview — which is how one rule becomes two.
+                            if (bw <= 0 || bh <= 0) {
+                                fittedSize = baseFontSize
+                            } else if (MetadataFields.isToken(itemTextLabel.shownText)) {
+                                fittedSize = baseFontSize
+                                measureSize = baseFontSize
+                            } else {
+                                let lo = 3, hi = 400
+                                for (let i = 0; i < 11; ++i) {
+                                    const mid = (lo + hi) / 2
+                                    measureSize = mid
+                                    if (fitMeasure.contentWidth <= bw && fitMeasure.contentHeight <= bh)
+                                        lo = mid
+                                    else
+                                        hi = mid
+                                }
+                                // growToFit fills the box; shrinkToFit/none cap at the set size.
+                                fittedSize = autoSizeMode === "growToFit" ? lo : Math.min(baseFontSize, lo)
+                                measureSize = fittedSize
+                            }
+                            solving = false
+                        }
+
+                        // Fit solver measurement twin: an invisible Text rendering the same
+                        // content at the current PROBE size (`measureSize` above) so the solver
+                        // can measure whether that size really fits the box (wrapping included)
+                        // before committing it to the visible label. Measuring the visible label
+                        // itself would oscillate (its content size depends on its already-
+                        // applied size). Mirrors the display font's properties explicitly —
+                        // keep in sync with the displayText bindings below.
+                        Text {
+                            id: fitMeasure
+                            visible: false
+                            width: itemTextLabel.width
+                            text: itemTextLabel.shownText          // what is on screen, list markers included
+                            font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
+                            font.pixelSize: itemTextLabel.measureSize
+                            font.weight: itemTextLabel.tmeta.bold ? Font.Bold
+                                : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
+                                : itemTextLabel.tmeta.fontWeight === "SemiBold" ? Font.DemiBold
+                                : itemTextLabel.tmeta.fontWeight === "Bold" ? Font.Bold
+                                : Font.Medium
+                            font.italic: itemTextLabel.tmeta.italic === true
+                            font.capitalization: itemTextLabel.tmeta.textCase === "upper" ? Font.AllUppercase
+                                : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
+                                : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
+                                : Font.MixedCase
+                            // The ONE reading of these two (see MetadataFields): the twin
+                            // must measure the spacing the display below paints, or the
+                            // auto-size solve is measuring one layout and drawing another.
+                            font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
+                            font.wordSpacing: MetadataFields.wordSpacing(itemTextLabel.tmeta)
+                            // Same line STEP the label draws: natural × height plus
+                            // the px gap (see MetadataFields.lineHeightWithGap), so
+                            // the solver measures the spacing the canvas paints.
+                            lineHeight: MetadataFields.lineHeightWithGap(itemTextLabel.tmeta, fitLineBox.contentHeight)
+                            lineHeightMode: Text.ProportionalHeight
+                            wrapMode: MetadataFields.oneLine(itemTextLabel.tmeta) ? Text.NoWrap : Text.WordWrap
+
+                            // The probe size's own line box — same measurement as
+                            // labelLineBox, at this twin's pixelSize.
+                            Text {
+                                id: fitLineBox
+                                visible: false
+                                text: "Xg"
+                                font: fitMeasure.font
+                                lineHeight: 1
+                                lineHeightMode: Text.ProportionalHeight
+                            }
+                        }
+
+                        visible: canvasItemObject.modelData.kind === "text"
+                        color: itemTextLabel.tmeta.color ?? "#f2f4fa"
                         font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
-                        font.pixelSize: itemTextLabel.measureSize
+
+                        font.pixelSize: fittedSize
+                        fontSizeMode: Text.FixedSize
+                        // Matches DesignPreview's (the thumbnails') own wrap rule:
+                        // the canvas and the preview must lay text out identically
+                        // or their auto-size results diverge. "Text on one line"
+                        // is the one thing that turns wrapping off on both.
+                        wrapMode: MetadataFields.oneLine(itemTextLabel.tmeta) ? Text.NoWrap : Text.WordWrap
+                        // "bold" (the B toggle) is an emphasis override on top
+                        // of whatever base weight is picked in the font-family
+                        // row's dropdown — matching common rich-text-editor UX
+                        // where Bold stays a quick on/off regardless of the
+                        // family's own weight.
                         font.weight: itemTextLabel.tmeta.bold ? Font.Bold
                             : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
                             : itemTextLabel.tmeta.fontWeight === "SemiBold" ? Font.DemiBold
@@ -1613,697 +2361,849 @@ Rectangle {
                             : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
                             : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
                             : Font.MixedCase
-                        // The ONE reading of these two (see MetadataFields): the twin
-                        // must measure the spacing the display below paints, or the
-                        // auto-size solve is measuring one layout and drawing another.
+                        font.underline: itemTextLabel.tmeta.underline === true
+                        font.strikeout: itemTextLabel.tmeta.strikethrough === true
                         font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
-                        lineHeight: MetadataFields.lineHeight(itemTextLabel.tmeta)
-                        lineHeightMode: Text.ProportionalHeight
-                        wrapMode: Text.WordWrap
-                    }
-
-                    visible: canvasItemObject.modelData.kind === "text"
-                    color: itemTextLabel.tmeta.color ?? "#f2f4fa"
-                    font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
-
-                    font.pixelSize: fittedSize
-                    fontSizeMode: Text.FixedSize
-                    // Matches DesignPreview's (the thumbnails') hardcoded WordWrap:
-                    // the canvas and the preview must lay text out identically or
-                    // their auto-size results diverge.
-                    wrapMode: Text.WordWrap
-                    // "bold" (the B toggle) is an emphasis override on top
-                    // of whatever base weight is picked in the font-family
-                    // row's dropdown — matching common rich-text-editor UX
-                    // where Bold stays a quick on/off regardless of the
-                    // family's own weight.
-                    font.weight: itemTextLabel.tmeta.bold ? Font.Bold
-                        : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
-                        : itemTextLabel.tmeta.fontWeight === "SemiBold" ? Font.DemiBold
-                        : itemTextLabel.tmeta.fontWeight === "Bold" ? Font.Bold
-                        : Font.Medium
-                    font.italic: itemTextLabel.tmeta.italic === true
-                    font.capitalization: itemTextLabel.tmeta.textCase === "upper" ? Font.AllUppercase
-                        : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
-                        : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
-                        : Font.MixedCase
-                    font.underline: itemTextLabel.tmeta.underline === true
-                    font.strikeout: itemTextLabel.tmeta.strikethrough === true
-                    font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
-                    // The panel's Height row reads the same function — 0/absent is
-                    // the font's own line height, never a hidden 1.2 (see MetadataFields).
-                    lineHeight: MetadataFields.lineHeight(itemTextLabel.tmeta)
-                    horizontalAlignment: {
-                        const a = itemTextLabel.tmeta.align ?? "center"
-                        return a === "left" ? Text.AlignLeft
-                            : a === "right" ? Text.AlignRight
-                            : a === "justify" ? Text.AlignJustify
-                            : Text.AlignHCenter
-                    }
-                    verticalAlignment: {
-                        const a = itemTextLabel.tmeta.verticalAlign ?? "center"
-                        return a === "top" ? Text.AlignTop
-                            : a === "bottom" ? Text.AlignBottom
-                            : Text.AlignVCenter
-                    }
-                    text: canvasItemObject.modelData.text
-                    // The list style (Text tab): every line a list item, marked by the ENGINE's formatting - display only.
-                    listStyle: itemTextLabel.tmeta.list ?? ""
-                    // (The box is the master in every auto-size mode — see
-                    // autoSizeMode above — so nothing here resizes modelData
-                    // geometry from content size anymore; the box-resizing
-                    // "grow" that used to live here was FreeShow's inverse
-                    // and is gone.)
-                    // Live per-keystroke propagation into the item object
-                    // — the thumbnail binds to this same object, so rows
-                    // update as you type, not only on commit. beginTextEdit
-                    // pushes the undo snapshot on the session's first
-                    // keystroke (see its header comment for why it can't
-                    // push before the fact); endTextEdit closes the session
-                    // so the next edit session gets its own undo step.
-                    onEdited: (value) => {
-                        root.beginTextEdit(canvasItemObject.modelData.key)
-                        canvasItemObject.modelData.text = value
-                    }
-                    onCommitted: (value) => {
-                        canvasItemObject.modelData.text = value
-                        root.endTextEdit()
-                    }
-                    // Closes the typing-undo session on every exit path —
-                    // commit (onCommitted above) but also Escape, which
-                    // exits edit mode without committing. Without this, a
-                    // second double-click-and-type into the same item would
-                    // silently merge into the first session's undo step.
-                    //
-                    // Also tracks root.anyTextEditing — separate from
-                    // textUndoKey, which only gets set on the session's
-                    // FIRST KEYSTROKE (see beginTextEdit's own comment) and
-                    // so stays empty the whole time if you enter edit mode
-                    // and press Ctrl+Z before typing anything. This flips
-                    // true the instant edit mode actually starts (the
-                    // double-click), which is what the undo/redo Shortcuts
-                    // below actually need to stay enabled through.
-                    onEditingChanged: {
-                        root.anyTextEditing = itemTextLabel.editing
-                        if (!itemTextLabel.editing)
-                            root.endTextEdit()
-                    }
-                    onSelectRequested: (mods, x, y) => root.handleCanvasSelect(canvasItemObject.modelData.key, mods,
-                                                              itemTextLabel.mapToItem(mCanvas, x, y))
-                    onMoveRequested: (dx, dy, snapDisabled) => {
-                        if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                            root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                        root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
-                    }
-                    onDragEnded: root.endCanvasDrag()
-                    // Undo/redo chords pressed while this item's edit is
-                    // open (see EditableCanvasLabel.undoRedoRequested for
-                    // why they arrive here instead of via the Shortcuts
-                    // below: the focused TextEdit accepts their
-                    // ShortcutOverride, so the Shortcuts never activate).
-                    // Deferred with Qt.callLater for the same reason
-                    // UndoHistory.commit is deferred: undo() applies a
-                    // snapshot that DESTROYS AND RECREATES this very
-                    // delegate — running it synchronously here would mutate
-                    // the model mid-key-dispatch from inside the dying
-                    // TextEdit (the documented AudioEffectsPanel hazard).
-                    // By the callLater tick the event is done, undo() has
-                    // abandoned the open session's pending snapshot and
-                    // pulled focus back to mCanvas — a clean exit path.
-                    onUndoRedoRequested: (undo) => Qt.callLater(undo ? root.undo
-                                                                     : root.redo)
-                }
-
-                // The full live-preview visual (lifted from the former fixed
-                // camObject) — same Shape gradient, LIVE badge, cam icons,
-                // CAM 1 label, timestamp — for every "camera" kind item, not
-                // just a single hardcoded one.
-                Item {
-                    id: camContent
-                    visible: canvasItemObject.modelData.kind === "camera"
-                    anchors.fill: parent
-
-                    Shape {
-                        anchors.fill: parent
-                        ShapePath {
-                            fillGradient: LinearGradient {
-                                x1: camContent.width * 0.5; x2: camContent.width * 0.5
-                                y1: 0; y2: camContent.height
-                                GradientStop { color: "#ff123326"; position: 0 }
-                                GradientStop { color: "#ff07130e"; position: 1 }
-                            }
-                            strokeColor: "#000"
-                            strokeWidth: 0
-                            PathRectangle { width: camContent.width; height: camContent.height; radius: 8 }
+                        font.wordSpacing: MetadataFields.wordSpacing(itemTextLabel.tmeta)
+                        // The panel's Height row reads the same function — 0/absent is
+                        // the font's own line height, never a hidden 1.2 (see MetadataFields).
+                        lineHeight: MetadataFields.lineHeightWithGap(itemTextLabel.tmeta, labelLineBox.contentHeight)
+                        horizontalAlignment: {
+                            const a = itemTextLabel.tmeta.align ?? "center"
+                            return a === "left" ? Text.AlignLeft
+                                : a === "right" ? Text.AlignRight
+                                : a === "justify" ? Text.AlignJustify
+                                : Text.AlignHCenter
                         }
-                    }
-                    Rectangle { x: 8; y: 8; width: 6; height: 6; radius: 3; color: Theme.danger }   // the LIVE dot (red = live; the accent sweep only recolored SELECTIONS)
-                    Text {
-                        x: 18; y: 7
-                        color: Theme.textPrimary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 8
-                        font.weight: Font.Medium
-                        text: qsTr("LIVE")
-                    }
-                    Rectangle { x: 10; y: 24; height: 34; width: 36; color: "#14503a"; radius: 4 }
-                    Rectangle { x: 30; y: 24; height: 34; width: 24; color: "#0f3a2c"; radius: 4 }
-                    Rectangle { x: 96; y: 10; width: 8; height: 8; radius: 4; color: "#0b1f17"; border.width: 1; border.color: "#1d5c46" }   // the lens
-                    Text {
-                        x: 10; y: 68
-                        color: Theme.textPrimary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 9
-                        font.weight: Font.Medium
-                        // The source picked in cameraSourceModal (see
-                        // addCanvasItem's onApplied handler below), falling
-                        // back to a generic label for items created before
-                        // that field was set.
-                        text: canvasItemObject.modelData.text.length > 0 ? canvasItemObject.modelData.text : qsTr("Camera")
-                    }
-                    Text {
-                        x: 68; y: 68
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 9
-                        text: qsTr("10:24:07")
-                    }
-
-                    // Click to select, drag the body to move — shared
-                    // press/threshold/delta body (see CanvasDragArea), the
-                    // same mechanics EditableCanvasLabel uses internally.
-                    CanvasDragArea {
-                        id: camDragArea
-                        anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
+                        verticalAlignment: {
+                            const a = itemTextLabel.tmeta.verticalAlign ?? "center"
+                            return a === "top" ? Text.AlignTop
+                                : a === "bottom" ? Text.AlignBottom
+                                : Text.AlignVCenter
+                        }
+                        text: canvasItemObject.modelData.text
+                        // The list style (Text tab): every line a list item, marked by the ENGINE's formatting - display only.
+                        listStyle: itemTextLabel.tmeta.list ?? ""
+                        // (The box is the master in every auto-size mode — see
+                        // autoSizeMode above — so nothing here resizes modelData
+                        // geometry from content size anymore; the box-resizing
+                        // "grow" that used to live here was FreeShow's inverse
+                        // and is gone.)
+                        // Live per-keystroke propagation into the item object
+                        // — the thumbnail binds to this same object, so rows
+                        // update as you type, not only on commit. beginTextEdit
+                        // pushes the undo snapshot on the session's first
+                        // keystroke (see its header comment for why it can't
+                        // push before the fact); endTextEdit closes the session
+                        // so the next edit session gets its own undo step.
+                        onEdited: (value) => {
+                            root.beginTextEdit(canvasItemObject.modelData.key)
+                            canvasItemObject.modelData.text = value
+                        }
+                        onCommitted: (value) => {
+                            canvasItemObject.modelData.text = value
+                            root.endTextEdit()
+                        }
+                        // Closes the typing-undo session on every exit path —
+                        // commit (onCommitted above) but also Escape, which
+                        // exits edit mode without committing. Without this, a
+                        // second double-click-and-type into the same item would
+                        // silently merge into the first session's undo step.
+                        //
+                        // Also tracks root.anyTextEditing — separate from
+                        // textUndoKey, which only gets set on the session's
+                        // FIRST KEYSTROKE (see beginTextEdit's own comment) and
+                        // so stays empty the whole time if you enter edit mode
+                        // and press Ctrl+Z before typing anything. This flips
+                        // true the instant edit mode actually starts (the
+                        // double-click), which is what the undo/redo Shortcuts
+                        // below actually need to stay enabled through.
+                        onEditingChanged: {
+                            root.anyTextEditing = itemTextLabel.editing
+                            if (!itemTextLabel.editing)
+                                root.endTextEdit()
+                        }
+                        onSelectRequested: (mods, x, y) => root.handleCanvasSelect(canvasItemObject.modelData.key, mods,
+                                                                  itemTextLabel.mapToItem(mCanvas, x, y))
+                        onMoveRequested: (dx, dy, snapDisabled) => {
                             if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
                                 root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
-                    }
-                }
-
-                // Live-ticking visual for every "clock" kind item, driven by
-                // the config picked in clockSourceModal (see its onApplied
-                // handler below) and LiveClock.qml's shared ticking/
-                // formatting logic — not a static placeholder.
-                Item {
-                    id: clockContent
-                    readonly property var cfg: canvasItemObject.modelData.meta
-                    readonly property bool hour12: clockContent.cfg.format !== "24"
-                    readonly property bool showSeconds: clockContent.cfg.showSeconds !== false
-                    readonly property bool showDate: clockContent.cfg.showDate === true
-                    readonly property bool analog: clockContent.cfg.style === "analog"
-                    // The colour picked in Add Clock (digits and hands); unset keeps the original accent look.
-                    readonly property bool tinted: clockContent.cfg.color !== undefined
-                    // No background = a bare clock: the analog face loses its dark disc too.
-                    readonly property bool bare: canvasItemObject.style !== null && canvasItemObject.style.backgroundColor.a === 0
-                    visible: canvasItemObject.modelData.kind === "clock"
-                    anchors.fill: parent
-
-                    LiveClock {
-                        id: clockTicker
-                        running: clockContent.visible
+                        onDragEnded: root.endCanvasDrag()
+                        // Undo/redo chords pressed while this item's edit is
+                        // open (see EditableCanvasLabel.undoRedoRequested for
+                        // why they arrive here instead of via the Shortcuts
+                        // below: the focused TextEdit accepts their
+                        // ShortcutOverride, so the Shortcuts never activate).
+                        // Deferred with Qt.callLater for the same reason
+                        // UndoHistory.commit is deferred: undo() applies a
+                        // snapshot that DESTROYS AND RECREATES this very
+                        // delegate — running it synchronously here would mutate
+                        // the model mid-key-dispatch from inside the dying
+                        // TextEdit (the documented AudioEffectsPanel hazard).
+                        // By the callLater tick the event is done, undo() has
+                        // abandoned the open session's pending snapshot and
+                        // pulled focus back to mCanvas — a clean exit path.
+                        onUndoRedoRequested: (undo) => Qt.callLater(undo ? root.undo
+                                                                         : root.redo)
                     }
 
-                    // Background/border/corner-radius come straight from
-                    // the item's own style now (see primarySelectedSupportsFill
-                    // above) — same neutral fallbacks the shape/camera
-                    // visuals use when no color's been picked yet.
-                    Rectangle {
+                    // The full live-preview visual (lifted from the former fixed
+                    // camObject) — same Shape gradient, LIVE badge, cam icons,
+                    // CAM 1 label, timestamp — for every "camera" kind item, not
+                    // just a single hardcoded one.
+                    Item {
+                        id: camContent
+                        visible: canvasItemObject.modelData.kind === "camera"
                         anchors.fill: parent
-                        radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
-                        // Exactly the item's own background/border: a clock with a transparent background is just its digits
-                        // (the Add Clock picker offers a dark box or none; the palette changes it afterwards).
-                        color: canvasItemObject.style ? canvasItemObject.style.backgroundColor : "#12131a"
-                        border.color: canvasItemObject.style ? canvasItemObject.style.borderColor : Theme.borderSubtle
-                        border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
-                            ? canvasItemObject.style.borderWidth : 0
+
+                        Shape {
+                            anchors.fill: parent
+                            ShapePath {
+                                fillGradient: LinearGradient {
+                                    x1: camContent.width * 0.5; x2: camContent.width * 0.5
+                                    y1: 0; y2: camContent.height
+                                    GradientStop { color: "#ff123326"; position: 0 }
+                                    GradientStop { color: "#ff07130e"; position: 1 }
+                                }
+                                strokeColor: "#000"
+                                strokeWidth: 0
+                                PathRectangle { width: camContent.width; height: camContent.height; radius: 8 }
+                            }
+                        }
+                        Rectangle { x: 8; y: 8; width: 6; height: 6; radius: 3; color: Theme.danger }   // the LIVE dot (red = live; the accent sweep only recolored SELECTIONS)
+                        Text {
+                            x: 18; y: 7
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 8
+                            font.weight: Font.Medium
+                            text: qsTr("LIVE")
+                        }
+                        Rectangle { x: 10; y: 24; height: 34; width: 36; color: "#14503a"; radius: 4 }
+                        Rectangle { x: 30; y: 24; height: 34; width: 24; color: "#0f3a2c"; radius: 4 }
+                        Rectangle { x: 96; y: 10; width: 8; height: 8; radius: 4; color: "#0b1f17"; border.width: 1; border.color: "#1d5c46" }   // the lens
+                        Text {
+                            x: 10; y: 68
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 9
+                            font.weight: Font.Medium
+                            // The source picked in cameraSourceModal (see
+                            // addCanvasItem's onApplied handler below), falling
+                            // back to a generic label for items created before
+                            // that field was set.
+                            text: canvasItemObject.modelData.text.length > 0 ? canvasItemObject.modelData.text : qsTr("Camera")
+                        }
+                        Text {
+                            x: 68; y: 68
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 9
+                            text: qsTr("10:24:07")
+                        }
+
+                        // Click to select, drag the body to move — shared
+                        // press/threshold/delta body (see CanvasDragArea), the
+                        // same mechanics EditableCanvasLabel uses internally.
+                        CanvasDragArea {
+                            id: camDragArea
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+                        }
                     }
 
-                    Column {
-                        visible: !clockContent.analog
-                        anchors.centerIn: parent
-                        spacing: 2
+                    // Live-ticking visual for every "clock" kind item, driven by
+                    // the config picked in clockSourceModal (see its onApplied
+                    // handler below) and LiveClock.qml's shared ticking/
+                    // formatting logic — not a static placeholder.
+                    Item {
+                        id: clockContent
+                        readonly property var cfg: canvasItemObject.modelData.meta
+                        readonly property bool hour12: clockContent.cfg.format !== "24"
+                        readonly property bool showSeconds: clockContent.cfg.showSeconds !== false
+                        readonly property bool showDate: clockContent.cfg.showDate === true
+                        readonly property bool analog: clockContent.cfg.style === "analog"
+                        // The colour picked in Add Clock (digits and hands); unset keeps the original accent look.
+                        readonly property bool tinted: clockContent.cfg.color !== undefined
+                        // No background = a bare clock: the analog face loses its dark disc too.
+                        readonly property bool bare: canvasItemObject.style !== null && canvasItemObject.style.backgroundColor.a === 0
+                        visible: canvasItemObject.modelData.kind === "clock"
+                        anchors.fill: parent
+
+                        LiveClock {
+                            id: clockTicker
+                            running: clockContent.visible
+                        }
+
+                        // Background/border/corner-radius come straight from
+                        // the item's own style now (see primarySelectedSupportsFill
+                        // above) — same neutral fallbacks the shape/camera
+                        // visuals use when no color's been picked yet.
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
+                            // Exactly the item's own background/border: a clock with a transparent background is just its digits
+                            // (the Add Clock picker offers a dark box or none; the palette changes it afterwards).
+                            color: canvasItemObject.style ? canvasItemObject.style.backgroundColor : "#12131a"
+                            border.color: canvasItemObject.style ? canvasItemObject.style.borderColor : Theme.borderSubtle
+                            border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
+                                ? canvasItemObject.style.borderWidth : 0
+                        }
+
+                        Column {
+                            visible: !clockContent.analog
+                            anchors.centerIn: parent
+                            spacing: 2
+
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                color: clockContent.tinted ? clockContent.cfg.color : Theme.accentLight
+                                font.family: Theme.fontFamily
+                                font.weight: Font.DemiBold
+                                font.pixelSize: Math.max(10, Math.min(clockContent.width, clockContent.height) * 0.22)
+                                text: clockTicker.formatClock(clockTicker.now, clockContent.hour12, clockContent.showSeconds)
+                            }
+                            Text {
+                                visible: clockContent.showDate
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 10
+                                text: Qt.formatDate(clockTicker.now, "dddd, MMMM d")
+                            }
+                        }
+
+                        // Simple analog face — a circle, three rotated hands, a
+                        // center pin. No real clock-face artwork; same
+                        // placeholder-visual status as the rest of this app's
+                        // per-kind content until that gets built out.
+                        Item {
+                            visible: clockContent.analog
+                            anchors.centerIn: parent
+                            width: Math.min(clockContent.width, clockContent.height) * 0.8
+                            height: width
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: width / 2
+                                color: clockContent.bare ? "transparent" : "#12131a"
+                                border.color: clockContent.tinted ? clockContent.cfg.color : Theme.borderSubtle
+                                border.width: 2
+                            }
+                            Rectangle {
+                                width: 4
+                                height: parent.height * 0.24
+                                radius: 2
+                                color: clockContent.tinted ? clockContent.cfg.color : Theme.textPrimary
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.bottom: parent.verticalCenter
+                                transformOrigin: Item.Bottom
+                                rotation: (clockTicker.now.getHours() % 12 + clockTicker.now.getMinutes() / 60) * 30
+                            }
+                            Rectangle {
+                                width: 3
+                                height: parent.height * 0.34
+                                radius: 1.5
+                                color: clockContent.tinted ? clockContent.cfg.color : Theme.textSecondary
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.bottom: parent.verticalCenter
+                                transformOrigin: Item.Bottom
+                                rotation: (clockTicker.now.getMinutes() + clockTicker.now.getSeconds() / 60) * 6
+                            }
+                            Rectangle {
+                                visible: clockContent.showSeconds
+                                width: 1.5
+                                height: parent.height * 0.4
+                                color: clockContent.tinted ? clockContent.cfg.color : Theme.accent
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.bottom: parent.verticalCenter
+                                transformOrigin: Item.Bottom
+                                rotation: clockTicker.now.getSeconds() * 6
+                            }
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 6
+                                height: 6
+                                radius: 3
+                                color: clockContent.tinted ? clockContent.cfg.color : Theme.accent
+                            }
+                        }
+
+                        CanvasDragArea {
+                            id: clockDragArea
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+                        }
+                    }
+
+                    // Live-ticking visual for every "timer" kind item, driven by
+                    // the config picked in timerSourceModal (see its onApplied
+                    // handler below) and LiveClock.qml's shared countdown/
+                    // count-up/time-of-day math — not a static placeholder.
+                    Item {
+                        id: timerContent
+                        readonly property var cfg: canvasItemObject.modelData.meta
+                        readonly property string mode: timerContent.cfg.mode ?? "countdown"
+                        readonly property real durationSeconds: timerContent.cfg.durationSeconds ?? 300
+                        readonly property real startedAt: timerContent.cfg.startedAt ?? Date.now()
+                        visible: canvasItemObject.modelData.kind === "timer"
+                        anchors.fill: parent
+
+                        LiveClock {
+                            id: timerTicker
+                            running: timerContent.visible
+                        }
+
+                        // Background/border/corner-radius come straight from
+                        // the item's own style now (see primarySelectedSupportsFill
+                        // above) — same neutral fallbacks the shape/camera
+                        // visuals use when no color's been picked yet.
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
+                            color: (canvasItemObject.style && canvasItemObject.style.backgroundColor.a > 0)
+                                ? canvasItemObject.style.backgroundColor : "#12131a"
+                            border.color: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
+                                ? canvasItemObject.style.borderColor : Theme.borderSubtle
+                            border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
+                                ? canvasItemObject.style.borderWidth : 1
+                        }
 
                         Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            color: clockContent.tinted ? clockContent.cfg.color : Theme.accentLight
+                            anchors.centerIn: parent
+                            color: Theme.accentLight
                             font.family: Theme.fontFamily
                             font.weight: Font.DemiBold
-                            font.pixelSize: Math.max(10, Math.min(clockContent.width, clockContent.height) * 0.22)
-                            text: clockTicker.formatClock(clockTicker.now, clockContent.hour12, clockContent.showSeconds)
+                            font.pixelSize: Math.max(10, Math.min(timerContent.width, timerContent.height) * 0.28)
+                            text: timerTicker.formatDuration(
+                                timerTicker.timerSeconds(timerTicker.now, timerContent.mode, timerContent.durationSeconds, timerContent.startedAt))
                         }
-                        Text {
-                            visible: clockContent.showDate
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            color: clockContent.tinted ? Qt.alpha(clockContent.cfg.color, 0.7) : Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 10
-                            text: Qt.formatDate(clockTicker.now, "dddd, MMMM d")
+
+                        CanvasDragArea {
+                            id: timerDragArea
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                         }
                     }
 
-                    // Simple analog face — a circle, three rotated hands, a
-                    // center pin. No real clock-face artwork; same
-                    // placeholder-visual status as the rest of this app's
-                    // per-kind content until that gets built out.
+                    // Visual for every "shape" kind item, driven by the type
+                    // picked in shapeSourceModal (see its onApplied handler
+                    // below) plus the item's OWN CanvasItemStyle — unlike
+                    // camera/media/timer/clock, a shape's fill/border/corner-
+                    // radius genuinely ARE the item's whole visual, so this
+                    // reads style.backgroundColor/borderColor/borderWidth/
+                    // cornerRadius directly instead of using fixed colors (see
+                    // primarySelectedSupportsFill above, which keeps Background/
+                    // Border active for this kind specifically).
                     Item {
-                        visible: clockContent.analog
-                        anchors.centerIn: parent
-                        width: Math.min(clockContent.width, clockContent.height) * 0.8
-                        height: width
+                        id: shapeContent
+                        readonly property var cfg: canvasItemObject.modelData.meta
+                        readonly property string shapeType: shapeContent.cfg.shapeType ?? "rectangle"
+                        readonly property var st: canvasItemObject.style
+                        // Alpha-based transparent test, NOT `!== "transparent"`:
+                        // a QML color holding "transparent" reads back as
+                        // #00000000, so a string comparison is ALWAYS true and
+                        // the fallback never fired — every shape rendered with a
+                        // fully transparent fill (the "shape doesn't show" bug).
+                        // Verified with a standalone qml runtime probe.
+                        readonly property bool hasFill: shapeContent.st && shapeContent.st.backgroundColor.a > 0
+                        // The fill is exactly the item's background: "transparent" (picked in the colour palette) draws nothing,
+                        // so outline-only frames work. A NEW shape is given a visible fill when it is added (shapeSourceModal).
+                        readonly property color fillColor: shapeContent.st ? shapeContent.st.backgroundColor : "#3a3f55"
+                        readonly property color strokeColor: shapeContent.st ? shapeContent.st.borderColor : Theme.accent
+                        readonly property real strokeWidth: (shapeContent.st && shapeContent.st.borderEnabled) ? shapeContent.st.borderWidth : 0
+                        readonly property bool isCircle: shapeContent.shapeType === "circle"
+                        readonly property bool isLine: shapeContent.shapeType === "line"
+                        readonly property bool isGlyph: ["triangle", "arrow", "star", "hexagon"].includes(shapeContent.shapeType)
+                        // The fallback for "rectangle"/"rounded" AND anything
+                        // unrecognized — always shows a filled box rather than
+                        // nothing if shapeType ever comes out unexpected.
+                        readonly property bool isBox: !shapeContent.isCircle && !shapeContent.isLine && !shapeContent.isGlyph
+                        visible: canvasItemObject.modelData.kind === "shape"
+                        anchors.fill: parent
 
+                        // rectangle / rounded (and fallback) — a plain box;
+                        // corner radius is already its own independent style
+                        // control.
                         Rectangle {
+                            visible: shapeContent.isBox
                             anchors.fill: parent
+                            radius: shapeContent.st ? shapeContent.st.cornerRadius : 0
+                            color: shapeContent.fillColor
+                            border.color: shapeContent.strokeColor
+                            border.width: shapeContent.strokeWidth
+                        }
+
+                        // circle — square-fit ellipse (a true ellipse for
+                        // non-square boxes is future work, same simplification
+                        // status as the rest of this app's per-kind visuals).
+                        Rectangle {
+                            visible: shapeContent.isCircle
+                            anchors.centerIn: parent
+                            width: Math.min(parent.width, parent.height)
+                            height: width
                             radius: width / 2
-                            color: clockContent.bare ? "transparent" : "#12131a"
-                            border.color: clockContent.tinted ? clockContent.cfg.color : Theme.borderSubtle
-                            border.width: 2
+                            color: shapeContent.fillColor
+                            border.color: shapeContent.strokeColor
+                            border.width: shapeContent.strokeWidth
                         }
+
+                        // line — thin horizontal bar at vertical center.
                         Rectangle {
-                            width: 4
-                            height: parent.height * 0.24
-                            radius: 2
-                            color: clockContent.tinted ? clockContent.cfg.color : Theme.textPrimary
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            anchors.bottom: parent.verticalCenter
-                            transformOrigin: Item.Bottom
-                            rotation: (clockTicker.now.getHours() % 12 + clockTicker.now.getMinutes() / 60) * 30
+                            visible: shapeContent.isLine
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            height: Math.max(2, shapeContent.strokeWidth || 3)
+                            color: shapeContent.fillColor
                         }
-                        Rectangle {
-                            width: 3
-                            height: parent.height * 0.34
-                            radius: 1.5
-                            color: clockContent.tinted ? clockContent.cfg.color : Theme.textSecondary
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            anchors.bottom: parent.verticalCenter
-                            transformOrigin: Item.Bottom
-                            rotation: (clockTicker.now.getMinutes() + clockTicker.now.getSeconds() / 60) * 6
-                        }
-                        Rectangle {
-                            visible: clockContent.showSeconds
-                            width: 1.5
-                            height: parent.height * 0.4
-                            color: clockContent.tinted ? clockContent.cfg.color : Theme.accent
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            anchors.bottom: parent.verticalCenter
-                            transformOrigin: Item.Bottom
-                            rotation: clockTicker.now.getSeconds() * 6
-                        }
-                        Rectangle {
+
+                        // triangle/arrow/star/hexagon — a simplified glyph fill,
+                        // same language shapeSourceModal's own picker cells use
+                        // for these (plain Text icons, not custom path art);
+                        // real vector shapes are future work.
+                        Text {
+                            visible: shapeContent.isGlyph
                             anchors.centerIn: parent
-                            width: 6
-                            height: 6
-                            radius: 3
-                            color: clockContent.tinted ? clockContent.cfg.color : Theme.accent
+                            color: shapeContent.fillColor
+                            font.pixelSize: Math.min(parent.width, parent.height) * 0.7
+                            text: shapeContent.shapeType === "triangle" ? "▲"
+                                : shapeContent.shapeType === "arrow" ? "→"
+                                : shapeContent.shapeType === "star" ? "★"
+                                : "⬡"
                         }
-                    }
 
-                    CanvasDragArea {
-                        id: clockDragArea
-                        anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
-                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
-                        }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
-                    }
-                }
-
-                // Live-ticking visual for every "timer" kind item, driven by
-                // the config picked in timerSourceModal (see its onApplied
-                // handler below) and LiveClock.qml's shared countdown/
-                // count-up/time-of-day math — not a static placeholder.
-                Item {
-                    id: timerContent
-                    readonly property var cfg: canvasItemObject.modelData.meta
-                    readonly property string mode: timerContent.cfg.mode ?? "countdown"
-                    readonly property real durationSeconds: timerContent.cfg.durationSeconds ?? 300
-                    readonly property real startedAt: timerContent.cfg.startedAt ?? Date.now()
-                    visible: canvasItemObject.modelData.kind === "timer"
-                    anchors.fill: parent
-
-                    LiveClock {
-                        id: timerTicker
-                        running: timerContent.visible
-                    }
-
-                    // Background/border/corner-radius come straight from
-                    // the item's own style now (see primarySelectedSupportsFill
-                    // above) — same neutral fallbacks the shape/camera
-                    // visuals use when no color's been picked yet.
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
-                        color: (canvasItemObject.style && canvasItemObject.style.backgroundColor.a > 0)
-                            ? canvasItemObject.style.backgroundColor : "#12131a"
-                        border.color: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
-                            ? canvasItemObject.style.borderColor : Theme.borderSubtle
-                        border.width: (canvasItemObject.style && canvasItemObject.style.borderEnabled)
-                            ? canvasItemObject.style.borderWidth : 1
-                    }
-
-                    Text {
-                        anchors.centerIn: parent
-                        color: Theme.accentLight
-                        font.family: Theme.fontFamily
-                        font.weight: Font.DemiBold
-                        font.pixelSize: Math.max(10, Math.min(timerContent.width, timerContent.height) * 0.28)
-                        text: timerTicker.formatDuration(
-                            timerTicker.timerSeconds(timerTicker.now, timerContent.mode, timerContent.durationSeconds, timerContent.startedAt))
-                    }
-
-                    CanvasDragArea {
-                        id: timerDragArea
-                        anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
-                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
-                        }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
-                    }
-                }
-
-                // Visual for every "shape" kind item, driven by the type
-                // picked in shapeSourceModal (see its onApplied handler
-                // below) plus the item's OWN CanvasItemStyle — unlike
-                // camera/media/timer/clock, a shape's fill/border/corner-
-                // radius genuinely ARE the item's whole visual, so this
-                // reads style.backgroundColor/borderColor/borderWidth/
-                // cornerRadius directly instead of using fixed colors (see
-                // primarySelectedSupportsFill above, which keeps Background/
-                // Border active for this kind specifically).
-                Item {
-                    id: shapeContent
-                    readonly property var cfg: canvasItemObject.modelData.meta
-                    readonly property string shapeType: shapeContent.cfg.shapeType ?? "rectangle"
-                    readonly property var st: canvasItemObject.style
-                    // Alpha-based transparent test, NOT `!== "transparent"`:
-                    // a QML color holding "transparent" reads back as
-                    // #00000000, so a string comparison is ALWAYS true and
-                    // the fallback never fired — every shape rendered with a
-                    // fully transparent fill (the "shape doesn't show" bug).
-                    // Verified with a standalone qml runtime probe.
-                    readonly property bool hasFill: shapeContent.st && shapeContent.st.backgroundColor.a > 0
-                    // The fill is exactly the item's background: "transparent" (picked in the colour palette) draws nothing,
-                    // so outline-only frames work. A NEW shape is given a visible fill when it is added (shapeSourceModal).
-                    readonly property color fillColor: shapeContent.st ? shapeContent.st.backgroundColor : "#3a3f55"
-                    readonly property color strokeColor: shapeContent.st ? shapeContent.st.borderColor : Theme.accent
-                    readonly property real strokeWidth: (shapeContent.st && shapeContent.st.borderEnabled) ? shapeContent.st.borderWidth : 0
-                    readonly property bool isCircle: shapeContent.shapeType === "circle"
-                    readonly property bool isLine: shapeContent.shapeType === "line"
-                    readonly property bool isGlyph: ["triangle", "arrow", "star", "hexagon"].includes(shapeContent.shapeType)
-                    // The fallback for "rectangle"/"rounded" AND anything
-                    // unrecognized — always shows a filled box rather than
-                    // nothing if shapeType ever comes out unexpected.
-                    readonly property bool isBox: !shapeContent.isCircle && !shapeContent.isLine && !shapeContent.isGlyph
-                    visible: canvasItemObject.modelData.kind === "shape"
-                    anchors.fill: parent
-
-                    // rectangle / rounded (and fallback) — a plain box;
-                    // corner radius is already its own independent style
-                    // control.
-                    Rectangle {
-                        visible: shapeContent.isBox
-                        anchors.fill: parent
-                        radius: shapeContent.st ? shapeContent.st.cornerRadius : 0
-                        color: shapeContent.fillColor
-                        border.color: shapeContent.strokeColor
-                        border.width: shapeContent.strokeWidth
-                    }
-
-                    // circle — square-fit ellipse (a true ellipse for
-                    // non-square boxes is future work, same simplification
-                    // status as the rest of this app's per-kind visuals).
-                    Rectangle {
-                        visible: shapeContent.isCircle
-                        anchors.centerIn: parent
-                        width: Math.min(parent.width, parent.height)
-                        height: width
-                        radius: width / 2
-                        color: shapeContent.fillColor
-                        border.color: shapeContent.strokeColor
-                        border.width: shapeContent.strokeWidth
-                    }
-
-                    // line — thin horizontal bar at vertical center.
-                    Rectangle {
-                        visible: shapeContent.isLine
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width
-                        height: Math.max(2, shapeContent.strokeWidth || 3)
-                        color: shapeContent.fillColor
-                    }
-
-                    // triangle/arrow/star/hexagon — a simplified glyph fill,
-                    // same language shapeSourceModal's own picker cells use
-                    // for these (plain Text icons, not custom path art);
-                    // real vector shapes are future work.
-                    Text {
-                        visible: shapeContent.isGlyph
-                        anchors.centerIn: parent
-                        color: shapeContent.fillColor
-                        font.pixelSize: Math.min(parent.width, parent.height) * 0.7
-                        text: shapeContent.shapeType === "triangle" ? "▲"
-                            : shapeContent.shapeType === "arrow" ? "→"
-                            : shapeContent.shapeType === "star" ? "★"
-                            : "⬡"
-                    }
-
-                    CanvasDragArea {
-                        id: shapeDragArea
-                        anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
-                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
-                        }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
-                    }
-                }
-
-                // Vignette / corners (overlay designs): drawn by the SAME DesignPreview the library cards use, so the canvas and the
-                // card can never disagree about what they look like.
-                Item {
-                    id: screenContent
-                    visible: canvasItemObject.modelData.kind === "vignette" || canvasItemObject.modelData.kind === "corners"
-                    anchors.fill: parent
-
-                    DesignPreview {
-                        anchors.fill: parent
-                        blocks: [{
-                            kind: canvasItemObject.modelData.kind, x: 0, y: 0, width: StageGrid.w, height: StageGrid.h,
-                            meta: canvasItemObject.modelData.meta,
-                            style: { backgroundColor: canvasItemObject.style.backgroundColor.toString() }
-                        }]
-                    }
-
-                    CanvasDragArea {
-                        anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
-                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
-                        }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
-                    }
-                }
-
-                // ---- BUS: the same live tile the picker showed ------------
-                // A bus item IS its feed: the window is the bus's picture while
-                // its routed video source is delivering frames, "No signal"
-                // when it is not, the three-state light in the corner and the
-                // bus's name along the bottom. Same answers as the picker and
-                // the Media › Inputs card (all three read BusMonitor), so the
-                // tile you chose is the tile you get.
-                Rectangle {
-                    id: busBody
-                    visible: canvasItemObject.modelData.kind === "bus"
-                    anchors.fill: parent
-                    radius: 6
-                    color: "#000000"
-                    clip: true
-
-                    Image {
-                        anchors.fill: parent
-                        source: busMonitor.previewSource
-                        fillMode: Image.PreserveAspectCrop
-                        cache: false
-                        asynchronous: false
-                        visible: busMonitor.previewing
-                    }
-
-                    Column {
-                        anchors.centerIn: parent
-                        spacing: 4
-                        visible: !busMonitor.previewing
-
-                        IconGlyph {
-                            name: "activity"
-                            color: Theme.textMuted
-                            width: 20; height: 20
-                            fit: true
-                        }
-                        Text {
-                            text: busMonitor.busType === "audio" ? qsTr("audio only") : qsTr("No signal")
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 10
-                        }
-                    }
-
-                    // The light: green connected · amber offline/starved · red
-                    // nothing routed. Same three colours as the pane's card.
-                    Rectangle {
-                        anchors.top: parent.top
-                        anchors.right: parent.right
-                        anchors.margins: 6
-                        width: 9; height: 9; radius: 4.5
-                        color: busMonitor.statusColor
-                        border.width: 1
-                        border.color: Qt.alpha("#000000", 0.45)
-                    }
-
-                    // The name rides the picture's bottom edge.
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.bottom: parent.bottom
-                        anchors.margins: 6
-                        width: Math.min(parent.width - 12, busNameText.implicitWidth + 12)
-                        height: busNameText.implicitHeight + 6
-                        radius: 4
-                        color: Qt.alpha("#000000", 0.55)
-
-                        Text {
-                            id: busNameText
-                            anchors.centerIn: parent
-                            text: canvasItemObject.modelData.text
-                            color: "#ffffff"
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 10
-                            elide: Text.ElideRight
-                            width: Math.min(implicitWidth, busBody.width - 24)
-                        }
-                    }
-
-                    CanvasDragArea {
-                        id: busDragArea
-                        anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
-                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
-                        }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
-                    }
-                }
-
-                // Generic placeholder for every other kind — its own
-                // icon/label from root.contentTypes, not just the bare kind
-                // name, so Media/Audio/Shape at least read as visually
-                // distinct from each other while real per-kind content is
-                // still future work.
-                Rectangle {
-                    id: genericPlaceholder
-                    readonly property var typeInfo: {
-                        for (let i = 0; i < root.contentTypes.length; ++i) {
-                            if (root.contentTypes[i].kind === canvasItemObject.modelData.kind)
-                                return root.contentTypes[i]
-                        }
-                        return { icon: "?", label: canvasItemObject.modelData.kind }
-                    }
-                    visible: !["text", "camera", "clock", "timer", "shape", "vignette", "corners", "bus"].includes(canvasItemObject.modelData.kind)
-                    anchors.fill: parent
-                    color: Theme.inset
-                    border.color: Theme.borderSubtle
-                    border.width: 1
-                    radius: 6
-
-                    Column {
-                        anchors.centerIn: parent
-                        spacing: 4
-
-                    // IconGlyph, not a unicode Text glyph — same missing-
-                    // glyph problem the Add Content chips had (see
-                    // contentTypes' comment).
-                    Item {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        y: 16
-                        width: 20
-                        height: 20
-
-                        Text {
+                        CanvasDragArea {
+                            id: shapeDragArea
                             anchors.fill: parent
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            visible: genericPlaceholder.typeInfo.icon === "text"
-                            color: Theme.accentLight
-                            font.pixelSize: 18
-                            text: "Aa"
-                        }
-                        IconGlyph {
-                            anchors.centerIn: parent
-                            visible: genericPlaceholder.typeInfo.icon !== "text"
-                            name: genericPlaceholder.typeInfo.icon
-                            color: Theme.accentLight
-                            width: 16
-                            height: 16
-                        }
-                    }
-                        Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            color: Theme.textSecondary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 13
-                            font.weight: Font.Medium
-                            text: genericPlaceholder.typeInfo.label.toUpperCase()
-                        }
-                        // The source picked in mediaSourceModal (see
-                        // addCanvasItem's onApplied handler below) — blank
-                        // for kinds without a picker yet (audio/shape/
-                        // timer/clock), so nothing extra shows for those.
-                        Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            visible: canvasItemObject.modelData.text.length > 0
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 10
-                            text: canvasItemObject.modelData.text
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
                         }
                     }
 
-                    // Click to select, drag the body to move — shared
-                    // press/threshold/delta body (see CanvasDragArea), the
-                    // same mechanics EditableCanvasLabel uses internally.
-                    CanvasDragArea {
-                        id: placeholderDragArea
+                    // Vignette / corners (overlay designs): drawn by the SAME DesignPreview the library cards use, so the canvas and the
+                    // card can never disagree about what they look like.
+                    Item {
+                        id: screenContent
+                        visible: canvasItemObject.modelData.kind === "vignette" || canvasItemObject.modelData.kind === "corners"
                         anchors.fill: parent
-                        onMoved: (dx, dy, snapDisabled) => {
-                            if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
-                                root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
-                            root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+
+                        DesignPreview {
+                            anchors.fill: parent
+                            blocks: [{
+                                kind: canvasItemObject.modelData.kind, x: 0, y: 0, width: StageGrid.w, height: StageGrid.h,
+                                meta: canvasItemObject.modelData.meta,
+                                style: { backgroundColor: canvasItemObject.style.backgroundColor.toString() }
+                            }]
                         }
-                        onDragFinished: root.endCanvasDrag()
-                        onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
-                                                     canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+
+                        CanvasDragArea {
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+                        }
+                    }
+
+                    // ---- BUS: the same live tile the picker showed ------------
+                    // A bus item IS its feed: the window is the bus's picture while
+                    // its routed video source is delivering frames, "No signal"
+                    // when it is not, the three-state light in the corner and the
+                    // bus's name along the bottom. Same answers as the picker and
+                    // the Media › Inputs card (all three read BusMonitor), so the
+                    // tile you chose is the tile you get.
+                    Rectangle {
+                        id: busBody
+                        visible: canvasItemObject.modelData.kind === "bus"
+                        anchors.fill: parent
+                        radius: 6
+                        color: "#000000"
+                        clip: true
+
+                        Image {
+                            anchors.fill: parent
+                            source: busMonitor.previewSource
+                            fillMode: Image.PreserveAspectCrop
+                            cache: false
+                            asynchronous: false
+                            visible: busMonitor.previewing
+                        }
+
+                        Column {
+                            anchors.centerIn: parent
+                            spacing: 4
+                            visible: !busMonitor.previewing
+
+                            IconGlyph {
+                                name: "activity"
+                                color: Theme.textMuted
+                                width: 20; height: 20
+                                fit: true
+                            }
+                            Text {
+                                text: busMonitor.busType === "audio" ? qsTr("audio only") : qsTr("No signal")
+                                color: Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 10
+                            }
+                        }
+
+                        // The light: green connected · amber offline/starved · red
+                        // nothing routed. Same three colours as the pane's card.
+                        Rectangle {
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.margins: 6
+                            width: 9; height: 9; radius: 4.5
+                            color: busMonitor.statusColor
+                            border.width: 1
+                            border.color: Qt.alpha("#000000", 0.45)
+                        }
+
+                        // The name rides the picture's bottom edge.
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 6
+                            width: Math.min(parent.width - 12, busNameText.implicitWidth + 12)
+                            height: busNameText.implicitHeight + 6
+                            radius: 4
+                            color: Qt.alpha("#000000", 0.55)
+
+                            Text {
+                                id: busNameText
+                                anchors.centerIn: parent
+                                text: canvasItemObject.modelData.text
+                                color: "#ffffff"
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 10
+                                elide: Text.ElideRight
+                                width: Math.min(implicitWidth, busBody.width - 24)
+                            }
+                        }
+
+                        CanvasDragArea {
+                            id: busDragArea
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+                        }
+                    }
+
+                    // A PLACED PICTURE — and a video's poster, which is the still
+                    // Media Foundation hands out for the same file. The FILE, not
+                    // a card: the canvas shows the pixels the outputs will show,
+                    // asked from the engine's own thumbnail cache (mediaPictureUrl)
+                    // so the two are one picture and not two decodes that can
+                    // disagree.
+                    //
+                    // The picture's own values (MediaItemPanel) are honoured HERE as
+                    // well as on the engine outputs: Fit (contain / cover / fill /
+                    // blur fill), the two flips, Cropping and the Filters set. Fit is
+                    // CanvasItemStyle.mediaFit; the rest ride meta.media, mirrored by
+                    // SceneBuilder's media branch so the canvas and the HDMI/NDI
+                    // frame cannot show two different pictures.
+                    Rectangle {
+                        id: mediaPictureBody
+                        readonly property var mmeta: canvasItemObject.modelData.meta
+                        readonly property string src: mediaPictureBody.mmeta ? (mediaPictureBody.mmeta.src ?? "") : ""
+                        readonly property var mmedia: mediaPictureBody.mmeta && mediaPictureBody.mmeta.media
+                                                     ? mediaPictureBody.mmeta.media : ({})
+                        readonly property var mcrop: mediaPictureBody.mmedia.crop
+                                                     || ({ top: 0, right: 0, bottom: 0, left: 0 })
+                        readonly property var mfilter: mediaPictureBody.mmedia.filter || ({})
+                        readonly property bool flipH: mediaPictureBody.mmedia.flipH === true
+                        readonly property bool flipV: mediaPictureBody.mmedia.flipV === true
+                        readonly property real cropSum: (mediaPictureBody.mcrop.top ?? 0)
+                            + (mediaPictureBody.mcrop.right ?? 0) + (mediaPictureBody.mcrop.bottom ?? 0)
+                            + (mediaPictureBody.mcrop.left ?? 0)
+                        readonly property bool cropActive: mediaPictureBody.cropSum > 0
+                        readonly property bool filterActive: {
+                            const f = mediaPictureBody.mfilter
+                            return (f.hueRotate ?? 0) !== 0 || (f.invert ?? 0) !== 0 || (f.blur ?? 0) !== 0
+                                || (f.grayscale ?? 0) !== 0 || (f.sepia ?? 0) !== 0
+                                || (f.brightness ?? 1) !== 1 || (f.contrast ?? 1) !== 1
+                                || (f.saturate ?? 1) !== 1 || (f.opacity ?? 1) !== 1
+                        }
+                        readonly property string fit: canvasItemObject.style ? canvasItemObject.style.mediaFit : "contain"
+                        readonly property bool canShader: GraphicsInfo.api !== GraphicsInfo.Software
+                        visible: canvasItemObject.modelData.kind === "image" || canvasItemObject.modelData.kind === "video"
+                        anchors.fill: parent
+                        color: "transparent"
+                        clip: true
+
+                        // BLUR FILL: the file fills the box softened, and the sharp copy
+                        // sits on top of it — FreeShow's fourth fit choice. A layer effect
+                        // needs a shader-capable scene graph; where there is none the
+                        // softened backdrop is simply skipped (the sharp picture still
+                        // draws, fitted the usual way).
+                        Image {
+                            anchors.fill: parent
+                            visible: mediaPictureBody.fit === "blur" && mediaPicture.status === Image.Ready
+                            asynchronous: true
+                            cache: false
+                            fillMode: Image.PreserveAspectCrop
+                            source: root.mediaPictureUrl(mediaPictureBody.src)
+                            layer.enabled: visible && mediaPictureBody.canShader
+                            layer.effect: SlideFilterEffect {
+                                filters: ({ blur: 24, brightness: 0.85 })
+                                stageWidth: StageGrid.w
+                                stageHeight: StageGrid.h
+                            }
+                        }
+
+                        // The picture's filter set wraps the picture (the same shader the
+                        // slide's own Filters card uses), so hue/invert/blur/gray/sepia/
+                        // brightness/contrast/saturate read identically in preview and on
+                        // air. An identity set never pays for a layer.
+                        Item {
+                            id: mediaPictureLayer
+                            anchors.fill: parent
+                            // The filter list's own Opacity (the file's transparency).
+                            // It is an item opacity, so it needs no shader — it applies
+                            // even where the colour filters cannot run.
+                            opacity: mediaPictureBody.mfilter.opacity ?? 1
+                            layer.enabled: mediaPictureBody.filterActive && mediaPictureBody.canShader
+                            layer.effect: SlideFilterEffect {
+                                filters: mediaPictureBody.mfilter
+                                stageWidth: StageGrid.w
+                                stageHeight: StageGrid.h
+                            }
+
+                            Image {
+                                id: mediaPicture
+                                anchors.fill: parent
+                                asynchronous: true
+                                cache: false
+                                // FIT: three of the four map straight onto Qt's fit modes;
+                                // "blur" keeps the whole picture sharp over its softened
+                                // backdrop, so it fits like contain.
+                                fillMode: mediaPictureBody.fit === "cover" ? Image.PreserveAspectCrop
+                                        : mediaPictureBody.fit === "fill" ? Image.Stretch
+                                        : Image.PreserveAspectFit
+                                // CROP: Qt crops the SOURCE and then fits what is left into
+                                // the box — exactly FreeShow's order (crop the picture, then
+                                // fit the cropped picture), and the reason a cropped portrait
+                                // still keeps its aspect instead of being squashed.
+                                sourceClipRect: {
+                                    if (!mediaPictureBody.cropActive || mediaPicture.sourceSize.width <= 1)
+                                        return Qt.rect(0, 0, 0, 0)
+                                    const c = mediaPictureBody.mcrop
+                                    const w = mediaPicture.sourceSize.width
+                                    const h = mediaPicture.sourceSize.height
+                                    const l = (c.left ?? 0) / 100
+                                    const r = (c.right ?? 0) / 100
+                                    const t = (c.top ?? 0) / 100
+                                    const b = (c.bottom ?? 0) / 100
+                                    return Qt.rect(w * l, h * t, w * (1 - l - r), h * (1 - t - b))
+                                }
+                                // FLIPS: mirror is Qt's own horizontal flip; the vertical one
+                                // is a scale about the picture's centre (a Scale at the origin
+                                // would swing it up out of its box).
+                                mirror: mediaPictureBody.flipH
+                                transform: Scale {
+                                    origin.x: mediaPicture.width / 2
+                                    origin.y: mediaPicture.height / 2
+                                    xScale: 1
+                                    yScale: mediaPictureBody.flipV ? -1 : 1
+                                }
+                                // A file the engine could not decode answers with a
+                                // 1x1 blank (see MediaThumbnailProvider) — that is
+                                // "no picture", and the badge below still explains
+                                // what the item is.
+                                source: root.mediaPictureUrl(mediaPictureBody.src)
+                                visible: status === Image.Ready && sourceSize.width > 1
+                            }
+                        }
+
+                        // The file's name, quietly, so a poster is not mistaken
+                        // for the item's title. A video adds a play badge: it is
+                        // an item that PLAYS, and the poster alone cannot say so.
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 6
+                            width: Math.min(parent.width - 12, mediaNameText.implicitWidth + 12)
+                            height: mediaNameText.implicitHeight + 6
+                            radius: 4
+                            color: Qt.alpha("#000000", 0.55)
+                            visible: canvasItemObject.modelData.text.length > 0
+
+                            Text {
+                                id: mediaNameText
+                                anchors.centerIn: parent
+                                text: canvasItemObject.modelData.text
+                                color: "#ffffff"
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 10
+                                elide: Text.ElideRight
+                                width: Math.min(implicitWidth, mediaPictureBody.width - 24)
+                            }
+                        }
+
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            visible: canvasItemObject.modelData.kind === "video"
+                                     && mediaPicture.status !== Image.Ready
+                            name: "play"
+                            color: Theme.accentLight
+                            width: 26
+                            height: 26
+                        }
+
+                        CanvasDragArea {
+                            id: mediaDragArea
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+                        }
+                    }
+
+                    // Generic placeholder for every other kind — its own
+                    // icon/label (root.kindInfo), not just the bare kind name, so
+                    // Audio and Shape at least read as visually distinct from each
+                    // other while real per-kind content is still future work.
+                    Rectangle {
+                        id: genericPlaceholder
+                        readonly property var typeInfo: root.kindInfo(canvasItemObject.modelData.kind)
+                        visible: !["text", "camera", "clock", "timer", "shape", "vignette", "corners", "bus",
+                                   "image", "video"].includes(canvasItemObject.modelData.kind)
+                        anchors.fill: parent
+                        color: Theme.inset
+                        border.color: Theme.borderSubtle
+                        border.width: 1
+                        radius: 6
+
+                        Column {
+                            anchors.centerIn: parent
+                            spacing: 4
+
+                        // IconGlyph, not a unicode Text glyph — same missing-
+                        // glyph problem the Add Content chips had (see
+                        // contentTypes' comment).
+                        Item {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: 16
+                            width: 20
+                            height: 20
+
+                            Text {
+                                anchors.fill: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                visible: genericPlaceholder.typeInfo.icon === "text"
+                                color: Theme.accentLight
+                                font.pixelSize: 18
+                                text: "Aa"
+                            }
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                visible: genericPlaceholder.typeInfo.icon !== "text"
+                                name: genericPlaceholder.typeInfo.icon
+                                color: Theme.accentLight
+                                width: 16
+                                height: 16
+                            }
+                        }
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                color: Theme.textSecondary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 13
+                                font.weight: Font.Medium
+                                text: genericPlaceholder.typeInfo.label.toUpperCase()
+                            }
+                            // The source picked in mediaSourceModal (see
+                            // addCanvasItem's onApplied handler below) — blank
+                            // for kinds without a picker yet (audio/shape/
+                            // timer/clock), so nothing extra shows for those.
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                visible: canvasItemObject.modelData.text.length > 0
+                                color: Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: 10
+                                text: canvasItemObject.modelData.text
+                            }
+                        }
+
+                        // Click to select, drag the body to move — shared
+                        // press/threshold/delta body (see CanvasDragArea), the
+                        // same mechanics EditableCanvasLabel uses internally.
+                        CanvasDragArea {
+                            id: placeholderDragArea
+                            anchors.fill: parent
+                            onMoved: (dx, dy, snapDisabled) => {
+                                if (!root.isCanvasObjectSelected(canvasItemObject.modelData.key))
+                                    root.handleCanvasSelect(canvasItemObject.modelData.key, 0)
+                                root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
+                            }
+                            onDragFinished: root.endCanvasDrag()
+                            onTapped: (mouse) => root.handleCanvasSelect(canvasItemObject.modelData.key, mouse.modifiers,
+                                                         canvasItemObject.mapToItem(mCanvas, mouse.x, mouse.y))
+                        }
                     }
                 }
+            }
+        }
+
+        // ---- Right-click opens the canvas menu ----------------------------
+        // One catcher for the whole stage, and it accepts the RIGHT button
+        // only: every item's own MouseArea claims the left one, so a right
+        // press falls through to here no matter what was under it, while every
+        // drag, select and text gesture keeps behaving exactly as before.
+        // The press point also decides the target — see openCanvasMenu.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.RightButton
+            onPressed: (mouse) => {
+                root.openCanvasMenu(mouse.x, mouse.y, Qt.point(mouse.x, mouse.y))
+                mouse.accepted = true
             }
         }
 
@@ -2501,7 +3401,9 @@ Rectangle {
             spacing: 4
 
             Repeater {
-                model: root.contentTypes
+                // The ring's CURRENT step: the usual kinds, or the three Media
+                // kinds with a way back (see shownContentTypes).
+                model: root.shownContentTypes
                 delegate: Rectangle {
                     id: typeChip
                     required property var modelData
@@ -2618,14 +3520,32 @@ Rectangle {
                     return
                 if (hoveredIndex < 0)
                     return
-                const kind = root.contentTypes[hoveredIndex].kind
+                const kind = root.shownContentTypes[hoveredIndex].kind
+                // ONE STEP IN, not an item: the Media chip swaps the ring's
+                // roster for its three kinds, and Back swaps it again. Both
+                // LEAVE THE RING OPEN — a submenu that closed the thing it
+                // was extending would be a menu the pointer has to re-find.
+                if (kind === "media") {
+                    root.mediaMenuOpen = true
+                    return
+                }
+                if (kind === "mediaBack") {
+                    root.mediaMenuOpen = false
+                    return
+                }
+                if (kind === "image" || kind === "video" || kind === "audio") {
+                    // The picker is what makes the item: it needs a FILE, and
+                    // a media item without one is a card with no content.
+                    root.addMenuOpen = false
+                    root.mediaPickKind = kind
+                    root.mediaModalOpen = true
+                    return
+                }
                 root.addMenuOpen = false
-                // Camera/Media/Timer/Clock/Shape each need configuration
-                // picked first (see cameraSourceModal/mediaSourceModal/
-                // timerSourceModal/clockSourceModal/shapeSourceModal below)
-                // rather than landing on the canvas immediately — Audio is
-                // the only kind left with no ground-truth picker popup, so
-                // it's the only one that still adds straight away.
+                // Camera/Timer/Clock/Shape each need configuration
+                // picked first (see cameraSourceModal/timerSourceModal/
+                // clockSourceModal/shapeSourceModal below) rather than
+                // landing on the canvas immediately.
                 if (kind === "bus")
                     root.busModalOpen = true
                 else if (kind === "timer")
@@ -2642,7 +3562,9 @@ Rectangle {
                     // closes — the palette IS the choice the chip was asking for.
                     root.metadataPaletteOpen = true
                     return
-                } else
+                } else if (kind === "text")
+                    root.addTextItem()
+                else
                     root.addCanvasItem(kind)
             }
         }
@@ -3051,6 +3973,11 @@ Rectangle {
             contentWidth: width
             contentHeight: slideListColumn.height
             boundsBehavior: Flickable.StopAtBounds
+            // The slide list takes the keyboard when a row is clicked (see the
+            // delegate's handlers) and is reachable with Tab. Its Ctrl+D / Del
+            // live in that focus (the Shortcuts at the end of this file), so
+            // "the focused slide row" is a real state and not just a hover.
+            activeFocusOnTab: true
 
         Column {
             id: slideListColumn
@@ -3074,15 +4001,25 @@ Rectangle {
                     // over the slide's own background.
                     previewItems: slideStore.items(slideId)
                     previewBackground: slideStore.backgroundOf(slideId)
-                    onSelected: slideModel.selectSlide(index)
+                    onSelected: {
+                        // The list becomes the keyboard's owner while a row is
+                        // the thing you are working on — that is what lets
+                        // Ctrl+D / Del act on the slide (see the list's own
+                        // Shortcuts at the end of this file) instead of on a
+                        // canvas item. Clicking the canvas hands it back.
+                        slideListFlick.forceActiveFocus()
+                        slideModel.selectSlide(index)
+                    }
                     onDuplicateRequested: showSession.duplicateSlide(index)
                     onDeleteRequested: showSession.removeSlide(index)
                     onContextMenuRequested: (mx, my) => {
-                        // Shared map+clamp helper — openAt maps into root's
-                        // space and clamps to the window, so the menu escapes
-                        // slideListFlick's clip without landing off-screen.
-                        slideContextMenu.openAt(this, mx, my, root)
-                        root.contextMenuSlideIndex = index
+                        // The menu belongs to this row, so the row is what the
+                        // keys act on: same focus hand-off as a left click.
+                        slideListFlick.forceActiveFocus()
+                        // The shared menu panel maps the press into window space
+                        // and clamps itself, so it escapes slideListFlick's clip
+                        // without landing off-screen.
+                        root.openSlideMenu(index, this, mx, my)
                     }
                 }
             }
@@ -3170,7 +4107,7 @@ Rectangle {
 
             Text {
                 id: tabItemsLabel
-                width: parent.width / 3
+                width: parent.width / 4
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "items" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
@@ -3193,7 +4130,7 @@ Rectangle {
             }
             Text {
                 id: tabTextLabel
-                width: parent.width / 3
+                width: parent.width / 4
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "text" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
@@ -3210,8 +4147,26 @@ Rectangle {
                 }
             }
             Text {
+                id: tabMediaLabel
+                width: parent.width / 4
+                horizontalAlignment: Text.AlignHCenter
+                color: root.rightPanelTab === "media" ? Theme.accent : Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: 13
+                font.weight: Font.Medium // constant — see tabItemsLabel above
+                text: qsTr("MEDIA")
+                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.rightPanelTab = "media"
+                }
+            }
+            Text {
                 id: tabSlideLabel
-                width: parent.width / 3
+                width: parent.width / 4
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "slide" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
@@ -3233,21 +4188,16 @@ Rectangle {
             height: 3
             radius: 1.50
             color: Theme.accent
-            // Centered under the active label: each label is one eqzual cell
-            // of the tab strip, so the underline is the label's text width
-            // placed at the cell's horizontal center — it glides between
-            // cell centers when the tab changes and tracks automatically if
-            // the panel is ever resized.
-            property string _activeLabel: root.rightPanelTab === "items" ? "items"
-                : root.rightPanelTab === "text" ? "text" : "slide"
-            x: rightTabRow.x
-                + (root.rightPanelTab === "items" ? tabItemsLabel.x
-                : root.rightPanelTab === "text" ? tabTextLabel.x : tabSlideLabel.x)
-                + (root.rightPanelTab === "items" ? tabItemsLabel.width
-                : root.rightPanelTab === "text" ? tabTextLabel.width : tabSlideLabel.width) / 2
-                - width / 2
-            width: root.rightPanelTab === "items" ? tabItemsLabel.implicitWidth
-                : root.rightPanelTab === "text" ? tabTextLabel.implicitWidth : tabSlideLabel.implicitWidth
+            // Centered under the active label: each label is one equal cell of
+            // the tab strip (four now that MEDIA has its own), so the underline
+            // is the label's text width placed at the cell's horizontal center —
+            // it glides between cell centers when the tab changes and tracks
+            // automatically if the panel is ever resized.
+            readonly property var activeLabel: root.rightPanelTab === "text" ? tabTextLabel
+                : root.rightPanelTab === "media" ? tabMediaLabel
+                : root.rightPanelTab === "slide" ? tabSlideLabel : tabItemsLabel
+            x: rightTabRow.x + activeLabel.x + activeLabel.width / 2 - width / 2
+            width: activeLabel.implicitWidth
             Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
             Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
         }
@@ -3415,8 +4365,12 @@ Rectangle {
             }
         }
 
-        SizeStyleCard {
-            id: sizeStyleCard
+        // Transform sits above Size & Style — FreeShow's own order, and the
+        // right one here too: how the item is PRESENTED (its opacity) is a
+        // different question from how its box is shaped, and Opacity used to
+        // live on the Filters card, which is about pixel effects.
+        TransformCard {
+            id: transformCard
             x: itemsTabContent.inset
             y: backgroundRow.y + backgroundRow.height + 10
             width: itemsTabContent.rowWidth
@@ -3424,18 +4378,49 @@ Rectangle {
             // displays the first one and applies changes to all of them.
             // canvasObjectByKey(k).style resolves correctly whether k is one
             // of the fixed objects (registry-backed) or a "+"-added item
-            // (its own inline style) — one lookup path for both.
+            // (its own inline style) — one lookup path for both. The cards
+            // below share this one list rather than each re-deriving it.
             targets: root.selectedCanvasObjects.map((k) => root.canvasObjectByKey(k)?.style).filter((s) => s !== null && s !== undefined)
+            undoHook: root.pushUndoSnapshot
+            focusHook: function () { mCanvas.forceActiveFocus() }
+        }
+
+        SizeStyleCard {
+            id: sizeStyleCard
+            x: itemsTabContent.inset
+            y: transformCard.y + transformCard.height + 10
+            width: itemsTabContent.rowWidth
+            targets: transformCard.targets
             fillSupported: root.primarySelectedSupportsFill
             undoHook: root.pushUndoSnapshot
             focusHook: function () { mCanvas.forceActiveFocus() }
             onChangeBorderRequested: root.openBackgroundPicker("border")
+            onChangeBorderStyleRequested: {
+                const field = sizeStyleCard.borderStyleFieldItem
+                borderStyleMenu.openAt(field, 0, field.height + 2, root)
+            }
         }
 
-                // Bottom gutter: the card's last control (the Line/Dotted/
-                // Dashed tiles) keeps `inset` of breathing room below it
-                // instead of ending flush with the panel's bottom edge.
-                height: sizeStyleCard.y + sizeStyleCard.height + itemsTabContent.inset
+        FiltersCard {
+            id: filtersCard
+            x: itemsTabContent.inset
+            y: sizeStyleCard.y + sizeStyleCard.height + 10
+            width: itemsTabContent.rowWidth
+            targets: sizeStyleCard.targets
+            mediaFitSupported: root.primarySelectedItem !== null
+                && (root.primarySelectedItem.kind === "image" || root.primarySelectedItem.kind === "video")
+            // The same Fit the MEDIA tab offers, through the same writer: style for
+            // the canvas AND the meta mirror the engine reads, so choosing Cover here
+            // cannot leave the output fitting it another way.
+            fitHook: (fit) => root.applyMediaFit(fit)
+            undoHook: root.pushUndoSnapshot
+            focusHook: function () { mCanvas.forceActiveFocus() }
+        }
+
+                // Bottom gutter: the card's last control keeps `inset` of
+                // breathing room below it instead of ending flush with the
+                // panel's bottom edge.
+                height: filtersCard.y + filtersCard.height + itemsTabContent.inset
             }
         }
 
@@ -3488,8 +4473,34 @@ Rectangle {
                 onChangeColorRequested: {
                     root.openBackgroundPicker("textColor")
                 }
-                onChangeFontRequested: textFontMenu.openAt(textItemPanel, 14, 96, root)
-                onChangeFontFamilyRequested: textFontFamilyMenu.openAt(textItemPanel, 14, 96, root)
+                // Anchored to the Weight FIELD itself, not the row/panel —
+                // same reasoning and matchAnchorWidth as the font-family menu
+                // below (it used to drop from x=0 of the whole row, landing
+                // under "Font family" instead of under "Weight").
+                onChangeFontRequested: {
+                    const field = textItemPanel.weightFieldItem
+                    textFontMenu.openAt(field, 0, field.height + 2, root)
+                }
+                onChangeFontFamilyRequested: {
+                    // Anchored to the Font family FIELD itself, not the whole
+                    // row/panel — matchAnchorWidth below then has the right
+                    // item to size itself against.
+                    const field = textItemPanel.fontFamilyFieldItem
+                    textFontFamilyMenu.openAt(field, 0, field.height + 2, root)
+                }
+                onChangeAutoSizeRequested: {
+                    const field = textItemPanel.autoSizeFieldItem
+                    textAutoSizeMenu.openAt(field, 0, field.height + 2, root)
+                }
+                onChangeTextCaseRequested: {
+                    const field = textItemPanel.textTransformFieldItem
+                    textCaseMenu.openAt(field, 0, field.height + 2, root)
+                }
+                // The Lines card's "Background color" row: the SAME shared picker,
+                // aimed at the per-LINE band instead of the item's box.
+                onChangeLineBackgroundRequested: {
+                    root.openBackgroundPicker("lineBackground")
+                }
             }
         }
 
@@ -3514,19 +4525,115 @@ Rectangle {
             text: qsTr("Select a text item on the canvas to edit its formatting.")
         }
 
-        // SLIDE tab — no design captured for this one either (see
-        // rightTabRow's header comment); a plain placeholder until there's
-        // an actual per-slide settings panel to build here.
+        // MEDIA tab — the selected picture / video / audio item's own values
+        // (MediaItemPanel.qml): the file it points at (with Change) and how it
+        // fills its box. Nothing here edits the slide itself — that is the
+        // SLIDE tab — and nothing here is a second copy of ITEMS' cards: only
+        // values that belong to the media item on its own live here, the same
+        // split TEXT makes for a text item.
+        Flickable {
+            id: mediaItemFlick
+            x: 8
+            y: 56
+            width: parent.width - 16
+            height: rightPanel.height - 56 - 12
+            visible: root.rightPanelTab === "media" && root.primaryMediaItem !== null
+            clip: true
+            contentWidth: width
+            contentHeight: mediaItemPanel.height
+            boundsBehavior: Flickable.StopAtBounds
+
+            MediaItemPanel {
+                id: mediaItemPanel
+                // The 12px scroll strip stays reserved whether the bar shows or
+                // not — the same reason the TEXT tab sizes its panel that way
+                // (a width that follows the bar's own visibility feeds back
+                // into the bar's condition).
+                width: mediaItemFlick.width - 12
+                item: mediaItemFlick.visible ? root.primaryMediaItem : null
+                undoHook: root.pushUndoSnapshot
+                focusHook: function () { mCanvas.forceActiveFocus() }
+                onChangeFileRequested: root.pickReplacementMedia()
+                onFitFieldTapped: mediaFitMenu.openAt(mediaItemPanel.fitFieldItem, 0,
+                                                      mediaItemPanel.fitFieldItem.height + 2, root)
+                onBlendFieldTapped: mediaBlendMenu.openAt(mediaItemPanel.blendFieldItem, 0,
+                                                          mediaItemPanel.blendFieldItem.height + 2, root)
+                onBlendPicked: (blend) => root.setMediaMeta({ blend: blend })
+                onClearFileRequested: root.clearItemFile()
+                onFitPicked: (fit) => root.applyMediaFit(fit)
+                onFlagChanged: (key, on) => root.setMediaFlag(key, on)
+                onCropEdited: (side, percent) => root.setMediaCrop(side, percent)
+                onResetCropRequested: root.resetMediaCrop()
+                onFilterEdited: (key, value) => root.setMediaFilter(key, value)
+                onResetFiltersRequested: root.resetMediaFilters()
+            }
+        }
+
+        AppScrollBar {
+            id: mediaItemScrollBar
+            x: mediaItemFlick.x + mediaItemFlick.width - 4
+            y: mediaItemFlick.y
+            height: mediaItemFlick.height
+            flickable: mediaItemFlick
+            visible: mediaItemFlick.visible && mediaItemFlick.contentHeight > mediaItemFlick.height
+        }
+
         Text {
             x: 8
             y: 56
             width: parent.width - 16
-            horizontalAlignment: Text.AlignHCenter
-            visible: root.rightPanelTab === "slide"
+            wrapMode: Text.Wrap
+            visible: root.rightPanelTab === "media" && !root.primaryIsMedia
             color: Theme.textMuted
             font.family: Theme.fontFamily
             font.pixelSize: 13
-            text: qsTr("Coming soon")
+            text: qsTr("Select a picture, video or audio item on the canvas to edit it.")
+        }
+
+        // SLIDE tab — the slide's own settings (SlidePanel.qml): its background
+        // colour, then "Arrange items" — the live item stack, topmost first,
+        // with the reorder arrows FreeShow's Slide tab has. Scrollable with the
+        // same Flickable + AppScrollBar pattern the other two tabs use (a slide
+        // with a dozen items runs past the panel's bottom): the bar's 12px
+        // strip is always reserved, never derived from the bar's own visibility
+        // (see textPanelFlick's note on the polish-pass loop that caused).
+        Flickable {
+            id: slidePanelFlick
+            x: 8
+            y: 56
+            width: parent.width - 16
+            height: rightPanel.height - 56 - 12
+            visible: root.rightPanelTab === "slide"
+            clip: true
+            contentWidth: width
+            contentHeight: slidePanel.height
+            boundsBehavior: Flickable.StopAtBounds
+
+            SlidePanel {
+                id: slidePanel
+                width: slidePanelFlick.width - 12
+                items: slideStore.current.items
+                selectedKeys: root.selectedCanvasObjects
+                kinds: root.contentTypes
+                backgroundColor: slideStore.current.background
+                onBackgroundPickRequested: root.openBackgroundPicker("background")
+                onRowClicked: (key, modifiers) => root.handleCanvasSelect(key, modifiers)
+                onMoveRequested: (key, direction) => root.moveCanvasItem(key, direction)
+                // The slide's filter set — the same map the canvas host and the
+                // engine's on-air pass read.
+                filters: slideStore.current.filters
+                undoHook: root.pushUndoSnapshot
+                onFilterChanged: (key, value) => root.setSlideFilter(key, value)
+                onFiltersResetRequested: root.resetSlideFilters()
+            }
+        }
+
+        AppScrollBar {
+            x: slidePanelFlick.x + slidePanelFlick.width - 4
+            y: slidePanelFlick.y
+            height: slidePanelFlick.height
+            flickable: slidePanelFlick
+            visible: slidePanelFlick.visible && slidePanelFlick.contentHeight > slidePanelFlick.height
         }
     }
 
@@ -3539,11 +4646,39 @@ Rectangle {
     // catcher.
     MouseArea {
         anchors.fill: parent
-        enabled: slideContextMenu.visible || textFontMenu.visible || textFontFamilyMenu.visible
+        enabled: slideContextMenu.visible || textFontMenu.visible || textFontFamilyMenu.visible || textAutoSizeMenu.visible || textCaseMenu.visible || borderStyleMenu.visible
         onClicked: {
-            slideContextMenu.visible = false
+            slideContextMenu.close()
             textFontMenu.visible = false
             textFontFamilyMenu.visible = false
+            textAutoSizeMenu.visible = false
+            textCaseMenu.visible = false
+            borderStyleMenu.visible = false
+        }
+    }
+
+    // The canvas's right-click menu (see canvasMenuModel/openCanvasMenu):
+    // FreeShow's own context-menu panel, so rows, icon colours, submenu
+    // mechanics and the shortcut hints all read the same as they do there.
+    SlideContextMenu {
+        id: canvasMenu
+        onChosen: (id, arg) => root.canvasMenuPicked(id)
+    }
+
+    // One of the item's three second-values (Item actions › Display duration /
+    // Time until show / Time until hide). 0 = off, which is what the store's
+    // defaults are too.
+    NameDialog {
+        id: itemTimerDialog
+        property string itemKey: ""
+        property string action: ""
+        title: qsTr("Seconds")
+        placeholder: qsTr("0 = off")
+        confirmLabel: qsTr("Set")
+        allowEmpty: true
+        onAccepted: (text) => {
+            const seconds = Math.max(0, Math.min(3600, Number(text) || 0))
+            root.setItemAction(itemTimerDialog.itemKey, itemTimerDialog.action, seconds)
         }
     }
 
@@ -3564,59 +4699,28 @@ Rectangle {
         }
     }
 
-    DropdownPanel {
+    // The slide row's right-click menu — the SAME panel the canvas context menu
+    // uses (FreeShow's context menu), so a row here and a row there read alike:
+    // coloured per-action icons, a divider between the slide's own settings and
+    // the duplicate/delete pair, and the shortcut hint on the right. Its rows
+    // are FreeShow's own slide layout (contextMenuLayouts.slide): Edit, Change
+    // group, Next timer, then Duplicate and Delete below the divider. Actions
+    // are the ones this app has — the layout's slide-level extras (format,
+    // bind, transition) have no engine behind them here, so they are not drawn.
+    SlideContextMenu {
         id: slideContextMenu
-        visible: false
         model: [
-            { label: "Edit" },
-            { label: "Duplicate" },
-            { label: "Change group…" },
-            { label: "Next timer…" },
+            { id: "edit", label: qsTr("Edit"), icon: "edit", color: "#97c7ff" },
+            { id: "group", label: qsTr("Change group…"), icon: "groups", color: "#ff97d9" },
+            { id: "nextTimer", label: qsTr("Next timer…"), icon: "clock", color: "#fca4ff" },
             { divider: true },
-            { label: "Delete", danger: true }
+            // Both chords are bound while this list owns the keyboard (see the
+            // row's focus hand-off and the list's Shortcuts), which is the state
+            // a right-click on a row leaves it in — so the hints are true.
+            { id: "duplicate", label: qsTr("Duplicate"), icon: "duplicate", color: "#97c7ff", shortcut: Hotkeys.sequence("duplicateSelected") },
+            { id: "delete", label: qsTr("Delete"), icon: "delete", color: "#ff5454", shortcut: Hotkeys.sequence("deleteSelected") }
         ]
-        onItemActivated: (label) => {
-            switch (label) {
-            case "Edit":
-                slideModel.selectSlide(root.contextMenuSlideIndex)
-                break
-            case "Change group…": {
-                // The slide's own "group" (Settings · Appearance & Actions'
-                // registry — verse, chorus...): a plain string, same field
-                // ShowCenter.qml's groupColor() already reads to colour the
-                // grid. Listing the registry's own names first (so the
-                // colour actually matches one of them) plus "None" to clear
-                // and a custom entry for a one-off name the registry
-                // doesn't carry.
-                const eid = slideModel.engineIdAt(root.contextMenuSlideIndex)
-                if (eid !== "") {
-                    groupPickerMenu.slideId = eid
-                    groupPickerMenu.openAt(slideContextMenu, 0, 0, root)
-                }
-                break
-            }
-            case "Next timer…": {
-                // How long this slide stays up before the show moves on by itself (0 = it waits).
-                const eid = slideModel.engineIdAt(root.contextMenuSlideIndex)
-                if (eid !== "") {
-                    slideTimerDialog.slideId = eid
-                    slideTimerDialog.open(String(Math.round(ShowService.slideOf(eid).nextTimer ?? 0)))
-                }
-                break
-            }
-            case "Duplicate":
-                // The ENGINE duplicates the slide (fresh id, its items copied); the list
-                // and the copy's canvas are rebuilt from what it made.
-                showSession.duplicateSlide(root.contextMenuSlideIndex)
-                break
-            case "Delete":
-                // The engine deletes the slide (and anything scoped to it); the UI
-                // drops its archive and lands on the neighbouring slide.
-                showSession.removeSlide(root.contextMenuSlideIndex)
-                break
-            }
-            slideContextMenu.visible = false
-        }
+        onChosen: (id, arg) => root.slideMenuPicked(id)
     }
 
     DropdownPanel {
@@ -3651,6 +4755,9 @@ Rectangle {
     DropdownPanel {
         id: textFontMenu
         visible: false
+        // Matches the Weight field's own width — same reasoning as the
+        // font-family menu below (see its own comment).
+        matchAnchorWidth: true
         model: [
             { label: "Regular" },
             { label: "Medium" },
@@ -3666,6 +4773,112 @@ Rectangle {
         }
     }
 
+    // Auto-size picker for TextItemPanel's Font size/Auto size row
+    // (changeAutoSizeRequested) — moved out of the "Text" collapsible
+    // section into a compact chevron Field (see TextItemPanel.qml's own
+    // comment), same DropdownPanel shape as the weight menu above.
+    DropdownPanel {
+        id: textAutoSizeMenu
+        visible: false
+        matchAnchorWidth: true
+        model: [
+            { label: qsTr("None"), key: "none" },
+            { label: qsTr("Shrink"), key: "shrinkToFit" },
+            { label: qsTr("Grow"), key: "growToFit" }
+        ]
+        onItemActivated: (label, item) => {
+            if (root.primarySelectedItem) {
+                canvasHistory.push(qsTr("Change auto size"))
+                root.primarySelectedItem.meta = Object.assign({}, root.primarySelectedItem.meta, { autoSize: item.key })
+            }
+            textAutoSizeMenu.visible = false
+        }
+    }
+
+    // Border style picker for SizeStyleCard's Style field
+    // (changeBorderStyleRequested) — the Line/Dotted/Dashed choice, moved out
+    // of a row of three full-width buttons into a chevron Field beside Width
+    // (user call: "Border Lines beside the width then make dropdown[,] at
+    // all"), same DropdownPanel shape as the other item-panel pickers above.
+    // Applies straight to sizeStyleCard's own targets (CanvasItemStyle
+    // objects), the same list the card's own controls write to.
+    DropdownPanel {
+        id: borderStyleMenu
+        visible: false
+        matchAnchorWidth: true
+        model: [
+            { label: qsTr("Line"), key: "line" },
+            { label: qsTr("Dotted"), key: "dotted" },
+            { label: qsTr("Dashed"), key: "dashed" }
+        ]
+        onItemActivated: (label, item) => {
+            root.pushUndoSnapshot()
+            sizeStyleCard.targets.forEach((t) => t.borderStyle = item.key)
+            borderStyleMenu.visible = false
+        }
+    }
+
+    // Fit picker for the MEDIA tab (MediaItemPanel's Fit field) — FreeShow's four
+    // choices for a placed file, the blur fill included: the canvas softens the
+    // file behind a sharp copy of itself, and the engine's media branch does the
+    // same on the pixels it sends to the outputs.
+    DropdownPanel {
+        id: mediaFitMenu
+        visible: false
+        matchAnchorWidth: true
+        model: [
+            { label: qsTr("Contain"), key: "contain" },
+            { label: qsTr("Cover"), key: "cover" },
+            { label: qsTr("Fill"), key: "fill" },
+            { label: qsTr("Blur fill"), key: "blur" }
+        ]
+        onItemActivated: (label, item) => {
+            root.pushUndoSnapshot()
+            root.applyMediaFit(item.key)
+            mediaFitMenu.visible = false
+        }
+    }
+
+    // Blend-mode picker for the MEDIA tab (MediaItemPanel's Blend field):
+    // FreeShow's own sixteen modes, in its order. The list is taller than the
+    // inspector, so the panel caps it and scrolls (maxHeight) instead of running
+    // off the bottom of the window.
+    DropdownPanel {
+        id: mediaBlendMenu
+        visible: false
+        matchAnchorWidth: true
+        maxHeight: 300
+        model: mediaItemPanel ? mediaItemPanel.blendOptions : []
+        onItemActivated: (label, item) => {
+            root.pushUndoSnapshot()
+            root.setMediaMeta({ blend: item.key })
+            mediaBlendMenu.visible = false
+        }
+    }
+
+    // Text-transform picker for the Text card's "Text transform" field
+    // (TextItemPanel's changeTextCaseRequested) — the four cases the engine's
+    // own textCase vocabulary understands, as one list instead of the four
+    // chips that used to sit under a "Case" caption.
+    DropdownPanel {
+        id: textCaseMenu
+        visible: false
+        matchAnchorWidth: true
+        model: [
+            { label: qsTr("As typed"), key: "none" },
+            { label: qsTr("UPPERCASE"), key: "upper" },
+            { label: qsTr("lowercase"), key: "lower" },
+            { label: qsTr("Title Case"), key: "capitalize" }
+        ]
+        onItemActivated: (label, item) => {
+            if (root.primarySelectedItem) {
+                canvasHistory.push(qsTr("Change text transform"))
+                root.primarySelectedItem.meta = Object.assign({}, root.primarySelectedItem.meta, { textCase: item.key })
+            }
+            textCaseMenu.visible = false
+        }
+    }
+
     // Font-FAMILY picker for TextItemPanel's font row (changeFontFamilyRequested) - every family Qt found installed on this
     // machine (Qt.fontFamilies(), the same font-enumeration QML itself uses to resolve a font.family string), not a short fixed
     // list; long, so it scrolls (maxHeight) rather than running off the screen. The current family gets a checkmark, same
@@ -3674,9 +4887,29 @@ Rectangle {
         id: textFontFamilyMenu
         visible: false
         maxHeight: 320
+        headerTitle: qsTr("Font family")
+        headerSubtitle: root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? FontService.defaultContentFamily) : ""
+        // Tighter rows than this component's normal menu — a long,
+        // font-sample-heavy list reads better packed closer than the usual
+        // 16px/34px menu row (user call: "those unnecessary extra space in
+        // front... is not needed").
+        rowInset: 8
+        rowHeight: 30
+        // Matches the Font family FIELD's own width (a COMBOBOX menu, same as
+        // every matchAnchorWidth consumer) — hugging the widest ROW's content
+        // (fitContentWidth) made the panel wider than its own trigger field
+        // whenever a long font name like "Arial Rounded MT Bold" appeared
+        // (user call: "let the font [list] be [the] same width as it[s]
+        // drop[down trigger]"). anchorItem is the field itself (see
+        // onChangeFontFamilyRequested's openAt call), not the whole panel.
+        matchAnchorWidth: true
         model: {
-            const current = root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? FontService.defaultFamily) : ""
-            return Qt.fontFamilies().slice().sort().map((f) => ({ label: f, trailing: f === current ? "✓" : "" }))
+            const current = root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? FontService.defaultContentFamily) : ""
+            // Each row previews its own face (`fontFamily`) and the chosen one is
+            // drawn in the accent (`accent`) — FreeShow's font picker, which is
+            // what makes a long alphabetical list scannable: you pick by shape,
+            // not by reading names in the body font.
+            return Qt.fontFamilies().slice().sort().map((f) => ({ label: f, trailing: f === current ? "✓" : "", fontFamily: f, accent: f === current }))
         }
         onItemActivated: (label) => {
             if (root.primarySelectedItem) {
@@ -3708,10 +4941,14 @@ Rectangle {
                 ? (style ? (root.bgModalTarget === "border" ? style.borderColor : style.backgroundColor) : "")
                 : root.bgModalTarget === "textColor"
                     ? (item ? String(item.meta?.color ?? "") : "")
-                    : slideStore.current.background)
+                    : root.bgModalTarget === "lineBackground"
+                        ? (item ? String(item.meta?.lineBg ?? "") : "")
+                        : slideStore.current.background)
         }
         title: root.bgModalTarget === "border" ? qsTr("Border Color")
-            : root.bgModalTarget === "textColor" ? qsTr("Text Color") : qsTr("Background Color")
+            : root.bgModalTarget === "textColor" ? qsTr("Text Color")
+            : root.bgModalTarget === "lineBackground" ? qsTr("Line Background")
+            : qsTr("Background Color")
         onApplied: (selection) => {
             canvasHistory.push(qsTr("Change color"))
             // Solid colors only for the item rows (gradients aren't a border /
@@ -3736,6 +4973,23 @@ Rectangle {
                 const item = root.bgPickerPrimaryItem() ?? root.primarySelectedItem
                 if (item)
                     item.meta = Object.assign({}, item.meta, { color: hex })
+            } else if (root.bgModalTarget === "lineBackground") {
+                // THE PER-LINE BAND (the Lines card). Each selected TEXT item
+                // gets its own fresh meta, the same reassign-the-whole-object
+                // shape as the text colour above, so every surface re-reads it.
+                // "transparent" lands here too and MEANS "no band" — the same
+                // spelling the picker and MetadataFields.lineBandText use.
+                let touched = 0
+                root.bgPickerKeys().forEach((k) => {
+                    const item = root.canvasObjectByKey(k)
+                    if (item && item.kind === "text") {
+                        item.meta = Object.assign({}, item.meta, { lineBg: hex })
+                        ++touched
+                    }
+                })
+                if (touched === 0)
+                    EventBus.notify(qsTr("Line colour not applied — the item it was opened for is no longer selected. Select it and try again."),
+                                    "warning", qsTr("Edit"), "ui.edit.lineBg.noTarget")
             } else {
                 slideStore.current.background = hex
             }
@@ -3840,6 +5094,42 @@ Rectangle {
         onCancelled: root.shapeModalOpen = false
     }
 
+    // ---- The Media chip's picker -----------------------------------------
+    // The app's one media grid (the Media library's own items), locked to the
+    // kind the chip step asked for — a Picture chip cannot insert an MP3. The
+    // pick becomes an item (addMediaItem above); nothing is taken, so choosing
+    // a file while building never changes what is on air.
+    MediaSourceModal {
+        id: mediaSourceModal
+        open: root.mediaModalOpen
+        fixedKind: root.mediaPickKind
+        onApplied: (item) => {
+            // Two outcomes from one picker: the MEDIA tab's Change replaces the
+            // file on the item it was opened for, the "+" ring adds a new item.
+            if (root.mediaReplaceKey !== "") {
+                if (!root.replaceItemMedia(root.mediaReplaceKey, item))
+                    EventBus.notify(qsTr("That item is no longer on the slide — nothing was replaced."),
+                                    "warning", qsTr("Media"), "edit.mediaReplace")
+                root.mediaReplaceKey = ""
+            } else if (!root.addMediaItem(root.mediaPickKind, item)) {
+                // No active slide (or the engine refused): the ring had
+                // already closed, so say so rather than dropping the pick
+                // silently onto nothing.
+                EventBus.notify(qsTr("Add a slide first — an item needs a slide to sit on."),
+                                "warning", qsTr("Media"), "edit.mediaItem")
+            }
+            root.mediaModalOpen = false
+        }
+        onCancelled: {
+            root.mediaModalOpen = false
+            root.mediaReplaceKey = ""
+        }
+        // "Browse this PC...": the library only indexes folders it was given.
+        // Picking a folder adds it (and rescans), so the file appears in the
+        // grid that is still open in front of the operator.
+        onBrowseRequested: MediaLibraryService.addFolder()
+    }
+
     // ---- Esc closes the Edit screen's own transient panels -----------------
     // The + ring and the metadata palette are not modals, but they do take
     // over the screen (the palette even owns the pointer), so Esc has to be
@@ -3874,6 +5164,14 @@ Rectangle {
     // TextInput (an item being typed into, a modal's search field, ...)
     // steals focus away from mCanvas, so these can't fire mid-typing.
     //
+    // Undo/redo are the exception to "canvas focus only": they are the open
+    // slide's HISTORY keys, and the slide list owns the keyboard as soon as a
+    // row is clicked — so gating them on mCanvas alone silently killed Ctrl+Z
+    // right after switching slides, which is exactly when a mistake gets
+    // noticed. They stay live while slideListFlick has focus and leave the
+    // focus there (see undo()/redo()), so the list's Ctrl+D / Del still work
+    // afterwards.
+    //
     // Undo/redo specifically ALSO stay enabled while root.anyTextEditing is
     // true — i.e. while a canvas text item is mid-edit specifically (not
     // just any focused text field elsewhere, like a slide rename or a hex
@@ -3887,12 +5185,12 @@ Rectangle {
     // flips true the instant edit mode itself starts.
     Shortcut {
         action: "undo"
-        enabled: mCanvas.activeFocus || root.anyTextEditing
+        enabled: mCanvas.activeFocus || root.anyTextEditing || slideListFlick.activeFocus
         onActivated: root.undo()
     }
     Shortcut {
         action: "redo"
-        enabled: mCanvas.activeFocus || root.anyTextEditing
+        enabled: mCanvas.activeFocus || root.anyTextEditing || slideListFlick.activeFocus
         onActivated: root.redo()
     }
     // Ctrl+Y — the second-standard redo chord, alongside Ctrl+Shift+Z above.
@@ -3900,7 +5198,7 @@ Rectangle {
     // are why users report "redo is broken" on the other.
     Shortcut {
         action: "redoAlt"
-        enabled: mCanvas.activeFocus || root.anyTextEditing
+        enabled: mCanvas.activeFocus || root.anyTextEditing || slideListFlick.activeFocus
         onActivated: root.redo()
     }
     Shortcut {
@@ -3916,15 +5214,77 @@ Rectangle {
     Shortcut {
         action: "duplicateSelected"
         enabled: mCanvas.activeFocus && root.selectedCanvasObjects.length > 0
-        onActivated: {
-            const src = root.canvasObjectByKey(root.selectedCanvasObjects[0])
-            if (src)
-                root.addCanvasItem(src.kind, src)
-        }
+        onActivated: root.duplicateSelectedCanvasObjects()
+    }
+    // Ctrl+A — the canvas menu's "Select all" row, on the keyboard.
+    Shortcut {
+        action: "selectAll"
+        enabled: mCanvas.activeFocus && root.hasActiveSlide
+        onActivated: root.selectAllCanvasObjects()
     }
     Shortcut {
         action: "addText"
         enabled: mCanvas.activeFocus && root.hasActiveSlide
-        onActivated: root.addCanvasItem("text")
+        onActivated: root.addTextItem()
+    }
+
+    // ---- Text style from the keyboard (Ctrl+B / Ctrl+I / Ctrl+U) --------
+    // FreeShow's own chords for the Text tab's B/I/U style toggles (its
+    // edit/values/boxes.ts) — the panel rows stay the way they are, these are
+    // the same switches without leaving the canvas. Enabled wherever undo is
+    // (canvas focus, or a text item mid-edit), so the chord works while typing,
+    // exactly as an editor's bold does.
+    //
+    // Ctrl+I is Import everywhere else in the app. While this is true, Import's
+    // own binding is switched off (Main.qml) so the two are never ambiguous —
+    // "in the edit scenario, I can serve something else".
+    readonly property bool textStyleKeysLive:
+        (mCanvas.activeFocus || root.anyTextEditing) && root.primarySelectedItem !== null
+    Shortcut {
+        action: "boldText"
+        enabled: root.textStyleKeysLive
+        onActivated: root.toggleTextStyle("bold")
+    }
+    Shortcut {
+        action: "italicText"
+        enabled: root.textStyleKeysLive
+        onActivated: root.toggleTextStyle("italic")
+    }
+    Shortcut {
+        action: "underlineText"
+        enabled: root.textStyleKeysLive
+        onActivated: root.toggleTextStyle("underline")
+    }
+
+    // ---- The slide LIST's own two keys --------------------------------
+    // Same chords as the canvas's, and gated by which surface owns the keyboard
+    // instead of being ambiguous: a row click hands focus to slideListFlick
+    // (see the delegate) and any canvas press hands it back to mCanvas, so
+    // exactly one of each pair is enabled at a time. Acting on the ACTIVE row
+    // is the model's `activeIndex()`, i.e. the slide the canvas is showing —
+    // never a hovered-but-unselected one.
+    //
+    // The gate is `hasActiveSlide`, not a read of activeIndex(): the index is a
+    // function call, so a binding on it would be computed once and go stale when
+    // the roster changes under it ("Add slide" would leave the key disabled
+    // until focus moved). hasActiveSlide is bound to the model's own change
+    // signal, so the enabled state follows the deck.
+    Shortcut {
+        action: "duplicateSelected"
+        enabled: slideListFlick.activeFocus && root.hasActiveSlide
+        onActivated: {
+            const row = slideModel.activeIndex()
+            if (row >= 0)
+                showSession.duplicateSlide(row)
+        }
+    }
+    Shortcut {
+        action: "deleteSelected"
+        enabled: slideListFlick.activeFocus && root.hasActiveSlide
+        onActivated: {
+            const row = slideModel.activeIndex()
+            if (row >= 0)
+                showSession.removeSlide(row)
+        }
     }
 }

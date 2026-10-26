@@ -23,17 +23,86 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
+#include <memory>
 #include <random>
-#include <sstream>
 #include <type_traits>
 
 namespace fs = std::filesystem;
 namespace bps::platform {
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Path conversion: every path handed to this PAL is UTF-8 — and on Windows the
+// narrow route into the OS is LOSSY.
+//
+// fs::path(std::string), std::fstream(const char*) and CreateFileA all convert
+// through the CRT's locale, which on this toolchain maps one wide char per
+// BYTE. Importing a ProPresenter songbook therefore wrote
+// "WE’LL TALK IT OVER.vgr" as "WEâ€™LL TALK IT OVER.vgr.tmp" and then failed to
+// publish it — `rename failed … Input/output error` (ERROR_IO_DEVICE), 194
+// times in one sweep, for exactly the titles holding a curly quote and not one
+// ASCII title (engine.log, 2026-10-24). The names also never matched what the
+// library scan listed, so the shows simply were not there afterwards.
+//
+// Everything below goes Windows' own UTF-8 -> UTF-16 -> OS route instead;
+// POSIX paths are UTF-8 already and need no help.
+// ---------------------------------------------------------------------------
+#if defined(_WIN32)
+std::wstring ToWide(std::string_view utf8) {
+    if (utf8.empty()) return {};
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int need = MultiByteToWideChar(codePage, flags, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (need <= 0) {
+        // Not valid UTF-8 (a legacy ANSI path kept in an old index): read the
+        // bytes the way this machine names them rather than dropping the path.
+        codePage = CP_ACP;
+        flags = 0;
+        need = MultiByteToWideChar(codePage, flags, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+        if (need <= 0) return {};
+    }
+    std::wstring wide(static_cast<size_t>(need), L'\0');
+    MultiByteToWideChar(codePage, flags, utf8.data(), static_cast<int>(utf8.size()), wide.data(), need);
+    return wide;
+}
+
+std::string ToUtf8(std::wstring_view wide) {
+    if (wide.empty()) return {};
+    int need = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    if (need <= 0) return {};
+    std::string utf8(static_cast<size_t>(need), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), need, nullptr, nullptr);
+    return utf8;
+}
+
+fs::path NativePath(std::string_view path) { return fs::path(ToWide(path)); }
+std::string PathToUtf8(const fs::path& path) { return ToUtf8(path.wstring()); }
+
+// The wide fopen: _wfopen is the only stream entry point that carries a name
+// Windows can actually store.
+std::FILE* OpenFile(const std::string& path, const char* mode) {
+    const std::wstring wmode(mode, mode + std::strlen(mode));
+    return _wfopen(ToWide(path).c_str(), wmode.c_str());
+}
+#else
+fs::path NativePath(std::string_view path) { return fs::path(std::string(path)); }
+std::string PathToUtf8(const fs::path& path) { return path.string(); }
+std::FILE* OpenFile(const std::string& path, const char* mode) { return std::fopen(path.c_str(), mode); }
+#endif
+
+// A std::FILE* that closes itself. It replaces the std::ifstream/std::ofstream
+// these functions used to open over the same wrong-name path.
+struct FileCloser {
+    void operator()(std::FILE* file) const {
+        if (file) std::fclose(file);
+    }
+};
+using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
+
 Error FsError(std::string_view op, std::string_view path, const std::error_code& ec,
               std::string_view module = "Filesystem") {
     Error e = Error::Make(Err::IoError, module,
@@ -80,7 +149,7 @@ bool FlushUnsupported(DWORD e) {
 // with ERROR_ACCESS_DENIED, which read as a real I/O failure and failed every
 // save), while a DIRECTORY handle is opened for reading and flushed as-is.
 FlushOutcome FlushPathData(const std::string& path, bool directory) {
-    HANDLE h = CreateFileA(path.c_str(), directory ? GENERIC_READ : GENERIC_WRITE,
+    HANDLE h = CreateFileW(ToWide(path).c_str(), directory ? GENERIC_READ : GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING,
                            directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL,
@@ -154,7 +223,7 @@ FlushOutcome FlushPathData(const std::string& path, bool directory) {
 // second copy of the whole document in memory). A short read, a longer file or
 // one differing byte is a mismatch.
 bool ContentMatches(const std::string& path, const void* bytes, size_t size) {
-    std::ifstream in(path, std::ios::binary);
+    FilePtr in(OpenFile(path, "rb"));
     if (!in) return false;
     const char* expected = static_cast<const char*>(bytes);
     constexpr size_t kChunk = 64 * 1024;
@@ -162,17 +231,16 @@ bool ContentMatches(const std::string& path, const void* bytes, size_t size) {
     std::vector<char> buf(std::min(kChunk, size == 0 ? size_t{1} : size));
     while (done < size) {
         const size_t want = std::min(buf.size(), size - done);
-        in.read(buf.data(), static_cast<std::streamsize>(want));
-        if (static_cast<size_t>(in.gcount()) != want) return false;
+        if (std::fread(buf.data(), 1, want, in.get()) != want) return false;
         if (std::memcmp(buf.data(), expected + done, want) != 0) return false;
         done += want;
     }
     // Nothing may follow: a longer file is a different file.
-    return in.peek() == std::char_traits<char>::eof();
+    return std::fgetc(in.get()) == EOF;
 }
 
 // mtime tick used as a change fingerprint (ns resolution).
-std::string Fingerprint(const fs::path& p) {
+std::string Fingerprint(std::string_view path) {
 #if defined(_WIN32)
     // Verified by direct trace (2026-09-19): this MinGW-w64/libstdc++
     // combination's std::filesystem::last_write_time() returns the exact
@@ -183,13 +251,13 @@ std::string Fingerprint(const fs::path& p) {
     // std::filesystem clock-epoch conversion involved at all) doesn't go
     // through whatever that library's bug is.
     WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExA(p.string().c_str(), GetFileExInfoStandard, &data)) return {};
+    if (!GetFileAttributesExW(ToWide(path).c_str(), GetFileExInfoStandard, &data)) return {};
     uint64_t t = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
                  data.ftLastWriteTime.dwLowDateTime;
     return std::to_string(t);
 #else
     std::error_code ec;
-    auto t = fs::last_write_time(p, ec);
+    auto t = fs::last_write_time(NativePath(path), ec);
     if (ec) return {};
     return std::to_string(t.time_since_epoch().count());
 #endif
@@ -203,62 +271,71 @@ FilesystemImpl::~FilesystemImpl() {
 
 bool FilesystemImpl::Exists(std::string_view path) const {
     std::error_code ec;
-    return fs::exists(fs::path(path), ec);
+    return fs::exists(NativePath(path), ec);
 }
 
 bool FilesystemImpl::IsDirectory(std::string_view path) const {
     std::error_code ec;
-    return fs::is_directory(fs::path(path), ec);
+    return fs::is_directory(NativePath(path), ec);
 }
 
 bool FilesystemImpl::IsRegularFile(std::string_view path) const {
     std::error_code ec;
-    return fs::is_regular_file(fs::path(path), ec);
+    return fs::is_regular_file(NativePath(path), ec);
 }
 
 Result<std::string> FilesystemImpl::ReadText(std::string_view path) const {
-    std::ifstream in(std::string(path), std::ios::binary);
+    FilePtr in(OpenFile(std::string(path), "rb"));
     if (!in) return IoError("Filesystem", "cannot open for reading: " + std::string(path));
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
+    std::string data;
+    char buf[64 * 1024];
+    size_t got = 0;
+    while ((got = std::fread(buf, 1, sizeof buf, in.get())) > 0) data.append(buf, got);
+    if (std::ferror(in.get())) return IoError("Filesystem", "read failed: " + std::string(path));
+    return data;
 }
 
 Result<std::vector<uint8_t>> FilesystemImpl::ReadBinary(std::string_view path) const {
-    std::ifstream in(std::string(path), std::ios::binary);
+    FilePtr in(OpenFile(std::string(path), "rb"));
     if (!in) return IoError("Filesystem", "cannot open for reading: " + std::string(path));
-    in.seekg(0, std::ios::end);
-    std::streamsize size = in.tellg();
-    in.seekg(0, std::ios::beg);
-    std::vector<uint8_t> data(size > 0 ? static_cast<size_t>(size) : 0);
-    if (size > 0) in.read(reinterpret_cast<char*>(data.data()), size);
+    std::vector<uint8_t> data;
+    uint8_t buf[64 * 1024];
+    size_t got = 0;
+    while ((got = std::fread(buf, 1, sizeof buf, in.get())) > 0)
+        data.insert(data.end(), buf, buf + got);
+    if (std::ferror(in.get())) return IoError("Filesystem", "read failed: " + std::string(path));
     return data;
 }
 
 Result<void> FilesystemImpl::Write(std::string_view path, std::string_view data) {
-    std::ofstream out(std::string(path), std::ios::binary | std::ios::trunc);
+    FilePtr out(OpenFile(std::string(path), "wb"));
     if (!out) return IoError("Filesystem", "cannot open for writing: " + std::string(path));
-    out.write(data.data(), static_cast<std::streamsize>(data.size()));
-    out.close();
-    if (!out) return IoError("Filesystem", "write failed: " + std::string(path));
+    const bool wrote = data.empty() || std::fwrite(data.data(), 1, data.size(), out.get()) == data.size();
+    const bool flushed = wrote && std::fflush(out.get()) == 0;
+    // The close is checked too: a stream can fail on close alone (a full disk
+    // answers there), which is why the old ofstream checked out.close().
+    const bool closed = std::fclose(out.release()) == 0;
+    if (!wrote || !flushed || !closed) return IoError("Filesystem", "write failed: " + std::string(path));
     return Ok();
 }
 
 Result<void> FilesystemImpl::WriteBinary(std::string_view path, const std::vector<uint8_t>& data) {
-    std::ofstream out(std::string(path), std::ios::binary | std::ios::trunc);
+    FilePtr out(OpenFile(std::string(path), "wb"));
     if (!out) return IoError("Filesystem", "cannot open for writing: " + std::string(path));
-    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-    out.close();
-    if (!out) return IoError("Filesystem", "write failed: " + std::string(path));
+    const bool wrote = data.empty() || std::fwrite(data.data(), 1, data.size(), out.get()) == data.size();
+    const bool flushed = wrote && std::fflush(out.get()) == 0;
+    const bool closed = std::fclose(out.release()) == 0;
+    if (!wrote || !flushed || !closed) return IoError("Filesystem", "write failed: " + std::string(path));
     return Ok();
 }
 
 Result<void> FilesystemImpl::Append(std::string_view path, std::string_view data) {
-    std::ofstream out(std::string(path), std::ios::binary | std::ios::app);
+    FilePtr out(OpenFile(std::string(path), "ab"));
     if (!out) return IoError("Filesystem", "cannot open for append: " + std::string(path));
-    out.write(data.data(), static_cast<std::streamsize>(data.size()));
-    out.close();
-    if (!out) return IoError("Filesystem", "append failed: " + std::string(path));
+    const bool wrote = data.empty() || std::fwrite(data.data(), 1, data.size(), out.get()) == data.size();
+    const bool flushed = wrote && std::fflush(out.get()) == 0;
+    const bool closed = std::fclose(out.release()) == 0;
+    if (!wrote || !flushed || !closed) return IoError("Filesystem", "append failed: " + std::string(path));
     return Ok();
 }
 
@@ -305,12 +382,13 @@ Result<void> FilesystemImpl::ReplaceAtomic(std::string_view path, const void* by
     }
     const std::string temp = target + ".tmp";
     {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        FilePtr out(OpenFile(temp, "wb"));
         if (!out) return IoError("Filesystem", "cannot open for writing: " + temp);
-        if (size > 0)
-            out.write(static_cast<const char*>(bytes), static_cast<std::streamsize>(size));
-        out.close();
-        if (!out) {
+        const bool wrote = size == 0 ||
+                           std::fwrite(bytes, 1, size, out.get()) == size;
+        const bool flushed = wrote && std::fflush(out.get()) == 0;
+        const bool closed = std::fclose(out.release()) == 0;   // before the size check below
+        if (!wrote || !flushed || !closed) {
             (void)Remove(temp);
             return IoError("Filesystem", "write failed: " + temp);
         }
@@ -386,7 +464,7 @@ Result<void> FilesystemImpl::CopyAtomic(std::string_view from, std::string_view 
     }
     const std::string temp = target + ".tmp";
     std::error_code ec;
-    fs::copy_file(fs::path(source), fs::path(temp),
+    fs::copy_file(NativePath(source), NativePath(temp),
                   fs::copy_options::overwrite_existing, ec);
     if (ec) {
         (void)Remove(temp);
@@ -424,35 +502,35 @@ Result<void> FilesystemImpl::CopyAtomic(std::string_view from, std::string_view 
 
 Result<void> FilesystemImpl::CreateDirectory(std::string_view path) {
     std::error_code ec;
-    fs::create_directory(fs::path(path), ec);
+    fs::create_directory(NativePath(path), ec);
     if (ec) return FsError("create_directory", path, ec);
     return Ok();
 }
 
 Result<void> FilesystemImpl::CreateDirectories(std::string_view path) {
     std::error_code ec;
-    fs::create_directories(fs::path(path), ec);
+    fs::create_directories(NativePath(path), ec);
     if (ec) return FsError("create_directories", path, ec);
     return Ok();
 }
 
 Result<void> FilesystemImpl::Remove(std::string_view path) {
     std::error_code ec;
-    fs::remove(fs::path(path), ec);
+    fs::remove(NativePath(path), ec);
     if (ec) return FsError("remove", path, ec);
     return Ok();
 }
 
 Result<void> FilesystemImpl::RemoveAll(std::string_view path) {
     std::error_code ec;
-    fs::remove_all(fs::path(path), ec);
+    fs::remove_all(NativePath(path), ec);
     if (ec) return FsError("remove_all", path, ec);
     return Ok();
 }
 
 Result<void> FilesystemImpl::Move(std::string_view from, std::string_view to) {
     std::error_code ec;
-    fs::rename(fs::path(from), fs::path(to), ec);
+    fs::rename(NativePath(from), NativePath(to), ec);
     if (ec) return FsError("rename", from, ec);
     return Ok();
 }
@@ -463,14 +541,14 @@ Result<void> FilesystemImpl::Rename(std::string_view from, std::string_view to) 
 
 Result<void> FilesystemImpl::Copy(std::string_view from, std::string_view to) {
     std::error_code ec;
-    fs::copy(fs::path(from), fs::path(to), fs::copy_options::recursive, ec);
+    fs::copy(NativePath(from), NativePath(to), fs::copy_options::recursive, ec);
     if (ec) return FsError("copy", from, ec);
     return Ok();
 }
 
 Result<uint64_t> FilesystemImpl::FileSize(std::string_view path) const {
     std::error_code ec;
-    auto size = fs::file_size(fs::path(path), ec);
+    auto size = fs::file_size(NativePath(path), ec);
     if (ec) return FsError("file_size", path, ec);
     return static_cast<uint64_t>(size);
 }
@@ -492,17 +570,17 @@ Result<std::string> FilesystemImpl::Absolute(std::string_view path) const {
     if (path.empty()) return std::string();
 
     std::error_code ec;
-    auto abs = fs::absolute(fs::path(path), ec);
+    auto abs = fs::absolute(NativePath(path), ec);
     if (ec) return FsError("absolute", path, ec);
-    return abs.string();
+    return PathToUtf8(abs);
 }
 
 Result<std::vector<std::string>> FilesystemImpl::Enumerate(std::string_view dir) const {
     std::error_code ec;
-    fs::directory_iterator it(fs::path(dir), ec);
+    fs::directory_iterator it(NativePath(dir), ec);
     if (ec) return FsError("directory_iterator", dir, ec);
     std::vector<std::string> out;
-    for (const auto& entry : it) out.push_back(entry.path().string());
+    for (const auto& entry : it) out.push_back(PathToUtf8(entry.path()));
     return out;
 }
 
@@ -514,7 +592,7 @@ std::string FilesystemImpl::Join(std::string_view a, std::string_view b) const {
 }
 
 std::string FilesystemImpl::Extension(std::string_view path) const {
-    return fs::path(path).extension().string();
+    return PathToUtf8(NativePath(path).extension());
 }
 
 Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path) const {
@@ -528,7 +606,7 @@ Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path
         return none;
     }
     std::error_code ec;
-    auto st = fs::status(fs::path(path), ec);
+    auto st = fs::status(NativePath(path), ec);
     if (ec) return FsError("status", path, ec);
     FileMetadata m;
     m.isDirectory = fs::is_directory(st);
@@ -536,7 +614,7 @@ Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path
     auto perms = st.permissions();   // std::filesystem::perms -> raw bits
     m.permissions = static_cast<uint32_t>(static_cast<std::underlying_type_t<fs::perms>>(perms));
     if (m.isRegularFile) {
-        auto size = fs::file_size(fs::path(path), ec);
+        auto size = fs::file_size(NativePath(path), ec);
         if (ec) return FsError("file_size", path, ec);
         m.sizeBytes = static_cast<uint64_t>(size);
     }
@@ -546,7 +624,7 @@ Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path
     // 100 ns; ask for that.
     {
         WIN32_FILE_ATTRIBUTE_DATA data;
-        const fs::path native(path);
+        const std::wstring native = ToWide(path);
         if (GetFileAttributesExW(native.c_str(), GetFileExInfoStandard, &data)) {
             ULARGE_INTEGER ticks;
             ticks.LowPart = data.ftLastWriteTime.dwLowDateTime;
@@ -559,7 +637,7 @@ Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path
         }
     }
 #endif
-    auto mtime = fs::last_write_time(fs::path(path), ec);
+    auto mtime = fs::last_write_time(NativePath(path), ec);
     if (!ec) {
         // file_clock's epoch is not the Unix epoch (on Windows it is 1601, and nanoseconds since
         // then overflow int64), so convert to the system clock before counting.
@@ -578,8 +656,8 @@ Result<std::string> FilesystemImpl::CreateTempFile(std::string_view prefix) {
     for (int attempt = 0; attempt < 8; ++attempt) {
         std::string name = std::string(prefix) + std::to_string(rd()) + ".tmp";
         fs::path p = dir / name;
-        std::ofstream out(p.string(), std::ios::binary | std::ios::trunc);
-        if (out) return p.string();
+        FilePtr out(OpenFile(PathToUtf8(p), "wb"));
+        if (out) return PathToUtf8(p);
     }
     return IoError("Filesystem", "cannot create temp file with prefix " + std::string(prefix));
 }
@@ -587,14 +665,14 @@ Result<std::string> FilesystemImpl::CreateTempFile(std::string_view prefix) {
 Result<std::vector<std::string>> FilesystemImpl::FindFiles(std::string_view dir,
                                                            std::string_view extension) const {
     std::error_code ec;
-    fs::recursive_directory_iterator it(fs::path(dir), ec);
+    fs::recursive_directory_iterator it(NativePath(dir), ec);
     if (ec) return FsError("recursive_directory_iterator", dir, ec);
     std::vector<std::string> out;
     for (const auto& entry : it) {
         if (ec) break;
         if (!entry.is_regular_file()) continue;
         if (!extension.empty() && entry.path().extension() != std::string(extension)) continue;
-        out.push_back(entry.path().string());
+        out.push_back(PathToUtf8(entry.path()));
     }
     return out;
 }
@@ -612,17 +690,17 @@ Result<void> FilesystemImpl::CreateSymlink(std::string_view target, std::string_
     // ordinary process creates symlinks on modern Windows.
     constexpr DWORD kUnprivileged = 0x2;   // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
     std::error_code ec;
-    const bool targetIsDir = fs::is_directory(fs::path(target), ec);
+    const bool targetIsDir = fs::is_directory(NativePath(target), ec);
     const DWORD flags = kUnprivileged | (targetIsDir ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0);
-    if (!CreateSymbolicLinkW(fs::path(linkPath).wstring().c_str(),
-                             fs::path(target).wstring().c_str(), flags)) {
+    if (!CreateSymbolicLinkW(ToWide(linkPath).c_str(),
+                             ToWide(target).c_str(), flags)) {
         return FsError("create_symlink", linkPath,
                        std::error_code(static_cast<int>(GetLastError()), std::system_category()));
     }
     return Ok();
 #else
     std::error_code ec;
-    fs::create_symlink(fs::path(target), fs::path(linkPath), ec);
+    fs::create_symlink(NativePath(target), NativePath(linkPath), ec);
     if (ec) return FsError("create_symlink", linkPath, ec);
     return Ok();
 #endif
@@ -630,9 +708,9 @@ Result<void> FilesystemImpl::CreateSymlink(std::string_view target, std::string_
 
 Result<std::string> FilesystemImpl::ReadSymlink(std::string_view linkPath) const {
     std::error_code ec;
-    auto target = fs::read_symlink(fs::path(linkPath), ec);
+    auto target = fs::read_symlink(NativePath(linkPath), ec);
     if (ec) return FsError("read_symlink", linkPath, ec);
-    return target.string();
+    return PathToUtf8(target);
 }
 
 Result<IFilesystem::WatchToken> FilesystemImpl::Watch(
@@ -647,7 +725,7 @@ Result<IFilesystem::WatchToken> FilesystemImpl::Watch(
         WatchEntry e;
         e.path = std::string(path);
         e.onChange = std::move(onChange);
-        e.fingerprint = Fingerprint(fs::path(e.path));
+        e.fingerprint = Fingerprint(e.path);
         watches_[token] = std::move(e);
         if (!pollThreadStarted_) {
             pollThreadStarted_ = true;
@@ -678,7 +756,7 @@ void FilesystemImpl::PollLoop() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto& [token, entry] : watches_) {
-                std::string fp = Fingerprint(fs::path(entry.path));
+                std::string fp = Fingerprint(entry.path);
                 if (fp != entry.fingerprint) {
                     entry.fingerprint = fp;
                     changed.emplace_back(entry.path, entry.onChange);

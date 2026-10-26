@@ -55,8 +55,11 @@ Item {
     property bool showCheckerboard: true
     // What time the clocks show; the host ticks it (one shared ticker rather than one per card).
     property date now: new Date()
-    // Checkerboard tile size in stage units - a strip of many small slides passes a bigger one to keep them cheap.
-    property int checkerSize: 16
+    // Checkerboard CELL size in SCREEN pixels — FreeShow's fixed 13px board at
+    // every preview size. The Checkerboard is handed this preview's own `unit`
+    // as its hostScale, so the cell lands at this many real pixels whatever the
+    // card's size (see the Checkerboard call below).
+    property real checkerSize: 13
     // A bound text block with no literal text shows "{bind}" as a stand-in —
     // correct for a library card or the Edit canvas (it reads as "this is a
     // template field," not broken text), wrong for REAL on-air content (the
@@ -66,6 +69,40 @@ Item {
     // live picture as literal text. Hosts rendering actual on-air/staged
     // content turn this off; every editor/library surface keeps it on.
     property bool showBindPlaceholders: true
+
+    // ---- THE READING STEP (LiveOutputService.lineStep) ----------------------
+    // A host that draws the stepped content itself (the Main Output tile) opts
+    // in: its reading block then paints the PASSAGE the page is cut from and
+    // slides it by LiveOutputService.readingScroll — the same passage, at the
+    // same offset, that the engine draws on the HDMI window and the NDI feed.
+    // Opt-in because every other host — a library card, a canvas thumbnail — has
+    // no reading step behind it and must keep drawing the page.
+    property bool animateLineSteps: false
+    // How long that text is, so a delegate can tell whether IT is the reading
+    // block. Only that one draws the passage: every text block used to shift by
+    // the same pitch, which moved a title by the BODY's line height — a visible
+    // hop out of place on the very blocks the step is not supposed to touch.
+    readonly property int stepTextLength: {
+        const bs = root.blocks !== undefined && root.blocks !== null ? root.blocks : []
+        let longest = 0
+        for (let i = 0; i < bs.length; ++i) {
+            const b = bs[i]
+            if (!b || (b.kind !== undefined && b.kind !== "text"))
+                continue
+            const length = String(b.text ?? "").length
+            if (length > longest)
+                longest = length
+        }
+        return longest
+    }
+    // NO CLOCK AND NO OVERLAY HERE ANY MORE. The move used to be played by a
+    // second copy of the words on top of the picture (an old-window snapshot
+    // translated by `blockShift`, cross-faded at the end), which is exactly what
+    // read as a slide with a snap: two snapshots of a re-flowed string can only
+    // be animated to LOOK like a scroll. The offset now comes from the service,
+    // animated once, and the block's own passage is slid under its own box (see
+    // el.drawsFlow below) — the words on screen are the words that exist, and
+    // when the move lands there is nothing to hand over.
 
     // The stage's grid, from its ONE definition (qml/settings/StageGrid.qml) —
     // this item draws a picture OF THE STAGE, so it follows the stage's own
@@ -111,7 +148,13 @@ Item {
 
         Checkerboard {
             anchors.fill: parent
+            // This subtree is painted in STAGE units and scaled by `unit`, so the
+            // board is told that scale: it keeps the cell at checkerSize real
+            // pixels and rasterizes at the size the card actually covers on
+            // screen — not at 754×428 stage units for a 120px card, which is
+            // what every design card in a grid used to do.
             tileSize: root.checkerSize
+            hostScale: root.unit
             visible: root.showCheckerboard && root.isClear(root.background)
         }
         Rectangle {
@@ -139,6 +182,43 @@ Item {
                 readonly property string kind: modelData.kind
                 readonly property var meta: modelData.meta !== undefined ? modelData.meta : {}
                 readonly property var style: modelData.style !== undefined ? modelData.style : {}
+                // The line advance THIS block paints at, measured from its own
+                // fitted size (measureLineBox is the font's line box at
+                // fitProbe = fitAnswer; fitMeasure.lineHeight is the multiplier
+                // with the additive gap already folded in) — the distance one
+                // line of the reading step travels, in this block's own type.
+                readonly property real linePitch: measureLineBox.contentHeight * fitMeasure.lineHeight
+                // THE READING BLOCK: the longest text (the same rule the service
+                // steps and the engine glides) — the only block the line step moves.
+                readonly property bool readingBlock: el.kind === "text"
+                    && String(modelData.text ?? "").length > 0
+                    && String(modelData.text ?? "").length === root.stepTextLength
+                // DOES THIS BLOCK DRAW THE READING PASSAGE? Only the reading
+                // block of a host that follows the step (the Main Output tile),
+                // and only while the service has a passage for it. Everything
+                // else about this file draws the page it always drew.
+                readonly property bool drawsFlow: el.readingBlock && el.kind === "text"
+                    && !root.paintOnly && root.animateLineSteps
+                    // ...and only if the passage really is THIS block's page (the
+                    // engine keeps the same guard for the same reason): a flow left
+                    // over from another slide would put the wrong words in the box,
+                    // and the page — which is what this file drew before the step
+                    // existed — is always the honest fallback.
+                    && String(LiveOutputService.readingFlowText ?? "")
+                           .indexOf(String(el.modelData.text ?? "")) === 0
+                // THE PAGE'S TOP EDGE — where the page's first line sits, from
+                // the block's own vertical alignment. The passage begins exactly
+                // there, so at offset 0 it draws where the page drew.
+                readonly property real pageTop: {
+                    const pad = el.style.padding ?? 0
+                    const v = el.meta.verticalAlign ?? "center"
+                    const h = fitMeasure.contentHeight
+                    if (v === "top")
+                        return pad
+                    if (v === "bottom")
+                        return el.height - pad - h
+                    return (el.height - h) / 2
+                }
                 readonly property bool screenWide: kind === "vignette" || kind === "corners"
                 // The box behind a block the canvas draws one for: a text or a clock (a fill of nothing is just its border).
                 // (Shapes, timers and camera / media tiles draw their own; a vignette / corners block is never a box.)
@@ -147,6 +227,14 @@ Item {
                 // from the ENGINE's own answer: this block's paint belongs under
                 // the feed, so it is not painted again above it.
                 readonly property bool paintUnderFeed: modelData.underVideo === true
+
+                // The Filters card's Opacity (CanvasItemStyle.opacity, round-
+                // tripped onto the plain block's style object) — applied here
+                // so every consumer of this file (the monitor tile, the
+                // output window, design-card thumbnails) fades a block the
+                // same way the edit canvas does, from the one shared style
+                // field instead of each rendering path re-deriving it.
+                opacity: el.style.opacity !== undefined ? el.style.opacity : 1
 
                 x: modelData.x; y: modelData.y
                 width: modelData.width !== undefined ? modelData.width : 160
@@ -180,15 +268,43 @@ Item {
                 readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
                                                   el.meta.fontSize ?? 16,
                                                   MetadataFields.lineHeight(el.meta),
+                                                  MetadataFields.lineSpacing(el.meta),
                                                   MetadataFields.letterSpacing(el.meta),
                                                   el.style.padding ?? 0]
                 // EVERY text block solves — "none" included: the box is the master and the
                 // text must always sit inside it (a "none" block renders at its set size
                 // while that fits, and SQUEEZES the moment it doesn't; nothing is ever cut).
-                onFitInputsChanged: if (!fitSolving)
-                    Qt.callLater(el.solveFit)
-                Component.onCompleted: if (!fitSolving)
-                    Qt.callLater(el.solveFit)
+                //
+                // DEFERRED (Qt.callLater), except for the ONE case where that defer is
+                // itself the bug: the reading block on a surface that animates line steps
+                // (el.readingBlock && root.animateLineSteps — the SAME pair drawsFlow
+                // gates on). A page-boundary commit destroys this delegate and builds a
+                // brand new one for the new page; deferred, its FIRST rendered frame uses
+                // the un-fitted fallback size (el.meta.fontSize) — not yet the solver's
+                // answer — for however long it takes Qt.callLater to run, right as
+                // readingScroll also resets to 0 for the new page. Two discontinuities
+                // landing in the same frame (a font-size pop on top of the page swap) is
+                // what read as "it['s] as if the app clicks" instead of a continued scroll.
+                // Solving immediately for just this one case costs one bisection on a page
+                // boundary (rare: one per Alt+Down that crosses one) — every other consumer
+                // of this file (library cards, canvas thumbnails, grids — see the
+                // scroll-cost probe above) keeps the deferred/coalesced solve unchanged.
+                onFitInputsChanged: {
+                    if (fitSolving)
+                        return
+                    if (el.readingBlock && root.animateLineSteps)
+                        el.solveFit()
+                    else
+                        Qt.callLater(el.solveFit)
+                }
+                Component.onCompleted: {
+                    if (fitSolving)
+                        return
+                    if (el.readingBlock && root.animateLineSteps)
+                        el.solveFit()
+                    else
+                        Qt.callLater(el.solveFit)
+                }
                 function solveFit() {
                     if (fitSolving)
                         return
@@ -238,18 +354,60 @@ Item {
                     font.italic: fitText.font.italic
                     font.capitalization: fitText.font.capitalization
                     font.letterSpacing: fitText.font.letterSpacing
-                    lineHeight: fitText.lineHeight
+                    font.wordSpacing: fitText.font.wordSpacing
+                    // The same line STEP the label below draws (see
+                    // MetadataFields.lineHeightWithGap): the twin must measure
+                    // the spacing that is painted, or the fit solve answers for
+                    // a layout nobody sees.
+                    lineHeight: MetadataFields.lineHeightWithGap(el.meta, measureLineBox.contentHeight)
                     lineHeightMode: Text.ProportionalHeight
-                    wrapMode: Text.WordWrap
+                    // The twin measures the layout the label below draws: a
+                    // one-line block is measured unwrapped, as it renders.
+                    wrapMode: MetadataFields.oneLine(el.meta) ? Text.NoWrap : Text.WordWrap
+
+                    // This font's OWN line box at the probe size — the number Qt
+                    // multiplies by lineHeight. Measured with a Text (line height
+                    // 1 on one glyph) rather than TextMetrics, which exposes no
+                    // ascent/descent; the two would only differ if Qt changed
+                    // what it means by "a line box", and then this follows it.
+                    Text {
+                        id: measureLineBox
+                        visible: false
+                        text: "Xg"
+                        font: fitMeasure.font
+                        lineHeight: 1
+                        lineHeightMode: Text.ProportionalHeight
+                    }
+                }
+                // The per-LINE background band (the Lines card's "Background
+                // color"), painted UNDER the glyphs by the same text as rich
+                // text — Qt bands each wrapped line fragment at that line's own
+                // width, so the tile shows what the output draws (the engine
+                // paints one band per laid-out line, TextStyle::lineBg).
+                LineBandLayer {
+                    anchors.fill: parent
+                    // The bands follow the GLYPHS they band — and while this block
+                    // draws the passage, that is the flow's own band layer below
+                    // (the words are one translated column there, so a band left
+                    // here would stay put while its words slid).
+                    visible: el.kind === "text" && !root.paintOnly && !el.drawsFlow
+                    layout: fitText
+                    color: String(el.meta.lineBg ?? "")
+                    radius: MetadataFields.lineRadius(el.meta)
+                    textCase: el.meta.textCase ?? "none"
                 }
                 Text {
                     id: fitText
-                    visible: el.kind === "text" && !root.paintOnly
+                    // HIDDEN WHILE THE PASSAGE IS DRAWN (el.drawsFlow): the flow
+                    // contains this page's words already, so drawing both puts two
+                    // copies of every line in one box.
+                    visible: el.kind === "text" && !root.paintOnly && !el.drawsFlow
                     anchors.fill: parent
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
                     // (a block from the canvas may carry no text at all)
-                    text: TextFormatService.applyList((el.modelData.text ?? "") !== "" ? el.modelData.text
-                        : ((root.showBindPlaceholders && (el.modelData.bind ?? "") !== "") ? "{" + el.modelData.bind + "}" : ""), el.meta.list ?? "")
+                    readonly property string ownText: (el.modelData.text ?? "") !== "" ? el.modelData.text
+                        : ((root.showBindPlaceholders && (el.modelData.bind ?? "") !== "") ? "{" + el.modelData.bind + "}" : "")
+                    text: TextFormatService.applyList(ownText, el.meta.list ?? "")
                     color: el.meta.color ?? "#f2f4fa"
                     // THE ENGINE'S OWN ANSWER (FontService -> FontManager), not
                     // the raw name and not Qt's substitution: a template whose
@@ -275,7 +433,20 @@ Item {
                     // Same ONE reading as the Edit canvas and the Text panel —
                     // 0/absent is the font's own line height, never a hidden 1.2.
                     font.letterSpacing: MetadataFields.letterSpacing(el.meta)
-                    lineHeight: MetadataFields.lineHeight(el.meta)
+                    // Word space: QML's own font.wordSpacing, the same additive
+                    // px value the engine adds after every space glyph.
+                    font.wordSpacing: MetadataFields.wordSpacing(el.meta)
+                    lineHeight: MetadataFields.lineHeightWithGap(el.meta, labelLineBox.contentHeight)
+                    // The same font's own line box, measured the same way (see
+                    // measureLineBox above) so the label and the twin agree.
+                    Text {
+                        id: labelLineBox
+                        visible: false
+                        text: "Xg"
+                        font: fitText.font
+                        lineHeight: 1
+                        lineHeightMode: Text.ProportionalHeight
+                    }
                     horizontalAlignment: {
                         const a = el.meta.align ?? "center"
                         return a === "left" ? Text.AlignLeft : a === "right" ? Text.AlignRight
@@ -288,10 +459,100 @@ Item {
                         const a = el.meta.verticalAlign ?? "center"
                         return a === "top" ? Text.AlignTop : a === "bottom" ? Text.AlignBottom : Text.AlignVCenter
                     }
-                    wrapMode: Text.WordWrap
+                    wrapMode: MetadataFields.oneLine(el.meta) ? Text.NoWrap : Text.WordWrap
                     // (No elide: the solver above guarantees the laid-out text fits the
                     // box, so there is nothing to truncate — swallowed tails with an
                     // ellipsis were this line's doing.)
+                }
+
+                // ---- THE READING PASSAGE (the Alt+Down / Alt+Up step) ------
+                //
+                // The block draws the PASSAGE its page was cut from — this page
+                // and the one after it, as one string — and slides it under its
+                // own box by LiveOutputService.readingScroll LINES. That offset is
+                // the same number the engine is handed for the HDMI window and the
+                // NDI feed, so the tile and the projector are two views of one
+                // scroll rather than two animations that have to agree.
+                //
+                // WHY THIS IS THE SCROLL AND NOT AN ANIMATION OF ONE: the words
+                // are one laid-out column that exists once and moves (el.clip cuts
+                // it at the box's edges). There is no second copy, no cross-fade
+                // and no hand-off at the end of the move — so nothing can snap when
+                // it lands, and the type size never changes, because the size the
+                // solver chose for the PAGE still governs (linePitch is measured at
+                // exactly that size).
+                // THE VIEWPORT IS THE PAGE'S OWN RECTANGLE, not the block's box: a
+                // box can be taller than the page it was fitted for (a shrink-mode
+                // page leaves slack at the bottom), and clipping to the BOX would
+                // leak the lines below into that slack — the passage would show
+                // next-page text on a slide nobody has stepped yet. At offset 0
+                // this window IS the page; a step moves the words inside it.
+                Item {
+                    id: flowWindow
+                    visible: el.drawsFlow
+                    x: 0
+                    y: el.pageTop
+                    width: el.width
+                    height: fitMeasure.contentHeight
+                    clip: true
+
+                    // The passage starts at the top of the window and travels UP by
+                    // the offset, one measured line at a time.
+                    Item {
+                        id: flowBox
+                        y: -LiveOutputService.readingScroll * el.linePitch
+                        width: parent.width
+                        height: flowText.implicitHeight
+
+                        LineBandLayer {
+                            anchors.fill: parent
+                            visible: !root.paintOnly
+                            layout: flowText
+                            color: String(el.meta.lineBg ?? "")
+                            radius: MetadataFields.lineRadius(el.meta)
+                            textCase: el.meta.textCase ?? "none"
+                        }
+
+                        Text {
+                            id: flowText
+                            width: parent.width
+                            // The passage as the service assembled it, with the
+                            // block's own list formatting applied — the same call
+                            // fitText makes.
+                            text: TextFormatService.applyList(
+                                      String(LiveOutputService.readingFlowText ?? ""),
+                                      el.meta.list ?? "")
+                            // EVERYTHING ABOUT THE TYPE IS THE PAGE'S: family,
+                            // size (the solver's answer), spacing, case, wrap. Only
+                            // the string is longer, so the page's own lines land
+                            // exactly where they did and the lines below it are the
+                            // ones that scroll into view.
+                            font: fitText.font
+                            fontSizeMode: Text.FixedSize
+                            color: fitText.color
+                            leftPadding: fitText.leftPadding
+                            rightPadding: fitText.rightPadding
+                            horizontalAlignment: fitText.horizontalAlignment
+                            // TOP, always: the passage is one column starting at
+                            // the page's top edge, not a block centred in the box.
+                            verticalAlignment: Text.AlignTop
+                            // NoWrap, ALWAYS — not fitText.wrapMode. The service's
+                            // own readingFlowText already carries a \n at every one
+                            // of the CANONICAL style's own wrap points (see
+                            // LiveOutputService::flowTextFor's own comment); letting
+                            // THIS box word-wrap it too re-breaks it at wherever
+                            // this box's own (possibly narrower, e.g. a Lower Third
+                            // output's) width happens to fall, landing different
+                            // words on screen than the output the lines were
+                            // measured for. A box too narrow for one of those lines
+                            // clips it at its own edge instead — the user's own
+                            // call: every output shows the same words at the same
+                            // step, in its own template's font/colour/box.
+                            wrapMode: Text.NoWrap
+                            lineHeight: fitText.lineHeight
+                            lineHeightMode: fitText.lineHeightMode
+                        }
+                    }
                 }
 
                 // --- shapes: the Edit screen's drawing - the fill is the item's background (transparent draws nothing, so an
@@ -437,9 +698,37 @@ Item {
                     }
                 }
 
-                // --- media / audio / any other kind: the canvas's generic tile - the kind's icon and name, and the picked file ---
+                // --- a placed picture, and a video's poster (Media Foundation's still
+                // for the same file) — the engine's own thumbnail cache, the SAME url
+                // EditScreen's own canvas asks for (mediaPictureUrl), so a slide
+                // thumbnail/card/preview and the edit canvas show one picture, not a
+                // decode here and a placeholder icon there (the gap that left every
+                // thumbnail with just an "IMAGE" tile and no actual frame).
+                Image {
+                    id: picturePreview
+                    readonly property bool isPicture: el.kind === "image" || el.kind === "video"
+                    visible: isPicture && !root.paintOnly && status === Image.Ready && sourceSize.width > 1
+                    anchors.fill: parent
+                    asynchronous: true
+                    cache: false
+                    // Same Contain/Cover/Fill mapping EditScreen's own
+                    // mediaPicture uses, read from the same style field.
+                    fillMode: {
+                        const fit = el.style.mediaFit !== undefined ? el.style.mediaFit : "contain"
+                        return fit === "cover" ? Image.PreserveAspectCrop
+                             : fit === "fill" ? Image.Stretch
+                             : Image.PreserveAspectFit
+                    }
+                    source: isPicture && (el.meta.src ?? "") !== ""
+                            ? "image://mediathumb/500/-1/" + encodeURIComponent(el.meta.src) : ""
+                }
+
+                // --- media / audio / any other kind, and an image/video whose thumbnail
+                // isn't decoded (yet, or at all — MediaThumbnailProvider's own answer for
+                // a file it can't read is a 1x1 blank): the canvas's generic tile - the
+                // kind's icon and name, and the picked file ---
                 Rectangle {
-                    visible: el.isPlaceholder && !root.paintOnly
+                    visible: (el.isPlaceholder || (picturePreview.isPicture && !picturePreview.visible)) && !root.paintOnly
                     anchors.fill: parent
                     radius: 6
                     color: "#1a1c26"
@@ -450,7 +739,7 @@ Item {
                         spacing: 4
                         IconGlyph {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            name: el.kind === "audio" ? "music" : el.kind === "media" ? "play" : "shape"
+                            name: el.kind === "audio" ? "music" : el.kind === "media" || el.kind === "video" ? "play" : el.kind === "image" ? "image" : "shape"
                             color: "#9b8ff5"
                             width: 16; height: 16
                         }
@@ -529,7 +818,7 @@ Item {
                 // text fitting, in the canvas's terms ("shrink" / "grow" also arrive as "shrinkToFit" / "growToFit")
                 readonly property string fitMode: (el.meta.autoSize === "growToFit" || el.meta.autoSize === "grow") ? "grow"
                     : (el.meta.autoSize === "shrinkToFit" || el.meta.autoSize === "shrink") ? "shrink" : "none"
-                readonly property bool isPlaceholder: !screenWide && !["text", "shape", "clock", "timer", "camera"].includes(el.kind)
+                readonly property bool isPlaceholder: !screenWide && !["text", "shape", "clock", "timer", "camera", "image", "video"].includes(el.kind)
                 // a shape's look comes from the item's own style, exactly as on the canvas
                 readonly property color fillColor: el.style.backgroundColor !== undefined ? el.style.backgroundColor : "#3a3f55"
                 readonly property color strokeColor: el.style.borderColor !== undefined ? el.style.borderColor : "#6c5ce7"

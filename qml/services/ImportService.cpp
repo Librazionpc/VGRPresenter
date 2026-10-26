@@ -48,6 +48,18 @@ QString localPath(const QString &file)
     return url.isLocalFile() ? url.toLocalFile() : file;
 }
 
+// A folder name for the imported media: the source folder, made safe for a path.
+QString safeFolderName(QString name)
+{
+    static const QString invalid = QStringLiteral("/\\:*?\"<>|");
+    for (QChar &c : name)
+        if (invalid.contains(c) || c.unicode() < 0x20)
+            c = QLatin1Char('-');
+    while (!name.isEmpty() && (name.back() == QLatin1Char(' ') || name.back() == QLatin1Char('.')))
+        name.chop(1);
+    return name;
+}
+
 QVariantMap failure(const QString &why)
 {
     return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), why }, { QStringLiteral("shows"), 0 }, { QStringLiteral("bibles"), 0 },
@@ -310,9 +322,47 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         // one refreshLibrary() on the GUI thread anyway.
         if (isFreeShow && showCount > 0)
             ShowService::instance().clearLibraryCategoryNoPublish(libraryFolder);
+
+        // ---- the artwork the documents reference ----------------------------
+        // A ProPresenter deck names its pictures in Media/Assets; the engine has
+        // already resolved those to files that exist here. They are COPIED into
+        // the app's own media folder for this source library (one folder per
+        // library, so two libraries' "logo.png" cannot collide), and the folders
+        // are added to the media library below on the interface thread: adding a
+        // folder is how media comes into the app, so the deck's art turns up in
+        // the Media dock as real files the operator can put on air.
+        const QString mediaRoot = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                                  + QStringLiteral("/media/imported");
+        QStringList mediaFolders;
+        int mediaCopied = 0;
+        for (const bi::ImportedShow &show : result.value().shows) {
+            if (show.mediaRefs.empty()) continue;
+            QString folder = safeFolderName(!libraryFolder.isEmpty() ? libraryFolder : qstr(show.sourceFolder));
+            if (folder.isEmpty()) folder = safeFolderName(formatName);
+            const QString dir = mediaRoot + QLatin1Char('/') + folder;
+            if (!QDir().mkpath(dir)) continue;
+            for (const std::string &ref : show.mediaRefs) {
+                const QString source = qstr(ref);
+                const QString target = dir + QLatin1Char('/') + QFileInfo(source).fileName();
+                // Already brought in by an earlier show of this batch (or an
+                // earlier import): the same asset serves both, and a second copy
+                // would only double the disk.
+                if (!QFileInfo::exists(target)) {
+                    if (!QFile::copy(source, target)) continue;
+                    ++mediaCopied;
+                }
+                if (!mediaFolders.contains(dir)) mediaFolders.append(dir);
+            }
+        }
         for (const bi::ImportedShow &show : result.value().shows) {
             QString why;
-            const QString path = saveImportedShow(show, /*applyTemplate=*/false, libraryFolder, &why);
+            // Each show is filed under the folder ITS OWN file came from, so an
+            // import that spans several source folders keeps their structure
+            // ("Only Believe SongBook", "Tabernacle Songs", ...) instead of
+            // piling every song into one category. FreeShow's library import is
+            // one batch by design, and keeps its own folder.
+            const QString folder = !libraryFolder.isEmpty() ? libraryFolder : qstr(show.sourceFolder);
+            const QString path = saveImportedShow(show, /*applyTemplate=*/false, folder, &why);
             ++saved;   // progress counts attempts, so the bar always reaches the end
             QMetaObject::invokeMethod(this, [this, saved, showCount]() {
                 if (showCount > 0)
@@ -328,18 +378,27 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         const int bibles = static_cast<int>(result.value().bibles.size());
 
         QMetaObject::invokeMethod(this, [this, warnings = std::move(warnings), firstPath, saved, bibles,
-                                         files = total, formatName, libraryFolder]() mutable {
+                                         files = total, formatName, libraryFolder,
+                                         mediaFolders = std::move(mediaFolders), mediaCopied]() mutable {
             // GUI thread: republish the library once and tell the user.
             if (saved > 0)
                 ShowService::instance().refreshLibrary();
             if (bibles > 0)
                 SearchService::instance().refreshBibles();   // the new Bible lands in the published list (see the sync path above)
+            // The artwork's folders join the media library (a folder already in it
+            // answers false; the rescan picks the new files up either way).
+            for (const QString &dir : mediaFolders) {
+                MediaLibraryService::instance().addFolderPath(dir);
+                MediaLibraryService::instance().rescan(dir);
+            }
 
             QString summary;
             if (saved > 0 && bibles > 0) summary = QObject::tr("Imported %n show(s) and %1 Bible(s).", "", saved).arg(bibles);
             else if (saved > 0) summary = QObject::tr("Imported %n show(s) from %1.", "", saved).arg(formatName);
             else if (bibles > 0) summary = QObject::tr("Installed %n Bible(s).", "", bibles);
             else summary = QObject::tr("Nothing could be imported from %1.").arg(formatName);
+            if (mediaCopied > 0)
+                summary += QLatin1Char(' ') + QObject::tr("Brought in %n media file(s).", "", mediaCopied);
             if (!warnings.isEmpty())
                 summary += QLatin1Char(' ') + QObject::tr("%n file(s) had a problem: %1", "", static_cast<int>(warnings.size())).arg(warnings.first());
             EngineBridge::write((saved > 0 || bibles > 0) && warnings.isEmpty() ? QStringLiteral("info") : QStringLiteral("warning"), QStringLiteral("Import"),
@@ -349,6 +408,7 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
 
             QVariantMap answer = { { QStringLiteral("ok"), saved > 0 || bibles > 0 }, { QStringLiteral("error"), QString() }, { QStringLiteral("shows"), saved },
                                    { QStringLiteral("bibles"), bibles }, { QStringLiteral("files"), files },
+                                   { QStringLiteral("media"), mediaCopied },
                                    { QStringLiteral("warnings"), warnings }, { QStringLiteral("firstShow"), firstPath } };
             m_busy = false;
             emit busyChanged();

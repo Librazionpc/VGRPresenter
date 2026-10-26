@@ -34,7 +34,18 @@ Rectangle {
     border.width: 1
     clip: true
 
-    layer.enabled: true
+    // NO ITEM LAYER. One used to be enabled here for exactly one reason: Qt's
+    // `clip` is RECTANGULAR, and a layered Rectangle is composited through its
+    // own rounded material, so the layer was what made the card's corners clip
+    // round instead of square. A layer is a GPU-scene-graph feature — on a
+    // machine running Qt Quick's SOFTWARE backend (no GPU driver) the nodes are
+    // unsupported and the card's corners came back square, or the card did not
+    // compose at all, for a purely cosmetic clip. The fix costs no texture: the
+    // only two strips that reach a card corner — the title bar at the top and the
+    // footer at the bottom — round THEIR own corners to the card's radius, and
+    // everything between them (the nav rail's straight edge, the content area)
+    // never enters a corner arc in the first place. Same picture on every
+    // backend, and one less full-card texture per frame on the GPU one.
 
     // Swallows clicks anywhere on the card so the shared scrim cannot pass
     // them through to the page behind this shell.
@@ -49,6 +60,11 @@ Rectangle {
         TitleBar {
             id: titleBar
             width: parent.width
+            // The card's own radius, per corner: an opaque strip that reaches the
+            // card's edge would otherwise square off the top of it now that no
+            // layer masks the whole card (see root's comment).
+            topLeftRadius: Theme.radiusXl
+            topRightRadius: Theme.radiusXl
             // Raised above the rail/content Row below so the search
             // suggestions dropdown paints over them, not under.
             z: 10
@@ -83,6 +99,9 @@ Rectangle {
         FooterBar {
             id: footerBar
             width: parent.width
+            // ...and the same at the bottom edge (see titleBar's comment).
+            bottomLeftRadius: Theme.radiusXl
+            bottomRightRadius: Theme.radiusXl
             visible: root.showFooter
             showSave: root.showSave
             onCancelRequested: root.cancelRequested()

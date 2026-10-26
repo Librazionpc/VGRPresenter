@@ -71,6 +71,17 @@ Item {
         // toolbar down, so "Show all" could never be reached.
         || LiveOutputService.canRestoreCleared
 
+    // ONE icon box for every glyph on the preview chrome (transport pills,
+    // Clear all / Show all / Blackout, the per-layer clears, the audio
+    // transport). They used to be 15 in the tool pills and 13 in the row
+    // buttons, which read as mismatched sizes in the same strip; a single
+    // shared number is what keeps them optically equal, since `fit` scales
+    // each Lucide path from its own 24-unit grid into this box.
+    readonly property real toolIconSize: 14
+    // ...and one stroke weight, or a shipped 2-unit stroke reads heavier at
+    // one size than the other even with equal boxes.
+    readonly property real toolIconStroke: 1.6
+
     // External contract: hosts position content under the wall and drive
     // the page dots from these.
     readonly property alias pageCount: wall.pageCount
@@ -315,7 +326,8 @@ Item {
                 name: toolBtn.icon
                 color: !toolBtn.enabled2 ? Theme.textMuted
                      : (toolBtn.danger ? (toolBtn.active ? Theme.dangerLight : Theme.textMuted) : Theme.textPrimary)
-                width: 15; height: 15; fit: true
+                width: root.toolIconSize; height: root.toolIconSize; fit: true
+                strokeWidth: root.toolIconStroke
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             }
             HoverHandler { id: toolArea; cursorShape: toolBtn.enabled2 ? Qt.PointingHandCursor : Qt.ArrowCursor }
@@ -368,7 +380,8 @@ Item {
                 IconGlyph {
                     name: rowBtn.icon
                     color: rowBtn.enabled2 ? rowBtn.tint : Theme.textMuted
-                    width: 13; height: 13
+                    width: root.toolIconSize; height: root.toolIconSize; fit: true
+                    strokeWidth: root.toolIconStroke
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 Text {
@@ -566,8 +579,11 @@ Item {
                     icon: "image"
                     danger: true
                     enabled2: (LiveOutputService.mediaOnAir && !LiveOutputService.mediaIsAudio) || root.inputTaken
+                    // Only the PICTURE's media here: an audio file is the audio
+                    // button's to clear (it has its own transport above), so
+                    // "Clear background" must not silently stop the music.
                     onPicked: {
-                        if (LiveOutputService.mediaOnAir) LiveOutputService.clearMedia()
+                        if (LiveOutputService.mediaOnAir && !LiveOutputService.mediaIsAudio) LiveOutputService.clearMedia()
                         if (root.inputTaken) LiveOutputService.clearInput()
                     }
                     tipTitle: qsTr("Clear background")
@@ -645,6 +661,137 @@ Item {
                     enabled2: false
                     tipTitle: qsTr("Clear timer")
                     tipDetail: qsTr("Not available yet")
+                }
+            }
+
+            // ---- Audio transport -----------------------------------------
+            // FreeShow's scrubber under the preview, kept honest: it appears
+            // ONLY while the wall is playing an audio FILE (mediaOnAir &&
+            // mediaIsAudio). A text slide, a video or a taken camera carries
+            // no dead play/seek row — audio that was never picked has no
+            // scrubber to show. height collapses to 0 when hidden so the
+            // Column (and therefore the wall's own height) shrinks with it.
+            Item {
+                id: audioBar
+                objectName: "selfTestWallAudioBar"
+                width: parent.width
+                height: visible ? 28 : 0
+                visible: LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio
+
+                readonly property bool playing: LiveOutputService.mediaState === "playing"
+                readonly property real progress: LiveOutputService.mediaDuration > 0
+                    ? Math.max(0, Math.min(1, LiveOutputService.mediaPosition / LiveOutputService.mediaDuration))
+                    : 0
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 8
+                    color: Theme.inset
+                    border.color: Theme.chip
+                    border.width: 1
+                }
+
+                // play / pause — the same engine call as the Media pane's own
+                // play button (mediaTogglePlay), so the two can never disagree
+                // about whether the file is running.
+                Item {
+                    id: audioToggle
+                    x: 8; y: 0
+                    width: 22; height: parent.height
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: audioBar.playing ? "pause" : "play"
+                        color: Theme.dangerLight
+                        width: root.toolIconSize; height: root.toolIconSize; fit: true
+                        strokeWidth: root.toolIconStroke
+                    }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: LiveOutputService.mediaTogglePlay() }
+                }
+
+                Text {
+                    id: audioElapsed
+                    anchors.left: audioToggle.right
+                    anchors.leftMargin: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: LiveOutputService.formatMediaTime(LiveOutputService.mediaPosition)
+                    color: Theme.dangerLight
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                }
+
+                Text {
+                    id: audioTotal
+                    anchors.right: audioMute.left
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: LiveOutputService.formatMediaTime(LiveOutputService.mediaDuration)
+                    color: Theme.dangerLight
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                }
+
+                // Seek track: click or drag anywhere on it to jump. The knob
+                // is the position, not an animation, so it reads the same as
+                // the elapsed time beside it.
+                Item {
+                    id: seekTrack
+                    anchors.left: audioElapsed.right
+                    anchors.right: audioTotal.left
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 16
+
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                        height: 4; radius: 2
+                        color: Theme.chip
+                    }
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width * audioBar.progress
+                        height: 4; radius: 2
+                        color: Theme.danger
+                    }
+                    Rectangle {
+                        x: Math.max(0, Math.min(parent.width - width, parent.width * audioBar.progress - width / 2))
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 9; height: 9; radius: 4.5
+                        color: Theme.dangerLight
+                    }
+
+                    function seekTo(x) {
+                        if (seekTrack.width <= 0) return
+                        LiveOutputService.mediaSeek(Math.max(0, Math.min(1, x / seekTrack.width)))
+                    }
+                    TapHandler {
+                        onTapped: function (point) { seekTrack.seekTo(point.position.x) }
+                    }
+                    DragHandler {
+                        onCentroidChanged: if (active) seekTrack.seekTo(centroid.position.x)
+                    }
+                }
+
+                // Mute — dimmed glyph means muted, the same read the Media
+                // pane's speaker uses.
+                Item {
+                    id: audioMute
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    width: 22; height: parent.height
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: "volume2"
+                        color: LiveOutputService.mediaMuted ? Theme.textMuted : Theme.dangerLight
+                        width: root.toolIconSize; height: root.toolIconSize; fit: true
+                        strokeWidth: root.toolIconStroke
+                    }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: LiveOutputService.mediaToggleMuted() }
                 }
             }
         }

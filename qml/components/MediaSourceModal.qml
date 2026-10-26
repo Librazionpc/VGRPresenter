@@ -2,58 +2,50 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// "Select Media" picker — pops up when "Media" is picked from the Edit
-// screen's "+" Add Content menu, matching
-// 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Add_Media.qml's media_modal_*/
-// media_item*/media_btn_* elements (same flat-Figma-export-with-no-reusable-
-// QML situation as VGRPresenter_Main_Screen_Edit_Add_Camera.qml). Built as
-// real, model-driven QML on the same convention as CameraSourceModal.qml/
-// BackgroundColorModal.qml: scrim + centered card, `open` to show/hide,
-// `applied`/`cancelled` signals, no application state of its own beyond the
-// picker UI itself.
+// "Select Media" picker — the app's ONE media chooser. Opened from the Edit
+// screen's + menu (Media → Picture / Video / Audio) and reused by Settings ·
+// Audio & Video's Media-kind "Browse..." option (an audio/video input's Source
+// field), restricted to one kind there via `fixedKind`.
 //
-// Reused by Settings · Audio & Video's Media-kind "Browse..." option (an
-// audio/video input's Source field) — the same grid picker instead of a
-// bare native file dialog, restricted to one kind there via `fixedKind`.
+// BUILT ON THE SHARED MODAL SHELL (ModalCard.qml) rather than its own scrim and
+// card, which is what every dialog in this app uses: the modal shell is where
+// the dim backdrop, the centered card, the pinned Cancel/Save footer, the
+// scrollable content slot and the AppScrollBar live. This dialog used to draw
+// its own chrome around a plain `Grid` — no scroll area and no scroll bar — so a
+// media folder with more than eight files simply ran off the bottom of the card
+// with no way to reach the rest. The shared shell caps the content against the
+// window, scrolls it, and the bar appears on its own when there is more than
+// fits (AppScrollBar hides itself otherwise).
+//
+// Cards carry the app's own hover language too: the tile under the pointer
+// lifts and takes the accent border, so the pick reads as "this one" before the
+// click, and a double-click inserts without reaching for the footer.
 //
 // `items` defaults to the real Media Library (MediaLibraryService.items()),
-// each { id, name, kind, path } — kind is "image" | "video" | "audio" (a
-// video card gets the small play-badge overlay, audio a note badge; there's
-// no real thumbnail rendering here, same placeholder-card situation as the
-// canvas's own camera/media/audio/shape/timer/clock visuals — real
-// thumbnails are future work, not blocking this picker). A consumer that
+// each { id, name, kind, path } — kind is "image" | "video" | "audio" (a video
+// card gets the small play-badge overlay, audio a note badge). A consumer that
 // wants a different set can still override `items` directly.
 Item {
     id: root
-    // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog.
-    z: 30000
 
     property bool open: false
 
-    // ---- Esc = cancel, Enter = Insert (qml/settings/Hotkeys.qml) ----------
-    // The Insert button's own condition, so a key that presses it cannot
-    // insert a pick the button itself would have refused (no selection yet).
-    property int hotkeyScope: 0
-    function accept() { if (root.selectedItem !== null) root.applied(root.selectedItem) }
+    // ---- the shared shell's own open/close --------------------------------
+    // `open` stays the public property callers bind to (the shell's is a
+    // function pair, and every use site here already speaks `open:`), so this is
+    // the one translation: opening resets the pick and raises the card, closing
+    // fades it out and releases its stacking slot.
     onOpenChanged: {
-        // Reset the pick whenever the modal (re)opens on a fresh item set —
-        // an open with no items yet (async library scan) must not carry the
-        // PREVIOUS session's pick forward as a silently-wrong default.
-        if (root.open)
+        if (root.open) {
+            // Reset the pick whenever the modal (re)opens on a fresh item set —
+            // an open with no items yet (async library scan) must not carry the
+            // PREVIOUS session's pick forward as a silently-wrong default.
             root.selectedId = ""
-        if (root.open && root.hotkeyScope === 0) {
-            root.hotkeyScope = Hotkeys.open({
-                name: qsTr("Media source"),
-                cancel: function () { root.cancelled() },
-                accept: function () { root.accept() }
-            })
-        } else if (!root.open && root.hotkeyScope !== 0) {
-            Hotkeys.close(root.hotkeyScope)
-            root.hotkeyScope = 0
+            card.open()
+        } else {
+            card.close()
         }
     }
-    Component.onDestruction: Hotkeys.close(root.hotkeyScope)
 
     readonly property var libraryItems: {
         void MediaLibraryService.totalCount
@@ -67,14 +59,13 @@ Item {
     }
     property var items: root.libraryItems
 
-    // Single-kind mode — Settings · Audio & Video only ever wants ONE kind
-    // (an audio input's Source can't offer video files). Non-empty hides
-    // the tab row entirely and locks filtering to it.
+    // Single-kind mode — the Edit screen's three media chips and Settings only
+    // ever want ONE kind (an audio input's Source can't offer video files).
+    // Non-empty hides the tab row entirely and locks filtering to it.
     property string fixedKind: ""
 
-    // "all" | "image" | "video" | "audio" — matches the ground truth's All/
-    // Images/Videos tabs (their plural UI copy for the singular `kind`
-    // values items are tagged with), plus Audio for the Settings reuse.
+    // "all" | "image" | "video" | "audio" — the tabs' own plural labels are UI
+    // copy for the singular `kind` values items are tagged with.
     property string activeTab: root.fixedKind !== "" ? root.fixedKind : "all"
     property string searchQuery: ""
 
@@ -90,429 +81,307 @@ Item {
     property string selectedId: ""
     readonly property var selectedItem: root.items.find((it) => it.id === root.selectedId) ?? null
 
-    // Fired when "Insert" is clicked, carrying the picked media item.
+    // Fired when "Insert" is clicked (or a card is double-clicked), carrying
+    // the picked media item.
     signal applied(var item)
     signal cancelled()
-    // "Browse this PC..." clicked — the consumer resolves it (native
-    // picker); this component has no PAL access of its own.
+    // "Browse this PC..." clicked — the consumer resolves it (native picker);
+    // this component has no PAL access of its own.
     signal browseRequested()
 
-    anchors.fill: parent
-    visible: root.open
-
-    // Dim scrim behind the card; clicking it cancels, same as every other
-    // overlay in this app (see BackgroundColorModal.qml). Shared ModalScrim
-    // — also consumes wheel so the page behind can't scroll through it.
-    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
-    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
-    // the whole app, not just that page's content column: parented in place its scrim
-    // covered one side of the settings card, so the dialog read as half-modal (user
-    // report: "the black box doesn't cover the whole settings modal, only one side").
-    // Reparented to the window overlay, this component has no scaled ancestor to
-    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
-    parent: Overlay.overlay
-
-    ModalScrim {
-        anchors.fill: parent
-        onDismissed: root.cancelled()
-    }
-
-    Rectangle {
+    ModalCard {
         id: card
-        // The app's one scale, on the card (see AppScale.qml) — never on the root,
-        // whose scrim IS the dialog's black box and has to stay window-sized.
-        scale: AppScale.cardScale(card)
-        transformOrigin: Item.Center
-        anchors.centerIn: parent
-        width: 800
-        height: content.height + 40
-        radius: 14
-        color: Theme.surface
-        border.color: Theme.border
-        border.width: 1
+        title: qsTr("Select Media")
+        subtitle: root.fixedKind === "audio" ? qsTr("Choose an audio file")
+                : root.fixedKind === "video" ? qsTr("Choose a video file")
+                : root.fixedKind === "image" ? qsTr("Choose a picture")
+                : qsTr("Choose a picture, video or audio file")
+        cardWidth: 900
+        // A picker asks nothing of what is behind it (no form is being edited),
+        // so a click on the dim backdrop is the same gesture as Cancel — the
+        // behaviour this dialog always had.
+        clickOutsideToDismiss: true
+        // NO INSERT WITHOUT A PICK: the footer's Save IS this dialog's Insert,
+        // so it is drawn only once there is something to insert — the same
+        // reason the old hand-rolled button carried an `enabled` flag, done with
+        // the shell's own switch so Enter cannot confirm an empty pick either
+        // (ModalCard claims Enter only while a Save exists).
+        showSave: root.selectedItem !== null
+        saveText: qsTr("Insert")
+        cancelText: qsTr("Cancel")
+        onCancelled: root.cancelled()
+        onAccepted: {
+            if (root.selectedItem !== null)
+                root.applied(root.selectedItem)
+        }
 
-        // Swallows clicks so they don't fall through to the scrim behind it.
-        MouseArea { anchors.fill: parent; onClicked: {} }
+        // Tabs (left) + search (right), same row like the ground truth.
+        Item {
+            width: parent.width
+            height: 32
 
-        Column {
-            id: content
-            x: 24
-            y: 20
-            width: parent.width - 48
-            spacing: 16
-
-            Column {
-                width: parent.width
+            Row {
+                visible: root.fixedKind === ""
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: 4
 
-                Item {
-                    width: parent.width
-                    height: closeBtn.height
+                Repeater {
+                    model: [
+                        { key: "all", label: qsTr("All") },
+                        { key: "image", label: qsTr("Images") },
+                        { key: "video", label: qsTr("Videos") },
+                        { key: "audio", label: qsTr("Audio") }
+                    ]
+                    delegate: Rectangle {
+                        id: tabBtn
+                        required property var modelData
+                        readonly property bool active: root.activeTab === tabBtn.modelData.key
 
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: qsTr("Select Media")
-                        color: Theme.textPrimary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 18
-                        font.weight: Font.DemiBold
-                    }
-
-                    Rectangle {
-                        id: closeBtn
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 28
                         height: 28
-                        radius: 7
-                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
+                        width: tabLabel.implicitWidth + 24
+                        radius: 8
+                        color: tabBtn.active ? Qt.alpha(Theme.accent, 0.16)
+                             : (tabArea.containsMouse ? Theme.hoverBg : "transparent")
+                        border.color: tabBtn.active ? Theme.accent : "transparent"
+                        border.width: 1
                         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                         Text {
+                            id: tabLabel
                             anchors.centerIn: parent
-                            text: "✕"
-                            color: Theme.textSecondary
+                            text: tabBtn.modelData.label
+                            color: tabBtn.active ? Theme.accentLight : Theme.textSecondary
+                            font.family: Theme.fontFamily
                             font.pixelSize: 14
+                            font.weight: Font.Medium
                         }
 
                         MouseArea {
-                            id: closeArea
+                            id: tabArea
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.cancelled()
+                            onClicked: root.activeTab = tabBtn.modelData.key
                         }
                     }
                 }
-
-                Text {
-                    width: parent.width
-                    text: root.fixedKind === "audio" ? qsTr("Choose an audio file for this source")
-                        : root.fixedKind === "video" ? qsTr("Choose a video file for this source")
-                        : qsTr("Choose an image or video to add to this slide")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 14
-                }
             }
 
-            // Tabs (left) + search (right), same row like the ground truth.
-            // A plain Item, not a Row — Row/Column/Grid forbid their own
-            // children from using anchors.left/right/fill/centerIn (they
-            // position children themselves), and both the tabs Row and the
-            // search box below need anchors to sit on opposite edges.
-            Item {
-                width: parent.width
+            Rectangle {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: 256
                 height: 32
+                radius: 8
+                color: Theme.inset
+                border.color: Theme.border
+                border.width: 1
 
                 Row {
-                    visible: root.fixedKind === ""
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 4
-
-                    Repeater {
-                        model: [
-                            { key: "all", label: qsTr("All") },
-                            { key: "image", label: qsTr("Images") },
-                            { key: "video", label: qsTr("Videos") },
-                            { key: "audio", label: qsTr("Audio") }
-                        ]
-                        delegate: Rectangle {
-                            id: tabBtn
-                            required property var modelData
-                            readonly property bool active: root.activeTab === tabBtn.modelData.key
-
-                            height: 28
-                            width: tabLabel.implicitWidth + 24
-                            radius: 8
-                            color: tabBtn.active ? Qt.alpha(Theme.accent, 0.16) : (tabArea.containsMouse ? Theme.hoverBg : "transparent")
-                            border.color: tabBtn.active ? Theme.accent : "transparent"
-                            border.width: 1
-                            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                            Text {
-                                id: tabLabel
-                                anchors.centerIn: parent
-                                text: tabBtn.modelData.label
-                                color: tabBtn.active ? Theme.accentLight : Theme.textSecondary
-                                font.family: Theme.fontFamily
-                                font.pixelSize: 14
-                                font.weight: Font.Medium
-                            }
-
-                            MouseArea {
-                                id: tabArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.activeTab = tabBtn.modelData.key
-                            }
-                        }
-                    }
-                }
-
-                Rectangle {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 256
-                    height: 32
-                    radius: 8
-                    color: Theme.inset
-                    border.color: Theme.border
-                    border.width: 1
-
-                    Row {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 12
-                        anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 8
-
-                        IconGlyph {
-                            anchors.verticalCenter: parent.verticalCenter
-                            name: "search"
-                            color: Theme.textMuted
-                            width: 12; height: 12
-                            }
-
-                        TextInput {
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - 24
-                            color: Theme.textPrimary
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 13
-                            selectByMouse: true
-                            onTextChanged: root.searchQuery = text
-
-                            Text {
-                                visible: parent.text.length === 0
-                                text: qsTr("Search media...")
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily
-                                font.pixelSize: 13
-                            }
-                        }
-                    }
-                }
-            }
-
-            Rectangle { width: parent.width; height: 1; color: Theme.border }
-
-            // Media item cards — four columns, matching the ground truth's
-            // 176-wide cards with 16px gutter in a 752-wide content area.
-            Grid {
-                width: parent.width
-                columns: 4
-                columnSpacing: 16
-                rowSpacing: 16
-
-                Repeater {
-                    model: root.filteredItems
-                    delegate: Rectangle {
-                        id: mediaCard
-                        required property var modelData
-                        readonly property bool selected: root.selectedId === mediaCard.modelData.id
-                        readonly property bool isVideo: mediaCard.modelData.kind === "video"
-                        readonly property bool isAudio: mediaCard.modelData.kind === "audio"
-                        // Audio has no visual frame to fetch — never even
-                        // asks the engine for one; video/image do, and fall
-                        // back to the icon below while it loads or if the
-                        // engine has no decoder for that file (the provider
-                        // answers with a 1x1 transparent image, matching
-                        // MediaTile.qml's own hasPicture convention).
-                        readonly property bool hasPicture: !mediaCard.isAudio
-                            && still.status === Image.Ready && still.sourceSize.width > 1
-
-                        width: (parent.width - 48) / 4
-                        height: 110
-                        radius: 8
-                        clip: true
-                        color: mediaCard.selected ? Qt.alpha(Theme.accent, 0.13) : Theme.inset
-                        border.width: mediaCard.selected ? 1.5 : 1
-                        border.color: mediaCard.selected ? Theme.accent : Theme.borderSubtle
-                        Behavior on border.color { ColorAnimation { duration: 100 } }
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        // The still — the engine's real first frame for
-                        // video, or the image itself (MediaThumbnailProvider,
-                        // same image://mediathumb URL MediaTile.qml uses for
-                        // the main Media grid). Never requested for audio —
-                        // there is nothing to decode.
-                        Image {
-                            id: still
-                            anchors.fill: parent
-                            visible: mediaCard.hasPicture
-                            asynchronous: true
-                            cache: true
-                            fillMode: Image.PreserveAspectCrop
-                            source: mediaCard.isAudio ? ""
-                                : "image://mediathumb/250/-1/" + encodeURIComponent(mediaCard.modelData.path || "")
-                        }
-
-                        // Placeholder icon — the only visual for audio (it
-                        // has no frame at all), or video/image while the
-                        // engine is still decoding / has no decoder for it.
-                        IconGlyph {
-                            anchors.centerIn: parent
-                            visible: !mediaCard.hasPicture
-                            name: mediaCard.isAudio ? "music" : (mediaCard.isVideo ? "camera" : "layoutTemplate")
-                            color: Theme.textMuted
-                            fit: true
-                            width: 16; height: 16
-                            scale: 2
-
-                            // Breathes while the engine is still making the
-                            // picture, so a loading tile doesn't read as "no
-                            // picture" — same convention as MediaTile.qml.
-                            SequentialAnimation on opacity {
-                                running: !mediaCard.isAudio && still.status === Image.Loading
-                                loops: Animation.Infinite
-                                NumberAnimation { from: 1.0; to: 0.3; duration: 700; easing.type: Easing.InOutSine }
-                                NumberAnimation { from: 0.3; to: 1.0; duration: 700; easing.type: Easing.InOutSine }
-                            }
-                        }
-
-                        // Play badge — marks a video even when its still IS
-                        // showing (a poster frame alone looks like a photo).
-                        Rectangle {
-                            visible: mediaCard.isVideo
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            anchors.margins: 6
-                            width: 24; height: 24
-                            radius: 12
-                            color: "#b0000000"
-
-                            Text {
-                                anchors.centerIn: parent
-                                anchors.horizontalCenterOffset: 1
-                                text: "▶"
-                                color: Theme.controlInk
-                                font.pixelSize: 11
-                            }
-                        }
-
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 28
-                            color: mediaCard.hasPicture ? "#a0161823" : "transparent"
-
-                            Text {
-                                anchors.centerIn: parent
-                                width: parent.width - 12
-                                horizontalAlignment: Text.AlignHCenter
-                                text: mediaCard.modelData.name
-                                color: Theme.textPrimary
-                                font.family: Theme.fontFamily
-                                font.pixelSize: 12
-                                elide: Text.ElideMiddle
-                            }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.selectedId = mediaCard.modelData.id
-                        }
-                    }
-                }
-            }
-
-            Rectangle { width: parent.width; height: 1; color: Theme.border }
-
-            // Footer — Item, not a Row, so "Browse this PC..." (left) and
-            // Cancel/Insert (right) can sit on opposite edges of the same
-            // band (Row/Column forbid their own children's edge anchors).
-            Item {
-                width: parent.width
-                height: 36
-
-                // The Media Library only covers folders you've added — a
-                // file that isn't indexed yet still needs a way in, so this
-                // opens the native picker instead (browseRequested; the
-                // consumer resolves it — see AudioVideoScreen.qml's
-                // settingsMediaPicker for the Settings reuse).
-                Text {
                     anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Browse this PC…")
-                    color: browseArea.containsMouse ? Theme.accentLight : Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 14
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                    spacing: 8
 
-                    MouseArea {
-                        id: browseArea
-                        anchors.fill: parent
-                        anchors.margins: -6
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.browseRequested()
+                    IconGlyph {
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: "search"
+                        color: Theme.textMuted
+                        width: 12; height: 12
                     }
-                }
 
-            Row {
-                anchors.right: parent.right
-                spacing: 10
-
-                Rectangle {
-                    width: 100
-                    height: 36
-                    radius: 10
-                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
-                    border.color: Theme.borderSubtle
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: qsTr("Cancel")
+                    TextInput {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 24
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 15
-                        font.weight: Font.Medium
-                    }
+                        font.pixelSize: 13
+                        selectByMouse: true
+                        onTextChanged: root.searchQuery = text
 
-                    MouseArea {
-                        id: cancelArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.cancelled()
-                    }
-                }
-
-                Rectangle {
-                    width: 100
-                    height: 36
-                    radius: 10
-                    enabled: root.selectedItem !== null
-                    opacity: root.selectedItem !== null ? 1 : 0.4
-                    color: insertArea.containsMouse ? Qt.darker(Theme.accent, 1.1) : Theme.accent
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: qsTr("Insert")
-                        color: Theme.controlInk
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 15
-                        font.weight: Font.DemiBold
-                    }
-
-                    MouseArea {
-                        id: insertArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.applied(root.selectedItem)
+                        Text {
+                            visible: parent.text.length === 0
+                            text: qsTr("Search media...")
+                            color: Theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 13
+                        }
                     }
                 }
             }
+        }
+
+        // The media grid. Inside the shell's scrollable content, so a library of
+        // hundreds scrolls (with the shell's own AppScrollBar) instead of
+        // running off the card.
+        Grid {
+            id: mediaGrid
+            readonly property int gap: 14
+            width: parent.width
+            columns: 4
+            columnSpacing: mediaGrid.gap
+            rowSpacing: mediaGrid.gap
+
+            Repeater {
+                model: root.filteredItems
+                delegate: Rectangle {
+                    id: mediaCard
+                    required property var modelData
+                    readonly property bool selected: root.selectedId === mediaCard.modelData.id
+                    readonly property bool hovered: cardHover.containsMouse
+                    readonly property bool isVideo: mediaCard.modelData.kind === "video"
+                    readonly property bool isAudio: mediaCard.modelData.kind === "audio"
+                    // Audio has no visual frame to fetch — never even asks the
+                    // engine for one; video/image do, and fall back to the icon
+                    // below while it loads or if the engine has no decoder for
+                    // that file (the provider answers with a 1x1 transparent
+                    // image, matching MediaTile.qml's own hasPicture rule).
+                    readonly property bool hasPicture: !mediaCard.isAudio
+                        && still.status === Image.Ready && still.sourceSize.width > 1
+
+                    width: Math.floor((mediaGrid.width - mediaGrid.gap * (mediaGrid.columns - 1)) / mediaGrid.columns)
+                    height: 118
+                    radius: 8
+                    clip: true
+                    // HOVER + SELECT, the same two states every other grid in the
+                    // app draws: the pointer's card lifts on its own (a fill and
+                    // an accent border) before any click commits to it.
+                    color: mediaCard.selected ? Qt.alpha(Theme.accent, 0.15)
+                         : (mediaCard.hovered ? Theme.rowBg : Theme.inset)
+                    border.width: mediaCard.selected ? 1.5 : 1
+                    border.color: mediaCard.selected ? Theme.accent
+                                : (mediaCard.hovered ? Qt.alpha(Theme.accent, 0.45) : Theme.borderSubtle)
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                    Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                    // The still — the engine's real first frame for video, or the
+                    // image itself (MediaThumbnailProvider, the same
+                    // image://mediathumb URL MediaTile.qml uses for the Media
+                    // grid). Never requested for audio — nothing to decode.
+                    Image {
+                        id: still
+                        anchors.fill: parent
+                        visible: mediaCard.hasPicture
+                        asynchronous: true
+                        cache: true
+                        fillMode: Image.PreserveAspectCrop
+                        source: mediaCard.isAudio ? ""
+                            : "image://mediathumb/250/-1/" + encodeURIComponent(mediaCard.modelData.path || "")
+                    }
+
+                    // Placeholder icon — the only visual for audio (it has no
+                    // frame at all), or video/image while the engine is still
+                    // decoding / has no decoder for it.
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        visible: !mediaCard.hasPicture
+                        name: mediaCard.isAudio ? "music" : (mediaCard.isVideo ? "camera" : "layoutTemplate")
+                        color: Theme.textMuted
+                        fit: true
+                        width: 16; height: 16
+                        scale: 2
+
+                        // Breathes while the engine is still making the picture,
+                        // so a loading tile doesn't read as "no picture" — same
+                        // convention as MediaTile.qml.
+                        SequentialAnimation on opacity {
+                            running: !mediaCard.isAudio && still.status === Image.Loading
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 1.0; to: 0.3; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 0.3; to: 1.0; duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
+
+                    // Play badge — marks a video even when its still IS showing
+                    // (a poster frame alone looks like a photo).
+                    Rectangle {
+                        visible: mediaCard.isVideo
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.margins: 6
+                        width: 24; height: 24
+                        radius: 12
+                        color: "#b0000000"
+
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            name: "play"
+                            color: "#ffffff"
+                            width: 11; height: 11
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 28
+                        color: mediaCard.hasPicture ? "#a0161823" : "transparent"
+
+                        Text {
+                            anchors.centerIn: parent
+                            width: parent.width - 12
+                            horizontalAlignment: Text.AlignHCenter
+                            text: mediaCard.modelData.name
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 12
+                            elide: Text.ElideMiddle
+                        }
+                    }
+
+                    // Click selects; double-click is the whole gesture (pick AND
+                    // insert) for a file the operator is sure about.
+                    MouseArea {
+                        id: cardHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.selectedId = mediaCard.modelData.id
+                        onDoubleClicked: {
+                            root.selectedId = mediaCard.modelData.id
+                            root.applied(mediaCard.modelData)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Nothing to show yet (an empty library, a fresh install, or a search
+        // that matched nothing) — said in words rather than as a blank card.
+        Text {
+            visible: root.filteredItems.length === 0
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: root.items.length === 0
+                ? qsTr("No media yet — add a folder below, or copy files into one you have added.")
+                : qsTr("Nothing here matches that search.")
+            color: Theme.textMuted
+            font.family: Theme.fontFamily
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
+        }
+
+        // The Media Library only covers folders you've added — a file that isn't
+        // indexed yet still needs a way in, so this opens the native picker
+        // instead (browseRequested; the consumer resolves it — see
+        // AudioVideoScreen.qml's settingsMediaPicker for the Settings reuse).
+        Text {
+            text: qsTr("Browse this PC…")
+            color: browseArea.containsMouse ? Theme.accentLight : Theme.textSecondary
+            font.family: Theme.fontFamily
+            font.pixelSize: 14
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+            MouseArea {
+                id: browseArea
+                anchors.fill: parent
+                anchors.margins: -6
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.browseRequested()
             }
         }
     }
