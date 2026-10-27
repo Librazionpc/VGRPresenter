@@ -1690,6 +1690,21 @@ ApplicationWindow {
                 return
             }
             pane.playPicked()
+            // REWIND TO THE PICK'S FIRST LINE FIRST, so the walk always crosses the
+            // same boundary sequence whatever this machine's stored pane selection
+            // was. The pane stages the passage with the SELECTED paragraph already at
+            // the top, so a run that just started pressing had only the pages after it
+            // left to walk — measured: 12 moves against a 71-line passage, and the
+            // several paragraph boundaries this check is about were never reached.
+            // Backward steps are the same LineWalk path (lineStep(-1)), so this
+            // exercises them too.
+            let rewound = 0
+            while (rewound < 400 && LiveOutputService.lineStep(-1))
+                ++rewound
+            console.log("[SELFTEST-TABLEWALK] rewound=" + rewound
+                        + " page=" + LiveOutputService.readingPage
+                        + " abs=" + Number(LiveOutputService.readingAbsoluteLine).toFixed(2)
+                        + " lines=" + LiveOutputService.readingRunLineStarts(String(OutputListModel.activeStyleId)).length)
             // THE SKIP TRACE STARTS WITH THE WALK. Opening the passage re-bases the
             // position (a new pick starts at its own first line), and the sampler has
             // been running since boot — so without this its first sample compares the
@@ -1825,7 +1840,7 @@ ApplicationWindow {
                      + " freshText=" + JSON.stringify(freshText.slice(0, 28))
                      + " style=" + String(tile.styleId).slice(0, 8)
                      + " glines=" + view.lines
-                     + " gline=" + Number(view.line).toFixed(2)
+                     + " drawn=" + Number(tile.readingDrawnLines) + " gline=" + Number(view.line).toFixed(2)
                      + " gchar=" + view.char
                      + " gpchar=" + view.pchar
                      + " gspan=" + view.span

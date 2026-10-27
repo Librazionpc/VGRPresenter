@@ -150,6 +150,7 @@ dump_ctx() {
 }
 
 FAILS=0
+GRID_MISMATCH=0
 MOVED=0
 PREV_ABS=""
 PREV_PAGE=""
@@ -265,6 +266,22 @@ while IFS= read -r line; do
             GTILE_SPAN[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* gspan=\([0-9]*\) .*/\1/p')"
             GTILE_LINES[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* glines=\([0-9]*\) .*/\1/p')"
             GTILE_STYLE[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* style=\([^ ]*\).*/\1/p')"
+            # THE COLUMN AND THE TABLE ARE ONE GRID — or the words cannot follow the
+            # keys at all. `drawn` is the passage column's own line count as THIS
+            # tile laid it out; `glines` is the table LiveOutputService converts the
+            # position through. Measured before this check existed, on the reported
+            # book: a tile drew 75 lines while the step's table had 45, so each press
+            # moved the words 0.6 of a line and the last 30 lines never came into
+            # view ("the first output is slower than the second", "it stops scrolling
+            # as if finished but some lines are not shown").
+            drawn="$(printf '%s\n' "$tl" | sed -n 's/.* drawn=\(-\?[0-9]*\) .*/\1/p')"
+            glines="${GTILE_LINES[$tidx]:-}"
+            if [ -n "$drawn" ] && [ "$drawn" -gt 0 ] && [ -n "$glines" ] && [ "$drawn" -ne "$glines" ]; then
+                echo "  FAIL press=$press: output $tidx draws $drawn line(s) while the step's table holds $glines — the column and the table are different grids"
+                dump_ctx "$press" "grid-mismatch tile=$tidx drawn=$drawn table=$glines"
+                GRID_MISMATCH=$((GRID_MISMATCH + 1))
+                FAILS=$((FAILS + 1))
+            fi
         done <<EOF
 $tiles
 EOF
@@ -377,7 +394,7 @@ echo "  ${GRID_PROOF:-no press read both outputs}"
 echo "  presses with both outputs read: $TWO_STYLE_PRESSES, furthest apart: $MAX_SPREAD char(s) (press ${SPREAD_AT:-none}) — one wrap is allowed, more is drift"
 echo "  run-window slides crossed: $RUN_REBASE_MOVES (the run-relative offset drops there by design; the pick-wide one above must not)"
 rm -f "$TILES" "$PANE"
-echo "== moved presses: $MOVED, wall tile reads: $TILE_READS, wall text changes: $TILE_TEXT_MOVES, pane paragraph advances: $PARA_MOVES, findings: $FAILS =="
+echo "== moved presses: $MOVED, wall tile reads: $TILE_READS, wall text changes: $TILE_TEXT_MOVES, pane paragraph advances: $PARA_MOVES, drawn-vs-table grid mismatches: $GRID_MISMATCH, findings: $FAILS =="
 if [ "$MOVED" -lt 15 ]; then
     echo "TABLE_WALK: FAIL too-few-moves ($MOVED) — the walk stopped early"
     exit 1

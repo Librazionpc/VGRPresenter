@@ -165,6 +165,12 @@ Rectangle {
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
+    // THE PASSAGE COLUMN'S OWN LINE COUNT, as this tile laid it out — read by the
+    // table-walk harness against the table LiveOutputService converts the reading
+    // position through (tools/selftest/run_table_walk_test.sh). The step moves an
+    // INDEX into that table while the words are drawn in lines of their own, so
+    // the two numbers have to be equal; -1 while no walk is drawing here.
+    readonly property int readingDrawnLines: contentPreview.readingDrawnLines
 
     // ---- What the feed does NOT bury: the backdrop pass ------------------
     // WHICH of the on-air blocks the ENGINE paints under the compositor's video
@@ -734,6 +740,7 @@ Rectangle {
         // means "the style's colour/image underneath shows through", and the
         // tile paints that (the pane below).
         DesignPreview {
+            id: contentPreview
             objectName: "selfTestTileDesignPreview"
             anchors.fill: parent
             visible: !root.blacked && root.hasSlidePreview && !root.framePriority

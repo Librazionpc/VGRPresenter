@@ -94,6 +94,37 @@ Item {
             return LiveOutputService.readingScroll
         return LiveOutputService.readingLineForStyle(root.readingStyleId, ch)
     }
+    // ---- WHAT THIS SURFACE REALLY LAID OUT (diagnostic, one line per wrap) ---
+    //
+    // `stepLine` above is a line index in the SERVICE's table for this style;
+    // the column under it is a Qt Text laid out in this box. Those are the same
+    // grid only while the size, the box and the wrap agree, and when they do not
+    // the drawn words lag the step: the reader reports the output "going slower"
+    // than its neighbour and "finishing" with lines still below the box. The
+    // number that decides it is the column's OWN line count against the table's,
+    // so both are printed together, here, for the style this surface draws at.
+    // (Information level, like the ReadRun/LineStep diagnostics beside it.)
+    property int readingDrawnLines: -1
+    function noteReadingDrawn(flow, block) {
+        readingDrawnLines = flow.lineCount
+        if (typeof EngineBridge === "undefined")
+            return
+        const style = String(root.readingStyleId)
+        let table = -1
+        let svcSize = -1
+        try { table = LiveOutputService.readingRunLineStarts(style).length } catch (e) { table = -2 }
+        try { svcSize = LiveOutputService.readingRunSizeForStyle(style) } catch (e) { svcSize = -2 }
+        EngineBridge.log("info", "ReadingDrawn",
+            "style=" + (style === "" ? "(ref)" : style.slice(0, 8))
+            + " drawn=" + flow.lineCount + " table=" + table
+            + " flowPx=" + Number(flow.font.pixelSize).toFixed(2)
+            + " flowW=" + (flow.width - flow.leftPadding - flow.rightPadding).toFixed(2)
+            + " svcSize=" + Number(svcSize).toFixed(2)
+            + " box=" + block.width + "x" + block.height
+            + " pageFit=" + Number(block.fitAnswer).toFixed(2)
+            + " pitch=" + Number(block.flowPitch).toFixed(2)
+            + " chars=" + flow.text.length)
+    }
     // How long that text is, so a delegate can tell whether IT is the reading
     // block. Only that one draws the passage: every text block used to shift by
     // the same pitch, which moved a title by the BODY's line height — a visible
@@ -281,12 +312,42 @@ Item {
                 // tested and confirmed independent of ReferencePane's own
                 // selector: "it's still refreshing... not continuing the
                 // flow").
+                // ...and when the SIZE settles — the walk's own number can land after
+                // this frame's first layout, and a log taken only at completion would
+                // then keep the fallback size's wrap and read as a mismatch the
+                // picture does not have.
+                onFlowSizeChanged: root.noteReadingDrawn(flowText, el)
                 onDrawsFlowChanged: EngineBridge.log("info", "DrawsFlowChanged",
                     "drawsFlow=" + el.drawsFlow
                     + " readingBlock=" + el.readingBlock
                     + " modelText=" + String(el.modelData.text ?? "").slice(0, 24)
                     + " flowText=" + String(LiveOutputService.readingFlowText ?? "").slice(0, 24)
                     + " fitAnswer=" + el.fitAnswer)
+                // ---- THE WALK'S ONE TYPE SIZE, FOR THE COLUMN THAT DRAWS IT ---
+                //
+                // The passage is laid out ONCE by the service, at one size per
+                // style (readingRunSizeForStyle), and every step is a LINE of that
+                // one table. This column must therefore be drawn at that same size:
+                // the page's own fit (fitAnswer above) is solved per page from that
+                // page's text, so it drifts from the walk's number as pages of
+                // different lengths go by — and a column drawn at a different size
+                // than the table holds different lines, which is the whole of the
+                // reported cross-output defect (measured: the table held 45 lines
+                // where the drawn column had 75, so the words moved 0.6 of a line
+                // per press and the last 30 lines never came into view).
+                //
+                // Falls back to the page's own fit while the walk has not measured
+                // this style yet (the first frame of a fresh pick).
+                readonly property real flowSize: {
+                    void LiveOutputService.readingFlowText
+                    const walk = Number(LiveOutputService.readingRunSizeForStyle(root.readingStyleId))
+                    return walk > 0 ? walk : el.fitAnswer
+                }
+                // ...and the pitch it travels by, measured at THAT size: the page's
+                // linePitch below is the page's own fit's line box, and using it
+                // with the walk's size is the same ratio error in the pixels.
+                readonly property real flowLineHeight: MetadataFields.lineHeightWithGap(el.meta, flowLineBox.contentHeight)
+                readonly property real flowPitch: flowLineBox.contentHeight * el.flowLineHeight
                 // THE PAGE'S TOP EDGE — where the page's first line sits, from
                 // the block's own vertical alignment. The passage begins exactly
                 // there, so at offset 0 it draws where the page drew.
@@ -627,8 +688,10 @@ Item {
                         // two outputs styled at different sizes used to scroll the
                         // same LINE number, which is a different word in each — one
                         // showed the passage's next sentence while the other was
-                        // still on the previous one.
-                        y: -root.stepLine * el.linePitch
+                        // still on the previous one. The pitch is the FLOW's own
+                        // (el.flowPitch), because the column is drawn at the walk's
+                        // size, not at this page's own fit.
+                        y: -root.stepLine * el.flowPitch
                         width: parent.width
                         height: flowText.implicitHeight
 
@@ -641,6 +704,22 @@ Item {
                             textCase: el.meta.textCase ?? "none"
                         }
 
+                        // The flow's own line box, measured at the size the flow is
+                        // DRAWN at (see el.flowSize) — the number the pitch above
+                        // multiplies.
+                        Text {
+                            id: flowLineBox
+                            visible: false
+                            text: "Xg"
+                            font.family: fitText.font.family
+                            font.pixelSize: el.flowSize
+                            font.weight: fitText.font.weight
+                            font.italic: fitText.font.italic
+                            font.letterSpacing: fitText.font.letterSpacing
+                            font.wordSpacing: fitText.font.wordSpacing
+                            lineHeight: 1
+                            lineHeightMode: Text.ProportionalHeight
+                        }
                         Text {
                             id: flowText
                             width: parent.width
@@ -655,7 +734,19 @@ Item {
                             // the string is longer, so the page's own lines land
                             // exactly where they did and the lines below it are the
                             // ones that scroll into view.
-                            font: fitText.font
+                            // EVERYTHING ABOUT THE TYPE IS THE PAGE'S (family,
+                            // weight, spacing, case) EXCEPT THE SIZE: that is the
+                            // walk's own held number, so the drawn column and the
+                            // table the step converts through are one grid.
+                            font.family: fitText.font.family
+                            font.weight: fitText.font.weight
+                            font.italic: fitText.font.italic
+                            font.underline: fitText.font.underline
+                            font.strikeout: fitText.font.strikeout
+                            font.capitalization: fitText.font.capitalization
+                            font.letterSpacing: fitText.font.letterSpacing
+                            font.wordSpacing: fitText.font.wordSpacing
+                            font.pixelSize: el.flowSize
                             fontSizeMode: Text.FixedSize
                             color: fitText.color
                             leftPadding: fitText.leftPadding
@@ -673,8 +764,14 @@ Item {
                             // each authored paragraph as one unbroken line clipped
                             // at the box edge.
                             wrapMode: fitText.wrapMode
-                            lineHeight: fitText.lineHeight
+                            lineHeight: el.flowLineHeight
                             lineHeightMode: fitText.lineHeightMode
+                            // WHAT THIS COLUMN REALLY BECAME (see noteReadingDrawn):
+                            // the drawn line count against the service table's, and
+                            // the size each was laid out at — the two numbers that
+                            // decide whether the step and the words are one grid.
+                            onLineCountChanged: root.noteReadingDrawn(flowText, el)
+                            Component.onCompleted: root.noteReadingDrawn(flowText, el)
                         }
                     }
                 }

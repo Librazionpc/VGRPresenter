@@ -676,6 +676,12 @@ public:
     // The character starts of that style's run lines — the table the two functions
     // above read. Exposed for the walk's own diagnostic (and cheap: cached).
     Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
+    // THE SIZE THAT TABLE WAS LAID OUT AT, for a style the walk has measured (-1
+    // when it has not). A surface comparing its own drawn column against the table
+    // needs it: the same words at a different pixel size are a different number of
+    // lines, so a mismatch here is the whole explanation for words that lag the
+    // step. Diagnostic only — the table is the authority.
+    Q_INVOKABLE qreal readingRunSizeForStyle(const QString &styleId) const;
     // WHERE THE READER IS, INDEPENDENT OF ANY STYLE: the CHARACTER offset into
     // readingFlowText of the line at the top of the box, in the reference (active
     // style) grid. This is the number every surface can agree on — see the

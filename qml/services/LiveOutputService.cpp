@@ -1,6 +1,7 @@
 #include "services/CallTrace.h"
 #include "services/LiveOutputService.h"
 
+#include "services/FontService.h"
 #include "services/ShowConverter.h"
 #include "services/SettingsService.h"
 #include "services/StyleSpecBuilder.h"
@@ -1010,7 +1011,12 @@ static QFont blockFontAt(const QVariantMap &block, double pixelSize)
 {
     const QVariantMap meta = block.value(QStringLiteral("meta")).toMap();
     QFont font;
-    const QString family = meta.value(QStringLiteral("fontFamily")).toString();
+    // THE FACE THAT IS ACTUALLY DRAWN, not the name the design asked for: QML
+    // draws the reading block with FontService.resolve (a missing family falls
+    // back to the content face), so measuring with the raw name would wrap a
+    // block in a font nobody paints whenever the design's font is not installed.
+    const QString family = FontService::instance()
+                               .resolve(meta.value(QStringLiteral("fontFamily")).toString());
     if (!family.isEmpty())
         font.setFamily(family);
     font.setPixelSize(qMax(1, qRound(pixelSize)));
@@ -1175,6 +1181,40 @@ static QVariantMap readingBoxForWrapping(const QVariantMap &slide)
             bestArea = area;
             best = block;
         }
+    }
+    return best;
+}
+
+// THE BLOCK THAT DRAWS THE PASSAGE — DesignPreview's own `readingBlock` rule:
+// the longest non-empty `text` among the slide's TEXT blocks. This is the block
+// the flow column is laid out in, so it owns BOTH the box the passage wraps at
+// and the text whose fitted size the column is drawn at.
+//
+// WHY IT IS NOT readingBoxForWrapping: that one answers "the largest text block
+// by AREA", which is a different block on a design whose header band spans the
+// slide. The two rules disagreed on a real Table walk, and the consequence was
+// exactly the reported cross-output bug: the passage's size was solved by
+// fitting the whole page BODY into the area box (27.42 px), while the surface
+// fitted the reading block's own text into its own box (45.84 px) — so the
+// service's table held 45 lines where the drawn column had 75 (ReadingDrawn).
+// The step converts a character into THAT table's line, so the output's words
+// moved 45/75 of a line per press: "the first output is slower than the second"
+// and "it stops scrolling as if finished but some lines are not shown".
+static QVariantMap readingBlockOf(const QVariantMap &slide)
+{
+    const QVariantList blocks = slide.value(QStringLiteral("blocks")).toList();
+    QVariantMap best;
+    int bestLength = 0;
+    for (const QVariant &entry : blocks) {
+        const QVariantMap block = entry.toMap();
+        if (block.value(QStringLiteral("kind"), QStringLiteral("text")).toString()
+            != QLatin1String("text"))
+            continue;
+        const int length = block.value(QStringLiteral("text")).toString().size();
+        if (length == 0 || length <= bestLength)
+            continue;      // DesignPreview: only a NON-EMPTY text is a reading block
+        bestLength = length;
+        best = block;
     }
     return best;
 }
@@ -1514,7 +1554,13 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
         return cached.value();
     const QVariantMap page = lineSetRaw_.at(lineSlideIndex_).toMap();
     const QVariantMap measured = previewWithStyle(page, styleId);
-    const QVariantMap box = readingBoxForWrapping(measured);
+    // THE BLOCK THE COLUMN IS DRAWN IN, not the largest one by area: the surface
+    // lays the passage out in this block's box at THIS block's fitted size, and a
+    // table measured anywhere else is a different grid from the words on screen
+    // (see readingBlockOf for the 45-vs-75-line measurement that proved it).
+    const QVariantMap readingBlock = readingBlockOf(measured);
+    const QVariantMap box = readingBlock.isEmpty() ? readingBoxForWrapping(measured)
+                                                   : readingBlock;
     // AT THE SIZE THE PAGE IS DRAWN AT, not at a size fitted for the PASSAGE.
     //
     // visualLinesOfText sizes a text to fit the box it is given, and a nine-page
@@ -1537,9 +1583,32 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     // size and that is exactly what the per-surface conversion exists for.
     double pageSize = readingRunSizeForStyle_.value(styleId, 0.0);
     if (pageSize <= 0.0) {
-        pageSize = fittedPixelSize(readingTextOf(page), box);
+        // FITTED FROM THE BLOCK'S OWN TEXT, which is what the surface's own fit
+        // solver is handed (DesignPreview's fitText) — not the page's whole body.
+        // The body of a Table page carries more than the paragraph (BookFill hands
+        // it on for that reason), so fitting IT into the same box answers a much
+        // smaller size: measured 27.42 px against the surface's 45.84 px, i.e. a
+        // third of the drawn column's lines. The passage is drawn at the block's
+        // size, so the table that positions it has to be measured at that size.
+        const QString fitText = readingBlock.isEmpty() ? readingTextOf(page)
+                                                       : readingBlock.value(QStringLiteral("text")).toString();
+        pageSize = fittedPixelSize(fitText, box);
         if (!box.isEmpty())
             readingRunSizeForStyle_.insert(styleId, pageSize);
+        // WHAT THE TABLE'S SIZE WAS SOLVED FROM, once per (style, page, run): the
+        // surface's own column reports ITS size and its wrap as ReadingDrawn, and a
+        // residual difference between the two lines is a difference in THESE
+        // numbers — the box, its padding, the fit text or the face it was fitted in.
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadFit"),
+                            QStringLiteral("style=%1 size=%2 box=%3x%4 pad=%5 "
+                                           "fitChars=%6 font=%7 (solved from the reading block)")
+                                .arg(styleId.isEmpty() ? QStringLiteral("(ref)") : styleId.left(8))
+                                .arg(pageSize, 0, 'f', 2)
+                                .arg(box.value(QStringLiteral("width")).toDouble())
+                                .arg(box.value(QStringLiteral("height")).toDouble())
+                                .arg(blockPadding(box))
+                                .arg(fitText.size())
+                                .arg(blockFontAt(box, pageSize).family()));
     }
     const QVector<VisualSpan> spans = box.isEmpty() ? newlineSpansOf(text)
                                                    : visualLinesOfTextAtSize(text, box, pageSize);
@@ -1558,6 +1627,12 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
 QStringList LiveOutputService::readingRunLinesForStyle(const QString &styleId) const
 {
     return styleRunLines(styleId).lines;
+}
+
+qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
+{
+    const auto it = readingRunSizeForStyle_.constFind(styleId);
+    return it == readingRunSizeForStyle_.constEnd() ? -1.0 : it.value();
 }
 
 QVariantList LiveOutputService::readingRunLineStarts(const QString &styleId) const
