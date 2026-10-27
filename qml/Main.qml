@@ -1332,6 +1332,508 @@ ApplicationWindow {
         }
     }
 
+    // ---- Reading-step self-test (VGR_LINESTEP_TEST=1 only) --------------------
+    // The numbers every "it blinks / it jumps back" report comes down to: what do
+    // the stepper's own counters do when it walks a multi-page pick? The scenario
+    // stages a synthetic pick through the REAL stageSlideSet, then presses the
+    // ordinary reading step (the same LiveOutputService.lineStep the arrows and
+    // wheel call), logging the run's offset, the passage length, the page's block
+    // count and its position in the pick each time.
+    //
+    // WHAT IT MUST SHOW
+    //  1. the position in the PICK (`abs`, see readingAbsoluteLine) grows by
+    //     exactly 1.0 per press, never backwards, and the passage length stays
+    //     CONSTANT while the pick lasts — a stepper that re-based its run per page
+    //     would reset the offset at the boundary and swap the passage;
+    //  2. THE WALL IS ON THE PAGE THE WALK IS ON. Every monitor tile's own
+    //     composition is read as it draws it and matched against the staged pages,
+    //     and its words are checked against the passage the service is drawing —
+    //     the reported "metadata is not updating the para values" / "the left is
+    //     still showing while the right has finished" are exactly a tile whose
+    //     composition has been left behind;
+    //  3. NO SKIPPING: the position is sampled every 16 ms through the glide, and
+    //     a sample that moves by half a line or goes the wrong way is printed.
+    //     That is what a "little skip" IS, at the only place it exists — the one
+    //     number every surface draws from.
+    //
+    // The pick is LONGER THAN THE RUN'S WINDOW on purpose (24 pages against the
+    // 4-pages-each-way run): the window then SLIDES while the reader walks, which
+    // is the case the earlier 6-page version could never reach — the 6-page pick
+    // fitted the window, so it neither slid nor let a tile's frozen composition
+    // fall out of the passage.
+    //
+    // Then it walks BACK up (direction -1) over the same boundaries and must come
+    // down by exactly 1.0 a press: the same base arithmetic drives both ways, and
+    // the report was about a boundary, not about going forward.
+    // The press counter runs ACROSS both passes (it is not reset when the walk
+    // turns around): every press number is unique, which is what lets the wall's
+    // own lines be matched to the press they were read on.
+    property int selfTestLineStepPress: 0
+    property bool selfTestLineStepBack: false
+    property int selfTestLineStepBackPress: 0
+    property var selfTestLineStepSlides: []
+    // The per-frame sampler's state (see the sample timer below).
+    property int selfTestLineStepDir: 1
+    property real selfTestLsPrevAbs: -1
+    property real selfTestLsGlideWorst: 0
+    property int selfTestLsGlideSkips: 0
+    property string selfTestLsGlideSkipAt: ""
+    // THE LONGEST TEXT BLOCK OF A TILE'S OWN COMPOSITION — the same "longest
+    // text is the reading block" rule DesignPreview uses, read off the tile as it
+    // draws (not re-derived from the raw slide), so this sees what the operator
+    // sees.
+    // The longest text block of a COMPOSITION (the same rule DesignPreview uses
+    // to find the reading block), and the same for a tile's own composition.
+    function lsCompText(comp) {
+        const bs = (comp && comp.blocks) ? comp.blocks : []
+        let best = ""
+        for (let i = 0; i < bs.length; ++i) {
+            const b = bs[i]
+            if (!b || (b.kind !== undefined && b.kind !== "text"))
+                continue
+            const t = String(b.text ?? "")
+            if (t.length > best.length)
+                best = t
+        }
+        return best
+    }
+    function lsTileText(tile) {
+        return window.lsCompText(tile ? tile.onAirSlide : null)
+    }
+    // EVERY BLOCK'S TEXT, in order — the whole composition's signature. Two
+    // compositions that agree on this draw the same things in the same places as
+    // far as any text goes, so comparing a tile's own against one composed NOW is
+    // the content-free way to ask "is this surface stale?" (which is what a walk
+    // that leaves the wall behind on an older page looks like, whatever the page
+    // says — the harness runs it against synthetic probes and a real passage).
+    function lsCompSig(comp) {
+        const bs = (comp && comp.blocks) ? comp.blocks : []
+        let s = ""
+        for (let i = 0; i < bs.length; ++i)
+            s += String(bs[i].text ?? "") + "\u0001"
+        return s
+    }
+    // WHICH PAGE OF THE PICK A TILE IS DRAWING, or -1 when its composition holds
+    // none of them (which is itself the finding: a tile that is not on any page
+    // has been left behind by the walk).
+    function lsTileShowsPage(tile) {
+        const text = window.lsTileText(tile)
+        if (text === "")
+            return -1
+        for (let k = 0; k < selfTestLineStepSlides.length; ++k) {
+            const body = String(selfTestLineStepSlides[k].body ?? "")
+            if (body !== "" && text.indexOf(body.slice(0, 24)) === 0)
+                return k
+        }
+        return -1
+    }
+    // One line per wall tile per press: which page it shows, whether it is still
+    // drawing the live passage (see DesignPreview's drawsFlow — the containment
+    // test the tile's own gate uses), and its own text, so a mismatch is readable
+    // rather than inferred.
+    function lsWallLines(press) {
+        const wall = SelfTest.findItem("selfTestMonitorWall")
+        if (!wall)
+            return ["[SELFTEST-LINESTEP] press=" + press + " wall=missing"]
+        const flow = String(LiveOutputService.readingFlowText ?? "")
+        const lines = []
+        const count = OutputListModel.rowCount()
+        for (let i = 0; i < count; ++i) {
+            const tile = window.bsFindTile(wall, i)
+            if (!tile) {
+                lines.push("[SELFTEST-LINESTEP] press=" + press + " tile=" + i + " missing=yes")
+                continue
+            }
+            const text = window.lsTileText(tile)
+            lines.push("[SELFTEST-LINESTEP] press=" + press + " tile=" + i
+                       + " shows=" + window.lsTileShowsPage(tile)
+                       + " flow=" + (text !== "" && flow.indexOf(text) >= 0)
+                       + " text=" + JSON.stringify(text.slice(0, 20)))
+        }
+        return lines
+    }
+    Timer {
+        id: selfTestLineStepStage
+        running: typeof SelfTestLineStep !== "undefined" && SelfTestLineStep
+        interval: 2600          // let the first frame land
+        onTriggered: {
+            const words = ["alpha", "bravo", "charlie", "delta", "echo",
+                           "foxtrot", "golf", "hotel", "india", "juliet"]
+            const slides = []
+            // 24 pages: more than the run's own window (4 pages each way), so the
+            // walk makes the window SLIDE — see this scenario's header comment.
+            for (let p = 0; p < 24; ++p) {
+                // EVERY PAGE'S TEXT IS UNIQUE, and unique EARLY: the runner reads
+                // a tile's own composition back and says WHICH page it is holding
+                // by matching the page's leading words, so two pages that shared
+                // their opening words would make a tile showing page 10 read as
+                // page 0 (the word list cycles every 10).
+                let body = "p" + (p + 1) + " "
+                for (let i = 0; i < 12; ++i)
+                    body += words[(i + p) % words.length] + " "
+                slides.push({ valid: true, title: "Probe " + (p + 1), body: body,
+                              blocks: [], background: "" })
+            }
+            selfTestLineStepSlides = slides
+            LiveOutputService.stageSlideSet("LineStep probe", slides, 0)
+            console.log("[SELFTEST-LINESTEP] staged " + slides.length + " page(s)")
+            selfTestLineStepTick.restart()
+            selfTestLineStepSample.restart()
+        }
+    }
+    // THE SKIP TRACE: sample the position in the pick every 16 ms (≈ one frame) for
+    // as long as the walk runs. A line takes ~190 ms, so a sample should advance
+    // ~0.08 lines.
+    //
+    // WHAT COUNTS AS A SKIP: a move against the press's direction, or a whole LINE
+    // between two samples. A full line cannot come from a late sample — the glide
+    // is time-based and at its fastest (the middle of the easing) covers about
+    // 0.02 lines per millisecond, so even a sample delayed by 50 ms by a busy
+    // interface thread stays under half a line. Half a line as the threshold
+    // therefore reports that jitter as a skip, which is noise: the measured
+    // defects are whole-page jumps, an order of magnitude over it.
+    Timer {
+        id: selfTestLineStepSample
+        // BOTH walks sample: the synthetic pick and the real passage. The skip
+        // trace is the same measurement either way — it reads the one number every
+        // surface draws from.
+        running: (typeof SelfTestLineStep !== "undefined" && SelfTestLineStep)
+                 || (typeof SelfTestTableWalk !== "undefined" && SelfTestTableWalk)
+        interval: 16
+        repeat: true
+        onTriggered: {
+            const abs = Number(LiveOutputService.readingAbsoluteLine)
+            if (selfTestLsPrevAbs >= 0) {
+                const d = abs - selfTestLsPrevAbs
+                const backward = d * selfTestLineStepDir < -0.001
+                if (Math.abs(d) > selfTestLsGlideWorst)
+                    selfTestLsGlideWorst = Math.abs(d)
+                if (backward || Math.abs(d) > 1.0) {
+                    ++selfTestLsGlideSkips
+                    if (selfTestLsGlideSkipAt === "")
+                        // Deliberately NOT "key=value": the runner parses this
+                        // line's own fields by name, and a nested `abs=` inside
+                        // this string would be read as the press's own.
+                        selfTestLsGlideSkipAt = "frame " + selfTestLineStepPress
+                            + " moved " + d.toFixed(3) + " to " + abs.toFixed(2)
+                }
+            }
+            selfTestLsPrevAbs = abs
+        }
+    }
+    Timer {
+        id: selfTestLineStepTick
+        // Longer than the glide's own maximum (reading.stepMs is bounded to
+        // 600ms), so the offset a press reports as `from` is the SETTLED one the
+        // previous press left on screen — that sequence is what has to climb by
+        // 1.0 and never restart.
+        interval: 700
+        repeat: true
+        onTriggered: {
+            const dir = selfTestLineStepBack ? -1 : 1
+            selfTestLineStepDir = dir
+            const before = Number(LiveOutputService.readingScroll)
+            const absBefore = Number(LiveOutputService.readingAbsoluteLine)
+            const flowBefore = String(LiveOutputService.readingFlowText || "").length
+            const pageBefore = Number(LiveOutputService.readingPage)
+            const moved = LiveOutputService.lineStep(dir)
+            const after = Number(LiveOutputService.readingScroll)
+            const absAfter = Number(LiveOutputService.readingAbsoluteLine)
+            const flowAfter = String(LiveOutputService.readingFlowText || "").length
+            const blocks = (LiveOutputService.stagedSlide && LiveOutputService.stagedSlide.blocks)
+                ? LiveOutputService.stagedSlide.blocks.length : -1
+            // The glide that just finished shipping is logged WITH the press that
+            // follows it: worst single-frame move and how many frames skipped.
+            console.log("[SELFTEST-LINESTEP] press=" + selfTestLineStepPress
+                        + " dir=" + dir
+                        + " moved=" + moved
+                        + " from=" + before.toFixed(2)
+                        + " to=" + after.toFixed(2)
+                        + " abs=" + absAfter.toFixed(2)
+                        + " absFrom=" + absBefore.toFixed(2)
+                        + " page=" + LiveOutputService.readingPage
+                        + " pageBefore=" + pageBefore
+                        + " passage=" + flowAfter
+                        + " passageBefore=" + flowBefore
+                        + " blocks=" + blocks
+                        + " glideWorst=" + selfTestLsGlideWorst.toFixed(3)
+                        + " glideSkips=" + selfTestLsGlideSkips
+                        + (selfTestLsGlideSkipAt !== "" ? " glideSkipAt=" + JSON.stringify(selfTestLsGlideSkipAt) : ""))
+            const wall = window.lsWallLines(selfTestLineStepPress)
+            for (let w = 0; w < wall.length; ++w)
+                console.log(wall[w])
+            selfTestLsGlideWorst = 0
+            selfTestLsGlideSkips = 0
+            selfTestLsGlideSkipAt = ""
+            ++selfTestLineStepPress
+            if (selfTestLineStepBack)
+                ++selfTestLineStepBackPress
+            if (!selfTestLineStepBack && selfTestLineStepPress > 33) {
+                // the end of the pick: now walk the same boundaries back up
+                selfTestLineStepBack = true
+            } else if (selfTestLineStepBack && selfTestLineStepBackPress > 11) {
+                selfTestLineStepTick.stop()
+                selfTestLineStepSample.stop()
+                selfTestLineStepDone.restart()
+            }
+        }
+    }
+    Timer {
+        id: selfTestLineStepDone
+        interval: 1200
+        onTriggered: {
+            console.log("[SELFTEST-LINESTEP] done")
+            SelfTest.quit()
+        }
+    }
+
+    // ---- REAL-PASSAGE reading walk (VGR_TABLEWALK_TEST=1 only) ---------------
+    // The synthetic-pick harness above proves the arithmetic; this one proves the
+    // THING THE OPERATOR WAS LOOKING AT. It drives the app's own app-wide search to
+    // a real sermon passage (VGR_TABLEWALK_QUERY, default the reported
+    // "47-1100X"), takes it the way the pane's own Enter does (playPicked), then
+    // walks it with the ordinary reading step — the same call the Alt+Down
+    // Shortcut makes — over several PARAGRAPH boundaries, printing per press:
+    //   * the wall: each tile's own composition against one composed NOW (stale=),
+    //     and whether it is still drawing the live passage (flow=);
+    //   * the pane: its own reference text and selected rows — the "para values"
+    //     the report said were not updating — plus the pick's name it owns;
+    //   * the walk itself: page, position in the pick, and the per-frame skips.
+    // Read-only apart from the search and the staging every pick already does.
+    readonly property string twQuery: (typeof SelfTestTableWalkQuery !== "undefined")
+                                      ? String(SelfTestTableWalkQuery) : "47-1100X"
+    property int twTries: 0
+    property int twPress: 0
+    function twRefPara(text) {
+        // The Table's reference carries the paragraph it is showing ("47-1100X -
+        // Fellowship 2"): the trailing number IS the value the report was about.
+        const m = String(text).match(/(\d+)\s*$/)
+        return m ? Number(m[1]) : -1
+    }
+    function twPaneLine(press) {
+        const pane = SelfTest.findItem("selfTestTablePane")
+        if (!pane)
+            return "[SELFTEST-TABLEWALK] press=" + press + " pane=missing"
+        return "[SELFTEST-TABLEWALK] press=" + press + " pane=yes"
+            + " page=" + LiveOutputService.readingPage
+            + " char=" + LiveOutputService.readingCharOffset()
+            + " refTop=" + JSON.stringify(window.twStyleView(String(OutputListModel.activeStyleId)).words)
+            + " ref=" + JSON.stringify(String(pane.referenceText))
+            + " para=" + window.twRefPara(pane.referenceText)
+            + " selected=" + JSON.stringify(pane.selected)
+            + " previewIndex=" + pane.previewSlideIndex
+            + " ownerRef=" + JSON.stringify(String(pane.lineStepOwnerRef))
+    }
+    // Opens the app-wide search, then re-asks until the sermon index answers (it
+    // builds in the background for ~40s after boot, exactly as the click-to-open
+    // scenario records) and takes the first result — the real "search a citation,
+    // open it" path, not a hand-built pick.
+    Timer {
+        id: selfTestTableWalkOpen
+        running: typeof SelfTestTableWalk !== "undefined" && SelfTestTableWalk
+        // 70s, not 45: the background sermon index this machine builds for its
+        // 1,206 documents finishes at ~58s (engine.log: "indexing progress:
+        // 1206/1206"), so a query issued at 45s scans a half-built corpus.
+        interval: 70000
+        onTriggered: {
+            console.log("[SELFTEST-TABLEWALK] query=" + JSON.stringify(window.twQuery))
+            quickSearch.openSearch()
+            selfTestTableWalkQuery.restart()
+        }
+    }
+    Timer {
+        id: selfTestTableWalkQuery
+        interval: 3000
+        repeat: true
+        onTriggered: {
+            // ASK, THEN ONLY LISTEN. Every refresh() bumps the search token and
+            // cancels the query already in flight, so re-asking every tick meant
+            // each retry killed the previous one and no answer ever landed (the
+            // corpus-wide Table scan takes longer than a tick): the harness
+            // reported "no-results" against a library that has 1,206 sermons.
+            // One ask, then poll; a re-ask every 5th tick gives each attempt a
+            // 15s window and still survives an index that is not ready yet.
+            if (window.twTries === 0 || window.twTries % 5 === 0) {
+                quickSearch.query = window.twQuery
+                quickSearch.refresh()
+            }
+            ++window.twTries
+            if (quickSearch.results.length > 0) {
+                const r = quickSearch.results[0]
+                selfTestTableWalkQuery.stop()
+                console.log("[SELFTEST-TABLEWALK] picking kind=" + r.kind + " verse=" + r.verse
+                            + " title=" + JSON.stringify(String(r.title)))
+                quickSearch.choose(r)
+                selfTestTableWalkSettle.restart()
+            } else if (window.twTries >= 25) {
+                selfTestTableWalkQuery.stop()
+                console.log("[SELFTEST-TABLEWALK] FAIL no-results after " + window.twTries
+                            + " tries token=" + quickSearch.searchToken
+                            + " pending=" + quickSearch.searchPending
+                            + " dialogVisible=" + quickSearch.visible)
+                SelfTest.quit()
+            }
+        }
+    }
+    // The pane has a selection once the result is opened; taking it is the pane's
+    // OWN play (the Enter key's body), which stages the whole chapter as the pick.
+    Timer {
+        id: selfTestTableWalkSettle
+        interval: 3000
+        onTriggered: {
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (!pane || !pane.book || pane.selected.length === 0) {
+                console.log("[SELFTEST-TABLEWALK] FAIL no-pick pane=" + (pane ? "yes" : "no")
+                            + " book=" + (pane && pane.book ? pane.book.id : "-")
+                            + " selected=" + (pane ? JSON.stringify(pane.selected) : "[]"))
+                SelfTest.quit()
+                return
+            }
+            pane.playPicked()
+            // THE SKIP TRACE STARTS WITH THE WALK. Opening the passage re-bases the
+            // position (a new pick starts at its own first line), and the sampler has
+            // been running since boot — so without this its first sample compares the
+            // NEW pick's position against the OLD one's and reports a whole-line skip
+            // at press 0 that no picture ever made. -1 means "no previous sample yet".
+            window.selfTestLsPrevAbs = -1
+            window.selfTestLsGlideWorst = 0
+            window.selfTestLsGlideSkips = 0
+            selfTestTableWalkPress.restart()
+        }
+    }
+    Timer {
+        id: selfTestTableWalkPress
+        // Past the glide's 600ms cap, so the position each press reports is the
+        // settled one the previous press left on screen.
+        interval: 700
+        repeat: true
+        onTriggered: {
+            // THE PRESS IS COUNTED FIRST, AND THE DIAGNOSTIC IS FENCED. This timer
+            // reports more than any other scenario in this file, so a mistake in a
+            // LOG LINE must never be able to stop the walk: `activeStyleId` read as
+            // a call instead of a property threw inside this handler, which skipped
+            // the counter's own increment — the walk never reached its limit, never
+            // logged its "done", and the harness waited out its whole timeout with
+            // the app still stepping (five such runs interleaved in one log). The
+            // counter and the stop check are therefore outside the try, and anything
+            // the fenced part throws is reported instead of silently ending the run.
+            const press = window.twPress
+            window.twPress = press + 1
+            window.selfTestLineStepPress = press
+            try {
+                const absFrom = Number(LiveOutputService.readingAbsoluteLine)
+                const moved = LiveOutputService.lineStep(1)
+                const abs = Number(LiveOutputService.readingAbsoluteLine)
+                const page = LiveOutputService.readingPage
+                console.log("[SELFTEST-TABLEWALK] press=" + press
+                            + " moved=" + moved
+                            + " abs=" + abs.toFixed(2)
+                            + " absFrom=" + absFrom.toFixed(2)
+                            + " page=" + page
+                            + " glideSkips=" + window.selfTestLsGlideSkips
+                            + " glideWorst=" + window.selfTestLsGlideWorst.toFixed(3))
+                const wall = window.twTileLines(press)
+                for (let w = 0; w < wall.length; ++w)
+                    console.log(wall[w])
+                console.log(window.twPaneLine(press))
+            } catch (err) {
+                console.log("[SELFTEST-TABLEWALK] log-error press=" + press + " " + err)
+            }
+            window.selfTestLsGlideWorst = 0
+            window.selfTestLsGlideSkips = 0
+            // 120, not 30: a real sermon's paragraphs are LONG (the reported
+            // passage's first one runs 9 lines, the next 20+), so 30 presses
+            // stopped inside the second paragraph and never crossed the several
+            // boundaries this check is about.
+            if (window.twPress > 120) {
+                selfTestTableWalkPress.stop()
+                selfTestTableWalkDone.restart()
+            }
+        }
+    }
+    Timer {
+        id: selfTestTableWalkDone
+        interval: 1500
+        onTriggered: {
+            console.log("[SELFTEST-TABLEWALK] done presses=" + window.twPress)
+            SelfTest.quit()
+        }
+    }
+    // WHAT A GIVEN STYLE DRAWS AT THE TOP OF ITS BOX — the CONVERSION, not the
+    // walk's line number read into another grid.
+    //
+    // The first version of this read `readingRunLinesForStyle(styleId)[floor(
+    // readingScroll)]`: the reference grid's LINE INDEX indexed into the style's
+    // own lines. That is a different word in every grid that wraps differently,
+    // so the two outputs it was meant to compare could not be compared by it —
+    // each was asked "what is on MY line 7", which is exactly the bug (a line
+    // number is only the same words if the grids agree). This asks the question
+    // the surfaces ask: the passage's character offset (readingChar), converted
+    // by that style (readingLineForStyle) into that style's own line, whose
+    // words are then the truth about what that output is showing.
+    //
+    // `char` is the offset of the top line's first character in the RUN's text (the
+    // number the surface draws with), `pchar` the same position in the PICK's whole
+    // passage (char + the run's own origin) — the coordinate that stays monotonic
+    // when the run's window slides, and therefore the one a drift check must use.
+    // `span` is the longest line in that grid: the most two grids can legitimately
+    // differ by (a difference that GROWS past it is drift).
+    function twStyleView(styleId) {
+        const starts = LiveOutputService.readingRunLineStarts(styleId)
+        const flow = String(LiveOutputService.readingFlowText ?? "")
+        const ch = LiveOutputService.readingChar
+        if (starts.length === 0 || !(ch >= 0))
+            return { lines: 0, line: -1, char: -1, pchar: -1, span: 0, words: "" }
+        const line = LiveOutputService.readingLineForStyle(styleId, ch)
+        const idx = Math.max(0, Math.min(starts.length - 1, Math.floor(line)))
+        const at = Number(starts[idx])
+        // where this run's text begins in the pick (both terms are the reference
+        // grid's own numbers, so their difference is the run's origin)
+        const base = LiveOutputService.readingPassageChar() - LiveOutputService.readingCharOffset()
+        let span = 0
+        for (let i = 0; i + 1 < starts.length; ++i)
+            span = Math.max(span, Number(starts[i + 1]) - Number(starts[i]))
+        return { lines: starts.length, line: line, char: at,
+                 pchar: (base >= 0 ? base + at : -1), span: span,
+                 words: flow.slice(at, at + 30) }
+    }
+    function twTileLines(press) {
+        const wall = SelfTest.findItem("selfTestMonitorWall")
+        if (!wall)
+            return ["[SELFTEST-TABLEWALK] press=" + press + " wall=missing"]
+        const stagedRaw = LiveOutputService.stagedSlideRaw
+        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+            ? stagedRaw : LiveOutputService.onAirSlideRaw
+        const flow = String(LiveOutputService.readingFlowText ?? "")
+        const out = []
+        const count = OutputListModel.rowCount()
+        for (let i = 0; i < count; ++i) {
+            const tile = window.bsFindTile(wall, i)
+            if (!tile) {
+                out.push("[SELFTEST-TABLEWALK] press=" + press + " tile=" + i + " missing=yes")
+                continue
+            }
+            const fresh = LiveOutputService.previewWithStyle(
+                (raw && typeof raw === "object") ? raw : {}, String(tile.styleId))
+            const tileText = window.lsCompText(tile.onAirSlide)
+            const freshText = window.lsCompText(fresh)
+            const view = window.twStyleView(String(tile.styleId))
+            out.push("[SELFTEST-TABLEWALK] press=" + press + " tile=" + i
+                     + " stale=" + (window.lsCompSig(tile.onAirSlide) !== window.lsCompSig(fresh))
+                     + " flow=" + (tileText !== "" && flow.indexOf(tileText) >= 0)
+                     + " tileText=" + JSON.stringify(tileText.slice(0, 28))
+                     + " freshText=" + JSON.stringify(freshText.slice(0, 28))
+                     + " style=" + String(tile.styleId).slice(0, 8)
+                     + " glines=" + view.lines
+                     + " gline=" + Number(view.line).toFixed(2)
+                     + " gchar=" + view.char
+                     + " gpchar=" + view.pchar
+                     + " gspan=" + view.span
+                     + " gwords=" + JSON.stringify(view.words))
+        }
+        return out
+    }
+
     // ---- Popup-modal fit self-test (VGR_MODALFIT_TEST=1 only) ----------------
     // EVERY popup in this app is a card laid over the app, and the window it
     // opens in is frameless and bounded to the active screen (Main.qml lets it

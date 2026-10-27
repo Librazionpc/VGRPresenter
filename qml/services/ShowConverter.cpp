@@ -263,7 +263,12 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
     // and the engine has to receive it exactly as typed. Absent on every slide
     // that is not part of a step-able pick, which is every ordinary slide.
     slide.flowText = utf8(s.value(QStringLiteral("flowText")).toString());
-    slide.flowScroll = static_cast<float>(s.value(QStringLiteral("flowScroll")).toDouble());
+    // WHERE IN THE PASSAGE (a character offset — see Slide::flowChar): a line
+    // number here would put different words at the top of two outputs styled at
+    // different sizes, which is exactly what the operator saw.
+    slide.flowChar = s.contains(QStringLiteral("flowChar"))
+                         ? static_cast<float>(s.value(QStringLiteral("flowChar")).toDouble())
+                         : -1.0f;
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     // Slide-wide filters (see applyFilters — the same door the Edit panel's live
     // patch comes through).

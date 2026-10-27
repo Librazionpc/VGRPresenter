@@ -561,6 +561,32 @@ namespace {
 // so this declares that very function. A declaration at bps::platform scope
 // instead would be a second, different overload.
 std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 stride, UINT32 quality);
+
+// BT.601 limited-range YUV -> BGRA, as 16-bit fixed point (the float path's
+// own coefficients, x65536 and rounded) — this is the fallback the capture
+// callback hits for devices whose own driver (or the Source Reader's
+// MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING — already on, see the
+// tap's own setup) still would not hand over RGB32 directly, the integrated
+// webcam among them per that call site's own comment. It ran on this same
+// callback thread as raw float math (per-pixel multiply/compare/convert,
+// several of them re-evaluating the identical expression up to three times
+// for one clamp — see the NV12 branch this replaces) at full capture
+// resolution, every frame — a believable source of the reported "camera
+// source... lagging, especially... on CPU". Integer multiply+shift carries
+// no float-to-int conversion cost and the compiler auto-vectorizes a tight
+// integer loop far more readily than one built from float ternary clamps.
+// cb/cr are the caller's own u-128/v-128 offset (kept as ints, not computed
+// twice per pixel here).
+inline void Yuv601ToBgra(int y, int cb, int cr, uint8_t *dst)
+{
+    const int r = y + ((91881 * cr) >> 16);
+    const int g = y - ((22554 * cr + 46802 * cb) >> 16);
+    const int b = y + ((116130 * cb) >> 16);
+    dst[0] = static_cast<uint8_t>(b < 0 ? 0 : (b > 255 ? 255 : b));
+    dst[1] = static_cast<uint8_t>(g < 0 ? 0 : (g > 255 ? 255 : g));
+    dst[2] = static_cast<uint8_t>(r < 0 ? 0 : (r > 255 ? 255 : r));
+    dst[3] = 0xFF;
+}
 } // namespace
 
 // RGB32 / YUY2 / NV12 -> the tap's published forms — the conversions the
@@ -652,25 +678,17 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
         } else if (w > 0 && h > 0 && subtype == MFVideoFormat_YUY2
                    && curLen >= static_cast<DWORD>(w) * h * 2) {
             // YUY2 packed 4:2:2 — [Y0 U Y1 V] per pixel pair. The
-            // BT.601 limited-range lift used by every capture stack.
+            // BT.601 limited-range lift used by every capture stack, now the
+            // fixed-point form (Yuv601ToBgra) — see its own comment.
             std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 4);
             for (UINT32 y = 0; y < h; ++y) {
                 const uint8_t *src = data + static_cast<size_t>(y) * w * 2;
                 uint8_t *dst = rgb.data() + static_cast<size_t>(y) * w * 4;
                 for (UINT32 x = 0; x < w; x += 2) {
-                    const float y0 = src[0], u = src[1], y1 = src[2], v = src[3];
-                    const float cb = u - 128.f, cr = v - 128.f;
-                    auto clamp8 = [](float v) {
-                        return static_cast<uint8_t>(v < 0.f ? 0 : v > 255.f ? 255 : v);
-                    };
-                    dst[0] = clamp8(y0 + 1.772f * cb);            // B
-                    dst[1] = clamp8(y0 - 0.344136f * cr - 0.714136f * cb);   // G
-                    dst[2] = clamp8(y0 + 1.402f * cr);            // R
-                    dst[3] = 0xFF;
-                    dst[4] = clamp8(y1 + 1.772f * cb);
-                    dst[5] = clamp8(y1 - 0.344136f * cr - 0.714136f * cb);
-                    dst[6] = clamp8(y1 + 1.402f * cr);
-                    dst[7] = 0xFF;
+                    const int cb = static_cast<int>(src[1]) - 128;
+                    const int cr = static_cast<int>(src[3]) - 128;
+                    Yuv601ToBgra(src[0], cb, cr, dst);
+                    Yuv601ToBgra(src[2], cb, cr, dst + 4);
                     src += 4;
                     dst += 8;
                 }
@@ -679,9 +697,14 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
         } else if (w > 0 && h > 0 && subtype == MFVideoFormat_NV12
                    && curLen >= static_cast<DWORD>(w) * h * 3 / 2) {
             // NV12 planar 4:2:0 — full-res Y plane, then interleaved
-            // UV at half resolution. Same BT.601 lift as YUY2. The
-            // integrated webcam delivers this when its driver refuses
-            // the reader's RGB32 conversion.
+            // UV at half resolution. Same BT.601 lift as YUY2, same
+            // fixed-point form (Yuv601ToBgra) — see its own comment. Also
+            // now reads cb/cr ONCE per horizontal pair instead of once per
+            // pixel (both pixels of a 4:2:0 pair always shared the same
+            // chroma anyway, via x & ~1u below — the original just repeated
+            // the lookup and the subtract for the second pixel of every
+            // pair). The integrated webcam delivers this when its driver
+            // refuses the reader's RGB32 conversion.
             std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 4);
             const uint8_t *yPlane = data;
             const uint8_t *uvPlane = data + static_cast<size_t>(w) * h;
@@ -689,19 +712,18 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
                 const uint8_t *yRow = yPlane + static_cast<size_t>(y) * w;
                 const uint8_t *uvRow = uvPlane + static_cast<size_t>(y / 2) * w;
                 uint8_t *dst = rgb.data() + static_cast<size_t>(y) * w * 4;
-                for (UINT32 x = 0; x < w; ++x) {
-                    const float cb = uvRow[(x & ~1u)] - 128.f;
-                    const float cr = uvRow[(x & ~1u) + 1] - 128.f;
-                    const float luma = yRow[x];
-                    dst[0] = static_cast<uint8_t>(luma + 1.772f * cb < 0.f ? 0
-                              : luma + 1.772f * cb > 255.f ? 255 : luma + 1.772f * cb);   // B
-                    dst[1] = static_cast<uint8_t>(luma - 0.344136f * cr - 0.714136f * cb < 0.f ? 0
-                              : luma - 0.344136f * cr - 0.714136f * cb > 255.f ? 255
-                              : luma - 0.344136f * cr - 0.714136f * cb);                   // G
-                    dst[2] = static_cast<uint8_t>(luma + 1.402f * cr < 0.f ? 0
-                              : luma + 1.402f * cr > 255.f ? 255 : luma + 1.402f * cr);     // R
-                    dst[3] = 0xFF;
-                    dst += 4;
+                UINT32 x = 0;
+                for (; x + 1 < w; x += 2) {
+                    const int cb = static_cast<int>(uvRow[x]) - 128;
+                    const int cr = static_cast<int>(uvRow[x + 1]) - 128;
+                    Yuv601ToBgra(yRow[x], cb, cr, dst);
+                    Yuv601ToBgra(yRow[x + 1], cb, cr, dst + 4);
+                    dst += 8;
+                }
+                if (x < w) {   // odd width: one leftover column, its own pair's chroma
+                    const int cb = static_cast<int>(uvRow[x & ~1u]) - 128;
+                    const int cr = static_cast<int>(uvRow[(x & ~1u) + 1]) - 128;
+                    Yuv601ToBgra(yRow[x], cb, cr, dst);
                 }
             }
             publish(rgb.data(), w * 4);

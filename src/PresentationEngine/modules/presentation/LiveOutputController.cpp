@@ -679,31 +679,31 @@ std::string LiveOutputController::CurrentSceneId() const {
     return {};
 }
 
-void LiveOutputController::LineScrollPush(float lines) {
+void LiveOutputController::FlowCharPush(float chars) {
     // Atomic stores only — see the header: the QML step's animator calls this on
     // the GUI thread and it must not take a lock or touch a device there. The
     // TIME is stored after the value so a frame that reads the pair can never see
     // a new number with the old clock (which would end its settle window early).
-    lineScroll_.store(lines);
-    lineScrollAtMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+    flowChar_.store(chars);
+    flowCharAtMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::steady_clock::now().time_since_epoch()).count());
-    lineScrollSettle_.store(true);
+    flowCharSettle_.store(true);
 }
 
-bool LiveOutputController::LineScrollMoving(int64_t nowMs) {
+bool LiveOutputController::FlowCharMoving(int64_t nowMs) {
     // A SCROLL IN FLIGHT MUST NOT BE SKIPPED. The loop's whole economy is to
     // compose only when something changed, and the offset is not part of the
     // scene's fingerprint — so "is the number still moving?" is asked here, by
     // the clock, and it keeps the compositor awake for as long as the step's
     // animator is still pushing numbers.
-    const int64_t at = lineScrollAtMs_.load();
-    if (at != 0 && nowMs - at < kLineScrollSettleMs)
+    const int64_t at = flowCharAtMs_.load();
+    if (at != 0 && nowMs - at < kFlowCharSettleMs)
         return true;
     // ...and ONE extra frame after the last push, so the value the animator
     // landed on is what stays on air (the frame that ends a move reads as
     // "nothing changed" and would otherwise be skipped, leaving the previous
     // sub-line offset up until something else moved).
-    return lineScrollSettle_.exchange(false);
+    return flowCharSettle_.exchange(false);
 }
 
 Result<void> LiveOutputController::RenderOnce() {
@@ -761,15 +761,15 @@ Result<void> LiveOutputController::RenderOnce() {
     const rendering::SlideFilterValues activeFilters =
         pres_->CurrentSlide() ? pres_->CurrentSlide()->filters : rendering::SlideFilterValues{};
     const bool filtersChanged = !(activeFilters == lastFilters_);
-    // THE READING SCROLL (see SetLineScroll). While one is moving the frame is a
+    // THE READING POSITION (see SetFlowChar). While one is moving the frame is a
     // MOVE even though the scene id never changes — the change-skip below must
     // not eat it, so a scroll in flight forces a compose per tick. The offset
     // itself is the animator's number, not this loop's: one value, pushed from
     // the interface thread's animation, is what every output draws.
     const int64_t nowSteadyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now().time_since_epoch()).count();
-    const float scrollLines = lineScroll_.load();
-    const bool scrollMoving = LineScrollMoving(nowSteadyMs);
+    const float scrollChars = flowChar_.load();
+    const bool scrollMoving = FlowCharMoving(nowSteadyMs);
     // THE FIRST FRAME OF A NEW SCENE takes its offset from the scene itself (see
     // RenderOptions::contentScrollFromScene): a step that lands on the next page
     // commits a slide carrying its own resting offset, so the boundary is right
@@ -802,7 +802,7 @@ Result<void> LiveOutputController::RenderOnce() {
             // Distribute each rather than a 1080p raster apiece, which is the whole
             // point; this call is what keeps a newly enabled screen from never
             // appearing at all while the on-air scene sits still.
-            RenderPerOutputPasses(scrollLines, freshScene);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+            RenderPerOutputPasses(scrollChars, freshScene);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
             const double ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - presentStart).count();
             representedFrames_.fetch_add(1);
@@ -821,7 +821,7 @@ Result<void> LiveOutputController::RenderOnce() {
     opts.filters = activeFilters;   // slide-wide; applied to the composed frame
     // The reading scroll for THIS frame: how far the reading block's flow sits
     // into its passage, in its own line heights. Nothing else in the scene moves.
-    opts.contentScrollLines = scrollLines;
+    opts.contentScrollChars = scrollChars;
     opts.contentScrollFromScene = freshScene;
     auto frame = render.Render(sceneId, opts);
     if (frame.ok()) {
@@ -890,7 +890,7 @@ Result<void> LiveOutputController::RenderOnce() {
     // builder, the active slide) while the GUI thread's replace path rewrites
     // exactly those members, so releasing the lock here would let a content
     // replace tear the set out from under a pass mid-frame.
-    RenderPerOutputPasses(scrollLines, freshScene);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+    RenderPerOutputPasses(scrollChars, freshScene);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
 
     // frames_ is what LiveOutputService::pollTick() polls to decide whether
     // to bump frameRev (the QML image providers' cache-buster) — and
@@ -928,7 +928,7 @@ bool LiveOutputController::RepresentLastFrame(rendering::RenderEngine& render) {
     return true;
 }
 
-void LiveOutputController::RenderPerOutputPasses(float contentScrollLines, bool contentScrollFromScene) {
+void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, bool contentScrollFromScene) {
     if (!pres_) return;
     std::vector<std::string> buffers;
     std::vector<std::pair<int, int>> sizes;
@@ -1049,7 +1049,7 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollLines, bool 
         // ...and the same reading scroll, so an output with its own scene (a
         // different style or resolution) slides exactly like the program feed it
         // sits beside rather than cutting while the next screen moves.
-        passOpts.contentScrollLines = contentScrollLines;
+        passOpts.contentScrollChars = contentScrollChars;
         passOpts.contentScrollFromScene = contentScrollFromScene;
         if (auto img = engine.Render(sceneId.value(), passOpts); img.ok() && !img.value().empty()) {
             rendering::Frame f;

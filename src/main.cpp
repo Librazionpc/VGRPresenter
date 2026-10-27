@@ -930,6 +930,13 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestInsets"),
         QVariant(qEnvironmentVariableIsSet("VGR_INSETS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The reading-step scenario: it stages a synthetic pick, walks it and quits,
+    // so it gets its own env var like the others (a plain VGR_SELFTEST=1 run must
+    // never replace what is staged or quit early).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestLineStep"),
+        QVariant(qEnvironmentVariableIsSet("VGR_LINESTEP_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The Settings-modal fit scenario has its own env var for the same reason:
     // it opens Settings and quits, so it must never ride a plain VGR_SELFTEST=1
     // run (the NDI probes' launch).
@@ -974,6 +981,22 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestOutputsLive"),
         QVariant(qEnvironmentVariableIsSet("VGR_OUTSLIVE_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The real-passage reading walk (VGR_TABLEWALK_TEST=1): drives the app-wide
+    // search to a REAL sermon passage, takes it the way the pane's own Enter does,
+    // then walks it with the ordinary reading step over several paragraph
+    // boundaries while printing what each monitor tile composes and where the
+    // pane's own selector says the walk is — the surfaces a reader is watching.
+    // Its own env var like the rest, because it opens the search and quits.
+    // VGR_TABLEWALK_QUERY picks the passage (default "47-1100X").
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestTableWalk"),
+        QVariant(qEnvironmentVariableIsSet("VGR_TABLEWALK_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestTableWalkQuery"),
+        qEnvironmentVariableIsSet("VGR_TABLEWALK_QUERY")
+            ? qEnvironmentVariable("VGR_TABLEWALK_QUERY")
+            : QStringLiteral("47-1100X"));
     // The monitor-wall tile-facts diagnostic (VGR_TILEFACTS_TEST=1): prints what
     // EACH wall tile is drawing — its own style, the composition's facts and
     // which of its pane's layers is visible — in three states (nothing on air, a

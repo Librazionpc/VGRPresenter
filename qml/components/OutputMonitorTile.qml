@@ -114,12 +114,54 @@ Rectangle {
         void LiveOutputService.mediaOnAir
         void LiveOutputService.mediaRev
         void LiveOutputService.inputLabel
+        // ...and the PAGE the walk is on. A page commit hands this tile the next
+        // page's blocks, so this binding has to re-run when that happens — see
+        // the memo key below for why it is the PAGE and not the offset.
+        void LiveOutputService.readingPage
         const stagedRaw = LiveOutputService.stagedSlideRaw
         const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
             ? stagedRaw : LiveOutputService.onAirSlideRaw
-        return LiveOutputService.previewWithStyle(
+        // PINNED PER PAGE WHILE A READING WALK RUNS — not per walk. A page commit
+        // hands over the next page's blocks, and recomposing them on every one of
+        // the ~20 block-list assignments inside a page turn (engine.log, 13 ms) is
+        // the interface-thread storm this memo exists to absorb. So the key holds
+        // the composition still for every step INSIDE a page, and lets it through
+        // when the page itself changes (`readingPage`).
+        //
+        // WHY NOT THE WHOLE WALK, which is what it used to be: the reading block
+        // draws the service's passage at `readingScroll`, so it always showed the
+        // current words — but every OTHER block of the page was frozen at the page
+        // the walk STARTED on. On a pick longer than the run's window the passage
+        // then slid out from under it, and this tile (the surface the operator
+        // actually watches) kept drawing that first page statically while the
+        // engine and the preview had moved on: the wall's paragraph number, its
+        // reference and its words all read as the old page — reported as "the
+        // metadata is not updating the para values" and "the left is still showing
+        // while the right has finished". The boundary landing is already seamless
+        // without the pin (that is what the run's own base arithmetic is for — the
+        // words at the top of the box do not move), so a per-page recompose costs
+        // one composition per page turn and nothing at all per step.
+        const walking = raw && typeof raw === "object"
+            && String(raw.flowText ?? "") !== ""
+        const key = walking
+            ? "walk|" + root.styleId + "|" + root.stylePulse + "|"
+              + LiveOutputService.readingSetName + "|" + LiveOutputService.readingPage
+              + "|" + LiveOutputService.live
+              + "|" + LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaRev
+              + "|" + LiveOutputService.inputLabel
+            : ""
+        const memo = root.slideMemo
+        if (key !== "" && key === memo.key)
+            return memo.value
+        const composed = LiveOutputService.previewWithStyle(
             (raw && typeof raw === "object") ? raw : ({}), root.styleId)
+        memo.key = key
+        memo.value = composed
+        return composed
     }
+    // A plain object mutated in place: its IDENTITY never changes, so writing it
+    // cannot re-enter the binding above (a property write there would).
+    readonly property var slideMemo: ({ key: "", value: {} })
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
@@ -133,11 +175,37 @@ Rectangle {
     // report this whole area keeps producing). Those blocks' own PAINT is drawn
     // by the backdrop layer below the taken-input image; their text — and every
     // block the rule left as decoration — stay in the block render above it.
+    // ONE ANSWER PER LAYOUT, NOT PER NOTIFICATION. This binding re-runs every
+    // time the slide map is replaced, and a page commit replaces it several times
+    // in a few milliseconds (engine.log: ~20 block-list assignments inside 13 ms
+    // at a page turn). Each evaluation was converting every block back to an
+    // engine ContentBlock and re-running SceneBuilder::PlanBlockLayers ON THE
+    // INTERFACE THREAD — the storm of that plus the recomposition is what dropped
+    // the frame the operator sees as a blink when the preview moves to the next
+    // item.
+    //
+    // The plan reads the LAYOUT (kind, geometry, stacking) and never the words, so
+    // a commit that only changes text cannot change the answer: it is memoized by
+    // that layout signature. The memo is a plain object mutated in place — its
+    // IDENTITY never changes, so writing it cannot invalidate this binding (a
+    // property write here would re-enter it).
+    readonly property var backdropMemo: ({ key: "", value: [] })
     readonly property var backdropIndexes: {
         const bs = root.onAirSlide && root.onAirSlide.blocks ? root.onAirSlide.blocks : []
         if (bs.length === 0 || typeof EngineBridge === "undefined")
             return []
-        return EngineBridge.backdropBlockIndexes(bs)
+        let key = ""
+        for (let i = 0; i < bs.length; ++i) {
+            const b = bs[i]
+            key += b.kind + "," + b.x + "," + b.y + "," + b.width + "," + b.height + ";"
+        }
+        const memo = root.backdropMemo
+        if (key === memo.key)
+            return memo.value
+        const plan = EngineBridge.backdropBlockIndexes(bs)
+        memo.key = key
+        memo.value = plan
+        return plan
     }
     // The same list with those blocks MARKED: the marker travels with the block,
     // so the block render can skip exactly their paint and the backdrop pass can
@@ -674,6 +742,12 @@ Rectangle {
             // staged), so the words travel one line and settle instead of the
             // tile cutting to the next line on the key press.
             animateLineSteps: true
+            // ...AT THIS OUTPUT'S OWN STYLE: the step's position is shared as a
+            // character offset, and this tile converts it into the lines THIS
+            // style draws (see DesignPreview.stepLine). Naming the style here is
+            // what keeps the two output tiles on the same words when their styles
+            // wrap differently.
+            readingStyleId: String(root.styleId)
             // This IS on-air content, never a template/library card — a
             // bound field with nothing to show renders blank, not the raw
             // "{bind}" placeholder syntax (go-live-with-nothing bakes in

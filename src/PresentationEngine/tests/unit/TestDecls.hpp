@@ -143,6 +143,12 @@ void TestPresentationTimeline();
 void TestPresentationEngine();
 void TestPresentationSerializer();
 void TestPresentationDocument();
+// The reading step's arithmetic (LineWalk): monotonic progress, page boundaries,
+// run-window shifts and the empty-page edges.
+void TestLineWalkMonotonic();
+void TestLineWalkBoundaries();
+void TestLineWalkRunShift();
+void TestLineWalkEdges();
 void TestShowStructure();
 void TestTemplateFile();
 void TestVgrWriteCreatesItsFolder();

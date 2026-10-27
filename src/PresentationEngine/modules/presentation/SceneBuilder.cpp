@@ -1930,7 +1930,39 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
     // The PAGE stays the layout's reference (the fit solver already sized it), and
     // the passage becomes what is drawn: one layout, one size, one offset into it
     // (RenderOptions::contentScrollLines, resting at Slide::flowScroll).
-    reading->SetReadingFlow(pageLines, slide.flowScroll);
+    // ...AND THIS STYLE'S OWN LINE TABLE, so the position can be a CHARACTER
+    // OFFSET rather than a line number. The offset the surfaces share is a
+    // character of the passage; which LINE that character sits on depends on the
+    // style's type size and wrap, and this output is the only place that answer
+    // exists for THIS style. Built by locating each laid-out line inside the
+    // passage (a line's text is a slice of it), once per scene build — the
+    // per-frame read is then a binary search (TextObject::FlowLineForChar),
+    // because a scroll in flight maps the position sixty times a second.
+    //
+    // A line the wrapper TRUNCATED or rewrote (no exact slice at or after the
+    // cursor) keeps the previous line's start: the table stays monotonic, and the
+    // mapping degrades to "the line before it", which is the ordering the old
+    // line-number path assumed anyway.
+    {
+        const auto flowLayout = rendering::TextLayout::Measure(slide.flowText, style, engine.Fonts());
+        std::vector<int> starts;
+        starts.reserve(flowLayout.lines.size());
+        int cursor = 0;
+        for (const auto &line : flowLayout.lines) {
+            int at = -1;
+            if (!line.text.empty()) {
+                const size_t found = slide.flowText.find(line.text, static_cast<size_t>(cursor));
+                if (found != std::string::npos)
+                    at = static_cast<int>(found);
+            }
+            if (at < 0)
+                at = starts.empty() ? cursor : starts.back();
+            starts.push_back(at);
+            cursor = at + static_cast<int>(line.text.size());
+        }
+        reading->SetFlowCharTable(std::move(starts));
+    }
+    reading->SetReadingFlow(pageLines, slide.flowChar < 0.0f ? 0.0f : slide.flowChar);
     reading->SetText(slide.flowText);
     // ONE LINE PER SCENE (the live loop rebuilds on every fingerprint move): the
     // numbers a "the step does nothing / jumps a page" report turns on — how many
@@ -1941,8 +1973,8 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
         std::lock_guard<std::mutex> lock(flowLogMutex);
         if (flowLogged.insert(sceneId).second)
             Logger::Instance().Debug(std::format(
-                "reading flow attached: page {} line(s), passage {} char(s), resting at line {:.2f}",
-                pageLines, slide.flowText.size(), slide.flowScroll), "SceneBuilder");
+                "reading flow attached: page {} line(s), passage {} char(s), resting at char {:.2f}",
+                pageLines, slide.flowText.size(), slide.flowChar), "SceneBuilder");
     }
 }
 

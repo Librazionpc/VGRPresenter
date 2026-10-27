@@ -128,19 +128,24 @@ struct RenderOptions {
     // HDMI window, the NDI feed, the recordings and the QML monitor tile — which
     // animates the same offset itself, from the same settings — travel together.
     //
-    // In LINE units, not pixels, because a line height is the text's own
-    // (`TextEngine` advances every line by size + lineSpacing). Applied to the
-    // ONE object that carries a flow: a title, a reference, a clock, the design's
-    // shapes and its background stay exactly where they are — the words travel
-    // inside their block, they do not drag the slide.
-    float contentScrollLines = 0.0f;
+    // A CHARACTER OFFSET into the passage, not a line and not pixels. Not a line
+    // because each output draws the passage with ITS OWN style: the same line
+    // number is a different word in a style that wraps differently, which is how
+    // two differently-styled outputs came to show different sentences at the same
+    // instant. Not pixels because a line height is the text's own (`TextEngine`
+    // advances every line by size + lineSpacing): the offset is the position in
+    // the WORDS, and the object converts it into its own line heights
+    // (TextObject::FlowLineForChar). Applied to the ONE object that carries a
+    // flow: a title, a reference, a clock, the design's shapes and its background
+    // stay exactly where they are — the words travel inside their block.
+    float contentScrollChars = 0.0f;
     // Is this the FIRST frame of a freshly built scene? Then the offset comes
     // from the scene itself (Slide::flowScroll, carried on the text object) and
-    // `contentScrollLines` above is ignored — so a page change lands at the
-    // offset the slide was committed with, without waiting for the interface
+    // `contentScrollChars` above is ignored — so a page change lands at the
+    // position the slide was committed with, without waiting for the interface
     // thread's next animation tick. On every later frame the pushed number
     // wins, which is what keeps an in-page step (no rebuild, no new slide) at
-    // the offset it just moved to.
+    // the position it just moved to.
     bool contentScrollFromScene = false;
 };
 
@@ -368,12 +373,12 @@ private:
     std::string activeBackendName_;
 
     // THE READING SCROLL for the frame being drawn (see
-    // RenderOptions::contentScrollLines): how far the reading block's flow is
+    // RenderOptions::contentScrollChars): where in the passage the reading block's flow is
     // slid, in its own line heights. Set at the top of Render under renderMutex_
     // and cleared at the end of it, so a frame can never leave the shared scene
     // in a moved state — the same scene is rasterised again by every other
     // output's pass.
-    float contentScrollLines_ = 0.0f;
+    float contentScrollChars_ = 0.0f;
     bool contentScrollFromScene_ = false;
 
     SceneGraph scenes_;

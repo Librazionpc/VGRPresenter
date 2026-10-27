@@ -917,6 +917,16 @@ Rectangle {
         && ["image", "video", "audio"].includes(root.primarySelectedItem.kind)
     readonly property var primaryMediaItem: root.primaryIsMedia ? root.primarySelectedItem : null
 
+    // The TEXT tab edits a text item, so — like MEDIA — it is only OFFERED
+    // while one is selected. With nothing selected the strip is just ITEMS and
+    // SLIDE (the two that always have something to show: the item sections and
+    // the slide itself), and selecting a text or media item adds its facet to
+    // the strip. One rule for both tabs and for the panel bodies that read it.
+    readonly property bool primaryIsText: root.primarySelectedItem !== null
+        && root.primarySelectedItem.kind === "text"
+    readonly property bool textTabAvailable: root.primaryIsText
+    readonly property bool mediaTabAvailable: root.primaryMediaItem !== null
+
 
     // The font dropdowns (textFontMenu, textFontFamilyMenu, textAutoSizeMenu) are opened FOR this item, so they must not
     // outlive it: deleting the item, clicking empty canvas or switching slides all drop this to null, and the menus close
@@ -929,6 +939,24 @@ Rectangle {
             textCaseMenu.visible = false
             borderStyleMenu.visible = false
         }
+        // The selected item decides which facet the panel OPENS on: TEXT for a
+        // text item, MEDIA for a picture / video / audio one, ITEMS when the
+        // selection is gone. Any other kind (shape, clock, timer, bus, add-on
+        // blocks) owns no tab of its own, so the panel stays where the operator
+        // put it — unless it was on TEXT or MEDIA, which that selection has
+        // just taken off the strip; leaving it there would show a hidden tab's
+        // body, i.e. an empty panel.
+        // Truthiness, not `=== null`: canvasObjectByKey can hand back
+        // undefined for a key whose item has gone, and that is "nothing to
+        // show" just as much as an empty selection.
+        if (!root.primarySelectedItem)
+            root.rightPanelTab = "items"
+        else if (root.textTabAvailable)
+            root.rightPanelTab = "text"
+        else if (root.mediaTabAvailable)
+            root.rightPanelTab = "media"
+        else if (root.rightPanelTab === "text" || root.rightPanelTab === "media")
+            root.rightPanelTab = "items"
     }
 
     // Background/Border only have a visible effect on a "text", "shape",
@@ -4086,32 +4114,74 @@ Rectangle {
         // captured design for what TEXT/SLIDE should show, so this only
         // switches the indicator for now; the content below doesn't vary
         // by tab yet (see KNOWN_ISSUES.md if that scope grows later).
-        Row {
+        // An ITEM, not a Row, although the cells are exactly a Row's layout.
+        // A positioner writes its children's x on every polish, so the tabs
+        // could not animate into their new cells when one appears or vanishes
+        // (the docs are explicit that a positioner assumes nobody else moves
+        // its children). With explicit slots the strip tiles identically -
+        // `slot * cellWidth` and `cellWidth` add up to the full width - and
+        // the slide is a plain Behavior on x/width instead of a snap.
+        Item {
             id: rightTabRow
-            // Spreads the tabs evenly across the full panel width — each
-            // label owns exactly one third of the panel and sits centered
-            // in its cell (the classic tab-strip distribution). Centering
-            // the Row as a fixed-width cluster (the previous fix) left the
-            // three labels bunched together in the middle; equal cells read
-            // more naturally at this panel width.
+            // Each label owns one equal cell of the panel and sits centered in
+            // it (the classic tab-strip distribution). The cell divides by the
+            // count of SHOWING tabs, so the strip stays correct as TEXT/MEDIA
+            // come and go.
             x: 0
             width: parent.width
-            y: 19
+            // One label's metrics; all four share them (same font, same caps),
+            // so the strip's height is the items label's.
+            height: tabItemsLabel.implicitHeight
+            // The strip is ITEMS + SLIDE by default; TEXT and MEDIA join it
+            // only while their own kind of item is the primary selection (see
+            // textTabAvailable / mediaTabAvailable). Their labels stay
+            // declared and hide themselves, so the cells have to divide by the
+            // count that is actually SHOWING — dividing by children.length
+            // would keep four cells' worth of width with two of them empty,
+            // leaving the two visible labels crammed into the left half.
+            //
+            // The geometry is keyed on AVAILABILITY, not on `visible`: a tab
+            // fades out over ~160ms, and `visible` only turns off once its
+            // opacity reaches 0 (see each label). If the cells counted
+            // `visible`, the strip would sit rigid for the whole fade and then
+            // snap closed at the end — the pop this is here to remove.
+            readonly property bool textShown: root.textTabAvailable
+            readonly property bool mediaShown: root.mediaTabAvailable
+            readonly property int visibleCount: 2 + (textShown ? 1 : 0) + (mediaShown ? 1 : 0)
+            readonly property real cellWidth: width / visibleCount
+            // A label's slot among the SHOWING tabs, in strip order (ITEMS is
+            // always first, SLIDE always last). Each one counts only the
+            // available predecessors, which is what makes the cells close up
+            // as a tab leaves and open as one arrives.
+            readonly property int textSlot: 1
+            readonly property int mediaSlot: 1 + (textShown ? 1 : 0)
+            readonly property int slideSlot: 1 + (textShown ? 1 : 0) + (mediaShown ? 1 : 0)
+            // Under the previews, not at a fixed 19: the strip's position is the
+            // wall's real bottom (see tabRowTop), which is what makes the same
+            // previews sit in the same place here as on the Show screen.
+            y: rightPanel.tabRowTop
 
             Text {
                 id: tabItemsLabel
-                width: parent.width / 4
+                // One equal cell per VISIBLE tab (see visibleCount): a fifth
+                // tab, or a hidden one, needs no arithmetic here, the strip
+                // just re-divides.
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "items" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
                 font.pixelSize: 13
                 // Constant weight in every state — a weight that changes
                 // with the active tab changes the label's advance width,
-                // which re-flows this Row and shoves the neighbouring tabs
+                // which re-flows this strip and shoves the neighbouring tabs
                 // sideways on every click. Color alone carries the active
                 // state; the underline indicator does the rest.
                 font.weight: Font.Medium
                 text: qsTr("ITEMS")
+                // ITEMS always leads the strip, so its slot is fixed.
+                x: 0
+                width: rightTabRow.cellWidth
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 MouseArea {
@@ -4123,7 +4193,17 @@ Rectangle {
             }
             Text {
                 id: tabTextLabel
-                width: parent.width / 4
+                // Offered only for a selected text item (root.textTabAvailable).
+                // Fades with the slide instead of popping: `visible` is the
+                // tail of the fade (off only at opacity 0), so the label is
+                // still drawn while it dims and disappears at the end.
+                visible: opacity > 0
+                opacity: rightTabRow.textShown ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                x: rightTabRow.textSlot * rightTabRow.cellWidth
+                width: rightTabRow.cellWidth
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "text" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
@@ -4135,13 +4215,26 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     anchors.margins: -6
+                    // A label that is fading OUT is still drawn and still hit-
+                    // testable, but its tab has already left the strip: a
+                    // click there would select a tab whose body is hidden
+                    // (an empty panel) until the next selection change.
+                    enabled: rightTabRow.textShown
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.rightPanelTab = "text"
                 }
             }
             Text {
                 id: tabMediaLabel
-                width: parent.width / 4
+                // Offered only for a selected picture / video / audio item —
+                // faded in and out exactly like TEXT.
+                visible: opacity > 0
+                opacity: rightTabRow.mediaShown ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                x: rightTabRow.mediaSlot * rightTabRow.cellWidth
+                width: rightTabRow.cellWidth
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "media" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
@@ -4153,13 +4246,18 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     anchors.margins: -6
+                    // See the TEXT label: no clicks on a fading-out cell.
+                    enabled: rightTabRow.mediaShown
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.rightPanelTab = "media"
                 }
             }
             Text {
                 id: tabSlideLabel
-                width: parent.width / 4
+                x: rightTabRow.slideSlot * rightTabRow.cellWidth
+                width: rightTabRow.cellWidth
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "slide" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
@@ -4176,25 +4274,94 @@ Rectangle {
                 }
             }
         }
+        // ---- THE PANEL'S ONE VERTICAL CHAIN ---------------------------------
+        // Previews first, then the tab strip, then the tab's own content — the
+        // order the Show screen reads in, and what the reference shows: the
+        // monitors ARE the frame of reference, so they sit above the strip that
+        // says which facet of the selection is being edited. Every step is
+        // derived from the one above it instead of a fixed number:
+        //     wall top → wall (its REAL height) → strip → hairline → content
+        // The wall is not tab content, so the strip does not jump when the tab
+        // changes, and the strip follows whatever height the wall currently
+        // reports — 212px for a lone preview, taller once the on-air toolbar
+        // and a second row of previews arrive (1, 2 or 4 outputs).
+        readonly property real itemsWallTop: 12
+        // Air between the previews and the strip: enough to read as two bands,
+        // small enough that the previews still own the top of the panel.
+        readonly property real itemsWallGap: 16
+        // Air between the strip's hairline and the first card.
+        readonly property real tabContentGap: 12
+        readonly property real tabUnderlineY: rightTabRow.y + rightTabRow.height + 5
+        readonly property real tabRuleY: tabUnderlineY + tabUnderline.height
+        // ITEMS/TEXT/MEDIA/SLIDE all read `tabContentTop`, so they cannot start
+        // at different heights, and a taller tab label, a larger UI scale or
+        // one more tab moves the content down with the strip instead of
+        // leaving behind a 56 that was right for exactly one strip.
+        readonly property real tabContentTop: Math.round(tabRuleY + rightPanel.tabContentGap)
+        // The strip's top, derived from the wall's SCALED height (see
+        // itemsWallHeight for why scaling is not the same as height).
+        readonly property real tabRowTop: rightPanel.itemsWallTop + rightPanel.itemsWallHeight + rightPanel.itemsWallGap
+
+        // ---- WHAT IS LEFT FOR THE WALL AND THE CARDS -------------------------
+        // The wall's height is intrinsic: its tiles are 16:9 boxes derived
+        // from its 376px width, so it cannot simply be told to be shorter. On a
+        // short window that meant the wall ate the panel and the tab content
+        // collapsed to nothing (the clamp below then made it exactly 0 — a
+        // pinned preview over an unreachable editor). The floor is what the
+        // wall may not take: the strip and the cards keep this much, and
+        // whatever the wall is denied is paid by scaling it DOWN uniformly
+        // about its top centre, so every preview stays whole (no half-cut
+        // tile) and the toolbar shrinks with it. The Flickable's own clamp
+        // stays as the last resort for a panel shorter than that.
+        readonly property real itemsSectionMinHeight: 150
+        // How far the wall may be shrunk before the cards give up space
+        // instead: under ~0.55 the transport icons stop being readable, which
+        // is worse than a section area that scrolls in less room.
+        readonly property real itemsWallScaleFloor: 0.55
+        readonly property real itemsWallScale: {
+            const natural = itemsMonitorWall.height
+            if (natural <= 0)
+                return 1
+            // The strip's own height, measured (row → 5px gap → hairline →
+            // gap), so a larger UI scale cannot silently eat the floor below.
+            const stripHeight = rightTabRow.height + 5 + tabUnderline.height + rightPanel.tabContentGap
+            const budget = rightPanel.height - rightPanel.itemsWallTop - rightPanel.itemsWallGap
+                - stripHeight - rightPanel.itemsSectionMinHeight - 12
+            if (budget >= natural)
+                return 1
+            return Math.max(rightPanel.itemsWallScaleFloor, budget / natural)
+        }
+        // The wall's on-screen height, not its layout height: `scale` does not
+        // change the item's geometry, so everything below (the strip and the
+        // scroll area) has to be placed against the scaled height or a shrunk
+        // wall would leave a gap the size of the shrink behind it.
+        readonly property real itemsWallHeight: itemsMonitorWall.height * rightPanel.itemsWallScale
+
         Rectangle {
-            y: 40
+            id: tabUnderline
+            y: rightPanel.tabUnderlineY
             height: 3
             radius: 1.50
             color: Theme.accent
-            // Centered under the active label: each label is one equal cell of
-            // the tab strip (four now that MEDIA has its own), so the underline
+            // Centered under the active label. Each label owns one equal cell of
+            // the strip (divided by the row's own child count), so the underline
             // is the label's text width placed at the cell's horizontal center —
             // it glides between cell centers when the tab changes and tracks
-            // automatically if the panel is ever resized.
-            readonly property var activeLabel: root.rightPanelTab === "text" ? tabTextLabel
-                : root.rightPanelTab === "media" ? tabMediaLabel
+            // automatically if the panel is resized or a tab is added.
+            // Only an OFFERED tab can own the underline: a hidden label has no
+            // cell in the Row any more, so pointing at it would draw the
+            // indicator at its stale x. The availability guards make the
+            // fallback a one-frame safety net (the selection handler switches
+            // the tab away at the same time), never a visible state.
+            readonly property var activeLabel: root.rightPanelTab === "text" && root.textTabAvailable ? tabTextLabel
+                : root.rightPanelTab === "media" && root.mediaTabAvailable ? tabMediaLabel
                 : root.rightPanelTab === "slide" ? tabSlideLabel : tabItemsLabel
             x: rightTabRow.x + activeLabel.x + activeLabel.width / 2 - width / 2
             width: activeLabel.implicitWidth
             Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
             Behavior on width { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
         }
-        Rectangle { y: 43; height: 1; width: parent.width; color: Theme.border }
+        Rectangle { y: rightPanel.tabRuleY; height: 1; width: parent.width; color: Theme.border }
 
         // ITEMS tab content — Outputs grid + the selected item's Background/
         // Size & Style. Not literally "canvas items" despite the tab's
@@ -4209,15 +4376,50 @@ Rectangle {
         // toolbar and past the panel's bottom edge — the per-layer tiles and
         // the Background row drew on top of each other, and the Line/Dotted/
         // Dashed selector ended flush against the window's bottom border. The
-        // sections now hang off the wall's own (dynamic) bottom and the whole
-        // column scrolls when it doesn't fit — the same Flickable +
-        // AppScrollBar pattern the TEXT tab and leftPanel's slide list use.
+        // sections now start below the tab strip (which starts below the wall,
+        // see tabRowTop) and that column scrolls when it doesn't fit — the same
+        // Flickable + AppScrollBar pattern the TEXT tab and leftPanel's slide
+        // list use.
+        // THE MONITOR WALL SITS AT THE TOP OF THE PANEL, ABOVE THE TAB STRIP.
+        // The same shared MonitorWall the Show screen's right column renders
+        // (hero page for a lone output, 2×2 paging, snap swipe, dots), with the
+        // same 12px gutter and the same 376-ish design width — same previews in
+        // the same place as the Show screen, and NOT tab content: the strip and
+        // the cards below it are what the tab switches, the monitors stay put.
+        // Scrolling never carries them off the top either (a half-scrolled wall
+        // is exactly what read as a cut-off preview).
+        MonitorWall {
+            id: itemsMonitorWall
+            x: 12
+            y: rightPanel.itemsWallTop
+            width: rightPanel.width - 24
+            // Item.Top is (width/2, 0): the wall shrinks toward its own top
+            // centre, so it stays horizontally centred in the panel's gutter
+            // and its top edge never moves.
+            transformOrigin: Item.Top
+            scale: rightPanel.itemsWallScale
+            // The transport row only here (‹ ›, play, lock, transition).
+            // Clear all / Show all / Blackout and the per-layer clears are the
+            // Show screen's control surface; on this panel they sat between the
+            // previews and the tab strip, pushing the strip down for buttons
+            // that have nothing to do with editing the selected item. Dropping
+            // their height shrinks the wall, so the strip moves up by exactly
+            // that much.
+            showClearControls: false
+        }
+
+        // The tab's sections scroll UNDER the strip.
         Flickable {
             id: itemsTabFlick
             x: 0
-            y: 56
+            // Below the strip (which is itself below the wall), so the cards
+            // follow the previews instead of being pinned to a guess.
+            y: rightPanel.tabContentTop
             width: parent.width
-            height: rightPanel.height - 56 - 12
+            // Clamped: now that the pinned wall eats into the panel's height,
+            // a short window can leave less than 12px below it, and a negative
+            // Flickable height is an invalid geometry (not merely empty).
+            height: Math.max(0, rightPanel.height - y - 12)
             visible: root.rightPanelTab === "items"
             clip: true
             contentWidth: width
@@ -4228,41 +4430,27 @@ Rectangle {
                 id: itemsTabContent
                 width: itemsTabFlick.width
 
-                // ONE gutter for the whole tab: the wall, the section label,
-                // the Background row and the Size & Style card all start at
-                // `inset` and stop `inset` short of the panel's right edge,
-                // so no pill or tile ever sits flush against the panel — and
-                // since the panel itself is flush against the window's right
-                // edge (rightPanel.x is root.width - 400), that one gutter is
-                // also what keeps the controls off the window border.
-                // 12 matches the wall's own design gutters: the wall must
-                // keep its 376 design width (its tiles and toolbar are laid
-                // out for exactly that), so its inset is the floor here.
+                // ONE gutter for the whole tab: the section label, the
+                // Background row, the cards — and, above this scroll area,
+                // the pinned wall — all start at `inset` and stop `inset`
+                // short of the panel's right edge, so no pill or tile ever
+                // sits flush against the panel — and since the panel itself
+                // is flush against the window's right edge (rightPanel.x is
+                // root.width - 400), that one gutter is also what keeps the
+                // controls off the window border. 12 is the wall's own design
+                // gutter: it must keep its 376 design width (its tiles and
+                // toolbar are laid out for exactly that), so it is the floor
+                // here too.
                 readonly property int inset: 12
                 readonly property int rowWidth: width - inset * 2
-
-        // The SAME wall the Show screen's right column renders — the shared
-        // MonitorWall component (hero page for a lone output, 2×2 paging,
-        // snap swipe, dots), not a private Grid hosting the tiles directly:
-        // "the same monitors" had come to mean same tiles, different hosting,
-        // which rendered visibly differently per surface (this tab stayed a
-        // flat 182px two-column grid while Show grew hero/paging). The y=8 is
-        // this row's own top spacing inside the tab; width matches the Show
-        // wall's 376 so tiles are pixel-identical across surfaces.
-        MonitorWall {
-            id: itemsMonitorWall
-            x: itemsTabContent.inset
-            y: 8
-            width: itemsTabContent.rowWidth
-        }
 
         Text {
             id: slideSectionLabel
             x: itemsTabContent.inset + 4
-            // Anchored off the wall's REAL bottom — whatever height the wall
-            // currently reports, toolbar included. A fixed y is precisely
-            // what put this label on top of the per-layer tile row.
-            y: itemsMonitorWall.y + itemsMonitorWall.height + 18
+            // The wall is pinned ABOVE this scroll area now (see itemsMonitorWall),
+            // so the sections start at the content's own top spacing and no
+            // longer have to be anchored off the wall's changing height.
+            y: 8
             color: Theme.textSecondary
             font.family: Theme.fontFamily
             font.pixelSize: 12
@@ -4441,11 +4629,10 @@ Rectangle {
         Flickable {
             id: textPanelFlick
             x: 8
-            y: 56
+            y: rightPanel.tabContentTop
             width: parent.width - 16
-            height: rightPanel.height - 56 - 12
-            visible: root.rightPanelTab === "text" && root.primarySelectedItem !== null
-                && root.primarySelectedItem.kind === "text"
+            height: rightPanel.height - rightPanel.tabContentTop - 12
+            visible: root.rightPanelTab === "text" && root.primaryIsText
             clip: true
             contentWidth: width
             contentHeight: textItemPanel.height
@@ -4508,7 +4695,7 @@ Rectangle {
 
         Text {
             x: 8
-            y: 56
+            y: rightPanel.tabContentTop
             width: parent.width - 16
             wrapMode: Text.Wrap
             visible: root.rightPanelTab === "text" && !(root.primarySelectedItem !== null && root.primarySelectedItem.kind === "text")
@@ -4527,9 +4714,9 @@ Rectangle {
         Flickable {
             id: mediaItemFlick
             x: 8
-            y: 56
+            y: rightPanel.tabContentTop
             width: parent.width - 16
-            height: rightPanel.height - 56 - 12
+            height: rightPanel.height - rightPanel.tabContentTop - 12
             visible: root.rightPanelTab === "media" && root.primaryMediaItem !== null
             clip: true
             contentWidth: width
@@ -4573,7 +4760,7 @@ Rectangle {
 
         Text {
             x: 8
-            y: 56
+            y: rightPanel.tabContentTop
             width: parent.width - 16
             wrapMode: Text.Wrap
             visible: root.rightPanelTab === "media" && !root.primaryIsMedia
@@ -4593,9 +4780,9 @@ Rectangle {
         Flickable {
             id: slidePanelFlick
             x: 8
-            y: 56
+            y: rightPanel.tabContentTop
             width: parent.width - 16
-            height: rightPanel.height - 56 - 12
+            height: rightPanel.height - rightPanel.tabContentTop - 12
             visible: root.rightPanelTab === "slide"
             clip: true
             contentWidth: width

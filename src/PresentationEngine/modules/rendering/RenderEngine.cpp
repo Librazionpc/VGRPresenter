@@ -726,7 +726,7 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
         case ObjectKind::Text: {
             // THE READING SCROLL is DrawTextObject's own business: a block that
             // carries a flow slides its layout under its box by the frame's
-            // contentScrollLines_ and clips to the box (see that function). An
+            // contentScrollChars_ and clips to the box (see that function). An
             // ordinary block has no flow and draws exactly as it always did.
             DrawTextObject(static_cast<TextObject*>(obj), cmds);
             break;
@@ -855,6 +855,13 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     // words travel. `flowing` false is the ordinary text object, which draws
     // byte-for-byte what it always drew.
     const bool flowing = obj->HasReadingFlow();
+    // THE POSITION, then the STYLE'S OWN ANSWER. What arrives is a character
+    // offset into the passage (from the scene's slide, or from the animator's
+    // per-frame push) — never a line, because a line number means a different
+    // word in every style. `FlowLineForChar` turns it into THIS style's line
+    // index (plus the fraction still in flight), using the table the scene built
+    // for this object, so two outputs of different type sizes put the SAME words
+    // at the top of their boxes.
     // ALIGNMENT MEASURES THE PAGE, not the whole passage: the fit solver sized
     // the box to hold one page, so one page is what it centres (or bottoms), and
     // the rest of the flow lives above and below that.
@@ -863,9 +870,10 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
         : result.totalHeight;
     // The scroll itself, in the text's OWN line heights — the same advance the
     // lines below step by, so one line of the number is one line of the picture.
-    const float scrollLines = !flowing ? 0.0f
-                             : contentScrollFromScene_ ? obj->FlowScrollLines()
-                                                       : contentScrollLines_;
+    const float scrollChars = !flowing ? 0.0f
+                             : contentScrollFromScene_ ? obj->FlowCharAt()
+                                                       : contentScrollChars_;
+    const float scrollLines = flowing ? obj->FlowLineForChar(scrollChars) : 0.0f;
     const float scrollPx = scrollLines * lineHeight;
 
     // WHERE THE PAGE SITS — the top edge of the reading window.
@@ -1157,12 +1165,13 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // driven externally (modules call Anim().Update per frame) — the engine
     // owns the animator, modules own the schedule.
     auto objects = CollectObjects(sceneId);
-    // THE READING SCROLL for this frame (see RenderOptions::contentScrollLines):
-    // one number, read by DrawTextObject when it meets the block that carries a
-    // reading flow. It lives under renderMutex_ for the length of this render
-    // (the block below holds it) and is cleared as the frame finishes, so a
-    // frame can never leave the shared scene slid.
-    contentScrollLines_ = opts.contentScrollLines;
+    // THE READING POSITION for this frame (see RenderOptions::contentScrollChars):
+    // one number — a character offset into the passage — read by DrawTextObject
+    // when it meets the block that carries a reading flow. It lives under
+    // renderMutex_ for the length of this render (the block below holds it) and is
+    // cleared as the frame finishes, so a frame can never leave the shared scene
+    // slid.
+    contentScrollChars_ = opts.contentScrollChars;
     contentScrollFromScene_ = opts.contentScrollFromScene;
     const auto layers = scene.value()->LayersSorted();
     // WHERE THE FRAME'S WORK WENT (see FrameCostProfile): the pipeline hands the
@@ -1205,7 +1214,7 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     });
     // The scroll is over for this frame: nothing outside the draw loop may see a
     // scene drawn at an offset (see the member's comment in the header).
-    contentScrollLines_ = 0.0f;
+    contentScrollChars_ = 0.0f;
     contentScrollFromScene_ = false;
 
     // ONE-SHOT PER SCENE PER STATE: what this render actually had to draw. A

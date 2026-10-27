@@ -86,6 +86,16 @@ Item {
     // the page dots from these.
     readonly property alias pageCount: wall.pageCount
     readonly property alias currentPage: wall.currentPage
+    // Host-facing switch for the DESTRUCTIVE half of the chrome: Clear all /
+    // Show all, Blackout, the per-layer clears and the audio transport. Those
+    // belong to the Show screen, which is where the operator drives the
+    // service; a surface that only needs to watch the outputs (the Edit panel,
+    // where they sat between the previews and the tab strip) turns them off and
+    // keeps just the transport row — ‹ › and the play/lock/transition actions,
+    // which apply to what the previews are showing wherever you are. The
+    // toolbar's own height is `transportRow.height + 12`, so dropping the rows
+    // shrinks the wall and everything hung below it follows.
+    property bool showClearControls: true
     function goTo(page) {
         wall.goTo(page)
     }
@@ -499,7 +509,8 @@ Item {
             // so the two can't drift apart; the button no longer runs the four
             // clears itself.
             Row {
-                width: parent.width; height: 28
+                width: parent.width; height: visible ? 28 : 0
+                visible: root.showClearControls
                 spacing: 6
 
                 RowButton {
@@ -540,6 +551,8 @@ Item {
             // going out, and LIVE stays the user's own GO LIVE/STOP decision.
             RowButton {
                 width: parent.width
+                height: visible ? 28 : 0
+                visible: root.showClearControls
                 icon: "ban"
                 caption: LiveOutputService.blackedOut ? qsTr("End blackout")
                                                       : qsTr("Blackout")
@@ -566,7 +579,8 @@ Item {
             // buttons above, not a fake lit state or a clear that's really
             // just Clear All in disguise.
             Row {
-                width: parent.width
+                width: parent.width; height: visible ? 30 : 0
+                visible: root.showClearControls
                 spacing: 6
                 readonly property real btnW: (width - spacing * 4) / 5
 
@@ -675,7 +689,7 @@ Item {
                 objectName: "selfTestWallAudioBar"
                 width: parent.width
                 height: visible ? 28 : 0
-                visible: LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio
+                visible: root.showClearControls && LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio
 
                 readonly property bool playing: LiveOutputService.mediaState === "playing"
                 readonly property real progress: LiveOutputService.mediaDuration > 0

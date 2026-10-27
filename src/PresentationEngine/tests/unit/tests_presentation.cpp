@@ -2,6 +2,7 @@
 // Split from tests/unit/main.cpp so a single phase can run alone:
 //   ./bps_unit_tests presentation
 #include "TestHarness.hpp"
+#include "modules/presentation/LineWalk.hpp"
 
 void TestPresentationStateMachine() {
     p::PresentationStateMachine sm;
@@ -1274,4 +1275,103 @@ void TestShowLibraryCrud() {
     CHECK(deleted.ok() && !fs.Exists(deleted.value()));
 
     (void)fs.RemoveAll(root);
+}
+
+// ---- THE READING STEP'S ARITHMETIC (LineWalk) ------------------------------
+// These are the rules every stepper regression broke, written so they can fail
+// HERE instead of in front of a congregation:
+//   * one press = one visible line, whether or not a page boundary is in the way;
+//   * `absolute` (the line within the RUN the surface draws) moves by exactly +1
+//     going down and -1 going up — never a jump, never a repeat, never backwards;
+//   * a boundary is +1, not a re-base to 0 (the blink the operator kept seeing);
+//   * shifting the run window keeps the line that is on screen.
+void TestLineWalkMonotonic()
+{
+    const int counts[] = { 6, 6, 5, 4, 4, 6, 3, 5, 6, 6 };
+    const int pages = static_cast<int>(sizeof(counts) / sizeof(counts[0]));
+    int total = 0;
+    for (int c : counts) total += c;
+
+    p::LineWalk walk;
+    walk.begin(0, 0, 0);
+    int presses = 0;
+    int lastAbsolute = walk.absolute();
+    for (;;) {
+        const int previous = walk.page() > 0 ? counts[walk.page() - 1] : 0;
+        const p::LineWalk::Step s = walk.step(1, counts[walk.page()], pages, previous);
+        if (!s.moved)
+            break;
+        ++presses;
+        // THE INVARIANT: straight down, one line, every press — across boundaries too.
+        CHECK(s.absolute == lastAbsolute + 1);
+        CHECK(s.page >= 0 && s.page < pages);
+        CHECK(s.offset >= 0 && s.offset < counts[s.page]);
+        lastAbsolute = s.absolute;
+    }
+    CHECK(presses == total - 1);              // every line after the first, exactly once
+    CHECK(lastAbsolute == total - 1);
+    CHECK(walk.page() == pages - 1);
+    CHECK(walk.offset() == counts[pages - 1] - 1);
+    CHECK(!walk.step(1, counts[pages - 1], pages, counts[pages - 2]).moved);  // the end holds
+}
+
+void TestLineWalkBoundaries()
+{
+    p::LineWalk walk;
+    walk.begin(0, 5, 5);                      // last line of a 6-line page
+    const p::LineWalk::Step down = walk.step(1, 6, 3, 0);
+    CHECK(down.moved && down.crossedPage);
+    CHECK(down.page == 1 && down.offset == 0);
+    CHECK(down.absolute == 6);                // ONE line further down, not 0
+
+    const p::LineWalk::Step back = walk.step(-1, 4, 3, 6);
+    CHECK(back.moved && back.crossedPage);
+    CHECK(back.page == 0 && back.offset == 5);
+    CHECK(back.absolute == 5);                // one line further up: 6 - 1
+
+    // Stepping up on the first line of the pick, or down on the last, does nothing.
+    walk.begin(0, 0, 0);
+    CHECK(!walk.step(-1, 6, 3, 0).moved);
+    walk.begin(2, 3, 23);
+    CHECK(!walk.step(1, 4, 3, 0).moved);
+}
+
+void TestLineWalkRunShift()
+{
+    // The window dropped 12 lines at its front: the offset is rebased by the same
+    // 12, so the SAME line stays at the top of the box (the column moved with it).
+    p::LineWalk walk;
+    walk.begin(3, 2, 20);
+    const int visible = walk.absolute();
+    walk.shiftRun(-12);
+    CHECK(walk.absolute() == visible - 12);
+    CHECK(walk.page() == 3 && walk.offset() == 2);   // the position itself is unchanged
+
+    // And the walk keeps stepping from there: still exactly one line per press.
+    const p::LineWalk::Step next = walk.step(1, 6, 10, 6);
+    CHECK(next.moved);
+    CHECK(next.absolute == walk.absolute());
+}
+
+void TestLineWalkEdges()
+{
+    // An empty page (a pick whose page carries no visible line) is stepped OVER,
+    // not into: the walk must not stop on a page it can never show.
+    p::LineWalk walk;
+    walk.begin(0, 0, 0);
+    const p::LineWalk::Step over = walk.step(1, 0, 3, 0);
+    CHECK(over.moved && over.crossedPage);
+    CHECK(over.page == 1 && over.offset == 0);
+    CHECK(over.absolute == 0);                        // an empty page adds no line
+
+    walk.begin(1, 0, 4);
+    const p::LineWalk::Step back = walk.step(-1, 3, 3, 0);
+    CHECK(back.moved && back.crossedPage);
+    CHECK(back.page == 0 && back.offset == 0);
+    CHECK(back.absolute == 4);                        // nothing above to subtract
+
+    // A single-page pick has nowhere to cross to.
+    walk.begin(0, 0, 0);
+    CHECK(!walk.step(1, 1, 1, 0).moved);
+    CHECK(!walk.step(-1, 1, 1, 0).moved);
 }

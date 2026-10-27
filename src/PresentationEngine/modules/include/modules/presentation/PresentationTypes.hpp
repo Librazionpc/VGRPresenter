@@ -175,9 +175,19 @@ struct Slide {
     //   flowText    the continuous run of words this page begins in (this page
     //               and the one after it, joined by the page break). Empty = an
     //               ordinary slide, which renders exactly as it always has.
-    //   flowScroll  where that passage rests, in line heights of the reading
-    //               text (0 = this page's first line at the top of its box). It
-    //               belongs HERE and not only in the frame's render options
+    //   flowChar    WHERE THE READER IS IN THAT PASSAGE, as a CHARACTER OFFSET into
+    //               flowText (0 = its first character at the top of the box).
+    //               Character, not line, because every output draws this passage
+    //               with ITS OWN style — its own type size, its own wrap — so
+    //               "line 7" is a different WORD in each of them. Measured on the
+    //               outputs' own hardware: two outputs styled at different sizes
+    //               stood a line or two apart, showing different sentences at the
+    //               same instant ("the left is still showing while the right has
+    //               finished"). A character offset is the one position they can all
+    //               agree on: each converts it into its own line grid (see
+    //               TextObject::FlowLineForChar), so the same words are at the top
+    //               of every box. -1 = no flow position (an ordinary slide).
+    //               It belongs HERE and not only in the frame's render options
     //               because it has to survive a rebuild: a step that lands on the
     //               next page commits a NEW slide, and the scene for it is built
     //               from this number — one atomic fact, so the boundary cannot
@@ -188,7 +198,7 @@ struct Slide {
     // own fields (ShowConverter), never inside metaJson, because a passage is
     // full of the very characters a JSON meta value has to escape.
     std::string flowText;
-    float flowScroll = 0.0f;
+    float flowChar = -1.0f;
     std::string notes;
     std::vector<std::string> tags;
     std::vector<std::string> sections;

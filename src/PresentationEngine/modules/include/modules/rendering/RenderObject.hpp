@@ -10,6 +10,8 @@
 #include "modules/rendering/RenderTypes.hpp"
 #include "modules/rendering/Scene.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -181,21 +183,51 @@ public:
     // `pageLines` is how many visual lines ONE page of the passage takes — the
     // layout the fit solver sized the box against, which is what the block's own
     // vertical alignment has to keep using (the box holds a page, not a book).
-    // `scrollLines` is where the passage RESTS: the scene's own answer, used
-    // whenever no scroll is moving, so a rebuild (a new page, a style change)
-    // lands at exactly the offset the last step asked for.
-    void SetReadingFlow(int pageLines, float scrollLines) {
+    // `charAt` is WHERE IN THE PASSAGE the reader is: a character offset into the
+    // flow text, not a line. Lines are per-STYLE ("line 7" is a different word in
+    // a style that wraps differently), so a line number sent to two outputs of
+    // different types sizes put different sentences at the top of each box —
+    // measured on the operator's own two styles: a line or two apart, half the
+    // time, which is the "the left is still showing while the right has finished"
+    // report. A character offset means the same words everywhere; each style turns
+    // it into its own line with FlowLineForChar below.
+    void SetReadingFlow(int pageLines, float charAt) {
         flowPageLines_ = pageLines > 0 ? pageLines : 0;
-        flowScroll_ = scrollLines;
+        flowCharAt_ = charAt;
     }
     bool HasReadingFlow() const { return flowPageLines_ > 0; }
     int FlowPageLines() const { return flowPageLines_; }
-    float FlowScrollLines() const { return flowScroll_; }
+    float FlowCharAt() const { return flowCharAt_; }
+    // THE PASSAGE'S LINES AS THIS OBJECT'S OWN STYLE WRAPS THEM, as character
+    // offsets (one entry per visual line). Built once from the layout the scene
+    // already measured (SceneBuilder::ApplyReadingFlow), because the mapping is
+    // needed on EVERY frame — a scroll in flight re-reads it sixty times a second —
+    // and re-laying out the passage per frame is exactly the cost this file's
+    // one-layout design exists to avoid. Empty = no mapping (an ordinary text
+    // object, or a slide that carries no passage).
+    void SetFlowCharTable(std::vector<int> lineStarts) { flowCharStarts_ = std::move(lineStarts); }
+    bool HasFlowCharTable() const { return !flowCharStarts_.empty(); }
+    // The position in the char offset, expressed in THIS style's line heights:
+    // the line that holds that character, plus the fraction of the move still in
+    // flight so a glide stays smooth on every surface. A char offset is a float
+    // whose integer part is a character and whose fraction is that progress.
+    float FlowLineForChar(float charAt) const {
+        if (flowCharStarts_.empty())
+            return charAt;   // no table: the caller is already speaking lines
+        const float whole = std::floor(charAt);
+        const int target = static_cast<int>(whole);
+        const auto it = std::upper_bound(flowCharStarts_.begin(), flowCharStarts_.end(), target);
+        const int index = (it == flowCharStarts_.begin())
+                              ? 0
+                              : static_cast<int>(it - flowCharStarts_.begin()) - 1;
+        return static_cast<float>(index) + (charAt - whole);
+    }
 
 private:
     std::string text_;
     int flowPageLines_ = 0;
-    float flowScroll_ = 0.0f;
+    float flowCharAt_ = 0.0f;
+    std::vector<int> flowCharStarts_;
 };
 
 class ImageObject final : public RenderObject {

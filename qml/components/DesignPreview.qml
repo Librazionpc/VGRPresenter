@@ -78,10 +78,44 @@ Item {
     // Opt-in because every other host — a library card, a canvas thumbnail — has
     // no reading step behind it and must keep drawing the page.
     property bool animateLineSteps: false
+    // WHICH STYLE THIS SURFACE DRAWS AT. The reading position itself is a character
+    // offset into the passage (LiveOutputService.readingChar), which means the same
+    // words everywhere; the LINE that character sits on depends on the style's own
+    // type size and wrap — so a host that owns a style (the monitor tile and the
+    // output window, one per output) names it here and this file converts. Empty =
+    // the reference (active style) grid, for hosts that have no style of their own.
+    property string readingStyleId: ""
+    // ...and THIS surface's own line for that position: the conversion below, or
+    // the reference grid's number when no style is named. Everything that draws or
+    // measures the move reads this one value.
+    readonly property real stepLine: {
+        const ch = LiveOutputService.readingChar
+        if (!root.animateLineSteps || root.readingStyleId === "" || ch < 0)
+            return LiveOutputService.readingScroll
+        return LiveOutputService.readingLineForStyle(root.readingStyleId, ch)
+    }
     // How long that text is, so a delegate can tell whether IT is the reading
     // block. Only that one draws the passage: every text block used to shift by
     // the same pitch, which moved a title by the BODY's line height — a visible
     // hop out of place on the very blocks the step is not supposed to touch.
+    // THE READING COLUMN'S TYPE SIZE, HELD ACROSS A PAGE COMMIT.
+    //
+    // A walk that crosses from 1 into 1-1 commits that page: its blocks arrive,
+    // its delegate is new, and the fit solver answers for ITS text — so the
+    // words came back at a slightly different size, laid out from the top of the
+    // new page. Reported as "the moment it moves to 1-1 it refreshes and opens
+    // 1-1 like I clicked" — the scroll never continues into the next page, it
+    // restarts there.
+    //
+    // One walk is one column, so its type size is one number: the size the first
+    // page of the walk solved is reused for every page after it, and the offset
+    // (readingScroll) is then the only thing that moves. The size is only
+    // re-solved when it genuinely does not fit the new page's box — a longer page
+    // still gets the smaller size it needs, rather than being clipped to keep a
+    // number constant. Keyed by the design inputs (box + type), so a different
+    // template or a resized box starts over.
+    property string readingFitKey: ""
+    property real readingFitSize: 0
     readonly property int stepTextLength: {
         const bs = root.blocks !== undefined && root.blocks !== null ? root.blocks : []
         let longest = 0
@@ -174,11 +208,32 @@ Item {
         }
 
         Repeater {
-            model: root.blocks
+            // THE SLOT LIST, NOT THE CONTENT LIST.
+            //
+            // `model: root.blocks` made every block a BRAND-NEW delegate whenever
+            // the array was replaced — and the array is replaced on every selector
+            // move, every re-stage, every style edit. Between the destroy and the
+            // create there is a frame with no delegate at all (and a new one's fit
+            // not yet solved), and THAT is the blink: "the moment the selector
+            // moves down it will blink". The picture was not changing size, it was
+            // being torn down and rebuilt.
+            //
+            // The model is the SLOT COUNT, and each delegate reads its block by
+            // `index` instead (el.modelData below). A change that keeps the count —
+            // the common case: same template, new words, a moved reference — now
+            // updates the delegates that already exist, in place. Only a block
+            // actually appearing or disappearing (a heading neither page has) still
+            // rebuilds, which is the one case where a new node is genuinely needed.
+            model: root.blocks ? root.blocks.length : 0
 
             delegate: Item {
                 id: el
-                required property var modelData
+                required property int index
+                // The block this slot currently holds. A binding, not the model
+                // item: that is what lets the same delegate be re-used for the
+                // next page's block at this index (see the model comment).
+                readonly property var modelData: (root.blocks && index < root.blocks.length)
+                                                 ? root.blocks[index] : ({})
                 readonly property string kind: modelData.kind
                 readonly property var meta: modelData.meta !== undefined ? modelData.meta : {}
                 readonly property var style: modelData.style !== undefined ? modelData.style : {}
@@ -197,15 +252,41 @@ Item {
                 // block of a host that follows the step (the Main Output tile),
                 // and only while the service has a passage for it. Everything
                 // else about this file draws the page it always drew.
+                // DOES THIS BLOCK DRAW THE READING PASSAGE? Only the reading
+                // block of a host that follows the step (the Main Output tile),
+                // and only while the service has a passage for it. Everything
+                // else about this file draws the page it always drew.
+                //
+                // ...and only if the passage really holds THIS block's page: a
+                // flow left over from another slide would put the wrong words in
+                // the box. It is a CONTAINMENT test, not a prefix test, because the
+                // passage is now a RUN of pages around the one being read (see
+                // LiveOutputService's reading run): the current page can sit
+                // anywhere inside it, and the offset that positions the column is
+                // measured from the run's start, so whichever page the block holds,
+                // the line at the top of the box is the line being read.
                 readonly property bool drawsFlow: el.readingBlock && el.kind === "text"
                     && !root.paintOnly && root.animateLineSteps
-                    // ...and only if the passage really is THIS block's page (the
-                    // engine keeps the same guard for the same reason): a flow left
-                    // over from another slide would put the wrong words in the box,
-                    // and the page — which is what this file drew before the step
-                    // existed — is always the honest fallback.
+                    && String(el.modelData.text ?? "") !== ""
                     && String(LiveOutputService.readingFlowText ?? "")
-                           .indexOf(String(el.modelData.text ?? "")) === 0
+                           .indexOf(String(el.modelData.text ?? "")) >= 0
+                // ONE-SHOT DIAGNOSTIC: every TRANSITION of this gate, named —
+                // this is the EXACT moment the visible surface hands off
+                // between the animated flow (flowText) and the plain static
+                // page (fitText), on a NEW delegate every page-boundary
+                // commit (the Repeater rebuilds when root.blocks changes).
+                // false->true->false in quick succession, or landing on
+                // false right after a commit, is what a cut/refresh at the
+                // boundary would look like from here (user report, A/B
+                // tested and confirmed independent of ReferencePane's own
+                // selector: "it's still refreshing... not continuing the
+                // flow").
+                onDrawsFlowChanged: EngineBridge.log("info", "DrawsFlowChanged",
+                    "drawsFlow=" + el.drawsFlow
+                    + " readingBlock=" + el.readingBlock
+                    + " modelText=" + String(el.modelData.text ?? "").slice(0, 24)
+                    + " flowText=" + String(LiveOutputService.readingFlowText ?? "").slice(0, 24)
+                    + " fitAnswer=" + el.fitAnswer)
                 // THE PAGE'S TOP EDGE — where the page's first line sits, from
                 // the block's own vertical alignment. The passage begins exactly
                 // there, so at offset 0 it draws where the page drew.
@@ -263,8 +344,25 @@ Item {
                 // invisible twin each step, gives both surfaces the same answer
                 // (the largest size whose real laid-out height/width fit the box).
                 property real fitProbe: el.meta.fontSize ?? 16
-                property real fitAnswer: el.meta.fontSize ?? 16
+                // The first rendered frame of a committed page already carries
+                // the walk's size (see root.readingFitSize): the solver runs
+                // immediately for the reading block, but a frame at the fallback
+                // size before it would be the same pop the latch exists to stop.
+                property real fitAnswer: (el.readingBlock && root.animateLineSteps
+                                          && root.readingFitSize > 0
+                                          && root.readingFitKey === el.readingFitKey)
+                                         ? root.readingFitSize : (el.meta.fontSize ?? 16)
                 property bool fitSolving: false
+                // What the latched size is keyed by: the BOX and the TYPE, never
+                // the text — the text is exactly what changes at a page commit,
+                // and re-solving for it is the refresh this whole block prevents.
+                readonly property string readingFitKey: [el.width, el.height,
+                                                         el.style.padding ?? 0,
+                                                         el.meta.fontSize ?? 16,
+                                                         el.meta.fontFamily ?? "",
+                                                         MetadataFields.lineHeight(el.meta),
+                                                         MetadataFields.lineSpacing(el.meta),
+                                                         MetadataFields.letterSpacing(el.meta)].join("|")
                 readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
                                                   el.meta.fontSize ?? 16,
                                                   MetadataFields.lineHeight(el.meta),
@@ -313,7 +411,8 @@ Item {
                     // be DESTROYED between the Qt.callLater that queued this and the call — the pane it
                     // reports to goes with it — so `typeof` guards the dead scope, the same way
                     // DropdownPanel's stale-row guards do.)
-                    if (typeof root !== "undefined" && root && root.probeSink)
+                    const hostAlive = typeof root !== "undefined" && root !== null && root !== undefined
+                    if (hostAlive && root.probeSink)
                         root.probeSink.gridFitSolves++
                     const pad = el.style.padding ?? 0
                     const bw = el.width - pad * 2, bh = el.height - pad * 2
@@ -326,9 +425,27 @@ Item {
                     // needing two spellings for one idea ("grow" here, "growToFit" there).
                     // The delegate is clipped to its box, so the token is cut at the edge
                     // instead of shrinking the type.
-                    if (bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)) {
+                    const tokenOrZero = bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)
+                    // STILL THE SAME WALK: keep the size the first page settled
+                    // on, so the committed page lands at the size the reader was
+                    // already looking at. Measured here, not assumed — a page that
+                    // genuinely does not fit at that size still gets its own
+                    // (smaller) answer, and the held size is then only the upper
+                    // bound the bisection may come down from.
+                    let held = false
+                    let readingFitHeld = 0
+                    if (!tokenOrZero && hostAlive && el.readingBlock && root.animateLineSteps
+                            && root.readingFitSize > 0
+                            && root.readingFitKey === el.readingFitKey) {
+                        readingFitHeld = root.readingFitSize
+                        fitProbe = readingFitHeld
+                        held = fitMeasure.contentWidth <= bw && fitMeasure.contentHeight <= bh
+                        if (!held)
+                            hi = readingFitHeld
+                    }
+                    if (tokenOrZero) {
                         lo = el.meta.fontSize ?? 16
-                    } else {
+                    } else if (!held) {
                         for (let i = 0; i < 11; ++i) {
                             const mid = (lo + hi) / 2
                             fitProbe = mid
@@ -337,10 +454,16 @@ Item {
                             else
                                 hi = mid
                         }
+                    } else {
+                        lo = held ? readingFitHeld : (el.meta.fontSize ?? 16)
                     }
                     // grow: fill the box; shrink/none: at most the set size (the squeeze).
                     fitAnswer = el.fitMode === "grow" ? lo : Math.min(el.meta.fontSize ?? 16, lo)
                     fitProbe = fitAnswer
+                    if (hostAlive && el.readingBlock && root.animateLineSteps) {
+                        root.readingFitKey = el.readingFitKey
+                        root.readingFitSize = fitAnswer
+                    }
                     fitSolving = false
                 }
                 Text {
@@ -500,7 +623,12 @@ Item {
                     // the offset, one measured line at a time.
                     Item {
                         id: flowBox
-                        y: -LiveOutputService.readingScroll * el.linePitch
+                        // THIS STYLE's line for the shared position (see stepLine):
+                        // two outputs styled at different sizes used to scroll the
+                        // same LINE number, which is a different word in each — one
+                        // showed the passage's next sentence while the other was
+                        // still on the previous one.
+                        y: -root.stepLine * el.linePitch
                         width: parent.width
                         height: flowText.implicitHeight
 

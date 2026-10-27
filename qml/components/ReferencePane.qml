@@ -364,25 +364,79 @@ Item {
     // when a step lands right after a rows delivery — and positionViewAtIndex is
     // also what realizes a row the list has virtualized away (no item to measure
     // means it cannot be on screen).
-    function centerRow(number, partIndex) {
+    // THE ROW THIS FOLLOW LAST PUT ON SCREEN — the anchor for the stand-down
+    // rule below. -1 means "nothing followed yet in this chapter".
+    property int followedRowIndex: -1
+    function rowFullyVisible(row) {
+        if (!row)
+            return false
+        const pad = 6
+        return row.y - pad >= versesFlick.contentY
+            && row.y + row.height + pad <= versesFlick.contentY + versesFlick.height
+    }
+    // `force` is for navigation the OPERATOR asked for (opening a chapter,
+    // clicking a continuation row, the preview's own arrows): those always move
+    // the list. The follow (followLiveStep) is the one caller that defers to
+    // where the operator has scrolled — see the stand-down rule below.
+    function centerRow(number, partIndex, force) {
         Qt.callLater(function () {
             const index = root.rowIndexForPart(number, partIndex ?? 0)
             if (index < 0)
                 return
             const row = versesFlick.itemAtIndex(index)
-            if (row) {
-                // Row geometry is in the list's CONTENT space (delegates are children
-                // of contentItem), so this is a plain viewport test.
-                const pad = 6
-                const top = row.y
-                const bottom = row.y + row.height
-                const viewTop = versesFlick.contentY
-                const viewBottom = viewTop + versesFlick.height
-                if (top - pad >= viewTop && bottom + pad <= viewBottom)
-                    return          // already fully on screen: do not move the list
+            if (row && root.rowFullyVisible(row)) {
+                root.followedRowIndex = index
+                return          // already fully on screen: do not move the list
             }
+            // THE LIST BELONGS TO THE OPERATOR WHILE THEY READ AHEAD. This used
+            // to re-centre on the active row no matter where the operator had
+            // scrolled, so reading ahead and then advancing yanked the list back
+            // to the row that was moving — reported as "it scrolls to two … then
+            // it refreshes two and I lose my place; it moves from bottom to top".
+            // Follow only while the list is TRACKING the reading: the row this
+            // same follow showed last time is still on screen (or still gliding
+            // to it). Once the active row is off screen because the operator's
+            // own scroll put it there, stand down — and the moment they bring
+            // the active row back into view themselves, the next step finds it
+            // visible and tracking resumes on its own.
+            if (force !== true) {
+                const previous = root.followedRowIndex >= 0
+                    ? versesFlick.itemAtIndex(root.followedRowIndex) : null
+                const tracking = root.followedRowIndex < 0
+                    || centerRowScroll.running || root.rowFullyVisible(previous)
+                if (!tracking)
+                    return
+            }
+            if (row) {
+                // (The "already on screen" test was made above, before the
+                // stand-down rule: one copy of that rule, not two.)
+                // GLIDES to the row instead of jumping (user call, made twice:
+                // "instead of jumping between slides, it could animate the
+                // progress between slides... gradually move... easily track
+                // things more easily") — the same ListView.Center target
+                // positionViewAtIndex would land on, clamped the same way it
+                // clamps internally, animated instead of set outright.
+                const targetY = Math.max(0, Math.min(
+                    versesFlick.contentHeight - versesFlick.height,
+                    row.y + row.height / 2 - versesFlick.height / 2))
+                centerRowScroll.to = targetY
+                centerRowScroll.restart()
+                root.followedRowIndex = index
+                return
+            }
+            // No delegate yet (virtualized away, off the cache buffer) — nothing
+            // to glide FROM, so land directly the way positionViewAtIndex always
+            // has; there is no "from" position for an animation to start at.
             versesFlick.positionViewAtIndex(index, ListView.Center)
+            root.followedRowIndex = index
         })
+    }
+    NumberAnimation {
+        id: centerRowScroll
+        target: versesFlick
+        property: "contentY"
+        duration: 220
+        easing.type: Easing.InOutQuad
     }
 
     // The row a remembered place names. A PICK is centred (the paragraph being read,
@@ -504,12 +558,64 @@ Item {
     // new snapshot each press (user report: "it['s] not scrolling[,] it
     // act[s] as a sliding"). null when nothing of ours is staged/on air yet
     // (browsing before any pick), so the box falls back to the static query.
-    readonly property var liveFlowSlide: {
-        if (root.lineStepOwnerRef === "")
-            return null
-        if (LiveOutputService.live)
-            return LiveOutputService.onAirTitle === root.lineStepOwnerRef ? LiveOutputService.onAirSlide : null
-        return LiveOutputService.stagedIsOurs(root.lineStepOwnerRef) ? LiveOutputService.stagedSlide : null
+    // IMPERATIVE, not a reactive binding — a readonly property var computing
+    // this from stagedIsOurs()/live/onAirTitle was observed to go stuck at
+    // null (confirmed via the FollowLiveStep + StagedIsOurs diagnostics:
+    // LiveOutputService.stagedIsOurs() genuinely returns true for this
+    // pane's own title, logged at the right moment, yet the SAME-INSTANT
+    // read of the property inside followLiveStep() still saw null) — a QML
+    // binding-evaluation-ORDER issue between this binding's own dependency
+    // invalidation and whatever read triggered its re-run, not a data bug.
+    // Setting it explicitly, at the exact same moment followLiveStep() itself
+    // runs (and at the moment a pick is first staged), removes the
+    // dependence on QML's binding engine ever re-running this expression at
+    // the right time at all.
+    property var liveFlowSlide: null
+    // ONE WALK, ONE SET OF BLOCKS.
+    //
+    // A walk is a RUN of pages (LiveOutputService's reading run) drawn by one
+    // reading block, so the page turning underneath it must NOT replace the
+    // blocks: the service commits a new page at every boundary, and each commit
+    // swapped the longest-text block for the next page's paragraph — engine.log
+    // showed nine drawsFlow flip-flops in 30 ms across the two surfaces, with the
+    // old page painting its static text while the new one painted the passage.
+    // That swap is the blink, and it is the scroller being told about slides it
+    // does not need to know about.
+    //
+    // So the map is pinned to the PICK for the length of the walk: it is replaced
+    // only when the pick changes (its owner/title), when live state changes under
+    // it, or when the design's background does — never because a page turned. The
+    // words still move, because DesignPreview draws the run at readingScroll; the
+    // reference and slide number are the pane's own, drawn around this box.
+    property string liveFlowSlideKey: ""
+    function refreshLiveFlowSlide() {
+        if (root.lineStepOwnerRef === "") {
+            root.liveFlowSlideKey = ""
+            root.liveFlowSlide = null
+            return
+        }
+        if (LiveOutputService.live) {
+            if (LiveOutputService.onAirTitle !== root.lineStepOwnerRef) {
+                root.liveFlowSlideKey = ""
+                root.liveFlowSlide = null
+                return
+            }
+        } else if (!LiveOutputService.stagedIsOurs(root.lineStepOwnerRef)) {
+            root.liveFlowSlideKey = ""
+            root.liveFlowSlide = null
+            return
+        }
+        const next = LiveOutputService.live ? LiveOutputService.onAirSlide
+                                            : LiveOutputService.stagedSlide
+        // The pick's identity, the live/staged state and the design's background —
+        // everything the blocks were copied from except WHICH PAGE is current.
+        const key = (LiveOutputService.live ? "live|" : "staged|")
+            + root.lineStepOwnerRef + "|"
+            + (next && next.background !== undefined ? String(next.background) : "")
+        if (key === root.liveFlowSlideKey && root.liveFlowSlide !== null)
+            return              // the same pick and design: keep the blocks painted
+        root.liveFlowSlideKey = key
+        root.liveFlowSlide = next
     }
     onPreviewChanged: {
         if (root.previewSlideIndex >= root.previewSlides.length)
@@ -1034,6 +1140,10 @@ Item {
         }
         root.chapterLoading = true
         versesFlick.contentY = 0
+        // A new chapter starts a new follow: the row the last one was tracking
+        // belongs to the list that just left, and would otherwise read as
+        // "off screen" and stand the follow down on its very first step.
+        root.followedRowIndex = -1
         if (root.adapter && root.adapter.chapterAsync) {
             root.adapter.chapterAsync(root.sourceId, bookId, number, token)
         } else {
@@ -1095,14 +1205,14 @@ Item {
             const v = rows[rows.length - 1]
             root.selected = [v.number]
             root.anchorVerse = v.number
-            root.centerRow(v.number, v.partIndex ?? 0)
+            root.centerRow(v.number, v.partIndex ?? 0, true)
         } else if (opened && root.chapterSelectFirst && rows.length > 0) {
             root.selected = [rows[0].number]
             root.anchorVerse = rows[0].number
             // A chapter stepped INTO puts its pick at the top of a list whose own
             // scroll was just reset — but the ‹ › may also have stepped INTO the
             // last row while the list was showing something else, so say it.
-            root.centerRow(rows[0].number)
+            root.centerRow(rows[0].number, 0, true)
         }
         if (opened) {
             root.rowsFillSignature = root.openFillSignature
@@ -1190,8 +1300,37 @@ Item {
     // and previewSlideIndex at whatever is actually showing now — the same
     // lookup selectSubpart already does for a direct click — so the
     // highlight and the auto-scroll (centerRow) follow the step.
+    // TEMPORARY A/B SWITCH (user's own suggested test: "let's stop that
+    // selector from moving, and let's see what happens"). false = the list's
+    // own highlight/selection/scroll-into-view stay put while the content
+    // keeps line-stepping normally — isolates whether MOVING THE SELECTOR
+    // itself is what disturbs the monitor, separate from the content step
+    // that triggers it. liveFlowSlide still refreshes either way, so the
+    // preview box's own scroll is unaffected by this switch.
+    // A/B TEST RESULT (user confirmed): disabling this did NOT stop the
+    // monitor glitch — it's in the shared flow-drawing mechanism itself
+    // (DesignPreview.qml / LiveOutputService), not in this pane's own
+    // selector-tracking. Back on; see DrawsFlowChanged in DesignPreview.qml
+    // for where the hunt continues.
+    property bool followSelectorMoves: true
+    // ONE FOLLOW PER ADVANCE, NOT PER SIGNAL. An advance lands as several
+    // notifications a few tens of ms apart (a staged commit, then the poll tick
+    // reading the same state), and engine.log showed the whole body running
+    // twice per press — two preview-index resolves and two scroll requests for
+    // the SAME row. The signature (this pick's owner + live/staged + the
+    // paragraph and piece actually showing) makes the repeat a no-op, while a
+    // step that really moved still follows at once: nothing is debounced, so the
+    // first notification of a fresh position always acts immediately.
+    //
+    // The owner is IN the signature on purpose — a new pick starts with the same
+    // first paragraph and piece as the old one could end on, and that is a
+    // follow that must happen (it re-points the list at a new passage).
+    property string followedStepSignature: ""
     function followLiveStep() {
         if (!root.book)
+            return
+        root.refreshLiveFlowSlide()
+        if (!root.followSelectorMoves)
             return
         const raw = LiveOutputService.live ? LiveOutputService.onAirSlideRaw : LiveOutputService.stagedSlideRaw
         const parts = (raw && raw.parts) || []
@@ -1199,7 +1338,30 @@ Item {
             return
         const number = parts[0].number
         const partIndex = parts[0].partIndex ?? 0
-        if (root.selected.length !== 1 || root.selected[0] !== number) {
+        const signature = root.lineStepOwnerRef + (LiveOutputService.live ? "|live|" : "|staged|")
+            + number + "|" + partIndex
+        if (signature === root.followedStepSignature)
+            return          // the same step, announced again: already followed
+        root.followedStepSignature = signature
+        const selectionChanging = root.selected.length !== 1 || root.selected[0] !== number
+        // ONE-SHOT DIAGNOSTIC: everything that could matter about THIS exact
+        // moment — is this a real paragraph change or a no-op re-announce,
+        // what liveFlowSlide (what the preview box actually draws) is doing
+        // right now, before this function touches root.selected at all. The
+        // same function's own writes below (root.selected, previewSlideIndex)
+        // are the ones that ripple into root.preview/currentPreviewSlide and
+        // every binding that reads them (user call: "check and trace what
+        // happens when the selector moves... track and see what could cause
+        // that [glitch]").
+        EngineBridge.log("info", "FollowLiveStep",
+            "number=" + number + " partIndex=" + partIndex
+            + " selectionChanging=" + selectionChanging
+            + " prevSelected=" + JSON.stringify(root.selected)
+            + " live=" + LiveOutputService.live
+            + " liveFlowSlideNull=" + (root.liveFlowSlide === null)
+            + " lineStepOwnerRef=" + root.lineStepOwnerRef
+            + " referenceTextBefore=" + root.referenceText)
+        if (selectionChanging) {
             root.selected = [number]
             root.anchorVerse = number
         }
@@ -1209,6 +1371,10 @@ Item {
             if (p.some((part) => part.number === number && (part.partIndex ?? 0) === partIndex)) {
                 root.previewSlideIndex = i
                 root.centerRow(number, partIndex)
+                EngineBridge.log("info", "FollowLiveStep",
+                    "done previewSlideIndex=" + i
+                    + " referenceTextAfter=" + root.referenceText
+                    + " liveFlowSlideNullAfter=" + (root.liveFlowSlide === null))
                 return
             }
         }
@@ -1303,7 +1469,9 @@ Item {
         root.selected = [row.number]
         root.anchorVerse = row.number
         root.previewSlideIndex = 0
-        root.centerRow(row.number, row.partIndex ?? 0)
+        // An operator's own pick always moves the list (force) — the stand-down
+        // rule exists for the automatic follow, not for a click.
+        root.centerRow(row.number, row.partIndex ?? 0, true)
         // The pick's preview is rebuilt for the new selection, so the slide that
         // shows THIS piece is resolved after that — a continuation row (20-1) must
         // open on its own slide, not on the paragraph's first one.
@@ -2378,6 +2546,7 @@ Item {
                 if (parts.some((part) => part.number === number && (part.partIndex ?? 0) === partIndex)) {
                     root.lineStepOwnerRef = root.referenceText
                     LiveOutputService.stageSlideSet(root.referenceText, output, i)
+                    root.refreshLiveFlowSlide()
                     return
                 }
             }
@@ -2386,6 +2555,7 @@ Item {
         // can't find a match (no chapter loaded, parts missing).
         root.lineStepOwnerRef = root.referenceText
         root.goLiveRequested(root.referenceText, slides)
+        root.refreshLiveFlowSlide()
     }
 
     // Floating pill buttons: previous / next picked passage (FreeShow's
@@ -2462,7 +2632,7 @@ Item {
         // of the paragraph's head (see rowIndexForPart).
         const piece = (slides[next].parts || [])[0]
         if (piece)
-            root.centerRow(piece.number, piece.partIndex ?? 0)
+            root.centerRow(piece.number, piece.partIndex ?? 0, true)
         if (publish)
             root.playSlideAt(next)
         return true
@@ -2509,6 +2679,7 @@ Item {
         if (hit) {
             root.lineStepOwnerRef = root.referenceText
             LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
+            root.refreshLiveFlowSlide()
         }
     }
 
@@ -4268,23 +4439,33 @@ Item {
                         // active edge to paint.
                         DesignPreview {
                             anchors.fill: parent
-                            // THE READING STEP SLIDES HERE TOO (see
-                            // root.liveFlowSlide's own comment) — the same
-                            // reason OutputMonitorTile's on-air DesignPreview
-                            // sets this, so this pane's own preview box
-                            // scrolls instead of cutting from one snapshot to
-                            // the next on every press.
-                            animateLineSteps: true
-                            blocks: root.liveFlowSlide ? (root.liveFlowSlide.blocks ?? [])
-                                : (root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks)
+                            // REVERTED: this box used to always show
+                            // root.preview/currentPreviewSlide — THE PANE'S
+                            // OWN chosen template — and briefly tried
+                            // preferring root.liveFlowSlide (LiveOutputService.
+                            // stagedSlide, composed against the ACTIVE
+                            // OUTPUT'S STYLE template, not this pane's own)
+                            // for its scroll animation. That made this box
+                            // permanently lock onto the output style's
+                            // template the moment anything was staged, with
+                            // no way back even after picking a different
+                            // template here — the output style's template
+                            // also carries bound fields this one never
+                            // needed, which is where the literal "{text}"
+                            // placeholders came from (user report: "the
+                            // moment I click on the list... it changes
+                            // [the template] and refuses to change it back").
+                            // Back to always the pane's own template; the
+                            // live-scroll animation for THIS box is dropped
+                            // rather than left half-working.
+                            blocks: root.currentPreviewSlide ? root.currentPreviewSlide.blocks : root.preview.blocks
                             // THE DESIGN'S OWN ANSWER, not an opaque plate of
                             // this pane's: an unpainted background keeps
                             // painting nothing, and the shared transparency
                             // convention (DesignPreview's checkerboard) shows
                             // there — the canvas's rule, not a black slab
                             // standing in for a keyable frame.
-                            background: root.liveFlowSlide ? (root.liveFlowSlide.background ?? "transparent")
-                                : (root.preview.background ?? "transparent")
+                            background: root.preview.background ?? "transparent"
                         }
                         Text {
                             visible: root.selected.length === 0

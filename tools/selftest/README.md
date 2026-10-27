@@ -1704,3 +1704,54 @@ sensitive configuration for re-running this is one where the loop can actually r
 Budgets are floors for "the feed is alive and reachable" (`VIDEOPERF_MIN_INPUT_FPS=8`,
 `VIDEOPERF_MIN_FPS=0.15`, `VIDEOPERF_MAX_AGE_MS=3000`); the printed numbers, and the
 `--compare` spread, are the point.
+
+## Reading a passage with Alt+Down: does the picture re-base at a page turn?
+
+The report, in the reader's own words: *"I'm seeing one or two, it scrolls it to two,
+but the time is about to move from two to three — it refreshes two, and the user loses
+track of sight because it moves from bottom to top"*, and later *"the moment the selector
+moves down it will blink"*. That is a claim about NUMBERS the stepper already publishes,
+so two harnesses measure it — one on a synthetic pick, one on the operator's own passage:
+
+```bash
+bash tools/selftest/run_line_step_test.sh 120        # synthetic 24-page pick: arithmetic
+bash tools/selftest/run_table_walk_test.sh 300 64-0617   # the REAL passage: the picture
+# ... LINE_STEP: PASS presses=<n> pages=<m> worstSkip=<x> findings=0
+#     TABLE_WALK: PASS <n> press(es) on a real passage, <m> tile reads (none stale,
+#         all drawing the passage), pane advanced through <k> paragraph(s), no skipped frame
+#     TABLE_WALK: FAIL no-results | FAIL no-pick | FAIL no-paragraph-advance | FAIL findings=<n>
+```
+
+The synthetic harness stages a pick LONGER than the run's own window (4 pages each way)
+so the window SLIDES while the reader walks, then presses the ordinary reading step and
+asserts, per press: the position climbs exactly +1.0, the page index never regresses,
+and no 16 ms sample of the glide moved a whole line or went the wrong way. The real-passage
+harness (`VGR_TABLEWALK_TEST=1`, query overridable with `VGR_TABLEWALK_QUERY`) opens the
+app-wide search, takes the first result the way a click does, stages the passage through
+the pane's own play (the Enter key's body), then walks it 120 presses and reads the three
+surfaces at once: every monitor tile's own composition against one composed now from the
+same slide and style (stale=), whether it is still drawing the passage (flow=), and the
+pane's own reference/selection paragraph — with a press that turns the pane to a new
+paragraph REQUIRED to change the tile text too, which is what "the left is still showing
+while the right has finished" looked like.
+
+Two traps worth keeping:
+
+- **A retry loop that re-asks can cancel its own answer.** `QuickSearchDialog.refresh()`
+bumps the search token, so a "query every 2 s until results appear" retry killed each
+in-flight query (a corpus-wide Table scan takes longer than a tick) and reported
+`no-results` against a library with 1,206 sermons. Ask once, then poll.
+- **The wait must outlast the index, and the walk must be long enough to cross the
+boundary at all.** This machine's sermon index finishes ~58 s after launch
+(`engine.log`: `indexing progress: 1206/1206`), and a real sermon's paragraphs run 10–25
+lines, so 30 presses stop INSIDE the second paragraph — 120 are needed before "several
+paragraph boundaries" is even a statement about the walk.
+
+Measured 2026-10-27 on `64-0617 - The Identified Christ Of All Ages` (the real passage,
+opened through the app's own search), 3 runs: 121 presses each, position +1.00 every
+press, page index monotonic 0 → 30, 0 skipped frames, 242 tile reads with `stale=false`
+and `flow=true` throughout, and the pane walking 15–19 paragraph boundaries with the
+wall's words changing at every one — no press where the pane had moved on and the wall
+had not. Failures append the suspect press and its neighbours to
+`build/table_walk_findings.log`, so an intermittent finding is diagnosable after the
+fact rather than only visible while the terminal still holds it.

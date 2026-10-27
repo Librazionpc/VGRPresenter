@@ -416,6 +416,11 @@ Window {
         // would scroll at two different points, which is the very split this
         // step exists to remove.
         animateLineSteps: true
+        // ...AT THIS OUTPUT'S OWN STYLE, the same conversion the monitor tile
+        // makes: the shared position is a character offset, and the line it names
+        // is this style's own (see DesignPreview.stepLine). The engine raster of
+        // this very output does the same arithmetic in C++.
+        readingStyleId: root.outputStyleId
         showBindPlaceholders: false
         showCheckerboard: false
         backgroundImage: root.onAirSlide.styleImagePainted === true

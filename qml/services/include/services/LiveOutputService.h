@@ -478,15 +478,50 @@ public:
     // views of ONE number, instead of two animations trying to agree.
     Q_PROPERTY(QString readingFlowText READ readingFlowText NOTIFY readingScrollChanged)
     Q_PROPERTY(qreal readingScroll READ readingScroll NOTIFY readingScrollChanged)
+    // THE POSITION EVERY STYLE AGREES ON: the character offset into
+    // readingFlowText that the line at the top of the box begins with. Unlike
+    // readingScroll (lines of the ACTIVE style's grid), this means the same WORDS
+    // on every surface: a tile whose style wraps differently turns it into its own
+    // line with readingLineForStyle below. Fires with readingScrollChanged (it is
+    // derived from it, once per frame), so a binding on THIS property re-runs
+    // through a glide and a binding on readingScroll does not have to.
+    Q_PROPERTY(qreal readingChar READ readingChar NOTIFY readingScrollChanged)
+    qreal readingChar() const { return readingCharForScroll(readingScroll_); }
     bool readingFlowActive() const { return !readingFlowText_.isEmpty(); }
     QString readingFlowText() const { return readingFlowText_; }
     qreal readingScroll() const { return readingScroll_; }
+    // THE PAGE THE WALK IS ON — an index into the pick. NOT the same thing as
+    // `readingScroll`, which is measured from the RUN's first line: the run is a
+    // WINDOW that slides as the reader walks (kReadingRunRadius pages each way),
+    // so the scroll number is not comparable across a window shift. A surface
+    // that COMPOSES the picture rather than drawing the flow needs this one: it
+    // recomposes when the PAGE changes and stays put for every step inside one
+    // page. Its own notify signal (not readingScrollChanged) so reading it does
+    // not make a binding re-run on every frame of a glide.
+    Q_PROPERTY(int readingPage READ readingPage NOTIFY readingPageChanged)
+    int readingPage() const { return lineSlideIndex_; }
+    // ...and WHERE IN THE PICK the words are, in lines: the page's own start (the
+    // line counts of every page before it) plus the offset inside that page.
+    // Window-independent BY CONSTRUCTION, which is what makes it the number a
+    // trace can compare across a window shift — a backward move or a jump in
+    // THIS value is a visible skip, while the same move in `readingScroll` is
+    // just the window moving under a picture that did not. Read by
+    // tools/selftest/run_line_step_test.sh, which samples it per frame.
+    Q_PROPERTY(qreal readingAbsoluteLine READ readingAbsoluteLine NOTIFY readingScrollChanged)
+    qreal readingAbsoluteLine() const;
     // The step's pulse, still emitted once per applied step and still carrying
     // the direction (+1 = the words travel up, the next line arrives from below;
     // -1 = back down). A surface that only needs to know "it moved" reads this;
     // a surface that draws the move reads `readingScroll` above.
+    // The pick the reading step is walking. A surface uses it to tell "the same
+    // passage, another page" from "a new pick" — see the monitor tile's pinned
+    // composition: while a walk runs, the page turning underneath must not
+    // re-compose the picture.
+    Q_PROPERTY(QString readingSetName READ readingSetName NOTIFY stagedChanged)
     Q_PROPERTY(int lineStepSerial READ lineStepSerial NOTIFY lineStepChanged)
     Q_PROPERTY(int lineStepDirection READ lineStepDirection NOTIFY lineStepChanged)
+    // (Getter placement note: the Q_PROPERTY above names it READ.)
+    QString readingSetName() const { return lineSetName_; }
     int lineStepSerial() const { return lineStepSerial_; }
     int lineStepDirection() const { return lineStepDirection_; }
     // Wipes a pending stage without touching live_/onAirSlide_ — stop()
@@ -614,6 +649,57 @@ public:
     // what a slide will ACTUALLY look like on air, not just its own raw
     // blocks. `slide` is the QML block shape (peekShow's own slide maps).
     Q_INVOKABLE QVariantMap previewWithActiveStyle(const QVariantMap &slide) const;
+    // ---- WHAT A GIVEN STYLE DRAWS AT THE CURRENT STEP ----------------------
+    //
+    // The step's own arithmetic is measured against the ACTIVE style: the line
+    // counts, the page bases and `readingScroll` are all lines of THAT picture.
+    // A monitor tile (and a real output) draws with ITS OWN style, at its own
+    // type size and its own wrap — so the same line number is only the same
+    // WORDS if the two grids agree. This asks the question directly, for one
+    // style: the RUN's lines as that style lays them out, so the caller can
+    // compare "the line at the top of the box" in two grids (the reading step's
+    // own cross-output check, and what tools/selftest/run_table_walk_test.sh
+    // measures when the outputs carry different styles).
+    //
+    // Read-only and self-contained: it composes the current page at that style
+    // to find the box, wraps the passage the step is drawing in it, and reports
+    // the lines. Nothing about the walk's own state changes.
+    Q_INVOKABLE QStringList readingRunLinesForStyle(const QString &styleId) const;
+    // THE SAME POSITION, IN THAT STYLE'S OWN LINES: the line index (plus the
+    // fraction of the move in flight) where character `charAt` of the passage sits
+    // when `styleId` lays it out. This is what a surface that draws at its own
+    // style must use — the engine's outputs do the same arithmetic in C++
+    // (TextObject::FlowLineForChar). Without it, two outputs of different type
+    // sizes put different sentences at the top of their boxes at the same instant
+    // (measured: a line or two apart on a third of the presses).
+    Q_INVOKABLE qreal readingLineForStyle(const QString &styleId, qreal charAt) const;
+    // The character starts of that style's run lines — the table the two functions
+    // above read. Exposed for the walk's own diagnostic (and cheap: cached).
+    Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
+    // WHERE THE READER IS, INDEPENDENT OF ANY STYLE: the CHARACTER offset into
+    // readingFlowText of the line at the top of the box, in the reference (active
+    // style) grid. This is the number every surface can agree on — see the
+    // readingRunLinesForStyle comment and Slide::flowChar's own note.
+    //
+    // RUN-RELATIVE, deliberately: the engine and the tiles draw THIS text, so the
+    // offset they are handed has to be an offset into it. A run window that slides
+    // (a long pick, see kReadingRunRadius) therefore makes this number go BACKWARDS
+    // at the moment it slides — the words it indexes have moved forward with it, so
+    // the picture does not, but the number alone cannot be compared across that
+    // instant. readingPassageChar below is the coordinate for that comparison.
+    Q_INVOKABLE int readingCharOffset() const;
+    // THE SAME POSITION IN THE PICK'S WHOLE PASSAGE — the run-relative offset above
+    // plus the characters of every page before the run's window (readingRunCharBase_).
+    // It is the coordinate a cross-press comparison needs, and the walk harness reads
+    // it per output per press (tools/selftest/run_table_walk_test.sh).
+    //
+    // WHAT IT IS NOT: proof that a move was continuous. readingRunCharBase_ is
+    // rebuilt from the pages' own reading text as the window slides, so a walk that
+    // changes the pick's page set (the Table refills a passage's pages as it is
+    // read) moves this number for reasons that have nothing to do with the drawn
+    // picture. Treat a move as a finding to investigate — the harness prints the
+    // page, the window and the words beside it — not as the position itself.
+    Q_INVOKABLE int readingPassageChar() const;
     // Compose a staged slide with one output's own saved style, for its local
     // monitor tile (the tile must not borrow the currently active output style).
     Q_INVOKABLE QVariantMap previewWithStyle(const QVariantMap &slide, const QString &styleId) const;
@@ -642,6 +728,10 @@ signals:
     // (see readingFlowText / readingScroll). The surface that draws the step
     // binds to `readingScroll`, so this fires at the animator's own cadence.
     void readingScrollChanged();
+    // The walk moved to another PAGE of the pick (see the readingPage property
+    // above). Emitted only when the page index actually changes — a step inside
+    // one page is not a page change.
+    void readingPageChanged();
     void inputChanged();
     void overlaysChanged();
     // clearAll() took a snapshot / restoreCleared() consumed it.
@@ -786,6 +876,21 @@ private:
     // where it rests, in line heights of the reading text.
     QString readingFlowText_;
     qreal readingScroll_ = 0.0;
+    // THE RUN THE SCROLLER DRAWS — the page being read plus kReadingRunRadius
+    // pages on each side, joined into ONE passage. `readingScroll_` is measured
+    // from the RUN's first line, never from a page's, so a page turn is only a
+    // pointer move: the words on screen keep their place while the reference,
+    // the slide number and the engine's current slide change around them. That
+    // is what "the scroller does not need to know about slides" means in code —
+    // it draws `readingFlowText_` at `readingScroll_`, full stop.
+    int readingRunFirst_ = -1;             // first slide in the run, -1 = none
+    int readingRunLast_ = -1;              // last slide in the run
+    QString readingRunText_;               // the run, joined by page breaks
+    int readingRunBaseLine_ = 0;           // run start -> the CURRENT page's first line
+    // Where the run's own text begins in the pick's whole passage, in characters —
+    // the stable half of readingPassageChar (see its note). Moved by
+    // rebuildReadingRun as the window slides, never reset by it.
+    int readingRunCharBase_ = 0;
     // The page change a landing step owes (a forward step that crossed a page
     // boundary): committed when the move finishes, so the boundary is ONE move
     // and never a cut followed by a scroll. -1 = nothing owed.
@@ -795,9 +900,80 @@ private:
     // tile and the HDMI/NDI frame are two views of the same number instead of
     // two animations that have to agree.
     QVariantAnimation *readingScrollAnim_ = nullptr;
-    // The passage for one page (that page followed by the next), and the store
-    // both this service and the engine read.
-    QString flowTextFor(int slideIndex) const;
+    // How many pages the run holds on EACH side of the page being read. The
+    // user's own number ("build like 4 lists ahead... both for forward and
+    // backward movement"), and the same radius prewarmReadingLines uses.
+    static constexpr int kReadingRunRadius = 4;
+    // Drops the run (a new pick: its pages are not this pick's pages).
+    void resetReadingRun();
+    // Builds the run around `anchor` if the current window does not already hold
+    // it. WHEN THE WINDOW SHIFTS IT REBASES readingScroll_ by exactly the lines
+    // added or dropped at the front, so the words on screen do not move: the
+    // offset and the column change by the same amount, which is the same picture.
+    void rebuildReadingRun(int anchor);
+    // Lines from the run's first page to `index`'s first line.
+    int readingBaseForSlide(int index) const;
+    // The reading line THIS page's first line sits at, in the walk's OWN
+    // numbering — carried, not summed: the sum would have to measure every page
+    // before it (each one a composed picture plus a text layout, and a Table pick
+    // can run to a hundred paragraphs), while this is updated by the same cached
+    // counts the run's own base uses, at the only moments the page index moves.
+    //
+    // Its ORIGIN is wherever the walk began, not necessarily the pick's first
+    // page: the two numbers that read it (readingAbsoluteLine and
+    // readingWindowOffset) are one another's inverse and only ever compare against
+    // each other, so a walk that started at page 12 is as consistent as one that
+    // started at 0 — which is what keeps a re-picked mid-passage start free of
+    // any "measure everything above me" cost.
+    int readingPickBase_ = 0;
+    // Moves that origin with the page index (from -> to), by the cached line
+    // counts of the pages in between (a step normally crosses one; an empty page
+    // LineWalk steps over contributes nothing).
+    void shiftPickBase(int from, int to);
+    // ---- THE MEASUREMENT BASIS CHANGED: re-seat the walk -------------------
+    //
+    // Every line count this service steps by is measured on a COMPOSED PICTURE
+    // (readingLines -> previewWithActiveStyle), and that picture belongs to the
+    // ACTIVE output style. A style edit, a different active style or a roster
+    // change re-measures every page at a new box and a new type size — while the
+    // counts already in readingLinesCache_ were only ever cleared for a NEW PICK
+    // (see its three call sites). Kept, they answer for a layout that no longer
+    // exists: the step's own bound (`ownLines`) and the window's bases would come
+    // from the old picture, so the words would move by the wrong amount — or a
+    // boundary would land early — with nothing on the key to explain it. That is
+    // the same family as the re-base the reading RUN exists to remove, so it gets
+    // the same treatment: no number the step runs on may belong to the previous
+    // composition.
+    //
+    // THE WALK RE-SEATS ON THE PAGE IT IS ALREADY ON. The counts are dropped and
+    // re-measured, the offset is CLAMPED into the new page's line count (a reader
+    // keeps their place wherever the new layout still has one), the pick's origin
+    // becomes that page (the pages above it were summed in the old numbering, and
+    // re-measuring all of them is the O(pick) walk the origin exists to avoid),
+    // and the page is re-staged so every surface draws the new composition — all
+    // of which applyReadingRestage already does for a page change.
+    void reseadReadingWalk();
+    // OutputListModel does not exist yet when this service is built (AGENTS.md: a
+    // service may precede the models), so the basis connections are made on the
+    // first poll tick that finds it — once.
+    void connectReadingBasis();
+    bool readingBasisConnected_ = false;
+    // THE INVERSE, and the reason it exists: a position in the PICK, turned into
+    // the window offset that SHOWS it. A glide's start has to be derived this way
+    // whenever the branch that started it moved the run's window, because
+    // `readingScroll_` is measured from the window's first line and the window may
+    // have just slid — a raw copy of it then means a different line (measured by
+    // tools/selftest/run_line_step_test.sh as a 3-line jump in a single backward
+    // press).
+    qreal readingWindowOffset(qreal absolute) const;
+    // Announces the page the walk is on to the surfaces that COMPOSE the picture
+    // (readingPageChanged), once, and only when it really changed. Called after
+    // the page has been staged/committed: a surface that recomposes on the
+    // announcement must find the NEW page already in place, or it caches the old
+    // page's composition under the new page's key and stays one page behind
+    // forever (exactly what the wall did — see the call sites).
+    void announceReadingPage();
+    int readingPageAnnounced_ = -1;
     void applyReadingScroll(qreal lines);
     void animateReadingScroll(qreal from, qreal to);
     // Settles a page change a landing step owes (readingRebaseSlide_), the
@@ -841,6 +1017,57 @@ private:
     // painted — rather than adding its own cost to that press's response.
     void prewarmReadingLines();
     mutable QHash<int, QStringList> readingLinesCache_;
+    // One style's view of the run: its wrapped lines AND where each one starts in
+    // the passage (the character starts that make the offset style-independent).
+    struct StyleRunLines {
+        QStringList lines;
+        QVector<int> charStarts;
+    };
+    // readingRunLinesForStyle's own answers, keyed by (style, page whose box is
+    // used, the run's text). The key IS the content, so nothing invalidates it.
+    mutable QHash<QString, StyleRunLines> readingRunLinesCache_;
+    // The cached entry for a style, computing it on a miss. styleRunLines is this
+    // on the run being drawn; styleRunLinesForText asks about another passage text
+    // (the one a window move is ABOUT to install — see rebuildReadingRun).
+    const StyleRunLines &styleRunLines(const QString &styleId) const;
+    const StyleRunLines &styleRunLinesForText(const QString &styleId, const QString &text) const;
+    // ---- THE STEP'S UNIT IS THE PASSAGE'S OWN LINE -------------------------
+    //
+    // A page's line count has TWO honest answers: the lines its text takes at the
+    // size IT is fitted to (readingLinesAt — the page as the design draws it alone),
+    // and the lines those same words take in the PASSAGE, which is laid out as one
+    // column and therefore at one fitted size for the whole run. The step moves
+    // readingScroll_, which is an index into the passage's table, so only the second
+    // answer keeps its arithmetic and the drawn words in step. Measured on a real
+    // walk (ReadRunShape): the per-page counts said 28 lines where the passage had
+    // 17 for the same seven pages — the step was walking a coordinate 1.6x too large,
+    // which is why the words stopped tracking the keys after a few pages.
+    //
+    // Both maps are rebuilt with the run and are empty when there is no run (the
+    // fallback is the page's own count, which is all a pick with one page has).
+    QHash<int, int> readingRunPageStart_;   // page index -> its text's char offset in the run
+    QHash<int, int> readingRunPageLines_;   // page index -> its lines in the passage's table
+    // THE WALK'S ONE TYPE SIZE PER STYLE (see styleRunLinesForText): solved by the
+    // first page the passage was measured on and held for the rest of the walk, so a
+    // page turn cannot re-flow the column. Cleared by resetReadingRun (a new pick, or
+    // a style change — a new column solves its own size).
+    mutable QHash<QString, double> readingRunSizeForStyle_;
+    // The step's answer for one page (see above): the passage's count when the page
+    // is in the run, the page's own count otherwise.
+    int readingPageLineCount(int index) const;
+    // The characters of the pages in [from, to) as the run's own join counts them
+    // (a non-empty page plus its break) — how readingRunCharBase_ is moved when the
+    // run's window slides, and computed from scratch for a fresh run.
+    int readingCharSpan(int from, int to) const;
+    // The character starts of one style's run lines — the table readingLineForStyle
+    // maps through. Shared with readingRunLineStarts (the QML side of it).
+    QVector<int> readingRunCharStarts(const QString &styleId) const
+    {
+        return styleRunLines(styleId).charStarts;
+    }
+    // The reference-grid line number turned into the passage's character offset
+    // (plus the fraction of the move in flight) — see applyReadingScroll.
+    qreal readingCharForScroll(qreal lines) const;
 
     // ---- Clear all's undo (see clearAll/restoreCleared) -------------------
     // A plain snapshot of each content layer at the moment Clear all ran.
