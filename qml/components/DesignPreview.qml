@@ -105,8 +105,16 @@ Item {
     // so both are printed together, here, for the style this surface draws at.
     // (Information level, like the ReadRun/LineStep diagnostics beside it.)
     property int readingDrawnLines: -1
+    // ...and WHICH box it laid that column out in, in stage units: two surfaces of
+    // one style can hold the passage in different blocks (the reading block is the
+    // longest TEXT, and a fill-built page can make a different block longest), and
+    // the table can only be measured in one of them.
+    property real readingDrawnBoxW: 0
+    property real readingDrawnBoxH: 0
     function noteReadingDrawn(flow, block) {
         readingDrawnLines = flow.lineCount
+        readingDrawnBoxW = block.width
+        readingDrawnBoxH = block.height
         if (typeof EngineBridge === "undefined")
             return
         const style = String(root.readingStyleId)
@@ -122,7 +130,7 @@ Item {
             + " svcSize=" + Number(svcSize).toFixed(2)
             + " box=" + block.width + "x" + block.height
             + " pageFit=" + Number(block.fitAnswer).toFixed(2)
-            + " pitch=" + Number(block.flowPitch).toFixed(2)
+            + " pitch=" + Number(block.linePitch).toFixed(2)
             + " chars=" + flow.text.length)
     }
     // How long that text is, so a delegate can tell whether IT is the reading
@@ -159,6 +167,32 @@ Item {
                 longest = length
         }
         return longest
+    }
+    // WHICH BLOCK OWNS THE PASSAGE — the FIRST of the longest-text blocks.
+    //
+    // "the longest text" is not unique on a fill-built page: the same paragraph
+    // arrives in the content slot AND in a band (measured on a real walk — one
+    // tile reported laying the passage out in 754x124 while drawing it in 150x42,
+    // 39 lines against 271), and a `length === stepTextLength` test then marks BOTH
+    // as the reading block. Two columns scroll in two different boxes, each reports
+    // its own size and box to the service, and which one the eye (and the harness)
+    // reads flips between them — the reported "this is not how the template is
+    // defined" and the un-fixable grid mismatch, because ONE style can only be
+    // measured in ONE box. The passage belongs in exactly one box, so the first
+    // such block owns it.
+    readonly property int readingBlockIndex: {
+        const bs = root.blocks !== undefined && root.blocks !== null ? root.blocks : []
+        const longest = root.stepTextLength
+        if (longest <= 0)
+            return -1
+        for (let i = 0; i < bs.length; ++i) {
+            const b = bs[i]
+            if (!b || (b.kind !== undefined && b.kind !== "text"))
+                continue
+            if (String(b.text ?? "").length === longest)
+                return i
+        }
+        return -1
     }
     // NO CLOCK AND NO OVERLAY HERE ANY MORE. The move used to be played by a
     // second copy of the words on top of the picture (an old-window snapshot
@@ -279,6 +313,7 @@ Item {
                 readonly property bool readingBlock: el.kind === "text"
                     && String(modelData.text ?? "").length > 0
                     && String(modelData.text ?? "").length === root.stepTextLength
+                    && el.index === root.readingBlockIndex
                 // DOES THIS BLOCK DRAW THE READING PASSAGE? Only the reading
                 // block of a host that follows the step (the Main Output tile),
                 // and only while the service has a passage for it. Everything
@@ -312,42 +347,12 @@ Item {
                 // tested and confirmed independent of ReferencePane's own
                 // selector: "it's still refreshing... not continuing the
                 // flow").
-                // ...and when the SIZE settles — the walk's own number can land after
-                // this frame's first layout, and a log taken only at completion would
-                // then keep the fallback size's wrap and read as a mismatch the
-                // picture does not have.
-                onFlowSizeChanged: root.noteReadingDrawn(flowText, el)
                 onDrawsFlowChanged: EngineBridge.log("info", "DrawsFlowChanged",
                     "drawsFlow=" + el.drawsFlow
                     + " readingBlock=" + el.readingBlock
                     + " modelText=" + String(el.modelData.text ?? "").slice(0, 24)
                     + " flowText=" + String(LiveOutputService.readingFlowText ?? "").slice(0, 24)
                     + " fitAnswer=" + el.fitAnswer)
-                // ---- THE WALK'S ONE TYPE SIZE, FOR THE COLUMN THAT DRAWS IT ---
-                //
-                // The passage is laid out ONCE by the service, at one size per
-                // style (readingRunSizeForStyle), and every step is a LINE of that
-                // one table. This column must therefore be drawn at that same size:
-                // the page's own fit (fitAnswer above) is solved per page from that
-                // page's text, so it drifts from the walk's number as pages of
-                // different lengths go by — and a column drawn at a different size
-                // than the table holds different lines, which is the whole of the
-                // reported cross-output defect (measured: the table held 45 lines
-                // where the drawn column had 75, so the words moved 0.6 of a line
-                // per press and the last 30 lines never came into view).
-                //
-                // Falls back to the page's own fit while the walk has not measured
-                // this style yet (the first frame of a fresh pick).
-                readonly property real flowSize: {
-                    void LiveOutputService.readingFlowText
-                    const walk = Number(LiveOutputService.readingRunSizeForStyle(root.readingStyleId))
-                    return walk > 0 ? walk : el.fitAnswer
-                }
-                // ...and the pitch it travels by, measured at THAT size: the page's
-                // linePitch below is the page's own fit's line box, and using it
-                // with the walk's size is the same ratio error in the pixels.
-                readonly property real flowLineHeight: MetadataFields.lineHeightWithGap(el.meta, flowLineBox.contentHeight)
-                readonly property real flowPitch: flowLineBox.contentHeight * el.flowLineHeight
                 // THE PAGE'S TOP EDGE — where the page's first line sits, from
                 // the block's own vertical alignment. The passage begins exactly
                 // there, so at offset 0 it draws where the page drew.
@@ -417,13 +422,26 @@ Item {
                 // What the latched size is keyed by: the BOX and the TYPE, never
                 // the text — the text is exactly what changes at a page commit,
                 // and re-solving for it is the refresh this whole block prevents.
-                readonly property string readingFitKey: [el.width, el.height,
-                                                         el.style.padding ?? 0,
-                                                         el.meta.fontSize ?? 16,
-                                                         el.meta.fontFamily ?? "",
-                                                         MetadataFields.lineHeight(el.meta),
-                                                         MetadataFields.lineSpacing(el.meta),
-                                                         MetadataFields.letterSpacing(el.meta)].join("|")
+                // WHAT THE LATCH IS KEYED BY: the BOX and the TYPE — never the text,
+                // which is exactly what changes at a page commit.
+                //
+                // ...and never the PAGE'S OWN FONT SIZE while a walk is drawing this
+                // block: a fill-built page (The Table, the Bible) carries its size per
+                // page — measured on a real walk: 45.84, 43.90, 42.93 and 40.99 in one
+                // passage — and a key that includes it lets every page re-solve the
+                // column, which is both the pop this latch exists to stop and a
+                // different line table under the reader (the table is measured at ONE
+                // size; a column drawn at four is four grids).
+                readonly property string readingFitKey: {
+                    const parts = [el.width, el.height, el.style.padding ?? 0,
+                                   el.meta.fontFamily ?? "",
+                                   MetadataFields.lineHeight(el.meta),
+                                   MetadataFields.lineSpacing(el.meta),
+                                   MetadataFields.letterSpacing(el.meta)]
+                    if (!(el.readingBlock && root.animateLineSteps))
+                        parts.push(el.meta.fontSize ?? 16)
+                    return parts.join("|")
+                }
                 readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
                                                   el.meta.fontSize ?? 16,
                                                   MetadataFields.lineHeight(el.meta),
@@ -500,9 +518,16 @@ Item {
                             && root.readingFitKey === el.readingFitKey) {
                         readingFitHeld = root.readingFitSize
                         fitProbe = readingFitHeld
-                        held = fitMeasure.contentWidth <= bw && fitMeasure.contentHeight <= bh
-                        if (!held)
-                            hi = readingFitHeld
+                        // HELD MEANS HELD. The walk's one type size IS the first page's
+                        // own solve, and the old "unless this page genuinely does not fit"
+                        // escape re-solved a longer page smaller — which re-flows the
+                        // column mid-walk, i.e. re-measures the line table under the
+                        // reader: the size the table was measured at changed, so the
+                        // drawn column and the table became different grids again
+                        // (measured: 45.84 → 40.99 across one walk, pageFit against
+                        // table mismatches of 3 lines). A longer page's extra lines
+                        // simply scroll through the box, which is what a passage is.
+                        held = true
                     }
                     if (tokenOrZero) {
                         lo = el.meta.fontSize ?? 16
@@ -524,6 +549,20 @@ Item {
                     if (hostAlive && el.readingBlock && root.animateLineSteps) {
                         root.readingFitKey = el.readingFitKey
                         root.readingFitSize = fitAnswer
+                        // THE NUMBER THE PASSAGE'S TABLE MUST BE MEASURED AT, handed to
+                        // the service that owns that table. This surface is the one
+                        // that DRAWS the column, so its solve is the authority: the
+                        // service re-deriving the size from its own solver put the
+                        // type 10% larger than the design's page (measured 44.48 px
+                        // drawn against a 40 px page) and left the table a different
+                        // grid from the words on screen.
+                        // ...with the BOX it draws in, because the service's own
+                        // composition can pick a different block for the same style
+                        // (measured: 150x41 against 754x124 for one output) and a
+                        // wrap measured in the wrong box counts different lines.
+                        LiveOutputService.noteReadingFit(root.readingStyleId, fitAnswer,
+                                                         el.width, el.height,
+                                                         el.style.padding ?? 0)
                     }
                     fitSolving = false
                 }
@@ -688,10 +727,8 @@ Item {
                         // two outputs styled at different sizes used to scroll the
                         // same LINE number, which is a different word in each — one
                         // showed the passage's next sentence while the other was
-                        // still on the previous one. The pitch is the FLOW's own
-                        // (el.flowPitch), because the column is drawn at the walk's
-                        // size, not at this page's own fit.
-                        y: -root.stepLine * el.flowPitch
+                        // still on the previous one.
+                        y: -root.stepLine * el.linePitch
                         width: parent.width
                         height: flowText.implicitHeight
 
@@ -704,22 +741,6 @@ Item {
                             textCase: el.meta.textCase ?? "none"
                         }
 
-                        // The flow's own line box, measured at the size the flow is
-                        // DRAWN at (see el.flowSize) — the number the pitch above
-                        // multiplies.
-                        Text {
-                            id: flowLineBox
-                            visible: false
-                            text: "Xg"
-                            font.family: fitText.font.family
-                            font.pixelSize: el.flowSize
-                            font.weight: fitText.font.weight
-                            font.italic: fitText.font.italic
-                            font.letterSpacing: fitText.font.letterSpacing
-                            font.wordSpacing: fitText.font.wordSpacing
-                            lineHeight: 1
-                            lineHeightMode: Text.ProportionalHeight
-                        }
                         Text {
                             id: flowText
                             width: parent.width
@@ -734,19 +755,7 @@ Item {
                             // the string is longer, so the page's own lines land
                             // exactly where they did and the lines below it are the
                             // ones that scroll into view.
-                            // EVERYTHING ABOUT THE TYPE IS THE PAGE'S (family,
-                            // weight, spacing, case) EXCEPT THE SIZE: that is the
-                            // walk's own held number, so the drawn column and the
-                            // table the step converts through are one grid.
-                            font.family: fitText.font.family
-                            font.weight: fitText.font.weight
-                            font.italic: fitText.font.italic
-                            font.underline: fitText.font.underline
-                            font.strikeout: fitText.font.strikeout
-                            font.capitalization: fitText.font.capitalization
-                            font.letterSpacing: fitText.font.letterSpacing
-                            font.wordSpacing: fitText.font.wordSpacing
-                            font.pixelSize: el.flowSize
+                            font: fitText.font
                             fontSizeMode: Text.FixedSize
                             color: fitText.color
                             leftPadding: fitText.leftPadding
@@ -764,7 +773,7 @@ Item {
                             // each authored paragraph as one unbroken line clipped
                             // at the box edge.
                             wrapMode: fitText.wrapMode
-                            lineHeight: el.flowLineHeight
+                            lineHeight: fitText.lineHeight
                             lineHeightMode: fitText.lineHeightMode
                             // WHAT THIS COLUMN REALLY BECAME (see noteReadingDrawn):
                             // the drawn line count against the service table's, and

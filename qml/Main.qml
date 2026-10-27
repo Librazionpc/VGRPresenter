@@ -1840,7 +1840,8 @@ ApplicationWindow {
                      + " freshText=" + JSON.stringify(freshText.slice(0, 28))
                      + " style=" + String(tile.styleId).slice(0, 8)
                      + " glines=" + view.lines
-                     + " drawn=" + Number(tile.readingDrawnLines) + " gline=" + Number(view.line).toFixed(2)
+                     + " drawn=" + Number(tile.readingDrawnLines) + " at=" + String(tile.readingDrawnAt)
+                     + " gline=" + Number(view.line).toFixed(2)
                      + " gchar=" + view.char
                      + " gpchar=" + view.pchar
                      + " gspan=" + view.span

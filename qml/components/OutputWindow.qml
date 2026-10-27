@@ -420,7 +420,8 @@ Window {
         // makes: the shared position is a character offset, and the line it names
         // is this style's own (see DesignPreview.stepLine). The engine raster of
         // this very output does the same arithmetic in C++.
-        readingStyleId: root.outputStyleId
+        readingStyleId: root.outputStyleId !== undefined && root.outputStyleId !== null
+                        ? String(root.outputStyleId) : ""
         showBindPlaceholders: false
         showCheckerboard: false
         backgroundImage: root.onAirSlide.styleImagePainted === true

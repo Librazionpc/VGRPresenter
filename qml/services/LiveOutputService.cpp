@@ -1007,6 +1007,26 @@ static double blockPadding(const QVariantMap &block)
 // THE FONT A BLOCK DRAWS WITH, at an explicit pixel size: the same family,
 // weight, italic, letter and word spacing the renderer uses, so the line breaks
 // computed here are the breaks on screen.
+// THE WEIGHT QML DRAWS WITH — DesignPreview's own rule, mirrored exactly:
+// `font.weight: meta.bold ? Bold : fontWeight Regular/SemiBold/Bold, ELSE Medium`.
+// A block that sets neither (the common case) is drawn at Medium, so measuring it
+// at QFont's Normal default is a different face's advances on any family that has
+// both — and a different advance is a different wrap, i.e. a table that does not
+// describe the drawn column.
+static QFont::Weight metaFontWeight(const QVariantMap &meta)
+{
+    if (meta.value(QStringLiteral("bold")).toBool())
+        return QFont::Bold;
+    const QString weight = meta.value(QStringLiteral("fontWeight")).toString();
+    if (weight == QLatin1String("Regular"))
+        return QFont::Normal;
+    if (weight == QLatin1String("SemiBold"))
+        return QFont::DemiBold;
+    if (weight == QLatin1String("Bold"))
+        return QFont::Bold;
+    return QFont::Medium;
+}
+
 static QFont blockFontAt(const QVariantMap &block, double pixelSize)
 {
     const QVariantMap meta = block.value(QStringLiteral("meta")).toMap();
@@ -1019,8 +1039,12 @@ static QFont blockFontAt(const QVariantMap &block, double pixelSize)
                                .resolve(meta.value(QStringLiteral("fontFamily")).toString());
     if (!family.isEmpty())
         font.setFamily(family);
-    font.setPixelSize(qMax(1, qRound(pixelSize)));
-    font.setBold(meta.value(QStringLiteral("bold")).toBool());
+    // TRUNCATED, not rounded: QML's own `font.pixelSize` setter stores the integer
+    // part of the number it is handed (measured: a fit answer of 44.48 is drawn at
+    // 44 px while a rounded twin measures it at 45 — a whole pixel of difference in
+    // the size every advance is computed from).
+    font.setPixelSize(qMax(1, static_cast<int>(pixelSize)));
+    font.setWeight(metaFontWeight(meta));
     font.setItalic(meta.value(QStringLiteral("italic")).toBool());
     const double spacing = meta.value(QStringLiteral("letterSpacing")).toDouble();
     if (!qFuzzyIsNull(spacing))
@@ -1055,8 +1079,15 @@ static QVector<VisualSpan> layoutSpansAt(const QString &text, const QVariantMap 
         }
         QTextLayout layout(paragraph, font);
         QTextOption option;
+        // THE BREAK RULE QML USES. `Text.WordWrap` is Qt's
+        // WrapAtWordBoundaryOrAnywhere — a word too long for the line is broken
+        // mid-word rather than left to overflow — while plain WordWrap only breaks
+        // between words. On a passage with long words the two produce a different
+        // line count for the same text and width (measured: 69 lines against the
+        // 75 the drawn column had), so the table would sit on different words from
+        // the picture.
         option.setWrapMode(oneLine || width <= 0.0 ? QTextOption::NoWrap
-                                                   : QTextOption::WordWrap);
+                                                   : QTextOption::WrapAtWordBoundaryOrAnywhere);
         layout.setTextOption(option);
         layout.beginLayout();
         while (true) {
@@ -1550,17 +1581,52 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     const QString key = styleId + QLatin1Char('#') + QString::number(lineSlideIndex_)
                         + QLatin1Char('#') + QString::number(qHash(text), 16);
     const auto cached = readingRunLinesCache_.constFind(key);
-    if (cached != readingRunLinesCache_.constEnd())
+    if (cached != readingRunLinesCache_.constEnd()) {
+        // Touch: move to most-recently-used so eviction below takes the
+        // table that has actually gone cold, not just whichever happened
+        // to be inserted first.
+        readingRunLinesLru_.removeOne(key);
+        readingRunLinesLru_.append(key);
         return cached.value();
+    }
     const QVariantMap page = lineSetRaw_.at(lineSlideIndex_).toMap();
-    const QVariantMap measured = previewWithStyle(page, styleId);
+    // WHICH SLIDE'S COMPOSITION THE BOX IS MEASURED ON: THE ONE THE SURFACES DRAW.
+    //
+    // A surface composes the STAGED slide — DesignPreview's host passes
+    // previewWithStyle(stagedSlideRaw, style), and the output window does the same —
+    // while this table used to compose the pick's RAW page. For the two styles on the
+    // reported book those two compositions put the passage in DIFFERENT blocks:
+    // measured, one tile drew its column in a 754x56 band while this table was laid
+    // out in a 754x372 content area, and 150x42 against 754x124 for the other output.
+    // The wrap width IS the box, so the table described a column nobody draws (64
+    // lines against 66, 271 against 39, on every press). The staged slide is what is
+    // on screen; a pick with nothing staged falls back to the raw page.
+    const QVariantMap staged = stagedSlideRaw();
+    const QVariantMap source = !staged.isEmpty() ? staged : page;
+    const QVariantMap measured = previewWithStyle(source, styleId);
     // THE BLOCK THE COLUMN IS DRAWN IN, not the largest one by area: the surface
     // lays the passage out in this block's box at THIS block's fitted size, and a
     // table measured anywhere else is a different grid from the words on screen
     // (see readingBlockOf for the 45-vs-75-line measurement that proved it).
     const QVariantMap readingBlock = readingBlockOf(measured);
-    const QVariantMap box = readingBlock.isEmpty() ? readingBoxForWrapping(measured)
-                                                   : readingBlock;
+    QVariantMap box = readingBlock.isEmpty() ? readingBoxForWrapping(measured)
+                                             : readingBlock;
+    // THE BOX THE SURFACE DRAWS THE COLUMN IN, when it has told us (see
+    // noteReadingFit). The two sides can pick different blocks out of the same
+    // style — measured 150x41 on a surface against 754x124 here — and the wrap
+    // width IS the box, so a table measured in the wrong one counts different
+    // lines from the picture (271 against 39 on that same output).
+    const auto reported = readingFitReported_.constFind(styleId);
+    if (!box.isEmpty() && reported != readingFitReported_.constEnd()
+            && reported->width > 0.0 && reported->height > 0.0) {
+        QVariantMap surfaceBox = box;
+        surfaceBox.insert(QStringLiteral("width"), reported->width);
+        surfaceBox.insert(QStringLiteral("height"), reported->height);
+        QVariantMap style = box.value(QStringLiteral("style")).toMap();
+        style.insert(QStringLiteral("padding"), reported->pad);
+        surfaceBox.insert(QStringLiteral("style"), style);
+        box = surfaceBox;
+    }
     // AT THE SIZE THE PAGE IS DRAWN AT, not at a size fitted for the PASSAGE.
     //
     // visualLinesOfText sizes a text to fit the box it is given, and a nine-page
@@ -1581,7 +1647,14 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     // page turn. One walk is one column, so the size the walk's first page solved is
     // held for the rest — per STYLE, because each output draws the passage at its own
     // size and that is exactly what the per-surface conversion exists for.
-    double pageSize = readingRunSizeForStyle_.value(styleId, 0.0);
+    // THE SIZE THE SURFACE DRAWS AT WINS (see noteReadingFit): the block is drawn
+    // by a QML Text whose solver is the design's own, and a table measured at any
+    // other number is a different grid from the picture — the whole defect this
+    // area keeps producing. The service's own solver is the fallback for a style no
+    // surface has reported (an engine-only read, the very first frame).
+    double pageSize = (reported != readingFitReported_.constEnd()) ? reported->size : 0.0;
+    if (pageSize <= 0.0)
+        pageSize = readingRunSizeForStyle_.value(styleId, 0.0);
     if (pageSize <= 0.0) {
         // FITTED FROM THE BLOCK'S OWN TEXT, which is what the surface's own fit
         // solver is handed (DesignPreview's fitText) — not the page's whole body.
@@ -1619,14 +1692,105 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
         entry.lines.append(text.mid(span.start, span.end - span.start));
         entry.charStarts.append(span.start);
     }
-    if (readingRunLinesCache_.size() > 16)
-        readingRunLinesCache_.clear();
+    // Evict only the single least-recently-used table, not the whole cache:
+    // this function is read once per style per animation frame while a page
+    // is on screen, so with 2+ outputs/styles live a few page turns fill the
+    // table, and a full clear() here used to make the very next per-frame
+    // read pay this function's own expensive re-measure synchronously,
+    // mid-glide — the reported "scrolls well for the first few pages, then
+    // freezes". Keeping the rest of the table warm removes that cliff.
+    constexpr int kReadingRunLinesCap = 16;
+    while (readingRunLinesCache_.size() >= kReadingRunLinesCap && !readingRunLinesLru_.isEmpty())
+        readingRunLinesCache_.remove(readingRunLinesLru_.takeFirst());
+    readingRunLinesLru_.append(key);
     return *readingRunLinesCache_.insert(key, entry);
 }
 
 QStringList LiveOutputService::readingRunLinesForStyle(const QString &styleId) const
 {
     return styleRunLines(styleId).lines;
+}
+
+// THE DRAWN COLUMN'S OWN TYPE SIZE, reported by the surface that draws it (see
+// DesignPreview's noteReadingFit call). This is the authority the table is measured
+// at: the surface's solver is the one the design's page is actually laid out with,
+// so [re-]solving it here only ever produced a number the picture does not have
+// (measured 44.48 px drawn against the page's own 40 px, and a 69-line table
+// against the 75 lines on screen).
+//
+// A CHANGED NUMBER IS A NEW COLUMN: the cached line table for that style belongs to
+// the old one and is dropped, and — when the style is the REFERENCE (active) grid,
+// which every base/offset number in this service is counted in — the run is
+// re-seated so the walk's arithmetic moves to the new measurement at once.
+void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
+                                      qreal boxWidth, qreal boxHeight, qreal pad)
+{
+    if (size <= 0.0)
+        return;
+    // A `required property string` bound to a missing/transient model role
+    // coerces JS `undefined` into the literal STRING "undefined" before any
+    // QML-side `!== undefined` guard ever sees it (OutputMonitorTile's own
+    // readingStyleId binding comment already names this exact failure —
+    // measured live: style='undefine' in the log). Caught here, the one
+    // place every style id this service is handed funnels through, rather
+    // than at each binding that can independently fail to catch it.
+    const QString styleId = (rawStyleId == QLatin1String("undefined")
+                              || rawStyleId == QLatin1String("null"))
+        ? QString() : rawStyleId;
+    ReadingFit report;
+    report.size = size;
+    report.width = boxWidth;
+    report.height = boxHeight;
+    report.pad = pad;
+    const auto previous = readingFitReported_.constFind(styleId);
+    if (previous != readingFitReported_.constEnd()
+            && qFuzzyCompare(previous->size + 1.0, report.size + 1.0)
+            && qFuzzyCompare(previous->width + 1.0, report.width + 1.0)
+            && qFuzzyCompare(previous->pad + 1.0, report.pad + 1.0))
+        return;                       // the same column: nothing to re-measure
+    // Captured before the insert below, which can rehash the table and
+    // invalidate `previous` — used only for the ReadFitNote diagnostic.
+    const double previousSize = (previous != readingFitReported_.constEnd()) ? previous->size : 0.0;
+    readingFitReported_.insert(styleId, report);
+    readingRunSizeForStyle_.remove(styleId);
+    const QString prefix = styleId + QLatin1Char('#');
+    for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
+        if (it.key().startsWith(prefix))
+            it = readingRunLinesCache_.erase(it);
+        else
+            ++it;
+    }
+    // Keep the LRU list's keys matching the cache's exactly — a key left
+    // behind here would sit in readingRunLinesLru_ pointing at an entry
+    // that no longer exists, and get "evicted" for free on the next insert
+    // instead of the table that is actually least-recently-used.
+    readingRunLinesLru_.removeIf([&prefix](const QString &k) { return k.startsWith(prefix); });
+    const auto *model = OutputListModel::instance();
+    const QString reference = model ? model->activeStyleId() : QString();
+    const bool resets = (styleId == reference);
+    // ONE LINE PER CALL THAT ACTUALLY CHANGES SOMETHING (a no-op return above
+    // never reaches here) — the earlier calls in this run are silent, so a
+    // mid-walk glitch with no other explanation is this function's own
+    // resetReadingRun()/applyReadingRestage() cascade, and this is the only
+    // way to see it fire without guessing from the side effects.
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadFitNote"),
+                        QStringLiteral("style='%1' previousSize=%2 reportedSize=%3 "
+                                       "box=%4x%5 pad=%6 reference='%7' resetsRun=%8")
+                            .arg(styleId.isEmpty() ? QStringLiteral("(ref)") : styleId.left(8))
+                            .arg(previousSize, 0, 'f', 2)
+                            .arg(report.size, 0, 'f', 2)
+                            .arg(report.width, 0, 'f', 2)
+                            .arg(report.height, 0, 'f', 2)
+                            .arg(report.pad, 0, 'f', 2)
+                            .arg(reference.isEmpty() ? QStringLiteral("(ref)") : reference.left(8))
+                            .arg(resets ? QStringLiteral("YES") : QStringLiteral("no")));
+    if (resets) {
+        // The grid every position in this file is counted in has changed: the run's
+        // page counts, bases and pick base are all derived from it.
+        resetReadingRun();
+        readingPickBase_ = 0;
+        applyReadingRestage();
+    }
 }
 
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
@@ -2154,12 +2318,48 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
     readingFlowText_ = readingRunText_;
     readingScroll_ = readingRunBaseLine_ + lineOffset_;
     const bool flowChanged = readingFlowText_ != previousFlow;
+    // THE RESULT, every time this runs — not just when LineStep calls it. A
+    // call from noteReadingFit's reset cascade, or from a fresh pick, lands
+    // here with no preceding LineStep line, so without this the glide this
+    // produced is invisible: readingScroll jumping with no LineStep right
+    // before it IS the trace of an unprompted restage, which is otherwise
+    // only inferable from a side effect (ReadFit re-firing) three calls away.
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadRestage"),
+                        QStringLiteral("slide=%1 base=%2 lineOffset=%3 scroll=%4 "
+                                       "flowChanged=%5 commitPage=%6 live=%7")
+                            .arg(lineSlideIndex_)
+                            .arg(static_cast<double>(readingRunBaseLine_), 0, 'f', 2)
+                            .arg(static_cast<double>(lineOffset_), 0, 'f', 2)
+                            .arg(readingScroll_, 0, 'f', 2)
+                            .arg(flowChanged ? QStringLiteral("yes") : QStringLiteral("no"))
+                            .arg(commitPage ? QStringLiteral("yes") : QStringLiteral("no"))
+                            .arg(live_ ? QStringLiteral("yes") : QStringLiteral("no")));
     // PREWARM THE NEIGHBOURHOOD, queued for the NEXT event-loop turn (after
     // this call's own step has already drawn) — see prewarmReadingLines's
     // own header comment. Every page the stepper can land on next or come
     // back to runs through here, so one call site covers forward and
     // backward both.
     QTimer::singleShot(0, this, &LiveOutputService::prewarmReadingLines);
+    // SETTLED HERE, BUT NOT ANNOUNCED YET — see the emit sites below for why
+    // the split. OutputMonitorTile's onAirSlide memoizes its composed blocks
+    // per page, keyed in part on readingPage precisely so a step inside a
+    // page does not recompose it. That key is exactly the trap if BOTH
+    // halves of "which page, and what its raw blocks are" are not already
+    // final by the time ANY signal touching this memo fires: announcing the
+    // page change here but emitting it immediately (the first attempt at
+    // this fix) moved readingPage to the NEW page before stagedSlidesRaw_/
+    // onAirSlideRaw_ below had been reassigned to match — trading the old
+    // race (new raw blocks, stale page key) for its mirror (new page key,
+    // stale raw blocks). Settling the VALUE now, with the EMIT held until
+    // the raw data is also final (see emit readingPageChanged() below), is
+    // what actually makes every consumer's first look see a page and its
+    // blocks that agree (reported: "the template expanding to its normal
+    // defined size and then contracting back" / "1-2 to 1-3 it flicked",
+    // recurring on every later page turn once the memo had a real OLD/NEW
+    // page pair to be wrong about — not on the very first commit, which had
+    // no prior page to be stale against).
+    const bool pageChanged = (readingPageAnnounced_ != lineSlideIndex_);
+    readingPageAnnounced_ = lineSlideIndex_;
     // EMITTED LAST, after stagedChanged/onAirChanged below — not alongside
     // them. A reader gating on "does the flow text start with THIS block's
     // own text" (DesignPreview's el.drawsFlow — its guard against drawing a
@@ -2184,7 +2384,8 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
                 emit readingScrollChanged();   // no block change this time: safe as-is
             return;
         }
-        // (The page change is announced at the END of this branch — see there.)
+        // (readingPageAnnounced_ was already settled above; the announcing
+        // emit itself waits until the raw data below is also final.)
         QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
         // The two fields the engine scrolls by (Slide::flowText / Slide::flowChar).
         shown[QStringLiteral("flowText")] = readingFlowText_;
@@ -2196,9 +2397,14 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
         stagedSlidesRaw_.clear();
         stagedSlide_ = QVariantMap{};
         emit stagedChanged();
+        // Held until here — readingPageAnnounced_ settled above, but the raw
+        // data a reader's own re-evaluation would compose against (onAirSlideRaw_,
+        // set inside goLiveWithSlides above) only became final just now, so this
+        // is the earliest point both halves of the memo key agree.
+        if (pageChanged)
+            emit readingPageChanged();
         if (flowChanged)
             emit readingScrollChanged();
-        announceReadingPage();
         return;
     }
     // OFF AIR the staged copy has to carry them: it is what GO LIVE will send.
@@ -2209,9 +2415,12 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
     stagedSlidesRaw_ = QVariantList{shown};
     stagedSlide_ = previewWithActiveStyle(shown);
     emit stagedChanged();
+    // Same reasoning as the live branch above: stagedSlidesRaw_ is only final
+    // as of the assignment just above, so readingPageChanged waits for here.
+    if (pageChanged)
+        emit readingPageChanged();
     if (flowChanged)
         emit readingScrollChanged();
-    announceReadingPage();
 }
 
 bool LiveOutputService::lineStep(int direction)

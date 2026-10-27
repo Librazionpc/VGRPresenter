@@ -47,6 +47,19 @@
 #          showing while the right has finished" report, measured instead of
 #          eyeballed.
 #
+#        * THE COLUMN AND THE TABLE ARE ONE GRID: each tile reports the line count
+#          of the passage column it really laid out (`drawn`) beside the line count
+#          of the table LiveOutputService converts the reading position through
+#          (`glines`). They must be equal — the step moves an index into that
+#          table while the words are drawn in lines of their own. Measured before
+#          this check existed, on the reported book: a tile drew 75 lines while the
+#          table held 45, so each press moved the words 0.6 of a line and the last
+#          30 lines never came into view.
+#
+# The walk REWINDS to the pick's first line before pressing (lineStep(-1) until it
+# refuses), so the boundary sequence does not depend on which paragraph this
+# machine's pane had selected — and the backward path is exercised too.
+#
 # Usage:  bash tools/selftest/run_table_walk_test.sh [wait-seconds] [query]
 # Needs tools/agent_env.sh (this script sources it).
 # ============================================================================
@@ -403,8 +416,15 @@ if [ "$TILE_READS" -eq 0 ]; then
     echo "TABLE_WALK: FAIL no-wall — nothing read the monitor tiles"
     exit 1
 fi
-if [ "$PARA_MOVES" -lt 2 ]; then
-    echo "TABLE_WALK: FAIL no-paragraph-advance ($PARA_MOVES) — the walk never crossed several paragraph boundaries"
+# ONE paragraph boundary is enough here, and the query is why: the default book
+# (47-1100X) is a short passage that spans Fellowship 1 and 2 — two paragraphs — so
+# the pane's own reference number advances exactly once over any full walk of it.
+# The check that made this number matter is the PER-PRESS one above ("the pane moved
+# to paragraph N but the wall still draws the old paragraph's words"); this gate only
+# says the walk reached the boundary at all. A longer query still exercises the
+# several-boundary case: run it with a multi-section passage and PARA_MOVES follows.
+if [ "$PARA_MOVES" -lt 1 ]; then
+    echo "TABLE_WALK: FAIL no-paragraph-advance ($PARA_MOVES) — the walk never crossed a paragraph boundary"
     exit 1
 fi
 if [ "$TWO_STYLE_PRESSES" -lt 15 ]; then

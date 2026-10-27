@@ -171,6 +171,9 @@ Rectangle {
     // INDEX into that table while the words are drawn in lines of their own, so
     // the two numbers have to be equal; -1 while no walk is drawing here.
     readonly property int readingDrawnLines: contentPreview.readingDrawnLines
+    readonly property string readingDrawnAt: String(root.objectName) + "@"
+                                            + Number(contentPreview.readingDrawnBoxW).toFixed(0)
+                                            + "x" + Number(contentPreview.readingDrawnBoxH).toFixed(0)
 
     // ---- What the feed does NOT bury: the backdrop pass ------------------
     // WHICH of the on-air blocks the ENGINE paints under the compositor's video
@@ -754,7 +757,11 @@ Rectangle {
             // style draws (see DesignPreview.stepLine). Naming the style here is
             // what keeps the two output tiles on the same words when their styles
             // wrap differently.
-            readingStyleId: String(root.styleId)
+            // (an output with no style of its own draws the ACTIVE style, which is
+            // what an empty id means to the service — "undefined" would name a
+            // style of its own and measure the passage a second time for it)
+            readingStyleId: root.styleId !== undefined && root.styleId !== null
+                            ? String(root.styleId) : ""
             // This IS on-air content, never a template/library card — a
             // bound field with nothing to show renders blank, not the raw
             // "{bind}" placeholder syntax (go-live-with-nothing bakes in

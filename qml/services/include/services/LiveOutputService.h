@@ -673,6 +673,20 @@ public:
     // sizes put different sentences at the top of their boxes at the same instant
     // (measured: a line or two apart on a third of the presses).
     Q_INVOKABLE qreal readingLineForStyle(const QString &styleId, qreal charAt) const;
+    // THE TYPE SIZE THE PASSAGE'S TABLE IS MEASURED AT, reported by the surface that
+    // DRAWS the reading column (DesignPreview calls this from its fit solve). The
+    // surface's solver is the design's own, so it is the authority: a table measured
+    // at a size the picture does not have is a different grid from the words on
+    // screen (measured 44.48 px drawn against the page's 40 px, and 69 table lines
+    // against 75 drawn). A changed number for the REFERENCE (active) style re-seats
+    // the walk, because every base and offset in this service is counted in that
+    // grid. Ignored when <= 0 (nothing solved yet).
+    //
+    // The BOX comes with it for the same reason one step further out: the two sides
+    // can pick different blocks out of the same style (measured 150x41 on the surface
+    // against 754x124 here), and the wrap width IS the box.
+    Q_INVOKABLE void noteReadingFit(const QString &styleId, qreal size,
+                                    qreal boxWidth, qreal boxHeight, qreal pad);
     // The character starts of that style's run lines — the table the two functions
     // above read. Exposed for the walk's own diagnostic (and cheap: cached).
     Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
@@ -1032,6 +1046,16 @@ private:
     // readingRunLinesForStyle's own answers, keyed by (style, page whose box is
     // used, the run's text). The key IS the content, so nothing invalidates it.
     mutable QHash<QString, StyleRunLines> readingRunLinesCache_;
+    // LRU ORDER for the cache above, oldest at the front — see
+    // styleRunLinesForText's own comment on why a bare size cap that CLEARS
+    // the whole table on overflow is the wrong shape for a cache read every
+    // animation frame: with 2+ outputs/styles live, a few page turns fill
+    // it, and the clear then makes the very next per-frame read pay a full,
+    // expensive re-measure synchronously, mid-glide — a stall on the step
+    // right after whichever one happened to tip the count over (reported:
+    // "it scrolls well for the first 3... then it freezes"). Evicting just
+    // the one least-recently-used entry keeps the table warm instead.
+    mutable QStringList readingRunLinesLru_;
     // The cached entry for a style, computing it on a miss. styleRunLines is this
     // on the run being drawn; styleRunLinesForText asks about another passage text
     // (the one a window move is ABOUT to install — see rebuildReadingRun).
@@ -1058,6 +1082,16 @@ private:
     // page turn cannot re-flow the column. Cleared by resetReadingRun (a new pick, or
     // a style change — a new column solves its own size).
     mutable QHash<QString, double> readingRunSizeForStyle_;
+    // ...and what the SURFACE reported for that style (see noteReadingFit) — the
+    // size it draws the column at and the box it draws it in — which wins over the
+    // solve above whenever it is present.
+    struct ReadingFit {
+        double size = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+        double pad = 0.0;
+    };
+    mutable QHash<QString, ReadingFit> readingFitReported_;
     // The step's answer for one page (see above): the passage's count when the page
     // is in the run, the page's own count otherwise.
     int readingPageLineCount(int index) const;
