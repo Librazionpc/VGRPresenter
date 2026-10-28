@@ -1624,7 +1624,28 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     // style — measured 150x41 on a surface against 754x124 here — and the wrap
     // width IS the box, so a table measured in the wrong one counts different
     // lines from the picture (271 against 39 on that same output).
-    const auto reported = readingFitReported_.constFind(styleId);
+    // THE REFERENCE GRID IS THE ACTIVE STYLE'S GRID, so an empty style id has to
+    // look its size up under the ACTIVE style — not under "". Every position in
+    // this service is counted in the reference grid, and the surface that draws
+    // THAT column reports at `activeStyleId()` (an output tile names its own style;
+    // the pane's preview draws the active one). Looking up "" found no report at
+    // all, so the table fell back to this file's own solver while the picture was
+    // drawn by QML's — two answers for one box. Measured on the reported click
+    // (engine.log, 16:23:02): ReadingDrawn "drawn=75 table=65 flowPx=45.00
+    // svcSize=39.83 box=754x372 sat=45.84" — a five-per-cent-smaller type wrapped
+    // into six fewer lines, so the step moved through a grid nobody drew and the
+    // column overflowed its box (reported: "the text is overflowing or trying to
+    // scroll").
+    const auto *styleModel = OutputListModel::instance();
+    const QString reportKey = styleId.isEmpty()
+        ? (styleModel ? styleModel->activeStyleId() : QString())
+        : styleId;
+    auto reported = readingFitReported_.constFind(reportKey);
+    // ...and the pane's own preview, which draws the active style with no id of its
+    // own, reports under "" — a valid answer for the same column, so it is the
+    // second choice rather than being ignored.
+    if (reported == readingFitReported_.constEnd() && reportKey != styleId)
+        reported = readingFitReported_.constFind(styleId);
     if (!box.isEmpty() && reported != readingFitReported_.constEnd()
             && reported->width > 0.0 && reported->height > 0.0) {
         QVariantMap surfaceBox = box;
@@ -1662,7 +1683,7 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     // surface has reported (an engine-only read, the very first frame).
     double pageSize = (reported != readingFitReported_.constEnd()) ? reported->size : 0.0;
     if (pageSize <= 0.0)
-        pageSize = readingRunSizeForStyle_.value(styleId, 0.0);
+        pageSize = readingRunSizeForStyle_.value(reportKey, 0.0);
     if (pageSize <= 0.0) {
         // FITTED FROM THE BLOCK'S OWN TEXT, which is what the surface's own fit
         // solver is handed (DesignPreview's fitText) — not the page's whole body.
@@ -1673,9 +1694,32 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
         // size, so the table that positions it has to be measured at that size.
         const QString fitText = readingBlock.isEmpty() ? readingTextOf(page)
                                                        : readingBlock.value(QStringLiteral("text")).toString();
-        pageSize = fittedPixelSize(fitText, box);
+        // THE DECLARED SIZE, DIRECTLY — not fittedPixelSize's bisection (the
+        // engine's twin of the OLD per-page QML solve this function's own
+        // comments already say lost to the surface's answer). DesignPreview's
+        // solveFit no longer bisects for the reading block either — it now
+        // uses el.meta.fontSize outright, because a scrolling column has
+        // nothing to fit a height against (see its own note). Measuring this
+        // engine-only guess against the OLD algorithm the surface no longer
+        // runs guaranteed the two would disagree the moment the block's text
+        // didn't happen to fit the box at the declared size: the guess landed
+        // here first (stageSlideSet's own initial restage, before any surface
+        // has solved anything), the surface's real report corrected it a
+        // frame or two later (noteReadingFit's first-solve reset), and the
+        // run's base line count — summed from THIS table — shifted under an
+        // already-staged, already-visible page: reported as a pane that was
+        // "just read" refreshing itself "as if newly selected", present on
+        // whichever pick's style hadn't been measured yet this session and
+        // absent once it had (readingFitReported_ then answers first, above,
+        // and this branch is never reached at all). Reading the declared
+        // size here instead makes the guess and the surface's own answer the
+        // SAME number by construction, so there is nothing left to correct.
+        const QVariantMap fitMeta = box.value(QStringLiteral("meta")).toMap();
+        bool fontSizeOk = false;
+        const double declaredFontSize = fitMeta.value(QStringLiteral("fontSize")).toDouble(&fontSizeOk);
+        pageSize = (fontSizeOk && declaredFontSize > 0.0) ? declaredFontSize : 16.0;
         if (!box.isEmpty())
-            readingRunSizeForStyle_.insert(styleId, pageSize);
+            readingRunSizeForStyle_.insert(reportKey, pageSize);
         // WHAT THE TABLE'S SIZE WAS SOLVED FROM, once per (style, page, run): the
         // surface's own column reports ITS size and its wrap as ReadingDrawn, and a
         // residual difference between the two lines is a difference in THESE
@@ -1812,7 +1856,16 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
 
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
 {
-    const auto it = readingRunSizeForStyle_.constFind(styleId);
+    // An empty id means the REFERENCE grid, which is the active style's own column
+    // (see styleRunLinesForText's reportKey): answer for that style rather than for
+    // a key nothing is ever filed under, or a surface that asks for "the reference
+    // size" is told there is none.
+    QString key = styleId;
+    if (key.isEmpty()) {
+        const auto *model = OutputListModel::instance();
+        key = model ? model->activeStyleId() : QString();
+    }
+    const auto it = readingRunSizeForStyle_.constFind(key);
     return it == readingRunSizeForStyle_.constEnd() ? -1.0 : it.value();
 }
 
