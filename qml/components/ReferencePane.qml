@@ -612,8 +612,20 @@ Item {
         const key = (LiveOutputService.live ? "live|" : "staged|")
             + root.lineStepOwnerRef + "|"
             + (next && next.background !== undefined ? String(next.background) : "")
-        if (key === root.liveFlowSlideKey && root.liveFlowSlide !== null)
-            return              // the same pick and design: keep the blocks painted
+        // DIAGNOSTIC: the box's blocks are pinned per pick (see the comment above). Logs
+        // whether a page change was served by the pinned copy or a fresh one, with the
+        // page the box actually shows vs the page the service is on.
+        const shownText = next && next.blocks && next.blocks.length > 0 ? String(next.blocks[0].text ?? "").slice(0, 24) : ""
+        if (key === root.liveFlowSlideKey && root.liveFlowSlide !== null) {
+            EngineBridge.log("info", "FlowBoxPinned",
+                "kept pinned blocks0=" + String(root.liveFlowSlide.blocks && root.liveFlowSlide.blocks[0] ? root.liveFlowSlide.blocks[0].text : "").slice(0, 24)
+                + " servicePage=" + LiveOutputService.readingPage
+                + " serviceNext0=" + shownText)
+            return
+        }
+        EngineBridge.log("info", "FlowBoxPinned",
+            "replaced key=" + key.slice(0, 60) + " blocks0=" + shownText
+            + " servicePage=" + LiveOutputService.readingPage)
         root.liveFlowSlideKey = key
         root.liveFlowSlide = next
     }
@@ -1285,7 +1297,7 @@ Item {
     // used to do on its own.
     function stageSubpart(number, partIndex) {
         root.selectSubpart(number, partIndex)
-        root.playSlideAt(root.previewSlideIndex)
+        root.stageOutputPart(number, partIndex)
     }
 
     // FOLLOW THE LINE STEPPER. Alt+Down/Alt+Up (LiveOutputService.lineStep)
@@ -1313,6 +1325,9 @@ Item {
     // selector-tracking. Back on; see DrawsFlowChanged in DesignPreview.qml
     // for where the hunt continues.
     property bool followSelectorMoves: true
+    // THE PIECE THE OPERATOR JUST PICKED (see followLiveStep): a click and the ‹ ›
+    // set it before staging, so the follow can tell an operator's page from a step's.
+    property var operatorPiece: null
     // ONE FOLLOW PER ADVANCE, NOT PER SIGNAL. An advance lands as several
     // notifications a few tens of ms apart (a staged commit, then the poll tick
     // reading the same state), and engine.log showed the whole body running
@@ -1336,6 +1351,52 @@ Item {
         const parts = (raw && raw.parts) || []
         if (parts.length === 0)
             return
+        // THE OPERATOR'S OWN PICK IS ALREADY IN PLACE — DO NOT FOLLOW IT BACK.
+        //
+        // A click (and a ‹ › step) sets the selection, the preview index and the
+        // list's scroll itself, then stages. This follow then re-derived the piece
+        // from parts[0], which for a paragraph the fill split is the paragraph's
+        // HEAD (1), not the continuation that was picked (1-7): the selection went
+        // back to paragraph 1, the preview to its first slide, and centerRow put the
+        // list at its first row — the reported "double click and the pane list goes
+        // back to the top", with the outputs (correctly) still on the clicked piece.
+        //
+        // So when the slide that was just staged CONTAINS the piece the operator
+        // picked, there is nothing to follow: the pane is already showing it. A
+        // stepper's own stage carries no such piece and follows exactly as before.
+        const op = root.operatorPiece
+        const opMatches = (part) => op && Number(part.number) === Number(op.number)
+                                         && Number(part.partIndex ?? 0) === Number(op.part)
+        if (op && parts.some(opMatches)) {
+            root.operatorPiece = null
+            // LAND ON THE OPERATOR'S PIECE, DO NOT RE-DERIVE IT FROM parts[0].
+            //
+            // Returning early here was not enough: the preview index is whatever the
+            // LAST pick set it to, so "click 1-6, then double-click 1" kept drawing
+            // 1-5's page beside a list on row 1 (reported exactly that way). The
+            // pick, the preview index and the row all follow the piece the operator
+            // chose — and only when the staged slide does not carry it (a stepper's
+            // own stage) does the old parts[0] follow run.
+            root.selected = [Number(op.number)]
+            root.anchorVerse = Number(op.number)
+            const mine = root.previewSlides
+            for (let i = 0; i < mine.length; ++i) {
+                if ((mine[i].parts || []).some(opMatches)) {
+                    root.previewSlideIndex = i
+                    break
+                }
+            }
+            root.followedStepSignature = root.lineStepOwnerRef
+                + (LiveOutputService.live ? "|live|" : "|staged|")
+                + Number(op.number) + "|" + Number(op.part)
+            root.centerRow(Number(op.number), Number(op.part))
+            EngineBridge.log("info", "FollowLiveStep",
+                "keptOperatorPick number=" + Number(op.number)
+                + " partIndex=" + Number(op.part)
+                + " previewIndex=" + root.previewSlideIndex
+                + " (the pane's own pick, not the paragraph's head)")
+            return
+        }
         const number = parts[0].number
         const partIndex = parts[0].partIndex ?? 0
         const signature = root.lineStepOwnerRef + (LiveOutputService.live ? "|live|" : "|staged|")
@@ -2515,6 +2576,10 @@ Item {
     function playPicked() {
         if (!root.book || root.selected.length === 0)
             return
+        // THE OPERATOR JUMPED (a double-click's body, the play button): the outputs'
+        // reading column may solve its own size for the page this stages. See
+        // LiveOutputService.readingJumpSerial — a page turn inside a walk must not.
+        LiveOutputService.noteOperatorJump()
         // The style gate: the active output's style must admit this tab's
         // content type (the Edit dialog's pills). Greyed pill = not meant for
         // that output — say so instead of silently showing nothing.
@@ -2524,53 +2589,31 @@ Item {
                             "warning", qsTr("On air"), "live.style.gate")
             return
         }
+        // Use the same page identity the pane preview uses. It maps the visible
+        // preview slide to the whole output set so line stepping still has neighbors.
+        //
+        // ...BUT ONLY IF THAT SLIDE IS PART OF THE PICK. The preview index is
+        // whatever the LAST pick set it to, and a double-click on a plain row does
+        // not always re-seat it: click row 1-6, then double-click row 1, and this
+        // staged 1-6's page while the list said 1 (reported: "when I click 1 it won't
+        // show it, it will show 1-5"). A slide carrying a paragraph the pick does not
+        // name is not this pick's page — fall through and build the pick itself.
+        const previewed = root.previewSlides[root.previewSlideIndex]
+        const shownParts = (previewed && previewed.parts) || []
+        const inPick = shownParts.length > 0
+            && shownParts.every((p) => root.selected.indexOf(Number(p.number)) >= 0)
+        if (inPick && root.playSlideAt(root.previewSlideIndex))
+            return
         const slides = root.buildSlides()
         if (slides.length === 0)
             return
-        // THE WHOLE CHAPTER, not just the picked verse(s): so Alt+Down/Alt+Up
-        // (LiveOutputService.lineStep) has somewhere to step into once the
-        // pick runs out — the same reason ShowCenter.qml's takeSlideLive
-        // stages a show's whole slide array instead of one slide, and
-        // playSlideAt/stageSubpart above do the same for a continuation row.
-        // (user report: "the table and bible keeps return[ing] to this and
-        // doesn't move" — the lineStep diagnostic's "set=1" meant only the
-        // picked verse(s) were ever staged, with nothing beyond them to step
-        // into.)
-        const firstParts = slides[0].parts || []
-        if (firstParts.length > 0 && root.chapterVerses.length > 0) {
-            const number = firstParts[0].number
-            const partIndex = firstParts[0].partIndex ?? 0
-            const output = root.chapterOutputSlides()
-            // DIAGNOSTIC: which piece this pick actually resolves to. selected
-            // names a HEAD verse (root.selected=[number]), so this should always
-            // land on i=0/partIndex=0 for a plain (non-continuation) double-click
-            // — a mismatch here (reported: double-clicking "1" staged "1-1") means
-            // firstParts[0]'s own partIndex disagrees with the list row model's
-            // hardcoded partIndex:0 for a head row (see where rows are built:
-            // "partIndex: 0" is asserted there, never read from the engine).
-            EngineBridge.log("info", "PlayPickedMatch",
-                "selected=" + JSON.stringify(root.selected)
-                + " slidesCount=" + slides.length
-                + " firstPartsCount=" + firstParts.length
-                + " firstParts0={number:" + firstParts[0].number
-                + ",partIndex:" + firstParts[0].partIndex + "}"
-                + " searchFor={number:" + number + ",partIndex:" + partIndex + "}")
-            for (let i = 0; i < output.length; ++i) {
-                const parts = output[i].parts || []
-                if (parts.some((part) => part.number === number && (part.partIndex ?? 0) === partIndex)) {
-                    EngineBridge.log("info", "PlayPickedMatch",
-                        "matched i=" + i + " of " + output.length
-                        + " outputParts0={number:" + (parts[0] ? parts[0].number : "?")
-                        + ",partIndex:" + (parts[0] ? parts[0].partIndex : "?") + "}")
-                    root.lineStepOwnerRef = root.referenceText
-                    LiveOutputService.stageSlideSet(root.referenceText, output, i)
-                    root.refreshLiveFlowSlide()
-                    return
-                }
-            }
-        }
-        // Falls back to the picked-only slides if the per-item rebuild
-        // can't find a match (no chapter loaded, parts missing).
+        // The pick's own first piece: the pane's preview and list land on it after
+        // this stage (see followLiveStep's operatorPiece), instead of on whatever
+        // page the previous pick had left in previewSlideIndex.
+        const first = ((slides[0] && slides[0].parts) || [])[0]
+        if (first)
+            root.operatorPiece = { number: Number(first.number),
+                                   part: Number(first.partIndex ?? 0) }
         root.lineStepOwnerRef = root.referenceText
         root.goLiveRequested(root.referenceText, slides)
         root.refreshLiveFlowSlide()
@@ -2585,6 +2628,9 @@ Item {
     // passage while the tile's title is still the old one, so a post-step
     // liveIsOurs(newRef) never matches.
     function stepAndPlay(direction) {
+        // THE ‹ › DELIBERATELY STAGE (per the pane's design): a jump, so each output
+        // fits the page it lands on instead of reusing the previous page's size.
+        LiveOutputService.noteOperatorJump()
         // THE MONITOR PREVIEW FOLLOWS THE ARROWS (user call: "the ‹ › should
         // move the slide in the monitor preview — the ones there do"). A step is
         // a presentation action, so it STAGES the slide it lands on whether or
@@ -2649,8 +2695,13 @@ Item {
         // list has to follow it — the row of the piece the preview landed on, not
         // of the paragraph's head (see rowIndexForPart).
         const piece = (slides[next].parts || [])[0]
-        if (piece)
+        if (piece) {
+            // The ‹ › has just put this piece on the list and in the preview, so the
+            // follow must not walk them back to the paragraph's head (see
+            // followLiveStep's operatorPiece).
+            root.operatorPiece = { number: Number(piece.number), part: Number(piece.partIndex ?? 0) }
             root.centerRow(piece.number, piece.partIndex ?? 0, true)
+        }
         if (publish)
             root.playSlideAt(next)
         return true
@@ -2672,12 +2723,30 @@ Item {
         const number = parts[0].number
         const partIndex = parts[0].partIndex ?? 0
         const output = root.chapterOutputSlides()
+        // DIAGNOSTIC: the output array is rebuilt FRESH on every call (chapterOutputSlides
+        // re-fetches adapter.slides() per verse), and ReferencePane's own mainRows comment
+        // documents that a chapter's continuation split can arrive in a SECOND, async
+        // delivery after the chapter opens. If a click lands in that window, the same
+        // verse/part can resolve to a DIFFERENT index than it did a moment ago — and that
+        // shifted index is exactly what OutputMonitorTile's onAirSlide memo keys on
+        // (LiveOutputService.readingPage), so a stale composition cached under the OLD
+        // index for that same number would stick until a click resolves to a genuinely new
+        // index. Logged to catch it if the "goes back to a previous row, shows stale until
+        // another click" report reproduces again — compare outputLen across clicks on the
+        // SAME chapter for a shrink/grow, and i against what a previous click on this same
+        // number logged.
+        EngineBridge.log("info", "OutputSlideAtMatch",
+            "number=" + number + " partIndex=" + partIndex + " outputLen=" + output.length)
         for (let i = 0; i < output.length; ++i) {
             const slide = output[i]
             if ((slide.parts || []).some((part) => part.number === number
-                                                   && (part.partIndex ?? 0) === partIndex))
+                                                   && (part.partIndex ?? 0) === partIndex)) {
+                EngineBridge.log("info", "OutputSlideAtMatch",
+                    "matched i=" + i + " of " + output.length)
                 return { slide: slide, output: output, index: i }
+            }
         }
+        EngineBridge.log("info", "OutputSlideAtMatch", "no match found")
         return null
     }
 
@@ -2694,11 +2763,60 @@ Item {
     // doesn't step in lines").
     function playSlideAt(index) {
         const hit = root.outputSlideAt(index)
-        if (hit) {
-            root.lineStepOwnerRef = root.referenceText
-            LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
-            root.refreshLiveFlowSlide()
+        if (!hit)
+            return false
+        root.lineStepOwnerRef = root.referenceText
+        LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
+        root.refreshLiveFlowSlide()
+        return true
+    }
+
+    // Stage the identity carried by a pane row directly. A selection change and
+    // its preview binding can settle in separate QML updates, so a double-click
+    // must not use previewSlideIndex to decide which row was actually clicked.
+    function stageOutputPart(number, partIndex) {
+        if (!root.book || !root.adapter)
+            return false
+        const kind = root.adapter.contentType
+        if (kind !== "" && !OutputListModel.activeStyleAllows(kind)) {
+            EventBus.notify(qsTr("%1 is switched off in this output's style.").arg(root.adapter.tabLabel),
+                            "warning", qsTr("On air"), "live.style.gate")
+            return false
         }
+        const output = root.chapterOutputSlides()
+        // A CLICK ON A PARAGRAPH IS A JUMP: fit this page's own auto-size.
+        LiveOutputService.noteOperatorJump()
+        const part = Number(partIndex ?? 0)
+        // ...and the pane already shows this piece: the follow must not take the
+        // list back to the paragraph's head row (see followLiveStep).
+        root.operatorPiece = { number: Number(number), part: part }
+        // Preserve the exact row slide produced by the old pick path
+        // (buildSlides -> goLiveRequested). The chapter set supplies line-step
+        // neighbours; it should not replace the picked page with a second,
+        // independently rebuilt copy.
+        const picked = root.buildSlides()
+        let pickedSlide = null
+        for (const slide of picked) {
+            if ((slide.parts || []).some((p) => Number(p.number) === Number(number)
+                                               && Number(p.partIndex ?? 0) === part)) {
+                pickedSlide = slide
+                break
+            }
+        }
+        for (let i = 0; i < output.length; ++i) {
+            if ((output[i].parts || []).some((p) => Number(p.number) === Number(number)
+                                                   && Number(p.partIndex ?? 0) === part)) {
+                if (pickedSlide)
+                    output[i] = pickedSlide
+                root.lineStepOwnerRef = root.adapter.reference(root.book.name,
+                                                               root.chapterNumber,
+                                                               [Number(number)])
+                LiveOutputService.stageSlideSet(root.lineStepOwnerRef, output, i)
+                root.refreshLiveFlowSlide()
+                return true
+            }
+        }
+        return false
     }
 
     // ---- The wall's ‹ ›: is THIS tab the one that can step the tile? --------
@@ -3361,6 +3479,11 @@ Item {
                         const pane = verseSource.owner
                         if (!pane)
                             return
+                        if (pane.adapter && pane.adapter.contentType === "table")
+                            EngineBridge.log("info", "TableRowDoubleClick",
+                                "number=" + verseRow.verseNumber
+                                + " partIndex=" + verseRow.partIndex
+                                + " split=" + verseRow.isSplit)
                         // DOUBLE CLICK IS THE STAGING GESTURE (user call: "double click
                         // is what should push it to monitor preview, single click is
                         // preview pane"): the pane's preview followed the click, and
@@ -3372,16 +3495,7 @@ Item {
                             return
                         }
                         pane.selectVerse(verseRow.verseNumber, false, false)
-                        // RE-RESOLVED, deliberately not the `pane` above: the
-                        // selection just made can rebuild the pane
-                        // synchronously, and the second fresh read of
-                        // `verseSource.owner` is precisely the one that came
-                        // back undefined (the first call had succeeded).
-                        if (typeof verseSource === "undefined" || !verseSource)
-                            return
-                        const live = verseSource.owner
-                        if (live)
-                            live.playPicked()
+                        pane.stageOutputPart(verseRow.verseNumber, verseRow.partIndex)
                     }
                 }
                 // The note affordance: a pencil on hover, persistent while a note

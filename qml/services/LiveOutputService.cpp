@@ -62,26 +62,8 @@
 #include <set>
 #include <string>
 
-// ---------------------------------------------------------------------------
-// NDI progress notes are NOT toasts.
-//
-// main.cpp's message handler turns every qWarning into a UI toast via
-// EventBus. That is right for real problems, and wrong for the NDI feed's
-// own narration: "sending started", "frames flowing", "2 monitor(s)
-// connected", "waiting for the first frame" — five toasts on every GO LIVE,
-// none of them actionable, all of them covering the screen the operator is
-// trying to work in.
-//
-// They still belong in the ENGINE LOG (that is the file you read when NDI
-// misbehaves), so they keep their level and their text — they just stop
-// being published as events. qCWarning with a category makes that a property
-// of the call site instead of a list of string prefixes to maintain in
-// main.cpp: the handler recognises the category and skips the publish.
-//
-// Everything that IS actionable keeps qWarning and therefore still toasts:
-// "NDI SendFrame FAILED", "NDI is not usable", "media player error",
-// "file not found", every selftest FAIL line.
-// ---------------------------------------------------------------------------
+// NDI progress uses a logging category so it stays in the engine log without
+// becoming a toast. Actionable failures still use qWarning and reach the UI.
 #include <QLoggingCategory>
 
 Q_LOGGING_CATEGORY(lcNdiProgress, "vgr.ndi.progress");
@@ -93,29 +75,14 @@ namespace pr = bps::rendering;
 
 namespace {
 
-// Pushes lastMediaFrame_ (a QImage this service already owns/decodes — a
-// real QVideoSink frame or a loaded still) into the engine-side
-// CompositorState as plain RGBA8 bytes, so SceneBuilder's worker thread can
-// composite it too, not just the QML preview tile's image provider. A null
-// image clears the engine's copy instead of pushing empty bytes.
-// THE FILL OF THE FILE ON AIR ("" = none, so the output's own default decides).
-// The compositor frame carries it, because the frame is what is on air and the
-// engine reads a whole frame per tick — see CompositorState::MediaFrame::fit.
-// File scope like the `hadFrame` flag below: one service, one take.
+// File-scope metadata follows the media frame through the compositor.
 std::string g_mediaFitOnAir;
 
-// THE PICTURE ON AIR'S OWN TRANSPARENCY (see CompositorState::MediaFrame::hasAlpha).
-// Decided ONCE per take, where the pixels were already in hand — the still's
-// decode on the take's worker (preflightMediaTake) or the FIRST frame of a video
-// (applyMediaTake's sink handler; a per-frame scan of 1080p RGBA would cost more
-// than the render) — and re-pushed with every frame so the engine's composition
-// reads a fact about THIS take, never a leftover from the last one.
+// Computed once per take and copied with each frame; scanning every video frame
+// for transparency would be needlessly expensive.
 bool g_mediaHasAlphaOnAir = false;
 
-// Does this picture carry a pixel you can see through? An alpha CHANNEL is not
-// the answer: a photo saved as PNG/ARGB is opaque everywhere, and treating its
-// channel as transparency put the monitor tile's checkers in the letterbox
-// margins of every such file. Walk the pixels — once per take, never per frame.
+// An alpha channel alone does not mean any pixel is transparent.
 bool imageHasTransparentPixel(const QImage &image)
 {
     if (image.isNull() || !image.hasAlphaChannel())
@@ -137,12 +104,8 @@ const QString kMediaMeterLabel = QStringLiteral("Media on air");
 
 void pushMediaFrameToCompositor(const QImage &frame)
 {
-    // ONE-SHOT TRANSITION LOG, never per frame (a video hands a frame in at its
-    // own frame rate — a per-frame line would bury engine.log). A media layer
-    // that renders black is either a frame the ENGINE never received or one it
-    // received and mis-drew; this line, together with the engine-side
-    // "media layer" line SceneBuilder writes when it builds the scene, is what
-    // tells the two apart in ONE run. Both greppable by "media hand-off".
+    // Log only state transitions; the paired SceneBuilder log distinguishes a
+    // missing handoff from a frame the engine received but rendered incorrectly.
     static bool hadFrame = false;
     if (frame.isNull()) {
         pl::CompositorState::Instance().ClearMedia();
@@ -152,31 +115,21 @@ void pushMediaFrameToCompositor(const QImage &frame)
         }
         return;
     }
-    // Format_RGBA8888 is byte order R,G,B,A on every platform — exactly the
-    // engine's own RGBA8 convention (see LivePreviewProvider::requestImage's
-    // comment on the reverse conversion).
+    // The compositor expects tightly packed RGBA bytes.
     const QImage rgba = frame.format() == QImage::Format_RGBA8888
         ? frame : frame.convertToFormat(QImage::Format_RGBA8888);
     pl::CompositorState::MediaFrame mf;
     mf.width = static_cast<uint32_t>(rgba.width());
     mf.height = static_cast<uint32_t>(rgba.height());
-    // Row-by-row: QImage's bytesPerLine() can pad past width*4, so a
-    // straight constBits()..sizeInBytes() copy would smear padding bytes
-    // into a "tightly packed" buffer CompositorState's readers assume.
+    // Copy rows separately because QImage may pad bytesPerLine().
     mf.rgba.resize(static_cast<size_t>(mf.width) * mf.height * 4);
     for (int y = 0; y < rgba.height(); ++y) {
         std::memcpy(mf.rgba.data() + static_cast<size_t>(y) * mf.width * 4,
                     rgba.constScanLine(y), static_cast<size_t>(mf.width) * 4);
     }
-    // THE FILE'S OWN FILL RIDES THE FRAME (see CompositorState::MediaFrame::fit):
-    // SceneBuilder lays the picture out by it, and it WINS over the output's
-    // default there.
+    // The media item's fit takes precedence over the output default.
     mf.fit = g_mediaFitOnAir;
-    // AND SO DOES ITS OWN TRANSPARENCY (see CompositorState::MediaFrame::hasAlpha):
-    // the engine's composition answers "is this frame transparent?" from the
-    // PICTURE, and every surface that draws the transparency convention reads
-    // that one answer (SlideComposition::frameTransparent) instead of asking a
-    // file's extension or a panel's own idea of what a take means.
+    // Carry the take's transparency result with the frame for all render surfaces.
     mf.hasAlpha = g_mediaHasAlphaOnAir;
     pl::CompositorState::Instance().SetMediaFrame(std::move(mf));
     if (!hadFrame) {
@@ -218,48 +171,16 @@ void pushActiveOverlaysToCompositor(const QVariantList &activeOverlays)
     pl::CompositorState::Instance().SetActiveOverlays(std::move(out));
 }
 
-// THE PREVIEW READS THE ENGINE'S OWN RULES, it does not keep copies of them.
-//
-// This file used to carry its own slideContentType / familyTemplateIndexFor /
-// styleAdmits / slideContentText — near-exact mirrors of SceneBuilder's, with
-// comments admitting as much. Two copies of the rule that decides a slide's
-// family, its style slot, its bound text and whether a style's gates admit it
-// is exactly how a tile comes to paint one thing and an output another: the
-// preview and the builder now call ONE implementation
-// (modules/presentation/SlideRules). Nothing here may re-derive them.
-//
-// The STYLE is the other half of that promise. This file also spelled out
-// "style row -> the engine's OutputStyleSpec" for itself (bakePreviewTemplate
-// plus its own field list and inherit/fallback pass), beside two copies of the
-// same composition in OutputListModel. The three had drifted: the preview's
-// spec never carried the style's category and fell back to the Bible layout on
-// a different condition than the engine's did, so a tile could render a layout
-// the outputs were not rendering. That composition is now ONE function
-// (services/StyleSpecBuilder), called by the spec pushed for the active output,
-// by each other styled output's spec, and here.
-//
-// What this file still owns is the PREVIEW-SHAPED plumbing around those rules:
-// composing the block list the tile draws (ShowConverter's mapping) and asking
-// the engine which layout owns a slide (SceneBuilder::ComposeSlide below).
+// Preview composition and style specs come from the engine's shared rules;
+// this file only maps the result to the QML preview shape.
 
 pl::OutputStyleSpec outputStyleForPreview(const QString &styleId)
 {
     return StyleSpecBuilder::specForStyleId(styleId);
 }
 
-// One slide as the QML preview shape: { valid, title, blocks, background } —
-// the same { blocks, background } maps DesignPreview draws everywhere else
-// (ShowConverter::blockToVariant is the single QML<->engine block mapping).
-//
-// THE COMPOSITION IS THE ENGINE'S. Which layout owns this slide (the style's
-// per-family template, the whole-style one, a built-in preset, the slide's own
-// blocks), what the template blocks bound to, and what background the output
-// paints are all decided ONCE, by SceneBuilder::ComposeSlide — the same call
-// every real output's scene is built from — and this function only maps that
-// decision into the QML shapes the tile draws. It used to make these decisions
-// itself, in a mirror of SceneBuilder's branch chain: the two drifted, and a
-// preview that reads a slide differently from the frame going on air is exactly
-// the "it shows on the monitor but the output is black" class of report.
+// Map the engine's slide composition to the QML preview shape. Keep layout and
+// background decisions in SceneBuilder so preview and output stay consistent.
 QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec &style)
 {
     if (!slide)
@@ -267,120 +188,59 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
     const pl::SceneBuilder::SlideComposition comp =
         pl::SceneBuilder::ComposeSlide(*slide, style, /*applyGates=*/true);
 
-    // ---- THE STYLE'S OWN FACTS, answered here so nobody else has to ---------
-    // A surface that draws this output needs more than the slide's picture: it
-    // needs to know whether this STYLE paints anything of its own (so it can
-    // leave a transparent/empty frame to its own convention — the checkerboard
-    // or a keyable window), whether its background image exists on disk AND is
-    // not stepped aside for this slide, and whether the style CHOSE
-    // transparency (which reads the same in pixels as naming nothing at all).
-    //
-    // These are the answers the monitor tile and the output window each used to
-    // work out for themselves, from the model's style role plus their own copy of
-    // `isClearColor` / `styled` / the clear-on-text image gate — two surfaces, two
-    // derivations, and one of them (the image gate) already disagreed with the
-    // engine about what "content on air" means. They come from the ONE call that
-    // composes the frame the outputs consume, so a preview cannot answer
-    // differently from the frame: same spec, same composition, same source.
+    // Publish style facts from the same composition used by real outputs.
     const QString styleImage = QString::fromStdString(style.backgroundImage);
     const bool styleImageOnDisk = !styleImage.isEmpty() && QFile::exists(styleImage);
-    // A colour that really paints: "" names none, "transparent" (ParseColor
-    // alpha 0) is the keyable choice, and a 0-alpha colour paints nothing.
+    // Empty and fully transparent colors do not paint.
     const bool stylePaintsColor = !style.backgroundColor.empty()
         && pl::StyleBuilder::ParseColor(style.backgroundColor).a > 0.0f;
     const bool stylePaints = stylePaintsColor || styleImageOnDisk;
-    // The frame has nothing of the style's OWN in it — either the style paints
-    // nothing, or its only paint (the image) is stepped aside for this slide. A
-    // surface bases its own transparency on this.
-    // A TAKE CLEARS THE STYLE'S BACKGROUND (see SlideComposition::clearedByTake):
-    // the engine paints none of it, so a preview must not either — the tile's
-    // pane colour, its style image and the block render's own style image all
-    // read these facts. This is the half of the rule the QML side used to miss:
-    // the composited frame came up clean while the monitor tile and the output
-    // window kept painting the style's poster around the picture, which is
-    // exactly the report "the image shows perfectly now but the style bg still
-    // shows for some of them".
+    // A take suppresses the style background in both preview and output.
     const bool stylePaintless = comp.clearedByTake || !stylePaints
         || (styleImageOnDisk && comp.styleImageSuppressed);
     const bool styleImagePainted = !comp.clearedByTake && styleImageOnDisk
         && !comp.styleImageSuppressed;
-    // WOULD A BLOCK RENDER OF THIS FRAME BE A STAND-IN? The camera / media /
-    // audio / image decision rides the composition too, so it is answered here
-    // once instead of by each surface for itself: the monitor tile and the
-    // output window each tested their own composed blocks for those kinds and
-    // handed the frame priority when they found one. Same question, two copies —
-    // the shape of rule this whole file is about. A REFUSED frame carries no
-    // blocks at all, and a preset's are its two text regions, so neither can
-    // want the frame.
+    // Whether a distributed frame takes priority is part of the composition.
     const std::vector<pl::ContentBlock> &drawn =
         comp.source == pl::SceneBuilder::SlideComposition::Source::SlideBlocks
             ? slide->blocks : comp.blocks;
     const bool framePriority = pl::SlideRules::NeedsDistributedFrame(drawn);
     const QVariantMap styleFacts{
-        // A take hands the frame to the picture: the style's colour is not the
-        // pane's base while one is showing (see clearedByTake above).
+        // A take replaces the style color.
         { QStringLiteral("styleColor"), comp.clearedByTake
             ? QStringLiteral("transparent")
             : QString::fromStdString(style.backgroundColor) },
         { QStringLiteral("styleImage"), styleImage },
-        // stylePaints answers "would this style paint anything of its own" for
-        // the slide that is up — false while a take owns the frame.
+        // A take owns the frame, so the style paints nothing.
         { QStringLiteral("stylePaints"), stylePaints && !comp.clearedByTake },
         { QStringLiteral("stylePaintless"), stylePaintless },
         { QStringLiteral("styleImagePainted"), styleImagePainted },
-        // The distributed frame must win over a block render for this slide —
-        // see SlideRules::NeedsDistributedFrame. Both preview surfaces read this
-        // one answer (gated on their own `hasFrame`: whether a frame exists at
-        // all is the service's state, not the slide's).
+        // Shared frame-priority decision; frame availability is tracked separately.
         { QStringLiteral("framePriority"), framePriority },
-        // The style CHOSE "transparent" (as opposed to naming no colour): a
-        // surface that shows transparency as transparency needs the difference,
-        // and only the composition has it.
+        // Preserve an explicit transparent choice separately from no color.
         { QStringLiteral("explicitTransparent"), comp.explicitTransparent },
-        // THE ONE ANSWER to "is this frame transparent where nothing paints?"
-        // (see SceneBuilder::SlideComposition::frameTransparent). Every surface
-        // that draws the transparency convention — the monitor tile's
-        // checkerboard, and anything added later — reads THIS, so a taken photo
-        // cannot be checkered on one surface and plain on the next, and a
-        // genuinely transparent picture cannot lose its checkers on one of them.
+        // All preview surfaces use the composition's transparency result.
         { QStringLiteral("frameTransparent"), comp.frameTransparent },
-        // A take owns the frame: surfaces use it to clear anything of the
-        // style's they would otherwise paint under the picture.
+        // Clear style layers while a take owns the frame.
         { QStringLiteral("clearedByTake"), comp.clearedByTake },
-        // THE EFFECTIVE FILL, answered ONCE, here, so no surface re-states it:
-        // the taken FILE's own fit (its library entry), else contain — the same
-        // rule SceneBuilder lays the frame out by (`media.fit.empty() ?
-        // "contain" : media.fit`). Nothing about the OUTPUT decides a take's
-        // shape: per-output fills are what showed one file two ways on the wall,
-        // and the roster's old value is ignored (a preview that recomputed this
-        // precedence — as the monitor tile and the output window each did — could
-        // letterbox what the output crops).
+        // Use the media item's fit, defaulting to contain; output fit is ignored.
         { QStringLiteral("mediaFit"), QString::fromStdString(
               g_mediaFitOnAir.empty() ? std::string("contain") : g_mediaFitOnAir) },
     };
 
-    // The background, as a QML string: an EXPLICITLY transparent style is
-    // "transparent" (the tile's checkerboard belongs there), a colour that won
-    // is that colour, and NOTHING NAMED is "" — the tile's own layering (its
-    // style colour, its style image, the checkerboard) decides what an unpainted
-    // frame looks like, exactly as the engine leaves such a frame unpainted.
+    // Preserve explicit transparency; otherwise pass through the composed color.
     const QString background = comp.explicitTransparent
         ? QStringLiteral("transparent")
         : QString::fromStdString(comp.background);
 
-    // A CLEAR: the frame paints NOTHING of the style's and nothing of the
-    // slide's (see SceneBuilder::ComposeSlide). Every "does the style paint"
-    // fact is answered OFF here — `styleColor` included, because the tile's
-    // pane paints that colour as its base — so a cleared output shows the same
-    // empty frame in the app as it sends, instead of the style's poster.
+    // A cleared slide has no style or slide content.
     if (comp.source == pl::SceneBuilder::SlideComposition::Source::Cleared) {
         QVariantMap cleared = styleFacts;
         cleared.insert(QStringLiteral("styleColor"), QStringLiteral("transparent"));
         cleared.insert(QStringLiteral("stylePaints"), false);
         cleared.insert(QStringLiteral("stylePaintless"), true);
         cleared.insert(QStringLiteral("styleImagePainted"), false);
-        // A CLEAR IS A TRANSPARENT FRAME by definition (nothing of the style's,
-        // nothing of the slide's) — the composition's own answer for it.
+        // Cleared frames are transparent.
         cleared.insert(QStringLiteral("frameTransparent"), true);
         cleared.insert(QStringLiteral("valid"), true);
         cleared.insert(QStringLiteral("title"), QString());
@@ -388,13 +248,9 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         cleared.insert(QStringLiteral("blocks"), QVariantList{});
         cleared.insert(QStringLiteral("background"), QStringLiteral("transparent"));
         cleared.insert(QStringLiteral("suppressStyleImage"), true);
-        // Named, like refusedByStyle: a surface can say WHY the frame is empty
-        // instead of it reading as a broken output.
+        // Let the preview distinguish an intentional clear from a failure.
         cleared.insert(QStringLiteral("cleared"), true);
-        // The flag travels with the composition too: every preview surface hands
-        // this map straight back through previewWithStyle() ->
-        // ShowConverter::slideFromVariant(), and a composition that lost the flag
-        // would recompose as an ordinary empty slide — the style poster again.
+        // Preserve the clear marker when the preview is converted back to a slide.
         cleared.insert(QStringLiteral("clearStage"), true);
         return cleared;
     }
@@ -406,13 +262,9 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         refused.insert(QStringLiteral("contentType"), QString::fromStdString(comp.contentType));
         refused.insert(QStringLiteral("blocks"), QVariantList{});
         refused.insert(QStringLiteral("background"), background);
-        // The style image rule still applies to a refused frame (the engine
-        // paints it on the same flag — see the note on the styled return below).
+        // Apply the same style-image rule as the engine.
         refused.insert(QStringLiteral("suppressStyleImage"), comp.styleImageSuppressed);
-        // WHY THIS IS EMPTY, not just that it is: the monitor tile reads this to
-        // say "Style blocks Media" on the tile itself, so a deliberately refused
-        // output can never be mistaken for a broken one — the exact confusion a
-        // background-only frame invites.
+        // Explain the intentional refusal in the preview.
         refused.insert(QStringLiteral("refusedByStyle"), true);
         return refused;
     }
@@ -423,15 +275,8 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         // The style's template, with the slide's content already bound in.
         blocks = ShowConverter::blocksToVariant(comp.blocks);
     } else if (comp.source == Source::FamilyPreset || comp.source == Source::StylePreset) {
-        // A BUILT-IN LAYOUT PRESET: the engine draws its two text regions as
-        // Title/Body text objects on these rectangles, so the tile draws the
-        // same two regions — synthesized as text blocks on the canvas grid the
-        // preview works in (754x428), from the preset's own fractions.
-        // The text style is the engine's default for a preset region (no
-        // TextStyleComponent on those objects): the builtin font, 24 OUTPUT
-        // pixels — which on the canvas grid is 24 * 428 / 1080, unglamorous
-        // but what a legacy preset actually renders on air, and the tile says
-        // what the output says.
+        // Convert preset regions to preview text blocks using the engine's
+        // default 24-pixel output font scaled to the preview canvas.
         const double kCanvasW = 754.0, kCanvasH = 428.0, kEngineStageH = 1080.0;
         auto presetRegion = [&](const pl::StyleBuilder::LayoutRect &r, const QString &text) {
             QVariantMap region{
@@ -460,7 +305,7 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         if (!slide->text.empty())
             presetRegion(comp.preset.body, QString::fromStdString(slide->text));
     } else {
-        // Source::SlideBlocks — the slide's own blocks carry the layout.
+        // Slide blocks already define the layout.
         blocks = ShowConverter::blocksToVariant(slide->blocks);
     }
 
@@ -470,23 +315,9 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
     composed.insert(QStringLiteral("contentType"), QString::fromStdString(comp.contentType));
     composed.insert(QStringLiteral("blocks"), blocks);
     composed.insert(QStringLiteral("background"), background);
-    // DOES THE STYLE'S OWN BACKGROUND IMAGE STEP ASIDE FOR THIS SLIDE?
-    // The engine's rule (clearBackgroundOnText, and only for a slide that
-    // CARRIES content — a blank go-live carrier keeps the branded backdrop),
-    // handed over so the monitor tile and the output window paint the style
-    // image exactly when the engine does. Both surfaces used to re-derive it
-    // from their own idea of "has content", which is how a blank carrier
-    // lost the image on the tile while the output still baked it.
+    // Use the engine's background suppression decision, including blank carriers.
     composed.insert(QStringLiteral("suppressStyleImage"), comp.styleImageSuppressed);
-    // ...AND THE FACTS A PREVIEW RE-ENTERS WITH. Every preview surface hands this
-    // map straight back through previewWithStyle() -> ShowConverter::slideFromVariant(),
-    // so the slide's body and its fill vocabulary have to be IN it. They were
-    // not: the monitor tile re-composed a slide whose body was gone and fell back
-    // to guessing it from the design's block ORDER, which drew the date code where
-    // the sermon text belonged — while the real NDI/HDMI frame, built from the
-    // engine's own Slide (which still had them), drew it correctly. Three
-    // surfaces, two answers, from one pick: the tile disagreed with the output it
-    // monitors. Same list as the fill's own writer, so the spelling cannot drift.
+    // Preserve body and fill when preview surfaces convert this map back to a slide.
     composed.insert(QStringLiteral("body"), QString::fromStdString(slide->text));
     composed.insert(QStringLiteral("fill"),
                     ShowConverter::fillFromMeta(ShowConverter::metaOf(*slide)));
@@ -525,21 +356,8 @@ QVariantMap preferredNdiOutput(const OutputListModel *model)
 
 LiveOutputService *LiveOutputService::s_instance = nullptr;
 
-// ---- NDI send worker (runs on the dedicated NDI QThread) ------------------
-//
-// Everything heavy about the NDI program feed happens here, OFF the GUI
-    // thread: the ~8 MB frame copy into the provider's send buffer, the
-// force-alpha pass over every pixel, the LAZY SENDER CREATION (the first
-// SendFrame after a reset builds the real NDI SDK sender — the single
-// heaviest step of GO LIVE with an NDI main output, hundreds of ms), and
-// the SDK send itself. The GUI thread only resolves WHICH frame to send
-// (roster lookup + buffer read) and queues it here.
-//
-// FEED THREAD ONLY (ndiWorkerTick is its only caller). One send at a time by
-// construction: the feed thread's clock is the only thing that runs this, and
-// a beat that lands inside the previous period is skipped before it gets here.
-// State feedback (frame counter, slow-send reports) crosses back through
-// LiveOutputService's mutex-guarded members, which the GUI reads.
+// NDI sends run on the dedicated feed thread; the GUI only resolves and queues
+// frames. This worker owns the SDK send and its per-output diagnostics.
 void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
                                            std::shared_ptr<const pr::Frame> frame,
                                            QString senderName, float fps)
@@ -549,12 +367,8 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
     if (!provider || !frame || frame->empty())
         return;
 
-    // Identity BEFORE the send: SetSenderName only takes effect before the
-    // sender's first SendFrame (NDI can't rename a live sender), and the
-    // lazy creation below happens inside this very call — so the name set
-    // here is the one the new sender is born with. THE LAZY CREATION (the
-    // real NDI SDK sender build) is the multi-hundred-ms step that used to
-    // freeze the GUI at GO LIVE — it happens HERE now.
+    // Set the identity before first send; NDI fixes the name when it creates
+    // the sender. Sender creation and sending stay off the GUI thread.
     if (!senderName.isEmpty())
         provider->SetSenderName(senderName.toStdString());
     provider->SetFrameRate(fps);
@@ -684,14 +498,7 @@ void LiveOutputService::setNdiWarming(bool on, const QString &name)
     emit ndiChanged();
 }
 
-// Hand the plan to the feed thread and forget it here.
-//
-// The plan is a VALUE, and this is where it stops being the GUI thread's: the
-// queued call installs it in ndiFeedPlan_ on the feed thread, so from that
-// moment only that thread touches it. Nothing is shared, so nothing needs a
-// lock — and the GUI thread can never be made to wait for a feed in progress.
-// A poll that resolves the same plan again posts nothing (a steady feed would
-// otherwise queue ten identical hand-overs a second).
+// Publish changed plans by value; only the feed thread accesses its copy.
 void LiveOutputService::handOverNdiPlan(const std::vector<NdiSendPlan> &plans)
 {
     if (ndiPlanPublished_ && plans == ndiSentPlan_)
@@ -708,11 +515,7 @@ LiveOutputService::LiveOutputService(QObject *parent)
 {
     s_instance = this;
 
-    // IDLE PREVIEW: while a show is open but nothing is on air, ask the engine
-    // to keep producing frames (LiveOutputController::StartIdlePreview) so the
-    // Settings resource meters breathe instead of reading zero. Idempotent and
-    // a no-op while live, so a plain 1Hz nudge is all it takes — the controller
-    // owns the worker's lifetime (and stops it seconds after no show is open).
+    // Keep idle preview frames available for the resource meters.
     previewTimer_ = new QTimer(this);
     previewTimer_->setInterval(1000);
     connect(previewTimer_, &QTimer::timeout, this, []() {
@@ -721,29 +524,15 @@ LiveOutputService::LiveOutputService(QObject *parent)
     });
     previewTimer_->start();
 
-    // The 10 Hz state poll runs from BOOT, not from GO LIVE. It is the only
-    // frameRev publisher (the monitor tiles' cache-buster), and the idle preview
-    // publishes a take's picture off air — a poll that only lived between GO
-    // LIVE and STOP meant none of those frames was ever fetched, which is
-    // exactly "it only shows on the monitor preview once I press go live".
+    // Poll from boot so monitor tiles also refresh during idle preview.
     ensurePollTimer();
 
-    // A tap OPEN is split (§3.9/§6.3 of docs/gui_thread_audit.md): the bridge
-    // accepts the claim here and now, opens the device on the engine worker, and
-    // reports a refusal a beat later. That refusal is this service's to unwind —
-    // the take/pip the operator just started must not sit on a placeholder that
-    // can never fill. Connected here because this service is the consumer that
-    // publishes the take optimistically; the Settings dialogs and the board rows
-    // ignore the signal and let their own warm-up placeholder stand.
+    // Undo optimistic preview state if the engine worker later refuses a tap.
     connect(&EngineBridge::instance(), &EngineBridge::previewRefused,
             this, &LiveOutputService::onPreviewRefused);
 }
 
-// The tap the operator asked for was refused by the device (not by resolution —
-// that refusal is still synchronous and unwound by the caller). Unwind whatever
-// this service had published for that label, with the reason the bridge recorded
-// read out BEFORE the unwind (the card's/slash's own failure text comes from
-// previewFailure, and a released label has no reason to give).
+// Undo this service's optimistic preview state after an asynchronous refusal.
 void LiveOutputService::onPreviewRefused(const QString &label, const QString &kind)
 {
     const QString why = EngineBridge::instance().previewFailure(label);
@@ -783,49 +572,18 @@ LiveOutputService *LiveOutputService::create(QQmlEngine *engine, QJSEngine *jsEn
 void LiveOutputService::goLive()
 {
 
-    // Breadcrumb: GO LIVE is the heaviest QML-facing call in the app (compile +
-    // prepare + output bring-up), so a stall or exception here names itself in
-    // engine.log instead of leaving a heartbeat line as the last word.
+    // Trace this expensive QML-facing operation for startup diagnostics.
     VGR_CALL_TRACE("LiveOutputService.goLive");
-    // A staged ad-hoc pick (stageSlides() — a slide double-clicked in
-    // ShowCenter, say) wins over the open document: what is sitting in the
-    // tile right now is what a real GO LIVE press sends, not whatever happens
-    // to be open in the editor behind it. It stays staged afterwards (see the
-    // branch below) — GO LIVE decides only what leaves the outputs.
+    // Send the staged preview selection, regardless of the open document.
     if (!stagedSlidesRaw_.isEmpty()) {
-        // SEND IT, DON'T CONSUME IT. GO LIVE is the OUTPUT gate: it puts the
-        // picture the preview is ALREADY showing on the outputs and decides
-        // nothing about the preview. Clearing the staged slot here (what this
-        // used to do) dropped the slide the tile was showing and sent the next
-        // GO LIVE down to the blank holding slide — content the operator never
-        // asked for, and the reason a GO LIVE / STOP pair looked like it was
-        // committing and discarding picks. The stage belongs to the preview;
-        // only Clear all, the slide-clear button, or a new pick change it.
+        // Staging belongs to the preview; going live does not consume it.
         goLiveWithSlides(stagedName_, stagedSlidesRaw_);
         return;
     }
 
-    // Transition toast BEFORE the (synchronous, GUI-thread) engine start:
-    // the first frame is the heaviest (style load + scene build + full-
-    // frame rasterize), so the click must feel acknowledged immediately —
-    // and a fast STOP press right after is safe by design now.
-    // GO LIVE SENDS THE PREVIEW'S OWN PICTURE — nothing else. It used to fall back
-    // to MIRRORING THE OPEN SHOW (LiveOutputController::StartFromOpenShow), which is
-    // how a press of GO LIVE put a show that merely happened to be open in the editor
-    // onto the monitors, in place of the file being previewed. The operator's words:
-    // "clear the go-live path from being responsible for taking any show to monitor
-    // or live — it takes only what it finds in the monitor preview". So the gate has
-    // two sources and neither is the open document: a STAGED pick goes as itself
-    // (the branch above), and with nothing staged the COMPOSITOR's own layers go
-    // under the blank carrier — a taken camera/screen, media on air, the overlays,
-    // over the active style's background: exactly what the tile is showing.
-    //
-    // The carrier has no content of its own (no blocks, no title, transparent), so
-    // this is not committing or inventing a pick, and it does not touch the preview:
-    // a staged slide stays staged, the tile keeps its pixels, and the next GO LIVE
-    // re-sends the same thing. Putting an OPEN SHOW on air is now only ever the
-    // explicit act — the show's own Take / Go Live, which sends THAT show's slides
-    // (goLiveWithSlides).
+    // Acknowledge before starting the engine, which can take time to render the
+    // first frame. With no staged slide, send the composited preview layers under
+    // a blank carrier; the open document is never implicitly taken live.
     EventBus::instance().notify(QStringLiteral("Going live…"),
                                 QStringLiteral("info"), QStringLiteral("Go Live"));
     goLiveBlank();
@@ -1384,6 +1142,8 @@ void LiveOutputService::prewarmReadingLines()
 void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVariantList &slides,
                                                 const QVariantMap &styledPreview)
 {
+    ++readingStageSerial_;
+    emit readingStageChanged();
     // THE PICK IS THE READING SET: whatever a pane stages (a passage's verses,
     // a Table section, a show's slides) can then be walked line by line with
     // Alt+Down without that pane having to say anything more than it already
@@ -1451,6 +1211,15 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
 // See the header: a NEXT SLIDE replaces the picture, a LINE STEP moves the
 // words — and the words it moves are the PASSAGE the page begins in, slid by an
 // offset, not a re-cut window of the page (see lineStep).
+// THE OPERATOR'S OWN JUMP (see readingJumpSerial in the header): the surfaces may
+// re-solve their column for the page this stages, where the walk's own follow
+// re-stage (which also goes through stageSlideSet) must not.
+void LiveOutputService::noteOperatorJump()
+{
+    ++readingJumpSerial_;
+    emit readingStageChanged();
+}
+
 void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &slides, int index)
 {
     VGR_CALL_TRACE("LiveOutputService.stageSlideSet");
@@ -1465,6 +1234,9 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
         stageSlides(name, slides);
         return;
     }
+    // A direct page pick starts a new fit/memo generation; line steps do not.
+    ++readingStageSerial_;
+    emit readingStageChanged();
     const int at = qBound(0, index, static_cast<int>(slides.size()) - 1);
     // THIS IS THE ONE CALL THAT KNOWS WHICH SLIDE OF THE SET IS BEING READ, so it
     // stages it itself rather than seeding the stepper at 0 and putting the index
@@ -1497,7 +1269,10 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     // applyReadingRestage, which also announces the page change once that page is
     // the one in stagedSlide_/onAirSlide_ (the order that matters: a surface which
     // recomposes on the announcement has to find the NEW page already there).
-    applyReadingRestage(true);
+    // A direct page pick resets readingScroll_ before restaging. Force the
+    // settled-position notification because the restage can otherwise compare
+    // zero with zero and leave surfaces holding the previous page's character.
+    applyReadingRestage(true, /*forceRebuild=*/ false, /*forceScrollNotify=*/ true);
 }
 
 // ONE PAGE'S PASSAGE: that page followed by the next one, joined by the page
@@ -1536,6 +1311,10 @@ void LiveOutputService::resetReadingRun()
     readingRunSizeForStyle_.clear();
     readingRunPageStart_.clear();
     readingRunPageLines_.clear();
+    // NOTHING TO DO ABOUT readingFitAcceptedJump_ HERE: this runs inside
+    // rebuildReadingRun for every page re-cut, and the marker is keyed to the
+    // OPERATOR-JUMP serial (see the header) precisely so an internal re-cut cannot
+    // unsettle a column the walk is holding.
 }
 
 // HOW MANY CHARACTERS the pages in [from, to) contribute to a run's text: the
@@ -1794,29 +1573,116 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
     report.width = boxWidth;
     report.height = boxHeight;
     report.pad = pad;
+    // WHAT MAKES A NEW COLUMN, and what is just the same one reported again.
+    //
+    // `qFuzzyCompare` on doubles is effectively exact, so a surface whose solved
+    // size lands a hundredth of a pixel away (a font metric rounding, a box that
+    // settled by half a pixel during layout) counted as a NEW column: the run was
+    // re-measured and the page re-staged, mid-glide. That is the jitter this check
+    // is here to absorb — the measured difference has to be one the picture can
+    // show. HEIGHT is compared too: it was missing, so a box that got taller at the
+    // same width and size (a template slot re-laid out) went unnoticed and its table
+    // stayed wrapped for the old height.
+    const auto sameColumn = [](const ReadingFit &a, const ReadingFit &b) {
+        return qAbs(a.size - b.size) < 0.05
+            && qAbs(a.width - b.width) < 0.25
+            && qAbs(a.height - b.height) < 0.25
+            && qAbs(a.pad - b.pad) < 0.05;
+    };
     const auto previous = readingFitReported_.constFind(styleId);
-    if (previous != readingFitReported_.constEnd()
-            && qFuzzyCompare(previous->size + 1.0, report.size + 1.0)
-            && qFuzzyCompare(previous->width + 1.0, report.width + 1.0)
-            && qFuzzyCompare(previous->pad + 1.0, report.pad + 1.0))
+    if (previous != readingFitReported_.constEnd() && sameColumn(*previous, report))
         return;                       // the same column: nothing to re-measure
     // Captured before the insert below, which can rehash the table and
     // invalidate `previous` — used only for the ReadFitNote diagnostic.
     const double previousSize = (previous != readingFitReported_.constEnd()) ? previous->size : 0.0;
+    // A PER-PAGE FIT IS NOT A NEW COLUMN.
+    //
+    // While a walk is live, a surface re-solves the block for the page it is
+    // showing, and a fill-built page carries its OWN size — measured on the
+    // reported passage: 45.84, 43.90, 42.93 and 40.99 px for four consecutive
+    // pages. Every one of those arrived here as a "new column": the tables were
+    // purged, the held size dropped and the run re-staged, so the column the reader
+    // was watching was re-measured on EVERY press (engine.log, one walk: ReadFitNote
+    // 40.99 -> 42.93 -> 45.84 -> 42.93 -> 45.84 -> 40.99 ... with resetsRun=YES each
+    // time). The drawn column itself never moved — the surface draws the passage at
+    // the size the walk locked when it started — so all of that churn moved nothing
+    // but the step's own grid underneath the words. That is the residual jitter.
+    //
+    // What the walk actually has to tell apart is the BOX from the ANSWER: width,
+    // height and padding are the column; the size is what the solver said about the
+    // text in front of it. So while a run is live and this report repeats the last
+    // box and padding, the page's answer is recorded (the surfaces draw the page
+    // block with it) and the WALK keeps the size it started with — nothing is
+    // purged, re-measured or re-staged. A jump clears the held size
+    // (resetReadingRun does), so the first page after one is accepted as before, and
+    // a real column change (a resized box, a template slot re-laid out) changes the
+    // box, which is accepted too.
+    {
+        const bool walkLive = readingRunFirst_ >= 0 && readingRunLast_ >= readingRunFirst_;
+        const bool sameBox = previous != readingFitReported_.constEnd()
+            && qAbs(previous->width - report.width) < 0.25
+            && qAbs(previous->height - report.height) < 0.25
+            && qAbs(previous->pad - report.pad) < 0.05;
+        // SETTLED FOR THIS JUMP, or not: the OPERATOR-JUMP serial, not the held size
+        // and not a run marker. The held size is written when a line table is computed
+        // (which can happen after this report arrives); a marker cleared by
+        // resetReadingRun is cleared by rebuildReadingRun for every page re-cut; and
+        // the plain stage serial moves on the walk's own follow re-stage (measured:
+        // stage=10, 11, 12 ... once per press). All three made the branch unreachable
+        // in practice (zero `held=YES` while ReadFitNote printed `resetsRun=YES` once
+        // per press).
+        if (walkLive && sameBox
+            && readingFitAcceptedJump_.value(styleId, -1) == readingJumpSerial_) {
+            // The box is the walk's; only the page's own answer moved.
+            readingFitReported_.insert(styleId, report);
+            const auto *model = OutputListModel::instance();
+            const QString reference = model ? model->activeStyleId() : QString();
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadFitNote"),
+                                QStringLiteral("style='%1' pageFit=%2 columnSize=%3 box=%4x%5 "
+                                               "pad=%6 reference='%7' held=YES "
+                                               "(the walk keeps its column; page answer recorded)")
+                                    .arg(styleId.isEmpty() ? QStringLiteral("(ref)") : styleId.left(8))
+                                    .arg(report.size, 0, 'f', 2)
+                                    .arg(previousSize, 0, 'f', 2)
+                                    .arg(report.width, 0, 'f', 2)
+                                    .arg(report.height, 0, 'f', 2)
+                                    .arg(report.pad, 0, 'f', 2)
+                                    .arg(reference.isEmpty() ? QStringLiteral("(ref)") : reference.left(8)));
+            return;
+        }
+    }
+    // THIS REPORT SETTLES THE COLUMN FOR THIS JUMP (see readingFitAcceptedJump_):
+    // the first one after an operator stage is the page's own auto-size answer, and
+    // that is what the walk is then measured and drawn at.
+    readingFitAcceptedJump_.insert(styleId, readingJumpSerial_);
     readingFitReported_.insert(styleId, report);
     readingRunSizeForStyle_.remove(styleId);
-    const QString prefix = styleId + QLatin1Char('#');
-    for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
-        if (it.key().startsWith(prefix))
-            it = readingRunLinesCache_.erase(it);
-        else
-            ++it;
+    // THE REFERENCE REPORT IS "" BUT ITS TABLES ARE FILED UNDER THE ACTIVE STYLE
+    // (see styleRunLinesForText's reportKey), so the purge has to name both — a
+    // purge that only matched "#" left every `s1#…` table measured at the old size
+    // in the cache, and the forced rebuild below would have re-counted the pages
+    // from those stale tables.
+    QStringList purgePrefixes{ styleId + QLatin1Char('#') };
+    if (styleId.isEmpty()) {
+        const auto *model = OutputListModel::instance();
+        const QString active = model ? model->activeStyleId() : QString();
+        if (!active.isEmpty())
+            purgePrefixes.append(active + QLatin1Char('#'));
     }
-    // Keep the LRU list's keys matching the cache's exactly — a key left
-    // behind here would sit in readingRunLinesLru_ pointing at an entry
-    // that no longer exists, and get "evicted" for free on the next insert
-    // instead of the table that is actually least-recently-used.
-    readingRunLinesLru_.removeIf([&prefix](const QString &k) { return k.startsWith(prefix); });
+    for (const QString &prefix : purgePrefixes) {
+        readingRunSizeForStyle_.remove(prefix.left(prefix.size() - 1));
+        for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
+            if (it.key().startsWith(prefix))
+                it = readingRunLinesCache_.erase(it);
+            else
+                ++it;
+        }
+        // Keep the LRU list's keys matching the cache's exactly — a key left
+        // behind here would sit in readingRunLinesLru_ pointing at an entry
+        // that no longer exists, and get "evicted" for free on the next insert
+        // instead of the table that is actually least-recently-used.
+        readingRunLinesLru_.removeIf([&prefix](const QString &k) { return k.startsWith(prefix); });
+    }
     const auto *model = OutputListModel::instance();
     const QString reference = model ? model->activeStyleId() : QString();
     const bool resets = (styleId == reference);
@@ -1827,7 +1693,8 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
     // way to see it fire without guessing from the side effects.
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadFitNote"),
                         QStringLiteral("style='%1' previousSize=%2 reportedSize=%3 "
-                                       "box=%4x%5 pad=%6 reference='%7' resetsRun=%8")
+                                       "box=%4x%5 pad=%6 reference='%7' resetsRun=%8 "
+                                       "run=[%9..%10] jump=%11 acceptedJump=%12")
                             .arg(styleId.isEmpty() ? QStringLiteral("(ref)") : styleId.left(8))
                             .arg(previousSize, 0, 'f', 2)
                             .arg(report.size, 0, 'f', 2)
@@ -1835,23 +1702,38 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
                             .arg(report.height, 0, 'f', 2)
                             .arg(report.pad, 0, 'f', 2)
                             .arg(reference.isEmpty() ? QStringLiteral("(ref)") : reference.left(8))
-                            .arg(resets ? QStringLiteral("YES") : QStringLiteral("no")));
+                            .arg(resets ? QStringLiteral("YES") : QStringLiteral("no"))
+                            .arg(readingRunFirst_)
+                            .arg(readingRunLast_)
+                            .arg(readingJumpSerial_)
+                            .arg(readingFitAcceptedJump_.value(styleId, -1)));
     if (resets) {
-        // CALLED INLINE, same frame — a deferred (QTimer::singleShot) version
-        // of this was tried and reverted: it stopped the binding loop below
-        // but left the FIRST frame showing the OLD scroll position (from
-        // whatever was staged before) for one tick, with the correct
-        // position only landing a moment later — a visible pop/jump on
-        // EVERY fresh pick, not just a Table walk, read as "it's trying to
-        // scroll instead of moving directly to the next line" for a plain
-        // verse click or an arrow step. The actual loop (QML-side: see
-        // OutputMonitorTile's refreshOnAirSlide) is now guarded against
-        // re-entrant writes instead, which fixes it without delaying the
-        // position by a frame.
-        resetReadingRun();
-        readingPickBase_ = 0;
-        applyReadingRestage();
+        // RE-MEASURE IN PLACE — DO NOT RE-SEAT THE WALK.
+        //
+        // This used to throw the run away (resetReadingRun), zero the pick's origin
+        // (readingPickBase_ = 0) and re-stage from scratch on every report. A
+        // measurement does not change the run's TEXT, so all of that rebuilt the
+        // same window; the zeroed origin then moved readingAbsoluteLine back to the
+        // window's own start, so the reader's position in the pick jumped backwards
+        // and the pane's highlight walked back to the passage's first paragraph at
+        // each report. That is the "little skip" while scrolling — measured by the
+        // per-frame sampler in tools/selftest/run_line_step_test.sh, which reads
+        // exactly that number, and it lands mid-glide because a report arrives
+        // whenever a surface re-solves its column.
+        //
+        // The cached line tables for this style were dropped just above, so a
+        // FORCED rebuild of the SAME window re-counts the pages and the base in the
+        // new grid, while the page, the offset inside it and the pick's origin stay
+        // exactly where the reader is.
+        applyReadingRestage(true, /*forceRebuild=*/ true);
+        return;
     }
+    // (CALLED INLINE, same frame — a deferred QTimer::singleShot version of this
+    // was tried and reverted: it stopped the binding loop below but left the FIRST
+    // frame showing the OLD scroll position for one tick, with the correct one only
+    // landing a moment later — a visible pop on EVERY fresh pick. The QML-side loop
+    // (OutputMonitorTile's refreshOnAirSlide) is guarded against re-entrant writes
+    // instead, which fixes it without delaying the position by a frame.)
 }
 
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
@@ -2015,7 +1897,7 @@ void LiveOutputService::announceReadingPage()
 // rebased by exactly the lines dropped from the front. The drawn column loses
 // those same lines above the offset, so the visible words — and therefore the
 // pixels — do not move.
-void LiveOutputService::rebuildReadingRun(int anchor)
+void LiveOutputService::rebuildReadingRun(int anchor, bool force)
 {
     const int count = static_cast<int>(lineSetRaw_.size());
     if (count == 0) {
@@ -2032,8 +1914,14 @@ void LiveOutputService::rebuildReadingRun(int anchor)
     const bool wholePick = count <= kReadingRunWholePick;
     const int first = wholePick ? 0 : qMax(0, anchor - kReadingRunRadius);
     const int last = wholePick ? count - 1 : qMin(count - 1, anchor + kReadingRunRadius);
-    if (first == readingRunFirst_ && last == readingRunLast_)
+    if (!force && first == readingRunFirst_ && last == readingRunLast_)
         return;                        // same window: the column is unchanged
+    // (FORCED: the window is the same but the MEASUREMENT is not — the per-page
+    // counts and the base below are derived from the table, so they have to be
+    // recomputed even though the text is identical. Everything that depends on the
+    // window having MOVED stays put: `previousFirst` is only used to move the
+    // character origin and the offset by what the window dropped or took on, and a
+    // forced rebuild keeps both ends, so both adjustments are zero.)
     // What the picture is NOW, in the old run's numbering (before the window
     // moves). -1 when there was no run yet (a pick that is just starting).
     const int previousBase = readingRunFirst_ >= 0
@@ -2364,14 +2252,15 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
 // every build), so the type size and the wrapping moved while the words were
 // supposed to travel, and the design's box could end up holding a column of
 // short lines instead of the paragraph the operator approved.
-void LiveOutputService::applyReadingRestage(bool commitPage)
+void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
+                                            bool forceScrollNotify)
 {
     if (lineSetRaw_.isEmpty() || lineSlideIndex_ < 0 || lineSlideIndex_ >= lineSetRaw_.size())
         return;
     // THE RUN, NOT ONE PAGE — rebuilt only when the window must move, and the
     // offset rebased with it (see rebuildReadingRun), so a page turn inside the
     // window changes no visible pixel at all.
-    rebuildReadingRun(lineSlideIndex_);
+    rebuildReadingRun(lineSlideIndex_, forceRebuild);
     // THE BASE IS ALWAYS THE CURRENT PAGE'S. rebuildReadingRun only recomputes
     // readingRunBaseLine_ when the WINDOW has to move, and a pick that fits the
     // run radius is its own window — it never moves, so the base stayed at the
@@ -2403,7 +2292,8 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
     // next passage. Measured in engine.log: ReadRestage slide=2 base=14.00
     // scroll=14.00 with no readingScrollChanged, while both tiles' composition
     // was already the new page (RefreshOnAirSlide page=2, blocks0Text of 1-2).
-    const bool scrollChanged = !qFuzzyCompare(previousScroll + 1.0, readingScroll_ + 1.0);
+    const bool scrollChanged = forceScrollNotify
+        || !qFuzzyCompare(previousScroll + 1.0, readingScroll_ + 1.0);
     // THE RESULT, every time this runs — not just when LineStep calls it. A
     // call from noteReadingFit's reset cascade, or from a fresh pick, lands
     // here with no preceding LineStep line, so without this the glide this

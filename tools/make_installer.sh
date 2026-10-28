@@ -174,7 +174,11 @@ fi
 rm -rf "$DIST/logs" "$DIST/enginedata" "$DIST/crashes"
 
 # ---- 3. compile the installer -------------------------------------------------
-echo "== compiling installer (Inno Setup) =="
+# TOTAL FILE COUNT, counted before ISCC starts — the compiler packages exactly
+# the deployed tree at $DIST, so this is the denominator the live progress
+# line below divides against (not an ISCC-reported total; it never prints one).
+TOTAL_FILES="$(find "$DIST" -type f | wc -l)"
+echo "== compiling installer (Inno Setup, $TOTAL_FILES files to package) =="
 # MSYS2_ARG_CONV_EXCL: without it bash rewrites the /D define into a Windows
 # path and ISCC sees "more than one script filename".
 # Streamed through `tee`, not silently redirected: ISCC's own per-file compile/
@@ -182,9 +186,44 @@ echo "== compiling installer (Inno Setup) =="
 # deployed app) now print live instead of the terminal sitting blank until it
 # either finishes or fails (user report: "so I can [tell] if it's moving").
 # `set -euo pipefail` (top of file) makes `if !` see ISCC's own exit code, not
-# tee's, so a real failure still trips this branch.
+# tee's/awk's, so a real failure still trips this branch — awk and tee reading/
+# writing plain text essentially never fail on their own, so the rightmost
+# non-zero status pipefail reports is still ISCC's.
+#
+# PERCENT PROGRESS, not just the raw per-file lines (user call: "show it...
+# how many percent it does"): ISCC itself never prints a percentage, only one
+# line per file as it compresses it — each line in this build's own output
+# that IS a packaged file starts with a drive letter and a colon (an absolute
+# Windows path), which is enough to count against TOTAL_FILES without needing
+# to match the backslash that follows it too (backslash-in-regex is exactly
+# what broke on the first attempt here — verified live, re-tested after the
+# fix: `echo 'C:\fake\file.dll' | gawk '{ if ($0 ~ /^[A-Za-z]:/) print "MATCH" }'`
+# matches, and a plain status line like "Reading script file..." correctly
+# does not). This is a count of lines that LOOK like a packaged file, not a
+# byte-accurate progress bar — LZMA2's compression ratio varies per file, so
+# the percentage can run a little ahead of or behind the real work, but it is
+# the same kind of estimate a package manager's "file N of M" counter gives,
+# and it is the only signal ISCC's own output offers. Printed every 5
+# percentage points (not every file) so a fast run of small files does not
+# flood the terminal between the per-file lines tee is already printing.
 if ! MSYS2_ARG_CONV_EXCL="*" "$ISCC" "/DAPP_VERSION=$VER" "$(cygpath -w "$ROOT/tools/installer.iss")" \
-        2>&1 | tee /tmp/iscc.log; then
+        2>&1 | awk -v total="$TOTAL_FILES" '
+            {
+                print
+                fflush()
+                if ($0 ~ /^[A-Za-z]:/) {
+                    count++
+                    if (total > 0) {
+                        pct = int(count * 100 / total)
+                        if (pct > lastPct && pct % 5 == 0) {
+                            printf("    [installer progress] %d%% (%d/%d files packaged)\n", pct, count, total) > "/dev/stderr"
+                            fflush("/dev/stderr")
+                            lastPct = pct
+                        }
+                    }
+                }
+            }
+        ' | tee /tmp/iscc.log; then
     echo "ISCC FAILED:"
     tail -25 /tmp/iscc.log
     echo "INSTALLER: FAIL compile"

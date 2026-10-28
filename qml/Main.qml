@@ -1604,6 +1604,10 @@ ApplicationWindow {
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
     property int twTries: 0
     property int twPress: 0
+    // The staged-jump phase's own counter (a declared property: assigning an
+    // undeclared one on the root throws every tick, which is how the first
+    // version of that phase spun instead of finishing).
+    property int twJump: 0
     function twRefPara(text) {
         // The Table's reference carries the paragraph it is showing ("47-1100X -
         // Fellowship 2"): the trailing number IS the value the report was about.
@@ -1751,6 +1755,12 @@ ApplicationWindow {
                 for (let w = 0; w < wall.length; ++w)
                     console.log(wall[w])
                 console.log(window.twPaneLine(press))
+                // THE PICTURE, not only the numbers: both outputs' tiles at the
+                // jump and once the walk is well inside the passage. A page turn
+                // must leave the type size exactly where it was, so these two
+                // grabs are the visual half of "it stopped shrinking".
+                if (press === 0 || press === 30)
+                    window.twGrab("press" + press)
             } catch (err) {
                 console.log("[SELFTEST-TABLEWALK] log-error press=" + press + " " + err)
             }
@@ -1762,6 +1772,56 @@ ApplicationWindow {
             // boundaries this check is about.
             if (window.twPress > 120) {
                 selfTestTableWalkPress.stop()
+                selfTestTableWalkJump.restart()
+            }
+        }
+    }
+    // A PNG of every output's monitor tile (same item names the tile-facts
+    // scenario grabs), so the fit the service logs can be checked against the
+    // picture the operator actually sees — the report is about what fills the
+    // text area, which no property answers.
+    function twGrab(phase) {
+        const count = OutputListModel.rowCount()
+        for (let i = 0; i < count; ++i) {
+            const ok = SelfTest.grab("selfTestMonitorTile" + i, "tw_" + phase + "_" + i + ".png")
+            console.log("[SELFTEST-TABLEWALK] grab phase=" + phase + " tile=" + i + " ok=" + ok)
+        }
+    }
+    // THE TWO GESTURES THE REPORT NAMED, after the walk: the ‹ › arrows, which
+    // deliberately STAGE the passage they land on (the pane's own stepAndPlay),
+    // and then a fresh pick through the pane's play — the double-click's body.
+    // Each stage must re-solve every output's page size for the page it lands
+    // on: the latch that holds ONE size during a walk is keyed on
+    // readingStageSerial, so a jump has to move it. This phase is one grab per
+    // tick, taken a full tick AFTER the stage, so the layout has settled.
+    Timer {
+        id: selfTestTableWalkJump
+        interval: 2500
+        repeat: true
+        onTriggered: {
+            const pane = SelfTest.findItem("selfTestTablePane")
+            if (!pane) {
+                console.log("[SELFTEST-TABLEWALK] FAIL no-pane-at-jump")
+                SelfTest.quit()
+                return
+            }
+            const n = (window.twJump === undefined) ? 0 : window.twJump
+            window.twJump = n + 1
+            if (n > 0) {
+                // Photograph the state the previous tick staged.
+                console.log("[SELFTEST-TABLEWALK] jump=" + n
+                            + " stageSerial=" + LiveOutputService.readingStageSerial
+                            + " page=" + LiveOutputService.readingPage
+                            + " ref=" + JSON.stringify(String(pane.referenceText)))
+                window.twGrab("jump" + n)
+            }
+            if (n <= 2) {
+                if (n === 2)
+                    pane.playPicked()        // the double-click's own body
+                else
+                    pane.stepAndPlay(1)      // the ‹ › arrow's own body
+            } else {
+                selfTestTableWalkJump.stop()
                 selfTestTableWalkDone.restart()
             }
         }

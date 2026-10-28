@@ -440,8 +440,28 @@ Item {
                     // started with. A new pick is a new walk and solves its own —
                     // the pick's name is that line, and it is the only input here
                     // that changes when one passage ends and the next begins.
-                    if (reading && typeof LiveOutputService !== "undefined")
+                    if (reading && typeof LiveOutputService !== "undefined") {
                         parts.push(String(LiveOutputService.readingSetName ?? ""))
+                        // ...AND THE JUMP/WALK DISTINCTION (readingStageSerial). One
+                        // WALK is one size: a line step inside the page already on
+                        // screen must not re-fit, or the column re-flows under the
+                        // reader (the template changing while it scrolls). A JUMP —
+                        // a click on another paragraph, the pane's ‹ ›, a search pick
+                        // — is a new page arriving, and reusing the previous page's
+                        // answer is what made a short paragraph look under-sized and
+                        // a long one overflow its box (reported: "when [I] double
+                        // click I expected autosize [to] show and the text font size
+                        // [to fit] the text area"). A walk never bumps this counter,
+                        // so its hold is untouched.
+                        // ...the OPERATOR-JUMP serial, not the stage serial: the walk's
+                        // own follow re-stages each page it crosses into (measured:
+                        // stage 10, 11, 12 ... once per press), so the stage serial made
+                        // every paragraph boundary look like a jump and re-solved the
+                        // type mid-scroll. A click, the ‹ › and a search pick bump this
+                        // one; a page turn does not.
+                        parts.push(String(Number((LiveOutputService.readingJumpSerial
+                                                  ?? LiveOutputService.readingStageSerial) ?? 0)))
+                    }
                     parts.push(el.width, el.height, el.style.padding ?? 0,
                                el.meta.fontFamily ?? "",
                                MetadataFields.lineHeight(el.meta),

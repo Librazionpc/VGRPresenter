@@ -185,7 +185,8 @@ Rectangle {
             && String(raw.flowText ?? "") !== ""
         const key = walking
             ? "walk|" + root.styleId + "|" + root.stylePulse + "|"
-              + LiveOutputService.readingSetName + "|" + LiveOutputService.readingPage
+              + LiveOutputService.readingSetName + "|" + LiveOutputService.readingStageSerial
+              + "|" + LiveOutputService.readingPage
               + "|" + LiveOutputService.live
               + "|" + LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaRev
               + "|" + LiveOutputService.inputLabel

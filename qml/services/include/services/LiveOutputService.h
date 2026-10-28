@@ -477,6 +477,25 @@ public:
     // the same offset on the HDMI window, the NDI feed and every recording. Two
     // views of ONE number, instead of two animations trying to agree.
     Q_PROPERTY(QString readingFlowText READ readingFlowText NOTIFY readingScrollChanged)
+    // HOW MANY TIMES A PAGE WAS STAGED OUTRIGHT — a click, a ‹ › step, a search
+    // pick — as opposed to the reading step walking lines inside the page it is
+    // already on. The two must be told apart by the surfaces: a WALK holds one
+    // type size for the whole passage (re-fitting it page by page is the template
+    // changing under the reader), while a JUMP is a new page arriving and gets its
+    // own auto-size, which is what the operator expects to see when they double-
+    // click a paragraph ("I expected autosize to show and the font size to [fit]
+    // the text area"). DesignPreview latches its solved size against this counter
+    // for exactly that reason.
+    Q_PROPERTY(int readingStageSerial READ readingStageSerial NOTIFY readingStageChanged)
+    // ...AND THE OPERATOR'S OWN JUMPS, which is what the stage serial above CANNOT
+    // tell apart from a page turn: the walk's own follow re-stages the page it
+    // crosses into (measured: readingStageSerial climbing 10, 11, 12 ... once per
+    // press), so keying the reading column on it made every paragraph boundary look
+    // like a jump and re-solved the type mid-scroll. This counter moves ONLY where
+    // the operator acts — a click on a paragraph, the pane's ‹ ›, a search pick (see
+    // the noteOperatorJump calls in ReferencePane) — so a walk keeps the column it
+    // started with and a deliberate jump still fits the page it lands on.
+    Q_PROPERTY(int readingJumpSerial READ readingJumpSerial NOTIFY readingStageChanged)
     Q_PROPERTY(qreal readingScroll READ readingScroll NOTIFY readingScrollChanged)
     // THE POSITION EVERY STYLE AGREES ON: the character offset into
     // readingFlowText that the line at the top of the box begins with. Unlike
@@ -522,6 +541,11 @@ public:
     Q_PROPERTY(int lineStepDirection READ lineStepDirection NOTIFY lineStepChanged)
     // (Getter placement note: the Q_PROPERTY above names it READ.)
     QString readingSetName() const { return lineSetName_; }
+    int readingStageSerial() const { return readingStageSerial_; }
+    int readingJumpSerial() const { return readingJumpSerial_; }
+    // The operator's own stage (a click, the arrows, a search pick): the walk may
+    // then re-solve its column for the page it lands on. Called from QML only.
+    Q_INVOKABLE void noteOperatorJump();
     int lineStepSerial() const { return lineStepSerial_; }
     int lineStepDirection() const { return lineStepDirection_; }
     // Wipes a pending stage without touching live_/onAirSlide_ — stop()
@@ -744,6 +768,8 @@ signals:
     void stagedChanged();
     // One applied line step (see lineStepSerial / lineStepDirection).
     void lineStepChanged();
+    // ...and a page STAGED OUTRIGHT (see readingStageSerial): a jump, not a step.
+    void readingStageChanged();
     // The reading passage, or where it sits, changed — every frame of a step
     // (see readingFlowText / readingScroll). The surface that draws the step
     // binds to `readingScroll`, so this fires at the animator's own cadence.
@@ -892,6 +918,8 @@ private:
     // Q_PROPERTYs above (the surfaces' animation pulse).
     int lineStepSerial_ = 0;
     int lineStepDirection_ = 1;
+    int readingStageSerial_ = 0;
+    int readingJumpSerial_ = 0;
     // THE PASSAGE the reading block is a page of (see the Q_PROPERTYs above) and
     // where it rests, in line heights of the reading text.
     QString readingFlowText_;
@@ -930,7 +958,11 @@ private:
     // it. WHEN THE WINDOW SHIFTS IT REBASES readingScroll_ by exactly the lines
     // added or dropped at the front, so the words on screen do not move: the
     // offset and the column change by the same amount, which is the same picture.
-    void rebuildReadingRun(int anchor);
+    // `force` RE-MEASURES the run it already holds. The window's TEXT does not
+    // change when a surface reports a new size/box for the same column, so the
+    // early return below would keep the line counts and the base derived from the
+    // OLD measurement. A re-report is exactly that case: same window, new grid.
+    void rebuildReadingRun(int anchor, bool force = false);
     // Lines from the run's first page to `index`'s first line.
     int readingBaseForSlide(int index) const;
     // The reading line THIS page's first line sits at, in the walk's OWN
@@ -1012,7 +1044,12 @@ private:
     // false for a step INSIDE one page: on air that needs no new presentation at
     // all (the offset travels on its own), and only a PAGE change has to be
     // committed for the reference/heading around the words to follow.
-    void applyReadingRestage(bool commitPage = true);
+    // `forceRebuild` is for a measurement change on the SAME page (see
+    // rebuildReadingRun's own note): the page is re-staged so the engine draws the
+    // same words in the new grid, but the walk's page, offset and pick origin are
+    // left exactly where the reader was.
+    void applyReadingRestage(bool commitPage = true, bool forceRebuild = false,
+                             bool forceScrollNotify = false);
     // A slide's READING lines — one entry per line ON SCREEN, not per authored
     // newline: the step moves by what the operator can see, so the text is
     // wrapped at the box the composed picture draws it in (see the .cpp).
@@ -1077,6 +1114,16 @@ private:
     // fallback is the page's own count, which is all a pick with one page has).
     QHash<int, int> readingRunPageStart_;   // page index -> its text's char offset in the run
     QHash<int, int> readingRunPageLines_;   // page index -> its lines in the passage's table
+    // WHICH JUMP-EPOCH EACH STYLE'S COLUMN WAS SETTLED IN (see noteReadingFit).
+    //
+    // Not cleared by resetReadingRun: that runs INSIDE rebuildReadingRun for every
+    // page re-cut, i.e. right before each page's own report — so a marker cleared
+    // there was always absent when the next page asked to be held, and the hold
+    // never fired (measured: zero `held=YES` while ReadFitNote kept printing
+    // `resetsRun=YES` once per press). The stage serial changes only when a page is
+    // OPERATOR-STAGED outright (readingJumpSerial: a click, the pane's ‹ ›, a search
+    // pick), which is exactly the moment a column should be allowed to solve again.
+    mutable QHash<QString, int> readingFitAcceptedJump_;
     // THE WALK'S ONE TYPE SIZE PER STYLE (see styleRunLinesForText): solved by the
     // first page the passage was measured on and held for the rest of the walk, so a
     // page turn cannot re-flow the column. Cleared by resetReadingRun (a new pick, or
