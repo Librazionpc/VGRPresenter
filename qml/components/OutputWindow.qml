@@ -256,22 +256,56 @@ Window {
     // a preview rule for itself any more (see that file's comment for the whole
     // reasoning — two surfaces deriving the same rule is what made them
     // disagree).
-    readonly property var onAirSlide: {
-        void root.stylePulse
-        // THE TAKE IS AN INPUT OF THE COMPOSITION (see OutputMonitorTile.qml's
-        // own binding for the full reasoning): SceneBuilder composes differently
-        // while a file or camera is up, and none of that is QML-notifiable, so
-        // without these the window kept drawing its PRE-take composition until
-        // the slide changed.
-        void LiveOutputService.mediaOnAir
-        void LiveOutputService.mediaRev
-        void LiveOutputService.inputLabel
-        const stagedRaw = LiveOutputService.stagedSlideRaw
-        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
-            ? stagedRaw : LiveOutputService.onAirSlideRaw
-        return LiveOutputService.previewWithStyle(
-            (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
+    // IMPERATIVE, NOT A BINDING — same conversion, same reason, as
+    // OutputMonitorTile.qml's own onAirSlide: confirmed live, "QML
+    // OutputWindow: Binding loop detected for property 'onAirSlide'"
+    // (OutputWindow.qml:259, the real output window — the tile's own fix
+    // never touched this file). The cascade is identical: this property
+    // feeding `blocks: root.onAirSlide.blocks` below, its Repeater, the
+    // reading block's eager solveFit, LiveOutputService.noteReadingFit's
+    // first-solve reset, stagedChanged, back to this binding — a second
+    // write landing while the first was still unwinding through that same
+    // chain. The re-entrancy guard (not a defer — see OutputMonitorTile's
+    // own note on why a QTimer version was tried and reverted) makes the
+    // re-entrant call mark itself pending and return instead of nesting a
+    // second write, then runs once more after the first pass's cascade
+    // fully returns — still inside one synchronous call, so there is no
+    // stale frame to be seen in between.
+    property var onAirSlide: ({})
+    property bool onAirSlideBusy: false
+    property bool onAirSlidePending: false
+    function refreshOnAirSlide() {
+        if (root.onAirSlideBusy) {
+            root.onAirSlidePending = true
+            return
+        }
+        root.onAirSlideBusy = true
+        do {
+            root.onAirSlidePending = false
+            // THE TAKE IS AN INPUT OF THE COMPOSITION (see OutputMonitorTile
+            // .qml's own binding for the full reasoning): SceneBuilder
+            // composes differently while a file or camera is up, and none of
+            // that is QML-notifiable, so without these the window kept
+            // drawing its PRE-take composition until the slide changed.
+            const stagedRaw = LiveOutputService.stagedSlideRaw
+            const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+                ? stagedRaw : LiveOutputService.onAirSlideRaw
+            root.onAirSlide = LiveOutputService.previewWithStyle(
+                (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
+        } while (root.onAirSlidePending)
+        root.onAirSlideBusy = false
     }
+    onStylePulseChanged: root.refreshOnAirSlide()
+    onOutputStyleIdChanged: root.refreshOnAirSlide()
+    Connections {
+        target: LiveOutputService
+        function onMediaChanged() { root.refreshOnAirSlide() }
+        function onMediaTick() { root.refreshOnAirSlide() }
+        function onInputChanged() { root.refreshOnAirSlide() }
+        function onStagedChanged() { root.refreshOnAirSlide() }
+        function onOnAirChanged() { root.refreshOnAirSlide() }
+    }
+    Component.onCompleted: root.refreshOnAirSlide()
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0

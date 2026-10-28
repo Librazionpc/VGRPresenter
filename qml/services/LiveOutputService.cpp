@@ -1484,7 +1484,15 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     resetReadingRun();
     rebuildReadingRun(at);
     readingFlowText_ = readingRunText_;
-    emit readingScrollChanged();
+    // NO ANNOUNCEMENT HERE: readingScroll_ is still 0 at this point (the run
+    // has just been rebuilt, the page's base is set by applyReadingRestage
+    // below), so emitting now told every drawing surface "the position is 0" —
+    // and the restage that follows set the real base (14 on the reported jump)
+    // WITHOUT telling them (its own announcement was gated on the FLOW text
+    // changing, which a direct jump does not). The tile then drew the passage
+    // from its first line while the pane's preview showed the picked paragraph.
+    // applyReadingRestage announces the settled position, so that is the one word
+    // on this call.
     // The page goes out (or is staged) carrying its passage and its offset — see
     // applyReadingRestage, which also announces the page change once that page is
     // the one in stagedSlide_/onAirSlide_ (the order that matters: a surface which
@@ -2324,9 +2332,25 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
     // on every restage rather than trusted from whenever the window last moved.
     readingRunBaseLine_ = readingBaseForSlide(lineSlideIndex_);
     const QString previousFlow = readingFlowText_;
+    const qreal previousScroll = readingScroll_;
     readingFlowText_ = readingRunText_;
     readingScroll_ = readingRunBaseLine_ + lineOffset_;
     const bool flowChanged = readingFlowText_ != previousFlow;
+    // THE POSITION CHANGED, not only the text. A DIRECT JUMP (a click on another
+    // paragraph, the pane's ‹ ›, a search pick) stages a page whose position is
+    // base+0 while the passage's TEXT is the same run it already had — so
+    // `flowChanged` is false, and the announcement below used to be skipped
+    // entirely. Every surface that draws by this number (DesignPreview's stepLine
+    // → readingChar → readingScroll, the monitor tiles, the output window) then
+    // kept the offset it was last told — 0, announced by stageSlideSet before the
+    // run existed — and drew the passage from its FIRST line while the pane's own
+    // preview (which draws the composed page, not the flow) showed the right
+    // paragraph: reported as "it gets stuck and doesn't update but the preview
+    // pane changes", and as ‹ › "trying to line step" instead of moving to the
+    // next passage. Measured in engine.log: ReadRestage slide=2 base=14.00
+    // scroll=14.00 with no readingScrollChanged, while both tiles' composition
+    // was already the new page (RefreshOnAirSlide page=2, blocks0Text of 1-2).
+    const bool scrollChanged = !qFuzzyCompare(previousScroll + 1.0, readingScroll_ + 1.0);
     // THE RESULT, every time this runs — not just when LineStep calls it. A
     // call from noteReadingFit's reset cascade, or from a fresh pick, lands
     // here with no preceding LineStep line, so without this the glide this
@@ -2335,14 +2359,16 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
     // only inferable from a side effect (ReadFit re-firing) three calls away.
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadRestage"),
                         QStringLiteral("slide=%1 base=%2 lineOffset=%3 scroll=%4 "
-                                       "flowChanged=%5 commitPage=%6 live=%7")
+                                       "flowChanged=%5 commitPage=%6 live=%7 "
+                                       "scrollChanged=%8 (true = the new position was announced)")
                             .arg(lineSlideIndex_)
                             .arg(static_cast<double>(readingRunBaseLine_), 0, 'f', 2)
                             .arg(static_cast<double>(lineOffset_), 0, 'f', 2)
                             .arg(readingScroll_, 0, 'f', 2)
                             .arg(flowChanged ? QStringLiteral("yes") : QStringLiteral("no"))
                             .arg(commitPage ? QStringLiteral("yes") : QStringLiteral("no"))
-                            .arg(live_ ? QStringLiteral("yes") : QStringLiteral("no")));
+                            .arg(live_ ? QStringLiteral("yes") : QStringLiteral("no"))
+                            .arg(scrollChanged ? QStringLiteral("yes") : QStringLiteral("no")));
     // PREWARM THE NEIGHBOURHOOD, queued for the NEXT event-loop turn (after
     // this call's own step has already drawn) — see prewarmReadingLines's
     // own header comment. Every page the stepper can land on next or come
@@ -2389,7 +2415,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
         // frame they already have at the new position instead of the loop being
         // handed a fresh presentation on every key press.
         if (!commitPage) {
-            if (flowChanged)
+            if (flowChanged || scrollChanged)
                 emit readingScrollChanged();   // no block change this time: safe as-is
             return;
         }
@@ -2412,7 +2438,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
         // is the earliest point both halves of the memo key agree.
         if (pageChanged)
             emit readingPageChanged();
-        if (flowChanged)
+        if (flowChanged || scrollChanged)
             emit readingScrollChanged();
         return;
     }
@@ -2428,7 +2454,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage)
     // as of the assignment just above, so readingPageChanged waits for here.
     if (pageChanged)
         emit readingPageChanged();
-    if (flowChanged)
+    if (flowChanged || scrollChanged)
         emit readingScrollChanged();
 }
 
