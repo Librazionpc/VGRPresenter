@@ -99,8 +99,55 @@ Rectangle {
     // tile's own preview), otherwise the on-air slide. THIS OUTPUT'S style id is
     // always the style the composition is asked for — never the active output's,
     // or a tile would paint another output's look.
-    readonly property var onAirSlide: {
-        void root.stylePulse
+    //
+    // IMPERATIVE, NOT A BINDING — this used to be `readonly property var
+    // onAirSlide: { ... }`, re-evaluated automatically on any of its ~9
+    // dependencies (confirmed live: "QML OutputMonitorTile: Binding loop
+    // detected for property 'onAirSlide'" during LiveOutputService.stageSlideSet,
+    // recurring on every later page turn — Qt's loop guard only WARNS once per
+    // binding, so after the first hit it silently kept dropping re-entrant
+    // re-evaluations, each one leaving root.blocks a beat stale). A plain
+    // property's assignment cannot loop the way a binding's own re-evaluation
+    // can: nothing re-triggers refreshOnAirSlide() automatically, only the
+    // explicit calls below, so there is no evaluation for Qt's guard to ever
+    // catch mid-flight. Every existing reader of root.onAirSlide (hasSlidePreview,
+    // backdropIndexes, the style-color/background/image bindings further down)
+    // is unchanged — they all still just read root.onAirSlide and react to its
+    // ordinary onAirSlideChanged notify, exactly as before.
+    property var onAirSlide: ({})
+    // RE-ENTRANCY GUARD, not a defer — a QTimer::singleShot version of this
+    // problem was tried on the C++ side (noteReadingFit) and reverted: it
+    // stopped the loop but left the FIRST frame showing the OLD position for
+    // one tick before snapping to the right one, which read as "it's trying
+    // to scroll instead of moving directly" on EVERY fresh pick (a plain
+    // verse click, an arrow step), not just a Table walk. This guard instead
+    // makes the SECOND, re-entrant call (triggered synchronously from deep
+    // inside the first one's own cascade — onAirSlide -> markedBlocks ->
+    // DesignPreview.blocks -> its Repeater -> the reading block's EAGER
+    // solveFit -> LiveOutputService.noteReadingFit's first-solve reset ->
+    // stagedChanged -> back to this function) mark itself PENDING and return
+    // immediately instead of writing root.onAirSlide again while the first
+    // write is still unwinding through that same chain — which is exactly
+    // what tripped Qt's loop guard on 'blocks'. Once the first pass's own
+    // cascade has fully returned, the loop below notices pending and runs
+    // the body again, reading the now-current state and writing
+    // root.onAirSlide exactly once more — still inside this one synchronous
+    // call, so there is no visible frame at the stale position at all.
+    property bool onAirSlideBusy: false
+    property bool onAirSlidePending: false
+    function refreshOnAirSlide() {
+        if (root.onAirSlideBusy) {
+            root.onAirSlidePending = true
+            return
+        }
+        root.onAirSlideBusy = true
+        do {
+            root.onAirSlidePending = false
+            root.refreshOnAirSlideOnce()
+        } while (root.onAirSlidePending)
+        root.onAirSlideBusy = false
+    }
+    function refreshOnAirSlideOnce() {
         // THE TAKE IS AN INPUT OF THE COMPOSITION. SceneBuilder::ComposeSlide
         // reads CompositorState — is a file/camera up, is its picture
         // transparent, does a take clear the style's background — so a take
@@ -111,13 +158,6 @@ Rectangle {
         // styleColor=<the style's poster>) until GO LIVE replaced the slide:
         // one tile painted checkers where its neighbour painted its card
         // colour, for the same picture on the same slide.
-        void LiveOutputService.mediaOnAir
-        void LiveOutputService.mediaRev
-        void LiveOutputService.inputLabel
-        // ...and the PAGE the walk is on. A page commit hands this tile the next
-        // page's blocks, so this binding has to re-run when that happens — see
-        // the memo key below for why it is the PAGE and not the offset.
-        void LiveOutputService.readingPage
         const stagedRaw = LiveOutputService.stagedSlideRaw
         const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
             ? stagedRaw : LiveOutputService.onAirSlideRaw
@@ -151,17 +191,40 @@ Rectangle {
               + "|" + LiveOutputService.inputLabel
             : ""
         const memo = root.slideMemo
-        if (key !== "" && key === memo.key)
-            return memo.value
+        if (key !== "" && key === memo.key) {
+            EngineBridge.log("info", "RefreshOnAirSlide",
+                "tile=" + root.objectName + " cacheHit key=" + key.slice(0, 60)
+                + " blocks0Text=" + String((memo.value.blocks && memo.value.blocks[0]
+                    && memo.value.blocks[0].text) ?? "").slice(0, 24))
+            root.onAirSlide = memo.value
+            return
+        }
         const composed = LiveOutputService.previewWithStyle(
             (raw && typeof raw === "object") ? raw : ({}), root.styleId)
+        EngineBridge.log("info", "RefreshOnAirSlide",
+            "tile=" + root.objectName + " recomposed key=" + key.slice(0, 60)
+            + " blocks0Text=" + String((composed.blocks && composed.blocks[0]
+                && composed.blocks[0].text) ?? "").slice(0, 24))
         memo.key = key
         memo.value = composed
-        return composed
+        root.onAirSlide = composed
     }
     // A plain object mutated in place: its IDENTITY never changes, so writing it
     // cannot re-enter the binding above (a property write there would).
     readonly property var slideMemo: ({ key: "", value: {} })
+    onStylePulseChanged: root.refreshOnAirSlide()
+    onStyleIdChanged: root.refreshOnAirSlide()
+    Connections {
+        target: LiveOutputService
+        function onMediaChanged() { root.refreshOnAirSlide() }
+        function onMediaTick() { root.refreshOnAirSlide() }
+        function onInputChanged() { root.refreshOnAirSlide() }
+        function onReadingPageChanged() { root.refreshOnAirSlide() }
+        function onStagedChanged() { root.refreshOnAirSlide() }
+        function onOnAirChanged() { root.refreshOnAirSlide() }
+        function onLiveChanged() { root.refreshOnAirSlide() }
+    }
+    Component.onCompleted: root.refreshOnAirSlide()
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
@@ -199,38 +262,81 @@ Rectangle {
     // IDENTITY never changes, so writing it cannot invalidate this binding (a
     // property write here would re-enter it).
     readonly property var backdropMemo: ({ key: "", value: [] })
-    readonly property var backdropIndexes: {
+    // IMPERATIVE, NOT A BINDING — same reason and same shape as onAirSlide
+    // above: this was a `readonly property var` calling EngineBridge
+    // .backdropBlockIndexes() from inside its own re-evaluation, and Qt's
+    // loop guard caught IT next ("Binding loop detected for property
+    // 'backdropIndexes'") the moment onAirSlide stopped being the one QML
+    // happened to catch first — the underlying page-commit signal storm this
+    // depends on (root.onAirSlide, reassigned per page) was always there.
+    // Its only dependency is onAirSlide itself, so one trigger covers it.
+    property var backdropIndexes: []
+    function refreshBackdropIndexes() {
         const bs = root.onAirSlide && root.onAirSlide.blocks ? root.onAirSlide.blocks : []
-        if (bs.length === 0 || typeof EngineBridge === "undefined")
-            return []
+        if (bs.length === 0 || typeof EngineBridge === "undefined") {
+            root.backdropIndexes = []
+            return
+        }
         let key = ""
         for (let i = 0; i < bs.length; ++i) {
             const b = bs[i]
             key += b.kind + "," + b.x + "," + b.y + "," + b.width + "," + b.height + ";"
         }
         const memo = root.backdropMemo
-        if (key === memo.key)
-            return memo.value
+        if (key === memo.key) {
+            root.backdropIndexes = memo.value
+            return
+        }
         const plan = EngineBridge.backdropBlockIndexes(bs)
         memo.key = key
         memo.value = plan
-        return plan
+        root.backdropIndexes = plan
+    }
+    onOnAirSlideChanged: {
+        // ONE write to markedBlocks per onAirSlide change — called directly,
+        // not through onBackdropIndexesChanged too: calling it from BOTH
+        // reassigned root.markedBlocks twice in the same synchronous cascade
+        // (once here, once again as backdropIndexes' own change signal fired
+        // mid-cascade), and each reassignment synchronously re-triggers
+        // DesignPreview's `blocks: root.markedBlocks` binding — the SECOND
+        // one landing while Qt was still processing the first's Repeater
+        // update is what tripped its loop guard next ("Binding loop detected
+        // for property 'blocks'" in DesignPreview, fed from this tile's
+        // markedBlocks). refreshBackdropIndexes() finishes settling
+        // backdropIndexes before refreshMarkedBlocks() reads it, so the
+        // ordering this was protecting is still exactly honoured — just
+        // once, not twice.
+        root.refreshBackdropIndexes()
+        root.refreshMarkedBlocks()
     }
     // The same list with those blocks MARKED: the marker travels with the block,
     // so the block render can skip exactly their paint and the backdrop pass can
     // draw exactly them, with no parallel index list to keep in step with a list
     // that gets filtered on the way through.
-    readonly property var markedBlocks: {
+    //
+    // IMPERATIVE, NOT A BINDING — same family as onAirSlide/backdropIndexes
+    // above: this has TWO volatile inputs (onAirSlide and backdropIndexes),
+    // and backdropIndexes is itself reassigned synchronously, in the same
+    // cascade, right after onAirSlide — so a page commit touches both within
+    // one call stack, which is what Qt's loop guard caught next ("Binding
+    // loop detected for property 'markedBlocks'") the moment the first two
+    // stopped being the ones it happened to report. No C++ call is needed to
+    // trigger this; two dependencies changing in the same synchronous burst
+    // is enough.
+    property var markedBlocks: []
+    function refreshMarkedBlocks() {
         const bs = root.onAirSlide && root.onAirSlide.blocks ? root.onAirSlide.blocks : []
         const under = root.backdropIndexes
-        if (under.length === 0)
-            return bs
+        if (under.length === 0) {
+            root.markedBlocks = bs
+            return
+        }
         const out = []
         for (let i = 0; i < bs.length; ++i) {
             const b = bs[i]
             out.push(under.indexOf(i) >= 0 ? Object.assign({}, b, { underVideo: true }) : b)
         }
-        return out
+        root.markedBlocks = out
     }
     readonly property var backdropBlocks: root.markedBlocks.filter(b => b.underVideo === true)
 

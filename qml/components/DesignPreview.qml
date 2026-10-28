@@ -433,12 +433,21 @@ Item {
                 // different line table under the reader (the table is measured at ONE
                 // size; a column drawn at four is four grids).
                 readonly property string readingFitKey: {
-                    const parts = [el.width, el.height, el.style.padding ?? 0,
-                                   el.meta.fontFamily ?? "",
-                                   MetadataFields.lineHeight(el.meta),
-                                   MetadataFields.lineSpacing(el.meta),
-                                   MetadataFields.letterSpacing(el.meta)]
-                    if (!(el.readingBlock && root.animateLineSteps))
+                    const reading = el.readingBlock && root.animateLineSteps
+                    const parts = []
+                    // ...AND THE PICK, for the reading block: one WALK is one size, so
+                    // every page commit inside it must reuse the answer the walk
+                    // started with. A new pick is a new walk and solves its own —
+                    // the pick's name is that line, and it is the only input here
+                    // that changes when one passage ends and the next begins.
+                    if (reading && typeof LiveOutputService !== "undefined")
+                        parts.push(String(LiveOutputService.readingSetName ?? ""))
+                    parts.push(el.width, el.height, el.style.padding ?? 0,
+                               el.meta.fontFamily ?? "",
+                               MetadataFields.lineHeight(el.meta),
+                               MetadataFields.lineSpacing(el.meta),
+                               MetadataFields.letterSpacing(el.meta))
+                    if (!reading)
                         parts.push(el.meta.fontSize ?? 16)
                     return parts.join("|")
                 }
@@ -505,33 +514,35 @@ Item {
                     // The delegate is clipped to its box, so the token is cut at the edge
                     // instead of shrinking the type.
                     const tokenOrZero = bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)
-                    // STILL THE SAME WALK: keep the size the first page settled
-                    // on, so the committed page lands at the size the reader was
-                    // already looking at. Measured here, not assumed — a page that
-                    // genuinely does not fit at that size still gets its own
-                    // (smaller) answer, and the held size is then only the upper
-                    // bound the bisection may come down from.
-                    let held = false
-                    let readingFitHeld = 0
+                    // THE WALK'S SIZE IS THE PAGE'S OWN FIT, HELD.
+                    //
+                    // What a scrolling column must NOT do is re-fit itself page by
+                    // page: that is the template changing under the reader (reported:
+                    // "some parts scroll well, some parts still shrink"). What it must
+                    // also not do is skip the fit — answering the DECLARED size instead
+                    // is what made a scrolling slide look shrunk next to the same slide
+                    // at rest, where auto-size is filling the box (our rule was being
+                    // read as "the scrolling case has no fit question to ask").
+                    //
+                    // So the first page of a walk is fitted by the SAME bisection a
+                    // slide at rest runs (see the loop below), and that one answer is
+                    // latched: every page after it — same pick, same box, same type —
+                    // reuses it, so nothing about the type moves between steps.
                     if (!tokenOrZero && hostAlive && el.readingBlock && root.animateLineSteps
-                            && root.readingFitSize > 0
-                            && root.readingFitKey === el.readingFitKey) {
-                        readingFitHeld = root.readingFitSize
-                        fitProbe = readingFitHeld
-                        // HELD MEANS HELD. The walk's one type size IS the first page's
-                        // own solve, and the old "unless this page genuinely does not fit"
-                        // escape re-solved a longer page smaller — which re-flows the
-                        // column mid-walk, i.e. re-measures the line table under the
-                        // reader: the size the table was measured at changed, so the
-                        // drawn column and the table became different grids again
-                        // (measured: 45.84 → 40.99 across one walk, pageFit against
-                        // table mismatches of 3 lines). A longer page's extra lines
-                        // simply scroll through the box, which is what a passage is.
-                        held = true
+                        && root.readingFitSize > 0 && root.readingFitKey === el.readingFitKey) {
+                        fitAnswer = root.readingFitSize
+                        fitProbe = fitAnswer
+                        fitSolving = false
+                        return
                     }
+                    // A walk that already has its size returned above; the walk's FIRST
+                    // page reaches here, and so does every other consumer (grids, cards,
+                    // canvas thumbnails, static text) — all of them fitted as they always
+                    // have: the declared size for a placeholder token, otherwise a real
+                    // bisection against the box.
                     if (tokenOrZero) {
                         lo = el.meta.fontSize ?? 16
-                    } else if (!held) {
+                    } else {
                         for (let i = 0; i < 11; ++i) {
                             const mid = (lo + hi) / 2
                             fitProbe = mid
@@ -540,29 +551,20 @@ Item {
                             else
                                 hi = mid
                         }
-                    } else {
-                        lo = held ? readingFitHeld : (el.meta.fontSize ?? 16)
                     }
                     // grow: fill the box; shrink/none: at most the set size (the squeeze).
                     fitAnswer = el.fitMode === "grow" ? lo : Math.min(el.meta.fontSize ?? 16, lo)
                     fitProbe = fitAnswer
-                    if (hostAlive && el.readingBlock && root.animateLineSteps) {
+                    if (!tokenOrZero && hostAlive && el.readingBlock && root.animateLineSteps) {
+                        // This is the walk's first page (or its first page at this box,
+                        // for this pick): it has just been fitted like any slide at
+                        // rest, so latch that answer for the pages that follow it.
                         root.readingFitKey = el.readingFitKey
                         root.readingFitSize = fitAnswer
-                        // THE NUMBER THE PASSAGE'S TABLE MUST BE MEASURED AT, handed to
-                        // the service that owns that table. This surface is the one
-                        // that DRAWS the column, so its solve is the authority: the
-                        // service re-deriving the size from its own solver put the
-                        // type 10% larger than the design's page (measured 44.48 px
-                        // drawn against a 40 px page) and left the table a different
-                        // grid from the words on screen.
-                        // ...with the BOX it draws in, because the service's own
-                        // composition can pick a different block for the same style
-                        // (measured: 150x41 against 754x124 for one output) and a
-                        // wrap measured in the wrong box counts different lines.
-                        LiveOutputService.noteReadingFit(root.readingStyleId, fitAnswer,
-                                                         el.width, el.height,
-                                                         el.style.padding ?? 0)
+                        if (typeof LiveOutputService !== "undefined")
+                            LiveOutputService.noteReadingFit(root.readingStyleId, fitAnswer,
+                                                             el.width, el.height,
+                                                             el.style.padding ?? 0)
                     }
                     fitSolving = false
                 }

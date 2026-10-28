@@ -2541,9 +2541,27 @@ Item {
             const number = firstParts[0].number
             const partIndex = firstParts[0].partIndex ?? 0
             const output = root.chapterOutputSlides()
+            // DIAGNOSTIC: which piece this pick actually resolves to. selected
+            // names a HEAD verse (root.selected=[number]), so this should always
+            // land on i=0/partIndex=0 for a plain (non-continuation) double-click
+            // — a mismatch here (reported: double-clicking "1" staged "1-1") means
+            // firstParts[0]'s own partIndex disagrees with the list row model's
+            // hardcoded partIndex:0 for a head row (see where rows are built:
+            // "partIndex: 0" is asserted there, never read from the engine).
+            EngineBridge.log("info", "PlayPickedMatch",
+                "selected=" + JSON.stringify(root.selected)
+                + " slidesCount=" + slides.length
+                + " firstPartsCount=" + firstParts.length
+                + " firstParts0={number:" + firstParts[0].number
+                + ",partIndex:" + firstParts[0].partIndex + "}"
+                + " searchFor={number:" + number + ",partIndex:" + partIndex + "}")
             for (let i = 0; i < output.length; ++i) {
                 const parts = output[i].parts || []
                 if (parts.some((part) => part.number === number && (part.partIndex ?? 0) === partIndex)) {
+                    EngineBridge.log("info", "PlayPickedMatch",
+                        "matched i=" + i + " of " + output.length
+                        + " outputParts0={number:" + (parts[0] ? parts[0].number : "?")
+                        + ",partIndex:" + (parts[0] ? parts[0].partIndex : "?") + "}")
                     root.lineStepOwnerRef = root.referenceText
                     LiveOutputService.stageSlideSet(root.referenceText, output, i)
                     root.refreshLiveFlowSlide()

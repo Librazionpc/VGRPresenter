@@ -877,7 +877,8 @@ void ReportLayerState(const std::string& sceneId, const std::string& label, std:
 int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    const std::vector<ContentBlock>& blocks,
                    const rendering::Size& size, std::string_view tag,
-                   std::string_view layer = "text") {
+                   std::string_view layer = "text",
+                   const std::string& flowText = {}) {
     // The stage grid has ONE definition on this side too (bps::library's
     // kStageWidth/kStageHeight, beside the ContentBlock they describe; the QML
     // counterpart is qml/settings/StageGrid.qml) — this used to be a second copy
@@ -1175,10 +1176,31 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // re-layout wrapping more lines and pushing the tail off the
             // frame). ALWAYS solving (with the set size as the ceiling) makes
             // the engine agree with both QML surfaces by construction.
+            // THE READING BLOCK IS THE ONE EXCEPTION: everything above assumes
+            // the box must hold the WHOLE text at once, which is exactly backwards
+            // for the passage ApplyReadingFlow is about to scroll through it. Fit
+            // bisected against THIS PAGE's own text (block.text/textBody) sizes
+            // the type for whichever page happens to open the walk — a longer
+            // opening page bisects smaller, and ApplyReadingFlow then draws every
+            // later, shorter page at that same already-decided size: smaller than
+            // the template's own declared size for the whole walk (reported: the
+            // output tile reading noticeably smaller than the template's own
+            // natural size, confirmed against the Reference Pane's un-scrolled
+            // preview of the identical style). The identity test is the same one
+            // ApplyReadingFlow uses below (a prefix of the full passage), run
+            // here before the block's size commits to a page-specific bisection
+            // at all — the declared size (already in styleComp->style.size from
+            // the per-block default above) is left standing, same as "none" mode
+            // with nothing to squeeze, because a scrolling column never needs to.
+            const bool isFlowBlock = !flowText.empty() && flowText.rfind(textBody, 0) == 0;
             const std::string autoSize = MetaString(block.metaJson, "autoSize");
             const float minPx =
                 static_cast<float>(3.0 * size.height / kBlockStageH);   // the canvas solver's own 3px floor, output-scaled
-            if (autoSize == "grow" || autoSize == "growToFit") {
+            if (isFlowBlock) {
+                // Left exactly as the per-block default set it above
+                // (MetaNumber(..., "fontSize", ...) * size.height / kBlockStageH):
+                // the template's own declared size, not a page-specific bisection.
+            } else if (autoSize == "grow" || autoSize == "growToFit") {
                 // GROW: the LARGEST size that fits — full stop (the canvas
                 // solver's `lo`, bracketed up to 400 stage px like its [3, 400]).
                 // The set size is neither floor nor ceiling: a short verse
@@ -1904,6 +1926,29 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
     }
     if (!reading)
         return;
+    // WHICH BOX GOT PICKED, every time this runs — the engine's own twin of
+    // DesignPreview's readingBlockIndex (see that property's own note: a
+    // fill-built page can carry the SAME paragraph in two blocks, a content
+    // slot and a band, and "longest text wins" can pick a DIFFERENT one of
+    // them page to page if their lengths aren't always in the same order —
+    // which reads as the box/size changing, because it would genuinely be a
+    // different box. QML's own pick is logged separately (ReadFitNote); the
+    // two should always name the same box for the same page, and this is
+    // the only way to see them agree or disagree without guessing.
+    {
+        static std::mutex pickMutex;
+        static std::map<std::string, std::pair<float, float>> lastPick;
+        std::lock_guard<std::mutex> lock(pickMutex);
+        const auto box = reading->Bounds();
+        auto &prev = lastPick[sceneId];
+        if (prev.first != box.width || prev.second != box.height) {
+            prev = { box.width, box.height };
+            Logger::Instance().Info(std::format(
+                "reading block picked: box={:.2f}x{:.2f} at ({:.2f},{:.2f}) textLen={}",
+                box.width, box.height, box.x, box.y, reading->Text().size()),
+                "SceneBuilder");
+        }
+    }
     if (slide.flowText.rfind(reading->Text(), 0) != 0) {
         // ONE LINE PER SCENE per state change — the live loop rebuilds on every
         // fingerprint move, so a repeating diagnostic would flood the log the
@@ -2694,13 +2739,13 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     auto addContent = [&]() {
         switch (comp.source) {
         case SlideComposition::Source::FamilyTemplate: {
-            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf");
+            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
                                                 sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
             return;
         }
         case SlideComposition::Source::StyleTemplate: {
-            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl");
+            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;
@@ -2713,7 +2758,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
             return;
         }
         case SlideComposition::Source::SlideBlocks: {
-            const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk");
+            const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;

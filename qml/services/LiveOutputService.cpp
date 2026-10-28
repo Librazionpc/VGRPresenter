@@ -1785,8 +1785,17 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
                             .arg(reference.isEmpty() ? QStringLiteral("(ref)") : reference.left(8))
                             .arg(resets ? QStringLiteral("YES") : QStringLiteral("no")));
     if (resets) {
-        // The grid every position in this file is counted in has changed: the run's
-        // page counts, bases and pick base are all derived from it.
+        // CALLED INLINE, same frame — a deferred (QTimer::singleShot) version
+        // of this was tried and reverted: it stopped the binding loop below
+        // but left the FIRST frame showing the OLD scroll position (from
+        // whatever was staged before) for one tick, with the correct
+        // position only landing a moment later — a visible pop/jump on
+        // EVERY fresh pick, not just a Table walk, read as "it's trying to
+        // scroll instead of moving directly to the next line" for a plain
+        // verse click or an arrow step. The actual loop (QML-side: see
+        // OutputMonitorTile's refreshOnAirSlide) is now guarded against
+        // re-entrant writes instead, which fixes it without delaying the
+        // position by a frame.
         resetReadingRun();
         readingPickBase_ = 0;
         applyReadingRestage();
