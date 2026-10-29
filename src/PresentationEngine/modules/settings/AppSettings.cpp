@@ -138,6 +138,8 @@ std::vector<SettingDef> BuildDefinitions() {
         Accent("green", "Green", "#4ade80", "#7ee2a8"),
         Accent("purple", "Purple", "#6c5ce7", "#9b8ff5"),
     }));
+    d.push_back(IntRange("appearance.textScale", "appearance", "Text size", 120, 80, 160,
+                         "Scales the whole interface, text included. 100 is the design size."));
 
     // ---- Startup ----
     d.push_back(Bool("startup.openLastProject", "startup", "Open last project", false));

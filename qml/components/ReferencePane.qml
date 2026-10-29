@@ -2966,6 +2966,9 @@ Item {
     // THE SET THIS PANE LAST STAGED, so Scroll off can put the slides back exactly as
     // they were staged (scrollOutput at scrollIndex) and Scroll on can rebuild the
     // passage from the same piece.
+    // `output` may be null: the pick is remembered by PIECE, and the slide set is
+    // built when Scroll off actually needs it (see applyScrollMode). Building it on
+    // every click put one engine slide per paragraph in front of the tile update.
     function rememberPick(output, index, number, part) {
         root.scrollOutput = output
         root.scrollIndex = index
@@ -2975,9 +2978,41 @@ Item {
         // the template's box at the budget size, not the slide's own split.
         if (LiveOutputService.scrollMode)
             root.ensureScrollSource()
+        else if (!output)
+            pickSetFill.restart()   // slide mode: the set a step needs, after the tile
+    }
+    // THE CHAPTER SET, FILLED AFTER THE CLICK INSTEAD OF INSIDE IT. It used to be built in
+    // stageOutputPart — one engine slide per paragraph/verse — and in the Scripture branch
+    // that ran BEFORE stageSlideSet, so the tile waited on 31 slide builds for a click that
+    // shows one. The Table already staged first and only then paid it; here both defer it
+    // to a zero-delay timer, so the tile is updated and painted before any of it runs, and
+    // Scroll mode skips it altogether (its walk reads the page list, and switching Scroll
+    // off builds the set then). Slide mode still gets its neighbours, so a line step can
+    // cross into the next paragraph's slide exactly as before.
+    function fillPickSet() {
+        if (root.scrollOutput || !root.scrollPiece || LiveOutputService.scrollMode
+                || !root.book || !root.adapter)
+            return
+        const set = root.chapterOutputSlides()
+        if (set.length === 0)
+            return
+        const at = set.findIndex((slide) => (slide.parts || []).some(
+            (p) => Number(p.number) === Number(root.scrollPiece.number)
+                   && Number(p.partIndex ?? 0) === Number(root.scrollPiece.part)))
+        // Only if this is still the pick (a second click may have landed meanwhile).
+        if (at < 0)
+            return
+        root.scrollOutput = set
+        root.scrollIndex = at
+    }
+    Timer {
+        id: pickSetFill
+        interval: 0
+        repeat: false
+        onTriggered: root.fillPickSet()
     }
     function applyScrollMode() {
-        if (!root.scrollPiece || !root.scrollOutput)
+        if (!root.scrollPiece)
             return
         const ours = LiveOutputService.live
             ? LiveOutputService.onAirTitle === root.lineStepOwnerRef
@@ -2990,8 +3025,23 @@ Item {
         } else {
             // WHERE THE WALK IS: the scroll page the service is on starts at a character
             // of the chapter, and the slide holding that character is the one restaged.
-            const set = root.scrollOutput
+            // THE SET IS BUILT HERE unless the pick stored one: a Scripture click no
+            // longer pays for the whole chapter up front (see stageOutputPart), and
+            // switching Scroll off is the moment that set is actually wanted.
+            const stored = !!root.scrollOutput
+            const set = root.scrollOutput || root.chapterOutputSlides()
+            if (set.length === 0)
+                return
+            root.scrollOutput = set
             let index = root.scrollIndex
+            // A SET BUILT JUST NOW has no remembered index: find the pick's own slide.
+            if (!stored && root.scrollPiece) {
+                const at = set.findIndex((slide) => (slide.parts || []).some(
+                    (p) => Number(p.number) === Number(root.scrollPiece.number)
+                           && Number(p.partIndex ?? 0) === Number(root.scrollPiece.part)))
+                if (at >= 0)
+                    index = at
+            }
             if (root.scrollSourced && root.scrollPages.length > 0) {
                 const page = root.scrollPages[Math.min(LiveOutputService.readingPage,
                                                        root.scrollPages.length - 1)]
@@ -3032,6 +3082,10 @@ Item {
     function stageOutputPart(number, partIndex) {
         if (!root.book || !root.adapter)
             return false
+        // MEASURED, because this click's cost was guessed wrong once already: the tile
+        // only updates when this function returns, so the elapsed time here IS the wait
+        // the operator sees. Printed only when it is slow enough to notice.
+        const pickT0 = Date.now()
         const kind = root.adapter.contentType
         if (kind !== "" && !OutputListModel.activeStyleAllows(kind)) {
             EventBus.notify(qsTr("%1 is switched off in this output's style.").arg(root.adapter.tabLabel),
@@ -3064,27 +3118,26 @@ Item {
             if (!pickedSlide)
                 return false
             LiveOutputService.stageSlideSet(root.lineStepOwnerRef, [pickedSlide], 0)
-            // The whole chapter set is what Scroll off restores, so its neighbours exist.
-            const set = root.chapterOutputSlides()
-            const at = set.findIndex((slide) => (slide.parts || []).some(
-                (p) => Number(p.number) === Number(number) && Number(p.partIndex ?? 0) === part))
-            root.rememberPick(at >= 0 ? set : [pickedSlide], at >= 0 ? at : 0, number, part)
+            // THE CHAPTER SET IS NOT BUILT HERE ANY MORE. It exists so Scroll off can
+            // put the neighbouring slides back, and building it meant one engine slide
+            // per paragraph on every click — after the stage, so the tile updated
+            // first and only the click that followed felt slow. rememberPick(null, …)
+            // stores the piece; applyScrollMode builds the set at the moment Scroll is
+            // switched off and finds this piece's slide in it.
+            root.rememberPick(null, 0, number, part)
         } else {
-            const output = root.chapterOutputSlides()
-            let staged = false
-            for (let i = 0; i < output.length; ++i) {
-                if (!(output[i].parts || []).some((p) => Number(p.number) === Number(number)
-                                                         && Number(p.partIndex ?? 0) === part))
-                    continue
-                if (pickedSlide)
-                    output[i] = pickedSlide
-                LiveOutputService.stageSlideSet(root.lineStepOwnerRef, output, i)
-                root.rememberPick(output, i, number, part)
-                staged = true
-                break
-            }
-            if (!staged)
+            if (!pickedSlide)
                 return false
+            // ONE SLIDE, the same as The Table's branch. This used to build the
+            // WHOLE chapter first — chapterOutputSlides() asks the engine for one
+            // slide per verse, each composed through the template — and then handed
+            // that entire set to stageSlideSet before anything could reach the tile.
+            // That is why a Scripture click took visibly longer than a Table one
+            // ("it is more heavy than it should be"): 31 engine slide builds for a
+            // click that shows one. The set is only needed to put slides back when
+            // Scroll is switched OFF, and applyScrollMode builds it then.
+            LiveOutputService.stageSlideSet(root.lineStepOwnerRef, [pickedSlide], 0)
+            root.rememberPick(null, 0, number, part)
         }
         // A CLICK WITH SCROLL ON IS A READING PICK: stage the passage itself, at the
         // size the text area and the max-words budget solve, instead of fitting this
@@ -3093,6 +3146,10 @@ Item {
         if (LiveOutputService.scrollMode)
             root.ensureScrollSource()
         root.refreshLiveFlowSlide()
+        const pickMs = Date.now() - pickT0
+        if (pickMs >= 80)
+            console.log("[PICKCOST] " + kind + " " + number + " staged in " + pickMs
+                        + " ms" + (LiveOutputService.scrollMode ? " (scroll)" : " (slide)"))
         return true
     }
 

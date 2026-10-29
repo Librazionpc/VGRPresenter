@@ -90,7 +90,10 @@ ApplicationWindow {
     // cursor shape from outside any transform).
     readonly property real designWidth: 1440
     readonly property real designHeight: 900
-    readonly property real uiScale: Math.min(window.width / designWidth, window.height / designHeight)
+    // The user's text size (Settings · General · Appearance) multiplies the scale, so
+    // every surface — text included — grows together.
+    readonly property real textScale: (Number(SettingsService.values["appearance.textScale"]) || 120) / 100
+    readonly property real uiScale: Math.min(window.width / designWidth, window.height / designHeight) * textScale
     // The DESIGN CANVAS the window-level layers are drawn in: the window itself,
     // expressed in design units (`window / uiScale`). Because uiScale is the
     // SMALLER of the two ratios, each axis of the canvas is at least its design

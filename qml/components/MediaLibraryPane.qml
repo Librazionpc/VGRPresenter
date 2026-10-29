@@ -686,7 +686,7 @@ Item {
             // the fix for it).
             model: root.gridItems
 
-            readonly property int columns: Math.max(2, Math.floor(width / 230))
+            readonly property int columns: Math.max(3, Math.floor(width / 120))
             cellWidth: Math.floor(width / columns)
             // The tile's 16:9 preview (its width less the 12 px of margins) plus the name bar.
             cellHeight: Math.round((cellWidth - 12) * 9 / 16) + 12 + 30

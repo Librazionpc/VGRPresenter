@@ -362,6 +362,16 @@ Item {
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
                         ChoiceRow { settingKey: "appearance.language" }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
+                        LabeledSlider {
+                            width: parent.width
+                            label: qsTr("Text size")
+                            minValue: 80
+                            maxValue: 160
+                            suffix: "%"
+                            value: Number(root.values["appearance.textScale"] ?? 120)
+                            onMoved: (v) => SettingsService.setValue("appearance.textScale", Math.round(v))
+                        }
+                        Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
 
                         // Lock In Mode — a toggle row.
                         Item {

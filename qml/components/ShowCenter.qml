@@ -398,14 +398,17 @@ Item {
                         Rectangle { anchors.fill: parent; color: "transparent"; border.width: cell.selected ? 2 : 0; border.color: root.cSecondary }
                     }
                     HoverHandler { id: cellHover; cursorShape: Qt.PointingHandCursor }
-                    // Single click selects only (a double-click's first tap
-                    // still fires this — harmless, it's a no-op re-select).
-                    // Double-click takes it live; right-click opens Edit —
-                    // simple, and it separates "look" from "go live" so a
-                    // single click can never accidentally put something on air.
+                    // A slide already chosen in the preview goes live on one click; a slide
+                    // that is not chosen yet is only chosen, and its double-click takes it
+                    // live. Right-click opens Edit.
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
-                        onTapped: root.selectedSlide = cell.index
+                        onTapped: {
+                            if (root.selectedSlide === cell.index)
+                                root.takeSlideLive(cell.index, cell.modelData, cell.styled)
+                            else
+                                root.selectedSlide = cell.index
+                        }
                         onDoubleTapped: root.takeSlideLive(cell.index, cell.modelData, cell.styled)
                     }
                     TapHandler {
@@ -493,7 +496,12 @@ Item {
                     HoverHandler { id: listHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
-                        onTapped: root.selectedSlide = listRow.index
+                        onTapped: {
+                            if (root.selectedSlide === listRow.index)
+                                root.takeSlideLive(listRow.index, listRow.modelData, listRow.styled)
+                            else
+                                root.selectedSlide = listRow.index
+                        }
                         onDoubleTapped: root.takeSlideLive(listRow.index, listRow.modelData, listRow.styled)
                     }
                     TapHandler {
