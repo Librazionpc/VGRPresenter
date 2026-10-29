@@ -1881,8 +1881,12 @@ Rectangle {
                                         // own double-click.
                                         const peeked = ShowService.peekShow(showRef)
                                         if (peeked && peeked.ok && peeked.show
-                                                && peeked.show.slides && peeked.show.slides.length > 0)
+                                                && peeked.show.slides && peeked.show.slides.length > 0) {
+                                            const wordsPerScreen = Number(SettingsService.value("shows.wordsPerSlide"))
+                                            LiveOutputService.readingWordBudget = wordsPerScreen > 0
+                                                ? wordsPerScreen : 40
                                             LiveOutputService.stageSlideSet(showName, peeked.show.slides, 0)
+                                        }
                                     }
                                     onContextRequested: (x, y) => {
                                         const p = rowMouse.mapToItem(media_table, x, y)

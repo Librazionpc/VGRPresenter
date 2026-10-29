@@ -158,6 +158,8 @@ Item {
     // unsaved).
     function takeSlideLive(index, slide, styledPreview) {
         root.selectedSlide = index
+        const wordsPerScreen = Number(SettingsService.value("shows.wordsPerSlide"))
+        LiveOutputService.readingWordBudget = wordsPerScreen > 0 ? wordsPerScreen : 40
         // The WHOLE show goes over, with `index` saying which slide is being
         // read: that is what gives Alt+Down (LiveOutputService.lineStep) the
         // neighbour slide whose first line comes in at the bottom of this one.

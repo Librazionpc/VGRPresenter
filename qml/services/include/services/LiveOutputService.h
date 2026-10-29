@@ -465,6 +465,8 @@ public:
     // the step — the caller then falls back to plain next/previous slide
     // behaviour.
     Q_INVOKABLE void stageSlideSet(const QString &name, const QVariantList &slides, int index);
+    // Queues a raw-text source; lineStep activates it, while slide picks stay slides.
+    Q_INVOKABLE void setReadingTextSource(const QString &name, const QVariantList &pages, int index);
     // Returns true when the words moved (a new offset, and the page re-staged or
     // live-committed where the step crossed into the next page).
     Q_INVOKABLE bool lineStep(int direction);
@@ -487,6 +489,24 @@ public:
     // the text area"). DesignPreview latches its solved size against this counter
     // for exactly that reason.
     Q_PROPERTY(int readingStageSerial READ readingStageSerial NOTIFY readingStageChanged)
+    // THE READER'S WORD BUDGET — the per-tab "Max words per slide" setting (default
+    // 40), handed here by the pane so the surfaces can solve the reading column
+    // against IT rather than against whatever words a page happens to carry.
+    //
+    // Why the budget and not the page: a page of many words is fitted smaller than a
+    // short one, so the same passage changed type size page by page — the scroll
+    // changing under the reader, and a wordy page (47-0412) overflowing its box on
+    // the outputs. Fitting the BUDGET gives one size per template box for every page,
+    // and no page is longer than the budget, so nothing can overflow it. Slides keep
+    // splitting exactly as they do; this number only tells the fit what "a full
+    // screenful" is.
+    Q_PROPERTY(int readingWordBudget READ readingWordBudget WRITE setReadingWordBudget
+               NOTIFY readingWordBudgetChanged)
+    // SLIDE / SCROLL for the wall's arrows and the output built from a pick. On: a
+    // table pick is fed its chapter passage (scroll architecture); off: its slide set.
+    Q_PROPERTY(bool scrollMode READ scrollMode WRITE setScrollMode NOTIFY scrollModeChanged)
+    Q_PROPERTY(bool readingBudgetFitActive READ readingBudgetFitActive
+               NOTIFY readingStageChanged)
     // ...AND THE OPERATOR'S OWN JUMPS, which is what the stage serial above CANNOT
     // tell apart from a page turn: the walk's own follow re-stages the page it
     // crosses into (measured: readingStageSerial climbing 10, 11, 12 ... once per
@@ -543,6 +563,11 @@ public:
     QString readingSetName() const { return lineSetName_; }
     int readingStageSerial() const { return readingStageSerial_; }
     int readingJumpSerial() const { return readingJumpSerial_; }
+    int readingWordBudget() const { return readingWordBudget_; }
+    bool readingBudgetFitActive() const { return readingBudgetFitActive_; }
+    void setReadingWordBudget(int words);
+    bool scrollMode() const { return scrollMode_; }
+    void setScrollMode(bool on);
     // The operator's own stage (a click, the arrows, a search pick): the walk may
     // then re-solve its column for the page it lands on. Called from QML only.
     Q_INVOKABLE void noteOperatorJump();
@@ -660,6 +685,14 @@ public:
     Q_INVOKABLE void setWallStepper(const QString &id, bool active);
     Q_PROPERTY(bool wallSteppable READ wallSteppable NOTIFY wallStepperChanged)
     bool wallSteppable() const;
+    // WHICH TAB OWNS THE ARROWS — the id that tab announced itself with (a pane's
+    // contentType: "table", "scripture" — or "show"). A surface needs it to keep
+    // per-TAB state on the content the arrows actually act for: the wall's
+    // Slide/Scroll mode is remembered per tab, and "the tab I am looking at" is not
+    // the same question as "the tab whose pick is on the tile". Empty when nobody
+    // claims the steppers.
+    Q_PROPERTY(QString wallStepperId READ wallStepperId NOTIFY wallStepperChanged)
+    QString wallStepperId() const { return wallStepperId_; }
 
     // Any slide of the live set as design blocks (same shape as onAirSlide):
     // a thumbnail strip renders the whole presentation from this. Empty map
@@ -770,6 +803,8 @@ signals:
     void lineStepChanged();
     // ...and a page STAGED OUTRIGHT (see readingStageSerial): a jump, not a step.
     void readingStageChanged();
+    void readingWordBudgetChanged();
+    void scrollModeChanged();
     // The reading passage, or where it sits, changed — every frame of a step
     // (see readingFlowText / readingScroll). The surface that draws the step
     // binds to `readingScroll`, so this fires at the animator's own cadence.
@@ -778,6 +813,9 @@ signals:
     // above). Emitted only when the page index actually changes — a step inside
     // one page is not a page change.
     void readingPageChanged();
+    // Emitted at the top of lineStep, before it reads the walk's state, so a pane
+    // that owns the pick can hand the walk its own passage first (synchronous).
+    void lineStepPending(int direction);
     void inputChanged();
     void overlaysChanged();
     // clearAll() took a snapshot / restoreCleared() consumed it.
@@ -886,6 +924,9 @@ private:
     // setWallStepper). GUI thread only: every writer is a QML pane, and the
     // property is read from QML bindings — no lock, and none is needed.
     QHash<QString, bool> wallSteppers_;
+    // The tab the ‹ › act for (see wallStepperId): the last one to claim, and when
+    // it withdraws, any other tab still claiming.
+    QString wallStepperId_;
     qulonglong frameRev_ = 0;
     qulonglong framesSent_ = 0;
     // The engine's EARLY publish — the live preview is already on the wire
@@ -912,6 +953,11 @@ private:
     // lands).
     QString lineSetName_;
     QVariantList lineSetRaw_;
+    bool lineSourceTextOnly_ = false;
+    bool readingBudgetFitActive_ = false;
+    QString pendingTextSourceName_;
+    QVariantList pendingTextSourcePages_;
+    int pendingTextSourceIndex_ = 0;
     int lineSlideIndex_ = 0;
     int lineOffset_ = 0;
     // Counts applied steps and remembers which way the last one went — see the
@@ -920,6 +966,9 @@ private:
     int lineStepDirection_ = 1;
     int readingStageSerial_ = 0;
     int readingJumpSerial_ = 0;
+    // "Max words per slide" for the tab that staged the pick (see readingWordBudget).
+    int readingWordBudget_ = 40;
+    bool scrollMode_ = false;
     // THE PASSAGE the reading block is a page of (see the Q_PROPERTYs above) and
     // where it rests, in line heights of the reading text.
     QString readingFlowText_;
@@ -954,6 +1003,7 @@ private:
     static constexpr int kReadingRunRadius = 4;
     // Drops the run (a new pick: its pages are not this pick's pages).
     void resetReadingRun();
+    void activatePendingTextSource();
     // Builds the run around `anchor` if the current window does not already hold
     // it. WHEN THE WINDOW SHIFTS IT REBASES readingScroll_ by exactly the lines
     // added or dropped at the front, so the words on screen do not move: the

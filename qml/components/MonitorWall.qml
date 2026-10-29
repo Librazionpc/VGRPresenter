@@ -96,6 +96,37 @@ Item {
     // toolbar's own height is `transportRow.height + 12`, so dropping the rows
     // shrinks the wall and everything hung below it follows.
     property bool showClearControls: true
+    // SLIDE OR SCROLL — which way this wall's ‹ › move. Two features, one pair of
+    // arrows: Slide steps the pick's slides (what a double-click stages); Scroll
+    // walks the passage line by line (LiveOutputService.lineStep — the reading
+    // source built from the chapter JSON, fitted to the tab's max-words budget).
+    // The switch is the transport button that used to be an inert "Transition ·
+    // not available yet" slot; scroll is driven from here rather than by making
+    // every press a walk, because a walk of a long passage is what froze the app.
+    readonly property bool scrollMode: LiveOutputService.scrollMode
+    // REMEMBERED PER TAB, not per wall: the mode belongs to the content the
+    // arrows act on, so The Table can come back in Scroll while a show comes
+    // back on Slide. The tab is the one that OWNS the arrows
+    // (LiveOutputService.wallStepperId — the pane announcing itself, not whichever
+    // pane happens to be visible), and the choice lives in that tab's own settings
+    // key (declared in AppSettings), so it survives a restart.
+    readonly property string modeKey: {
+        const t = String(LiveOutputService.wallStepperId || "")
+        return (t === "scripture" ? "scripture" : t === "show" ? "shows" : "table") + ".scrollWalk"
+    }
+    // ADOPT THE TAB'S STORED MODE when the arrows change owner (a different tab's
+    // pick reaches the tile, or the first one claims them at startup).
+    onModeKeyChanged: LiveOutputService.scrollMode = SettingsService.values[root.modeKey] === true
+    Component.onCompleted: LiveOutputService.scrollMode = SettingsService.values[root.modeKey] === true
+    // ...AND WRITE THE CHOICE BACK. Every change of the service's mode lands here
+    // — the switch's press and an adopted value alike — so the tab's key is the
+    // only copy that has to be right; there is no second state to drift.
+    Connections {
+        target: LiveOutputService
+        function onScrollModeChanged() {
+            SettingsService.setValue(root.modeKey, LiveOutputService.scrollMode)
+        }
+    }
     function goTo(page) {
         wall.goTo(page)
     }
@@ -301,6 +332,10 @@ Item {
             property string tipDetail: ""
             property bool enabled2: true
             property bool danger: false
+            // A MODE that is currently ON (the slide/scroll switch): accent-tinted
+            // rather than either the plain transport look or the danger red — a
+            // mode is not a destructive action.
+            property bool lit: false
             // Lit (red) vs "clickable but currently off" — distinct from
             // enabled2 (clickability alone) so a toggle-style button (the
             // scripture clear/resume) can stay clickable while reading as
@@ -317,6 +352,8 @@ Item {
                         return toolBtn.active
                             ? (toolArea.hovered ? Qt.alpha(Theme.danger, 0.20) : Qt.alpha(Theme.danger, 0.15))
                             : (toolArea.hovered ? Theme.chip : Theme.inset)
+                    if (toolBtn.lit)
+                        return toolArea.hovered ? Qt.alpha(Theme.accent, 0.22) : Qt.alpha(Theme.accent, 0.15)
                     return toolArea.hovered ? Theme.chip : Theme.inset
                 }
                 border.color: {
@@ -325,6 +362,8 @@ Item {
                         return toolBtn.active
                             ? (toolArea.hovered ? Qt.alpha(Theme.danger, 0.40) : Qt.alpha(Theme.danger, 0.20))
                             : (toolArea.hovered ? Qt.alpha(Theme.danger, 0.22) : Qt.alpha(Theme.danger, 0.14))
+                    if (toolBtn.lit)
+                        return toolArea.hovered ? Qt.alpha(Theme.accent, 0.42) : Qt.alpha(Theme.accent, 0.28)
                     return toolArea.hovered ? Theme.borderSubtle : Theme.chip
                 }
                 border.width: 1
@@ -334,7 +373,8 @@ Item {
                 anchors.centerIn: parent
                 name: toolBtn.icon
                 color: !toolBtn.enabled2 ? Theme.textMuted
-                     : (toolBtn.danger ? (toolBtn.active ? Theme.dangerLight : Theme.textMuted) : Theme.textPrimary)
+                     : (toolBtn.danger ? (toolBtn.active ? Theme.dangerLight : Theme.textMuted)
+                                       : (toolBtn.lit ? Theme.accent : Theme.textPrimary))
                 width: root.toolIconSize; height: root.toolIconSize; fit: true
                 strokeWidth: root.toolIconStroke
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
@@ -440,20 +480,40 @@ Item {
                     // Dead only mid-set with nowhere back (a multi-slide pick
                     // already on the first slide): a single-verse pick keeps
                     // the arrow (it passage-steps).
-                    enabled2: toolbar.canStep && !(toolbar.multiSlide && toolbar.atStart)
-                    onPicked: LiveOutputService.stepPassage(-1)
+                    enabled2: toolbar.canStep && (root.scrollMode || !(toolbar.multiSlide && toolbar.atStart))
+                    // IN SCROLL the press walks one line back; at the pick's own
+                    // first line lineStep answers false and the press becomes the
+                    // passage step it always was, so the arrows still leave the
+                    // passage instead of going dead at its edge.
+                    onPicked: {
+                        if (root.scrollMode) {
+                            LiveOutputService.lineStep(-1)
+                            return
+                        }
+                        LiveOutputService.stepPassage(-1)
+                    }
                     objectName: "selfTestWallPrev"
                     tipTitle: qsTr("Previous")
-                    tipDetail: qsTr("Step back to the previous slide or passage")
+                    tipDetail: root.scrollMode
+                               ? qsTr("Scroll back one line (at the passage's start: the previous passage)")
+                               : qsTr("Step back to the previous slide or passage")
                 }
                 ToolButton {
                     width: parent.btnW; height: 30
                     icon: "next"
-                    enabled2: toolbar.canStep && !(toolbar.multiSlide && toolbar.atEnd)
-                    onPicked: LiveOutputService.stepPassage(1)
+                    enabled2: toolbar.canStep && (root.scrollMode || !(toolbar.multiSlide && toolbar.atEnd))
+                    onPicked: {
+                        if (root.scrollMode) {
+                            LiveOutputService.lineStep(1)
+                            return
+                        }
+                        LiveOutputService.stepPassage(1)
+                    }
                     objectName: "selfTestWallNext"
                     tipTitle: qsTr("Next")
-                    tipDetail: qsTr("Step forward to the next slide or passage")
+                    tipDetail: root.scrollMode
+                               ? qsTr("Scroll forward one line (at the passage's end: the next passage)")
+                               : qsTr("Step forward to the next slide or passage")
                 }
                 // Play: the explicit GO LIVE trigger while nothing is on
                 // air yet (commits whatever's staged — see
@@ -487,14 +547,30 @@ Item {
                     tipTitle: qsTr("Lock output")
                     tipDetail: qsTr("Not available yet")
                 }
-                // Transition: FreeShow opens its transition popup; there is
-                // no engine transition editor yet, so the glyph is a marker.
+                // SLIDE / SCROLL — the switch this slot was repurposed for (it
+                // used to be an inert "Transition · not available yet" marker).
+                // It changes what this wall's ‹ › DO, not what is on air: Slide
+                // steps the pick's slides, Scroll walks the passage's lines. Lit
+                // while Scroll is on, so the arrows' own tooltips and this button
+                // always agree about the mode.
                 ToolButton {
                     width: parent.btnW; height: 30
-                    icon: "transition"
-                    enabled2: false
-                    tipTitle: qsTr("Transition")
-                    tipDetail: qsTr("Not available yet")
+                    icon: "textLines"
+                    enabled2: toolbar.canStep
+                    lit: root.scrollMode
+                    objectName: "selfTestWallScrollMode"
+                    onPicked: {
+                        const enabled = !root.scrollMode
+                        LiveOutputService.scrollMode = enabled
+                        EventBus.notify(enabled
+                            ? qsTr("Scroll mode on — the arrows move through the reading text.")
+                            : qsTr("Slide mode on — the arrows change slides."),
+                            "info", qsTr("Monitor"), "ui.monitor.mode")
+                    }
+                    tipTitle: root.scrollMode ? qsTr("Scroll mode") : qsTr("Slide mode")
+                    tipDetail: root.scrollMode
+                               ? qsTr("The arrows scroll the passage. Click to switch to slides.")
+                               : qsTr("The arrows change slides. Click to switch to scrolling.")
                 }
             }
 

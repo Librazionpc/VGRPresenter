@@ -1152,6 +1152,10 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
     // next/previous slide instead.
     lineSetName_ = name;
     lineSetRaw_ = slides;
+    lineSourceTextOnly_ = false;
+    readingBudgetFitActive_ = false;
+    pendingTextSourceName_.clear();
+    pendingTextSourcePages_.clear();
     lineSlideIndex_ = 0;
     readingPickBase_ = 0;      // a new pick: the origin is ITS first page
     lineOffset_ = 0;
@@ -1214,6 +1218,27 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
 // THE OPERATOR'S OWN JUMP (see readingJumpSerial in the header): the surfaces may
 // re-solve their column for the page this stages, where the walk's own follow
 // re-stage (which also goes through stageSlideSet) must not.
+void LiveOutputService::setScrollMode(bool on)
+{
+    if (on == scrollMode_)
+        return;
+    scrollMode_ = on;
+    emit scrollModeChanged();
+}
+
+void LiveOutputService::setReadingWordBudget(int words)
+{
+    // Clamped to the setting's own range (AppSettings declares 3..1000): a budget of
+    // 0 or a negative would have the fit solve against an empty probe and collapse
+    // the type, and one beyond the setting's ceiling is not a screenful anyone asked
+    // for.
+    const int clamped = qBound(3, words, 1000);
+    if (clamped == readingWordBudget_)
+        return;
+    readingWordBudget_ = clamped;
+    emit readingWordBudgetChanged();
+}
+
 void LiveOutputService::noteOperatorJump()
 {
     ++readingJumpSerial_;
@@ -1225,6 +1250,10 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     VGR_CALL_TRACE("LiveOutputService.stageSlideSet");
     if (slides.isEmpty()) {
         lineSetRaw_.clear();
+        lineSourceTextOnly_ = false;
+        readingBudgetFitActive_ = false;
+        pendingTextSourceName_.clear();
+        pendingTextSourcePages_.clear();
         lineSlideIndex_ = 0;
         readingPickBase_ = 0;
         announceReadingPage();
@@ -1244,6 +1273,10 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     // then committed the real one — two live replacements for one click).
     lineSetName_ = name;
     lineSetRaw_ = slides;
+    lineSourceTextOnly_ = false;
+    readingBudgetFitActive_ = false;
+    pendingTextSourceName_.clear();
+    pendingTextSourcePages_.clear();
     lineSlideIndex_ = at;
     readingPickBase_ = 0;         // a new pick: the origin is the page it starts on
     lineOffset_ = 0;
@@ -1273,6 +1306,56 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     // settled-position notification because the restage can otherwise compare
     // zero with zero and leave surfaces holding the previous page's character.
     applyReadingRestage(true, /*forceRebuild=*/ false, /*forceScrollNotify=*/ true);
+}
+
+void LiveOutputService::setReadingTextSource(const QString &name, const QVariantList &pages, int index)
+{
+    if (pages.isEmpty())
+        return;
+    pendingTextSourceName_ = name;
+    pendingTextSourcePages_ = pages;
+    pendingTextSourceIndex_ = qBound(0, index, static_cast<int>(pages.size()) - 1);
+    if (scrollMode_)
+        activatePendingTextSource();
+}
+
+void LiveOutputService::activatePendingTextSource()
+{
+    if (pendingTextSourcePages_.isEmpty())
+        return;
+    QVariantMap visualPage;
+    const QVariantList visualSlides = live_ ? onAirSlidesRaw() : stagedSlidesRaw_;
+    if (!visualSlides.isEmpty())
+        visualPage = visualSlides.first().toMap();
+    QVariantList readingPages;
+    readingPages.reserve(pendingTextSourcePages_.size());
+    for (const QVariant &value : pendingTextSourcePages_) {
+        QVariantMap page = value.toMap();
+        if (page.value(QStringLiteral("contentType")).toString().isEmpty())
+            page[QStringLiteral("contentType")] = visualPage.value(QStringLiteral("contentType"));
+        readingPages.append(page);
+    }
+    lineSetName_ = pendingTextSourceName_;
+    lineSetRaw_ = readingPages;
+    lineSourceTextOnly_ = true;
+    readingBudgetFitActive_ = true;
+    lineSlideIndex_ = qBound(0, pendingTextSourceIndex_, static_cast<int>(readingPages.size()) - 1);
+    pendingTextSourceName_.clear();
+    pendingTextSourcePages_.clear();
+    readingPickBase_ = 0;
+    lineOffset_ = 0;
+    readingLinesCache_.clear();
+    readingRunLinesCache_.clear();
+    readingRunLinesLru_.clear();
+    resetReadingRun();
+    readingRebaseSlide_ = -1;
+    if (readingScrollAnim_)
+        readingScrollAnim_->stop();
+    readingScroll_ = 0.0;
+    rebuildReadingRun(lineSlideIndex_, true);
+    readingFlowText_ = readingRunText_;
+    emit readingStageChanged();
+    applyReadingRestage(false, false, true);
 }
 
 // ONE PAGE'S PASSAGE: that page followed by the next one, joined by the page
@@ -1909,9 +1992,11 @@ void LiveOutputService::rebuildReadingRun(int anchor, bool force)
     // [0..8] the moment the reader reaches page 4 — a refill landing on a step
     // they are watching (reported as "works from 1 to 1-3, then misbehaves").
     // Covering the whole pick costs nothing here (it is the pick's own text, not
-    // a copy) and removes every mid-walk rebuild for it.
+    // a copy) and removes every mid-walk rebuild for it. A JSON passage is the whole
+    // chapter, so it is windowed like a slide set: laying out the chapter every frame
+    // is what stalled the GUI thread.
     constexpr int kReadingRunWholePick = 2 * LiveOutputService::kReadingRunRadius * 2 + 1;
-    const bool wholePick = count <= kReadingRunWholePick;
+    const bool wholePick = !lineSourceTextOnly_ && count <= kReadingRunWholePick;
     const int first = wholePick ? 0 : qMax(0, anchor - kReadingRunRadius);
     const int last = wholePick ? count - 1 : qMin(count - 1, anchor + kReadingRunRadius);
     if (!force && first == readingRunFirst_ && last == readingRunLast_)
@@ -1968,6 +2053,14 @@ void LiveOutputService::rebuildReadingRun(int anchor, bool force)
         if (page.trimmed().isEmpty())
             continue;
         if (!run.isEmpty()) {
+            if (lineSourceTextOnly_) {
+                // Reading-only chunks are adjacent slices of the original JSON
+                // text. Keep their exact boundary; a slide-style newline here
+                // would insert a visible gap every max-words screenful.
+                readingRunPageStart_.insert(i, static_cast<int>(run.size()));
+                run += page;
+                continue;
+            }
             // an edge is whitespace: the break before this page, and this page's own
             // leading blank lines, are one boundary — not a boundary plus a blank line
             while (page.startsWith(QLatin1Char('\n')) || page.startsWith(QLatin1Char('\r')))
@@ -2318,6 +2411,33 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // back to runs through here, so one call site covers forward and
     // backward both.
     QTimer::singleShot(0, this, &LiveOutputService::prewarmReadingLines);
+    const bool pageChanged = (readingPageAnnounced_ != lineSlideIndex_);
+    readingPageAnnounced_ = lineSlideIndex_;
+    if (lineSourceTextOnly_) {
+        if (live_) {
+            if (flowChanged) {
+                QVariantList current = onAirSlidesRaw();
+                if (!current.isEmpty()) {
+                    QVariantMap shown = current.first().toMap();
+                    shown[QStringLiteral("flowText")] = readingFlowText_;
+                    shown[QStringLiteral("flowChar")] = readingCharForScroll(readingScroll_);
+                    goLiveWithSlides(onAirTitle_, QVariantList{shown});
+                }
+            }
+        } else if (flowChanged && !stagedSlidesRaw_.isEmpty()) {
+            QVariantMap shown = stagedSlidesRaw_.first().toMap();
+            shown[QStringLiteral("flowText")] = readingFlowText_;
+            shown[QStringLiteral("flowChar")] = readingCharForScroll(readingScroll_);
+            stagedSlidesRaw_ = QVariantList{shown};
+            stagedSlide_ = previewWithActiveStyle(shown);
+            emit stagedChanged();
+        }
+        if (pageChanged)
+            emit readingPageChanged();
+        if (flowChanged || scrollChanged)
+            emit readingScrollChanged();
+        return;
+    }
     // SETTLED HERE, BUT NOT ANNOUNCED YET — see the emit sites below for why
     // the split. OutputMonitorTile's onAirSlide memoizes its composed blocks
     // per page, keyed in part on readingPage precisely so a step inside a
@@ -2336,8 +2456,6 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // recurring on every later page turn once the memo had a real OLD/NEW
     // page pair to be wrong about — not on the very first commit, which had
     // no prior page to be stale against).
-    const bool pageChanged = (readingPageAnnounced_ != lineSlideIndex_);
-    readingPageAnnounced_ = lineSlideIndex_;
     // EMITTED LAST, after stagedChanged/onAirChanged below — not alongside
     // them. A reader gating on "does the flow text start with THIS block's
     // own text" (DesignPreview's el.drawsFlow — its guard against drawing a
@@ -2403,6 +2521,8 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
 
 bool LiveOutputService::lineStep(int direction)
 {
+    if (direction != 0)
+        emit lineStepPending(direction);
     // ONE-SHOT DIAGNOSTIC, one line per press: which set/slide the window is
     // in, how many lines the slide is seen to have, and what the step decided.
     // "Alt+Down did nothing" and "Alt+Down jumped a whole slide" look the same
@@ -2425,6 +2545,11 @@ bool LiveOutputService::lineStep(int direction)
 
     if (lineSetRaw_.isEmpty() || direction == 0)
         return false;
+
+    // The JSON-backed passage is only walked while Scroll is on; with it off, a line
+    // step walks the slides' own lines as before.
+    if (scrollMode_)
+        activatePendingTextSource();
 
     // A REBASE OWED BY AN EARLIER PRESS is settled now, synchronously, before
     // anything below reads lineSlideIndex_/readingScroll_: in the ordinary
@@ -2469,6 +2594,10 @@ bool LiveOutputService::lineStep(int direction)
     const pl::LineWalk::Step step = walk.step(direction, ownLines, setSize, previousLines);
     if (!step.moved)
         return false;   // the pick's first/last line: nothing above/below it
+    if (!readingBudgetFitActive_) {
+        readingBudgetFitActive_ = true;
+        emit readingStageChanged();
+    }
 
     if (!step.crossedPage) {
         // ANOTHER LINE OF THIS PAGE LEAVES AT THE TOP, and the line under it
@@ -4219,11 +4348,31 @@ void LiveOutputService::setWallStepper(const QString &id, bool active)
     if (id.isEmpty())
         return;
     const bool before = wallSteppable();
-    if (active)
+    const QString ownerBefore = wallStepperId_;
+    if (active) {
         wallSteppers_.insert(id, true);
-    else
+    } else {
         wallSteppers_.remove(id);
-    if (wallSteppable() != before)
+    }
+    // THE OWNER (see wallStepperId): the last tab to claim. When it withdraws,
+    // another claiming tab takes over rather than leaving the owner blank — only
+    // one tab's content is on the tile, so its own claim is the one that matters,
+    // but a withdraw/re-claim pair must not read as "nobody".
+    if (active) {
+        wallStepperId_ = id;
+    } else if (wallStepperId_ == id) {
+        wallStepperId_.clear();
+        for (auto it = wallSteppers_.cbegin(); it != wallSteppers_.cend(); ++it) {
+            if (it.value()) {
+                wallStepperId_ = it.key();
+                break;
+            }
+        }
+    }
+    // The OWNER change is signalled too: a surface keying per-tab state on it has
+    // to re-read when the tile's content moves from one tab to another, which can
+    // happen with the aggregate staying lit throughout.
+    if (wallSteppable() != before || wallStepperId_ != ownerBefore)
         emit wallStepperChanged();
 }
 

@@ -612,20 +612,8 @@ Item {
         const key = (LiveOutputService.live ? "live|" : "staged|")
             + root.lineStepOwnerRef + "|"
             + (next && next.background !== undefined ? String(next.background) : "")
-        // DIAGNOSTIC: the box's blocks are pinned per pick (see the comment above). Logs
-        // whether a page change was served by the pinned copy or a fresh one, with the
-        // page the box actually shows vs the page the service is on.
-        const shownText = next && next.blocks && next.blocks.length > 0 ? String(next.blocks[0].text ?? "").slice(0, 24) : ""
-        if (key === root.liveFlowSlideKey && root.liveFlowSlide !== null) {
-            EngineBridge.log("info", "FlowBoxPinned",
-                "kept pinned blocks0=" + String(root.liveFlowSlide.blocks && root.liveFlowSlide.blocks[0] ? root.liveFlowSlide.blocks[0].text : "").slice(0, 24)
-                + " servicePage=" + LiveOutputService.readingPage
-                + " serviceNext0=" + shownText)
-            return
-        }
-        EngineBridge.log("info", "FlowBoxPinned",
-            "replaced key=" + key.slice(0, 60) + " blocks0=" + shownText
-            + " servicePage=" + LiveOutputService.readingPage)
+        if (key === root.liveFlowSlideKey && root.liveFlowSlide !== null)
+            return              // the same pick and design: keep the blocks painted
         root.liveFlowSlideKey = key
         root.liveFlowSlide = next
     }
@@ -1507,6 +1495,16 @@ Item {
                 return i
         }
         return -1
+    }
+
+    function chapterOutputSlides() {
+        const output = []
+        for (const verse of root.chapterVerses) {
+            const slides = root.adapter.slides(root.sourceId, root.book.id, root.chapterNumber, [verse.number])
+            for (const slide of slides)
+                output.push(slide)
+        }
+        return output
     }
 
     // Where the pick sits in the ROW list: the piece its preview shows (a divided
@@ -2530,6 +2528,27 @@ Item {
     }
 
     // "Convert to show": the whole passage becomes a show, one slide per screenful of verses.
+    // WHAT A FULL SCREENFUL IS FOR THIS TAB: the pane's own "Max words per slide"
+    // setting, handed to the service so the reading column can be fitted against the
+    // BUDGET instead of against whatever words a page carries (see
+    // LiveOutputService.readingWordBudget — one size per template box, nothing able
+    // to overflow it). Read at each stage because the setting is per tab and the
+    // operator can change it between picks; slides themselves are not touched.
+    // ONLY THE SCROLL ASKS FOR THIS. A double-click and the ‹ › stage a SLIDE —
+    // its own template box, its own split, nothing of the reading walk — so they
+    // must not push a budget into the service and let it reach the fit: these two
+    // features are separate, and mixing them is what made a slide's size depend on
+    // a scroll setting. Called from ensureScrollSource, the one place the walk
+    // starts.
+    function syncReadingWordBudget() {
+        if (!root.adapter || !root.adapter.optionsPrefix)
+            return
+        const v = Number(SettingsService.value(root.adapter.optionsPrefix + ".wordsPerSlide"))
+        // A WRITE accessor is a property assignment in QML — calling it threw
+        // "Property 'setReadingWordBudget' … is not a function" on every stage.
+        LiveOutputService.readingWordBudget = (v > 0 ? v : 40)
+    }
+
     function buildSlides() {
         if (root.selected.length === 0 || !root.book)
             return []
@@ -2542,31 +2561,76 @@ Item {
             root.convertToShowRequested(root.referenceText, slides)
     }
 
-    // The WHOLE chapter's output, one row at a time — the array
-    // LiveOutputService.lineStep (Alt+Down/Alt+Up) and the arrow-step/
-    // continuation-row staging below need to have somewhere to step into.
-    //
-    // ONE ITEM PER adapter.slides() CALL, not the whole chapter in one
-    // request (buildSlides()'s own "screenful" packing): asked for many
-    // verse/paragraph numbers at once, the engine packs consecutive ones
-    // onto a single "screenful" slide — exactly what "Convert to show"
-    // wants, but it also means lineStep's "lines" count for that slide (its
-    // AUTHORED line count) came out as the whole packed passage's flowing
-    // prose, 1 line, regardless of how many verses/paragraphs were crammed
-    // into it — so stepping could only ever jump between a couple of giant
-    // screenfuls, never between the rows the list itself shows (user
-    // report: "the table doesn't move past paragraph one"). Asking one
-    // number at a time avoids the packing and keeps every row (including a
-    // split continuation like "4-1") its own step, matching the list's own
-    // granularity and chapterVerses' own numbering.
-    function chapterOutputSlides() {
-        const output = []
-        for (const v of root.chapterVerses) {
-            const piece = root.adapter.slides(root.sourceId, root.book.id, root.chapterNumber, [v.number])
-            for (const s of piece)
-                output.push(s)
+    // Build the SCROLL stream from the chapter JSON, independently of the visual
+    // slides and their template splitting. Works for any reference tab (The Table's
+    // paragraphs, Scripture's verses) because it reads the pane's own
+    // chapterVerses/mainRows, which both adapters fill — the walk is a reading of
+    // the passage, not a re-cut of the slides.
+    function readingPagesFromChapter(number, partIndex) {
+        const verseIndex = root.chapterVerses.findIndex((v) => Number(v.number) === Number(number))
+        if (verseIndex < 0)
+            return { pages: [], index: 0 }
+        const row = root.mainRows.find((r) => Number(r.number) === Number(number)
+                                              && Number(r.partIndex ?? 0) === Number(partIndex ?? 0))
+        // ONE CONTINUOUS PASSAGE, the way a book prints it: the items run on into
+        // each other with a space, NOT a newline. A newline here is a hard line
+        // break inside the page, so a page that crosses a paragraph boundary
+        // started the next paragraph on its own line and left the rest of the box
+        // empty — the reported "I pick paragraph one and it is not like a book".
+        // The page break (the word budget below) is the only division left, and a
+        // page fills from wherever it starts with as many words as the budget
+        // allows, crossing into the next paragraph and the one after it.
+        let text = ""
+        let selectedOffset = 0
+        for (let i = 0; i < root.chapterVerses.length; ++i) {
+            const verse = root.chapterVerses[i]
+            if (i > 0)
+                text += " "
+            const verseText = String(verse.text ?? "")
+            if (i === verseIndex) {
+                let partOffset = 0
+                if (row) {
+                    const found = verseText.indexOf(String(row.text ?? ""))
+                    if (found >= 0)
+                        partOffset = found
+                }
+                selectedOffset = text.length + partOffset
+            }
+            text += verseText
         }
-        return output
+
+        const setting = Number(root.options[root.adapter.optionsPrefix + ".wordsPerSlide"] ?? 40)
+        const wordsPerScreen = Math.max(3, Math.floor(setting))
+        const word = /\S+/g
+        const matches = []
+        let match
+        while ((match = word.exec(text)) !== null)
+            matches.push({ start: match.index, end: word.lastIndex })
+        const pages = []
+        const selectedWord = matches.findIndex((entry) => entry.start >= selectedOffset)
+        const pivot = selectedWord < 0 ? matches.length : selectedWord
+        const appendRange = (from, to) => {
+            if (from >= to)
+                return
+            const start = from === 0 ? 0 : matches[from].start
+            const end = to < matches.length ? matches[to].start : text.length
+            pages.push({ body: text.slice(start, end), start: start })
+        }
+        let cursor = 0
+        while (cursor < pivot) {
+            const next = Math.min(cursor + wordsPerScreen, pivot)
+            appendRange(cursor, next)
+            cursor = next
+        }
+        let selectedPage = pages.length
+        while (cursor < matches.length) {
+            const next = Math.min(cursor + wordsPerScreen, matches.length)
+            appendRange(cursor, next)
+            cursor = next
+        }
+        if (pages.length > 0)
+            selectedPage = Math.min(selectedPage, pages.length - 1)
+        return { pages: pages, index: Math.max(0, selectedPage) }
     }
 
     // THE ON-AIR PICK (FreeShow's verse dblclick -> playScripture): the picked
@@ -2616,6 +2680,16 @@ Item {
                                    part: Number(first.partIndex ?? 0) }
         root.lineStepOwnerRef = root.referenceText
         root.goLiveRequested(root.referenceText, slides)
+        if (first)
+            root.rememberPick(slides, 0, first.number, first.partIndex ?? 0)
+        else
+            root.scrollPiece = null
+        // WITH SCROLL ON THE PASSAGE GOES OUT NOW, not on the first arrow: the
+        // tile draws the budget-sized column and fills its box with the following
+        // paragraphs. Scroll off leaves the pick a slide, fitted to its own words
+        // (the auto-size above).
+        if (LiveOutputService.scrollMode)
+            root.ensureScrollSource()
         root.refreshLiveFlowSlide()
     }
 
@@ -2628,6 +2702,15 @@ Item {
     // passage while the tile's title is still the old one, so a post-step
     // liveIsOurs(newRef) never matches.
     function stepAndPlay(direction) {
+        // SCROLL MODE: the arrows walk this pane's passage line by line. A boundary
+        // press stays in scroll mode instead of turning into a slide or passage jump.
+        const owned = LiveOutputService.live
+            ? LiveOutputService.onAirTitle === root.lineStepOwnerRef
+            : LiveOutputService.stagedIsOurs(root.lineStepOwnerRef)
+        if (LiveOutputService.scrollMode && root.scrollPiece && owned) {
+            LiveOutputService.lineStep(direction)
+            return
+        }
         // THE ‹ › DELIBERATELY STAGE (per the pane's design): a jump, so each output
         // fits the page it lands on instead of reusing the previous page's size.
         LiveOutputService.noteOperatorJump()
@@ -2723,30 +2806,12 @@ Item {
         const number = parts[0].number
         const partIndex = parts[0].partIndex ?? 0
         const output = root.chapterOutputSlides()
-        // DIAGNOSTIC: the output array is rebuilt FRESH on every call (chapterOutputSlides
-        // re-fetches adapter.slides() per verse), and ReferencePane's own mainRows comment
-        // documents that a chapter's continuation split can arrive in a SECOND, async
-        // delivery after the chapter opens. If a click lands in that window, the same
-        // verse/part can resolve to a DIFFERENT index than it did a moment ago — and that
-        // shifted index is exactly what OutputMonitorTile's onAirSlide memo keys on
-        // (LiveOutputService.readingPage), so a stale composition cached under the OLD
-        // index for that same number would stick until a click resolves to a genuinely new
-        // index. Logged to catch it if the "goes back to a previous row, shows stale until
-        // another click" report reproduces again — compare outputLen across clicks on the
-        // SAME chapter for a shrink/grow, and i against what a previous click on this same
-        // number logged.
-        EngineBridge.log("info", "OutputSlideAtMatch",
-            "number=" + number + " partIndex=" + partIndex + " outputLen=" + output.length)
         for (let i = 0; i < output.length; ++i) {
             const slide = output[i]
             if ((slide.parts || []).some((part) => part.number === number
-                                                   && (part.partIndex ?? 0) === partIndex)) {
-                EngineBridge.log("info", "OutputSlideAtMatch",
-                    "matched i=" + i + " of " + output.length)
+                                                   && (part.partIndex ?? 0) === partIndex))
                 return { slide: slide, output: output, index: i }
-            }
         }
-        EngineBridge.log("info", "OutputSlideAtMatch", "no match found")
         return null
     }
 
@@ -2761,12 +2826,99 @@ Item {
     // as ShowCenter.qml's takeSlideLive — a single-slide stage left it with
     // no neighbour to step into (user report: "when I press Alt[+]down it
     // doesn't step in lines").
+    // Scroll picks retain the clicked JSON paragraph/verse and rebuild the reading
+    // stream from it; slide picks continue to use the staged slide set.
+    property var scrollPiece: null
+    property var scrollOutput: null
+    property int scrollIndex: 0
+    property bool scrollSourced: false
+    // THE PAGES THE WALK WAS BUILT FROM ({ body, start } each, see
+    // readingPagesFromChapter), kept because Scroll-off has to map the page the
+    // service is ON back to the slide holding that character. It was read without
+    // ever being declared — "Cannot read property 'length' of undefined" on every
+    // Scroll toggle (applyScrollMode).
+    property var scrollPages: []
+    function ensureScrollSource() {
+        // The active reading tab supplies its own JSON passage and word budget.
+        // Other content, such as a show's slides, has no chapter passage to read.
+        const reading = root.adapter ? String(root.adapter.contentType || "") : ""
+        if (root.scrollSourced || !root.scrollPiece || !root.book || !root.adapter
+                || (reading !== "table" && reading !== "scripture"))
+            return
+        const ours = LiveOutputService.live
+            ? LiveOutputService.onAirTitle === root.lineStepOwnerRef
+            : LiveOutputService.stagedIsOurs(root.lineStepOwnerRef)
+        if (!ours)
+            return
+        root.scrollSourced = true
+        root.syncReadingWordBudget()   // the walk's budget, read where the walk begins
+        const source = root.readingPagesFromChapter(root.scrollPiece.number,
+                                                   root.scrollPiece.part)
+        root.scrollPages = source.pages
+        LiveOutputService.setReadingTextSource(root.lineStepOwnerRef, source.pages, source.index)
+    }
+    // SCROLL ON REBUILDS THE OUTPUT: the pick's passage goes out at once, so the
+    // monitor tiles and this pane's preview draw the budget-sized scroll text
+    // instead of waiting for the first arrow press.
+    // THE SET THIS PANE LAST STAGED, so Scroll off can put the slides back exactly as
+    // they were staged (scrollOutput at scrollIndex) and Scroll on can rebuild the
+    // passage from the same piece.
+    function rememberPick(output, index, number, part) {
+        root.scrollOutput = output
+        root.scrollIndex = index
+        root.scrollPiece = { number: Number(number), part: Number(part) }
+        root.scrollSourced = false
+        // In Scroll, a click shows the chapter text from the clicked paragraph on, in
+        // the template's box at the budget size, not the slide's own split.
+        if (LiveOutputService.scrollMode)
+            root.ensureScrollSource()
+    }
+    function applyScrollMode() {
+        if (!root.scrollPiece || !root.scrollOutput)
+            return
+        const ours = LiveOutputService.live
+            ? LiveOutputService.onAirTitle === root.lineStepOwnerRef
+            : LiveOutputService.stagedIsOurs(root.lineStepOwnerRef)
+        if (!ours)
+            return
+        if (LiveOutputService.scrollMode) {
+            root.scrollSourced = false
+            root.ensureScrollSource()
+        } else {
+            // WHERE THE WALK IS: the scroll page the service is on starts at a character
+            // of the chapter, and the slide holding that character is the one restaged.
+            const set = root.scrollOutput
+            let index = root.scrollIndex
+            if (root.scrollSourced && root.scrollPages.length > 0) {
+                const page = root.scrollPages[Math.min(LiveOutputService.readingPage,
+                                                       root.scrollPages.length - 1)]
+                const piece = root.pieceAtChapterOffset(Number(page.start ?? 0))
+                const found = piece ? set.findIndex((slide) => (slide.parts || []).some(
+                    (p) => Number(p.number) === piece.number && Number(p.partIndex ?? 0) === piece.partIndex))
+                                    : -1
+                if (found >= 0)
+                    index = found
+            }
+            root.scrollSourced = false
+            root.scrollIndex = index
+            LiveOutputService.stageSlideSet(root.lineStepOwnerRef, set, index)
+        }
+        root.refreshLiveFlowSlide()
+    }
+    Connections {
+        target: LiveOutputService
+        function onLineStepPending(direction) { root.ensureScrollSource() }
+        function onScrollModeChanged() { root.applyScrollMode() }
+    }
+
     function playSlideAt(index) {
         const hit = root.outputSlideAt(index)
         if (!hit)
             return false
         root.lineStepOwnerRef = root.referenceText
         LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
+        const piece = (root.previewSlides[index].parts || [])[0]
+        root.rememberPick(hit.output, hit.index, piece.number, piece.partIndex ?? 0)
         root.refreshLiveFlowSlide()
         return true
     }
@@ -2783,7 +2935,6 @@ Item {
                             "warning", qsTr("On air"), "live.style.gate")
             return false
         }
-        const output = root.chapterOutputSlides()
         // A CLICK ON A PARAGRAPH IS A JUMP: fit this page's own auto-size.
         LiveOutputService.noteOperatorJump()
         const part = Number(partIndex ?? 0)
@@ -2803,20 +2954,43 @@ Item {
                 break
             }
         }
-        for (let i = 0; i < output.length; ++i) {
-            if ((output[i].parts || []).some((p) => Number(p.number) === Number(number)
-                                                   && Number(p.partIndex ?? 0) === part)) {
+        root.lineStepOwnerRef = root.adapter.reference(root.book.name,
+                                                       root.chapterNumber,
+                                                       [Number(number)])
+        if (kind === "table") {
+            if (!pickedSlide)
+                return false
+            LiveOutputService.stageSlideSet(root.lineStepOwnerRef, [pickedSlide], 0)
+            // The whole chapter set is what Scroll off restores, so its neighbours exist.
+            const set = root.chapterOutputSlides()
+            const at = set.findIndex((slide) => (slide.parts || []).some(
+                (p) => Number(p.number) === Number(number) && Number(p.partIndex ?? 0) === part))
+            root.rememberPick(at >= 0 ? set : [pickedSlide], at >= 0 ? at : 0, number, part)
+        } else {
+            const output = root.chapterOutputSlides()
+            let staged = false
+            for (let i = 0; i < output.length; ++i) {
+                if (!(output[i].parts || []).some((p) => Number(p.number) === Number(number)
+                                                         && Number(p.partIndex ?? 0) === part))
+                    continue
                 if (pickedSlide)
                     output[i] = pickedSlide
-                root.lineStepOwnerRef = root.adapter.reference(root.book.name,
-                                                               root.chapterNumber,
-                                                               [Number(number)])
                 LiveOutputService.stageSlideSet(root.lineStepOwnerRef, output, i)
-                root.refreshLiveFlowSlide()
-                return true
+                root.rememberPick(output, i, number, part)
+                staged = true
+                break
             }
+            if (!staged)
+                return false
         }
-        return false
+        // A CLICK WITH SCROLL ON IS A READING PICK: stage the passage itself, at the
+        // size the text area and the max-words budget solve, instead of fitting this
+        // one page's own words. That is the difference the mode makes — the click
+        // still picks, it just stops auto-fitting when the tab is scrolling.
+        if (LiveOutputService.scrollMode)
+            root.ensureScrollSource()
+        root.refreshLiveFlowSlide()
+        return true
     }
 
     // ---- The wall's ‹ ›: is THIS tab the one that can step the tile? --------

@@ -275,6 +275,18 @@ std::vector<SettingDef> BuildDefinitions() {
     for (const FillTab &tab : kFillTabs)
         AddFillOptions(d, tab.key, tab.one, tab.lowerOne, tab.lowerMany);
 
+    // WHAT THE WALL'S ‹ › DO, remembered per tab: Slide steps the pick's slides,
+    // Scroll walks the passage a line at a time (LiveOutputService::lineStep).
+    // One key per tab on purpose — The Table can come back in Scroll while a show
+    // comes back on Slide. No settings card lists these: the mode is shown and
+    // changed by the wall's own transport button (MonitorWall's scroll switch),
+    // and this is only where the choice survives a restart. Declared here for the
+    // same reason every remembered key is: an undeclared key refuses every write,
+    // so the mode would silently reset on each launch.
+    d.push_back(Bool("scripture.scrollWalk", "scripture", "Scroll the passage", false));
+    d.push_back(Bool("table.scrollWalk", "table", "Scroll the passage", false));
+    d.push_back(Bool("shows.scrollWalk", "shows", "Scroll the passage", false));
+
     // ---- What the app remembers between runs (not shown as settings) ----
     d.push_back(Text("session.scriptureBible", "session", "Last Bible"));
     // The EXTRA Bible versions shown BESIDE the selected one — the parallel layouts

@@ -415,6 +415,9 @@ Item {
                 // immediately for the reading block, but a frame at the fallback
                 // size before it would be the same pop the latch exists to stop.
                 property real fitAnswer: (el.readingBlock && root.animateLineSteps
+                                          && LiveOutputService.readingBudgetFitActive)
+                                         ? Number(el.meta.fontSize ?? 16)
+                                         : (el.readingBlock && root.animateLineSteps
                                           && root.readingFitSize > 0
                                           && root.readingFitKey === el.readingFitKey)
                                          ? root.readingFitSize : (el.meta.fontSize ?? 16)
@@ -442,6 +445,9 @@ Item {
                     // that changes when one passage ends and the next begins.
                     if (reading && typeof LiveOutputService !== "undefined") {
                         parts.push(String(LiveOutputService.readingSetName ?? ""))
+                        parts.push(String(LiveOutputService.readingBudgetFitActive ?? false))
+                        if (LiveOutputService.readingBudgetFitActive)
+                            parts.push(String(LiveOutputService.readingWordBudget ?? 40))
                         // ...AND THE JUMP/WALK DISTINCTION (readingStageSerial). One
                         // WALK is one size: a line step inside the page already on
                         // screen must not re-fit, or the column re-flows under the
@@ -477,6 +483,15 @@ Item {
                                                   MetadataFields.lineSpacing(el.meta),
                                                   MetadataFields.letterSpacing(el.meta),
                                                   el.style.padding ?? 0]
+                Connections {
+                    target: LiveOutputService
+                    function onReadingScrollChanged() {
+                        const active = LiveOutputService.readingBudgetFitActive === true
+                        if (active && el.readingBlock && root.animateLineSteps
+                                && root.readingFitKey !== el.readingFitKey)
+                            el.solveFit()
+                    }
+                }
                 // EVERY text block solves — "none" included: the box is the master and the
                 // text must always sit inside it (a "none" block renders at its set size
                 // while that fits, and SQUEEZES the moment it doesn't; nothing is ever cut).
@@ -534,20 +549,23 @@ Item {
                     // The delegate is clipped to its box, so the token is cut at the edge
                     // instead of shrinking the type.
                     const tokenOrZero = bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)
-                    // THE WALK'S SIZE IS THE PAGE'S OWN FIT, HELD.
-                    //
-                    // What a scrolling column must NOT do is re-fit itself page by
-                    // page: that is the template changing under the reader (reported:
-                    // "some parts scroll well, some parts still shrink"). What it must
-                    // also not do is skip the fit — answering the DECLARED size instead
-                    // is what made a scrolling slide look shrunk next to the same slide
-                    // at rest, where auto-size is filling the box (our rule was being
-                    // read as "the scrolling case has no fit question to ask").
-                    //
-                    // So the first page of a walk is fitted by the SAME bisection a
-                    // slide at rest runs (see the loop below), and that one answer is
-                    // latched: every page after it — same pick, same box, same type —
-                    // reuses it, so nothing about the type moves between steps.
+                    // Scrolling keeps the template's declared font size. Its word
+                    // budget fills the stream; it never resizes the template text.
+                    const fixedScrollText = hostAlive && el.readingBlock
+                        && root.animateLineSteps && LiveOutputService.readingBudgetFitActive
+                    if (fixedScrollText) {
+                        fitAnswer = Number(el.meta.fontSize ?? 16)
+                        fitProbe = fitAnswer
+                        root.readingFitKey = el.readingFitKey
+                        root.readingFitSize = fitAnswer
+                        LiveOutputService.noteReadingFit(root.readingStyleId, fitAnswer,
+                                                         el.width, el.height,
+                                                         el.style.padding ?? 0)
+                        fitSolving = false
+                        return
+                    }
+                    // Slide-mode reading keeps its normal fitted size across pages
+                    // within the same operator pick.
                     if (!tokenOrZero && hostAlive && el.readingBlock && root.animateLineSteps
                         && root.readingFitSize > 0 && root.readingFitKey === el.readingFitKey) {
                         fitAnswer = root.readingFitSize
@@ -736,9 +754,12 @@ Item {
                     id: flowWindow
                     visible: el.drawsFlow
                     x: 0
-                    y: el.pageTop
+                    y: LiveOutputService.readingBudgetFitActive
+                       ? (el.style.padding ?? 0) : el.pageTop
                     width: el.width
-                    height: fitMeasure.contentHeight
+                    height: LiveOutputService.readingBudgetFitActive
+                            ? Math.max(0, el.height - 2 * (el.style.padding ?? 0))
+                            : fitMeasure.contentHeight
                     clip: true
 
                     // The passage starts at the top of the window and travels UP by

@@ -789,34 +789,12 @@ ApplicationWindow {
         onActivated: quickSearch.openSearch()
     }
 
-    // THE READING STEP (Alt+Down / Alt+Up) — see LiveOutputService::lineStep.
-    // Window-level on purpose: it acts on whatever pick is staged or on air
-    // (a show's slides, a passage's verses, a Table section), so every pane
-    // gets the behaviour without owning a binding of its own. Right/Left keep
-    // their plain next/previous-slide meaning, so the two moves stay distinct
-    // (user: "if I press > next slide; if I press alt+down it means take the
-    // next slide first line and move the current slide first line out").
-    Shortcut {
-        action: "lineStepNext"
-        // ONE-SHOT DIAGNOSTIC: logged at the EARLIEST point this action can be
-        // seen, before lineStep() runs its own (LiveOutputService's own
-        // "LineStep: dir=..." line). If THIS line is missing from engine.log
-        // after a press, the key never reached this Shortcut at all (something
-        // else — a focused TextInput, a modal, another Shortcut/MouseArea —
-        // swallowed it first); if it's there but LiveOutputService's own line
-        // is not, the call into lineStep() itself is the break.
-        onActivated: {
-            EngineBridge.log("info", "LineStepShortcut", "lineStepNext activated")
-            LiveOutputService.lineStep(1)
-        }
-    }
-    Shortcut {
-        action: "lineStepPrevious"
-        onActivated: {
-            EngineBridge.log("info", "LineStepShortcut", "lineStepPrevious activated")
-            LiveOutputService.lineStep(-1)
-        }
-    }
+    // THE READING STEP USED TO LIVE HERE (Alt+Down / Alt+Up). The walk is now
+    // driven by the wall's own transport: its Scroll mode (the repurposed
+    // Transition slot, selfTestWallScrollMode) makes ‹ › step LINES of the
+    // passage instead of slides, so the same two arrows serve both features and
+    // there is no second, invisible chord to learn. LiveOutputService::lineStep
+    // is unchanged — it is what those arrows call in Scroll mode.
 
     AppMenuBar {
         id: appMenuBar

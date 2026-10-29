@@ -104,15 +104,9 @@ QtObject {
         nextPassage: "Down",
         previousSlide: "Left",
         nextSlide: "Right",
-        // THE READING STEP (the "telecaster" step): the same pick, moved one
-        // LINE at a time instead of one picture at a time. Alt+Down pushes the
-        // current slide's first line out at the top and brings the NEXT slide's
-        // first line in at the bottom, so an operator reading to the end of a
-        // slide continues downward instead of hunting for their place in a
-        // fresh picture; Alt+Up walks back. Right/Left stay the plain
-        // next/previous slide — two different moves, both available.
-        lineStepNext: "Alt+Down",
-        lineStepPrevious: "Alt+Up",
+        // THE READING STEP has no chord of its own any more: the wall's ‹ ›
+        // step lines while its Scroll mode is on (see MonitorWall.qml) and
+        // slides while it is off, so one pair of arrows covers both features.
         // The library dock's tab row (Shows, Media, Overlays, Templates,
         // Scripture, The Table, Calendar, Functions) — Ctrl+1 through the
         // last tab, in the row's own left-to-right order. ONE array entry,
