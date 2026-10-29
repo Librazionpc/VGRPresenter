@@ -283,9 +283,14 @@ std::vector<SettingDef> BuildDefinitions() {
     // and this is only where the choice survives a restart. Declared here for the
     // same reason every remembered key is: an undeclared key refuses every write,
     // so the mode would silently reset on each launch.
-    d.push_back(Bool("scripture.scrollWalk", "scripture", "Scroll the passage", false));
-    d.push_back(Bool("table.scrollWalk", "table", "Scroll the passage", false));
-    d.push_back(Bool("shows.scrollWalk", "shows", "Scroll the passage", false));
+    // TEXT, not Bool, because "never chosen" is a third state: a tab whose key is
+    // empty inherits the mode currently in force, while a tab the operator has
+    // switched comes back to its own choice. As a Bool the unset default was
+    // `false`, so picking a verse in Scripture silently turned Scroll off for good
+    // (the Table worked, the Bible quietly went back to a slide).
+    d.push_back(Text("scripture.scrollWalk", "scripture", "Scroll the passage"));
+    d.push_back(Text("table.scrollWalk", "table", "Scroll the passage"));
+    d.push_back(Text("shows.scrollWalk", "shows", "Scroll the passage"));
 
     // ---- What the app remembers between runs (not shown as settings) ----
     d.push_back(Text("session.scriptureBible", "session", "Last Bible"));

@@ -91,7 +91,13 @@ Rectangle {
     scale: AppScale.cardScale(root)
     transformOrigin: Item.TopLeft
 
-    signal itemActivated(string label)
+    // THE ROW IS PART OF THE SIGNAL: a picker whose rows carry a value (the
+    // Auto size menu's { label, key } entries) needs that value, and its handlers
+    // read it as a second argument. Only the label was emitted, so every one of
+    // those handlers threw "Cannot read property 'key' of undefined" the moment a
+    // row was clicked (the Edit screen's Auto size / border-style / font pickers).
+    // A handler that takes just the label keeps working — QML ignores extra args.
+    signal itemActivated(string label, var item)
 
     // --- autocomplete mode (opt-in) ------------------------------------------
     // An inline suggestion list for a text field (the tab search box's live
@@ -699,11 +705,12 @@ Rectangle {
                                             return
                                         const pickedLabel = modelData.label
                                         const pickedPayload = modelData.payload
+                                        const pickedRow = modelData
                                         const pickedIndex = index
                                         if (typeof pickedPayload !== "undefined")
                                             root.itemPicked(pickedIndex, pickedPayload)
                                         else
-                                            root.itemActivated(pickedLabel)
+                                            root.itemActivated(pickedLabel, pickedRow)
                                     }
                                     // Same stale-row guards as the click: a
                                     // hover recompute can also fire on a row

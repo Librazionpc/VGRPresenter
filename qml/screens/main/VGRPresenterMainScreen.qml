@@ -2556,7 +2556,7 @@ Rectangle {
             minValue: workspace_body.minTop
             maxValue: workspace_body.maxTop
             onDragged: (v) => { workspace_body.topOverride = v; saveColumnWidthsTimer.restart() }
-            onResetRequested: (v) => { workspace_body.topOverride = -1; saveColumnWidthsTimer.restart() }
+            onResetRequested: { workspace_body.topOverride = -1; saveColumnWidthsTimer.restart() }
         }
 
         // Drag the divider between the main preview workspace and the output

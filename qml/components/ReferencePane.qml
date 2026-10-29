@@ -2566,10 +2566,24 @@ Item {
     // paragraphs, Scripture's verses) because it reads the pane's own
     // chapterVerses/mainRows, which both adapters fill — the walk is a reading of
     // the passage, not a re-cut of the slides.
+    // HOW THE FILL PRINTS ONE ITEM of this tab: with the item's NUMBER in front
+    // when the tab's "Verse/Paragraph numbers" option is on ("1 In the beginning…").
+    // The passage has to be built the SAME way, or it is a different string from
+    // the block it is meant to replace: DesignPreview only draws the flow when the
+    // block's own text is contained in it (drawsFlow), so a passage without the
+    // leading number matched no Scripture block at all and the Bible kept drawing
+    // one verse while The Table — whose paragraphs carried no number — worked.
+    function chapterItemText(verse) {
+        const numbersOn = root.options[root.adapter.optionsPrefix + ".verseNumbers"] === true
+        const body = String(verse.text ?? "")
+        if (!numbersOn)
+            return body
+        return String(verse.number ?? "") + " " + body
+    }
+
     function readingPagesFromChapter(number, partIndex) {
-        const verseIndex = root.chapterVerses.findIndex((v) => Number(v.number) === Number(number))
-        if (verseIndex < 0)
-            return { pages: [], index: 0 }
+        // (No pre-check on the list here: the passage is built first and the pick is
+        // matched against the items it actually contains, below.)
         const row = root.mainRows.find((r) => Number(r.number) === Number(number)
                                               && Number(r.partIndex ?? 0) === Number(partIndex ?? 0))
         // ONE CONTINUOUS PASSAGE, the way a book prints it: the items run on into
@@ -2586,27 +2600,39 @@ Item {
         // the service had cut would put the same words into the passage once per
         // part. Whole paragraphs only, in their own order; the only division left
         // is the word budget below.
+        // EACH ITEM'S OWN SPAN IS RECORDED AS THE TEXT IS BUILT. The pick's page used
+        // to be found by the loop's POSITION ("i === verseIndex"), and any item the
+        // passage and the list disagree about — a skipped continuation, a row the
+        // list has and the passage does not — shifted the start by a whole item:
+        // selecting verse 1 opened the passage at verse 2. Matching the item by its
+        // OWN identity, against spans taken from the text that was actually built,
+        // cannot drift like that.
         let text = ""
-        let selectedOffset = 0
-        for (let i = 0; i < root.chapterVerses.length; ++i) {
-            const verse = root.chapterVerses[i]
+        const items = []
+        for (const verse of root.chapterVerses) {
             const continuation = Number(verse.partIndex ?? 0) > 0
                 || String(verse.number ?? "").indexOf("-") >= 0
             if (continuation)
                 continue
             if (text !== "")
                 text += " "
-            const verseText = String(verse.text ?? "")
-            if (i === verseIndex) {
-                let partOffset = 0
-                if (row) {
-                    const found = verseText.indexOf(String(row.text ?? ""))
-                    if (found >= 0)
-                        partOffset = found
-                }
-                selectedOffset = text.length + partOffset
-            }
+            const verseText = root.chapterItemText(verse)
+            items.push({ number: Number(verse.number),
+                         partIndex: Number(verse.partIndex ?? 0),
+                         start: text.length,
+                         end: text.length + verseText.length })
             text += verseText
+        }
+        const picked = items.find((it) => it.number === Number(number)
+                                          && it.partIndex === Number(partIndex ?? 0))
+                       || items.find((it) => it.number === Number(number))
+        if (!picked)
+            return { pages: [], index: 0 }
+        let selectedOffset = picked.start
+        if (row) {
+            const found = text.indexOf(String(row.text ?? ""), picked.start)
+            if (found >= 0 && found < picked.end)
+                selectedOffset = found
         }
 
         const setting = Number(root.options[root.adapter.optionsPrefix + ".wordsPerSlide"] ?? 40)
@@ -2626,13 +2652,23 @@ Item {
             const end = to < matches.length ? matches[to].start : text.length
             pages.push({ body: text.slice(start, end), start: start })
         }
-        let cursor = 0
-        while (cursor < pivot) {
-            const next = Math.min(cursor + wordsPerScreen, pivot)
-            appendRange(cursor, next)
-            cursor = next
+        // PAGES BEFORE THE PICK ARE PACKED BACKWARDS from it, each a full budget
+        // ending where the pick begins. Packed forwards from word 0 they left a
+        // leftover page at the END of the prefix, and with a pick one word into the
+        // chapter that leftover was a page holding only the verse number "1" — the
+        // walk could then start on it and the passage looked like it began a verse
+        // late ("I select 1 it shows verse 2"). Backwards, the picked page always
+        // begins exactly ON the picked item.
+        const before = []
+        for (let back = pivot; back > 0; ) {
+            const from = Math.max(0, back - wordsPerScreen)
+            before.unshift({ from: from, to: back })
+            back = from
         }
+        for (const range of before)
+            appendRange(range.from, range.to)
         let selectedPage = pages.length
+        let cursor = pivot
         while (cursor < matches.length) {
             const next = Math.min(cursor + wordsPerScreen, matches.length)
             appendRange(cursor, next)
@@ -2640,6 +2676,19 @@ Item {
         }
         if (pages.length > 0)
             selectedPage = Math.min(selectedPage, pages.length - 1)
+        // ONE-SHOT DIAGNOSTIC: which item the pick resolved to and which page the
+        // walk starts on. "I select 1 and it shows verse 2" can be a wrong verse
+        // index, a wrong part offset or a wrong page index — this names which,
+        // instead of inferring it from the picture.
+        if (typeof EngineBridge !== "undefined")
+            EngineBridge.log("info", "ChapterPassage",
+                "number=" + number + " part=" + partIndex
+                + " itemStart=" + picked.start + " selectedOffset=" + selectedOffset
+                + " pivot=" + pivot
+                + " pages=" + pages.length + " startPage=" + Math.max(0, selectedPage)
+                + " pageAt=" + (pages.length > 0
+                                ? String(pages[Math.max(0, selectedPage)].body).slice(0, 30) : "-")
+                + " head=" + text.slice(0, 30))
         return { pages: pages, index: Math.max(0, selectedPage) }
     }
 
@@ -2662,7 +2711,7 @@ Item {
                 continue
             if (at > 0)
                 at += 1                       // the joining space between items
-            const text = String(verse.text ?? "")
+            const text = root.chapterItemText(verse)
             lastKept = verse
             if (charOffset > at + text.length) {
                 at += text.length

@@ -477,7 +477,24 @@ Item {
                         parts.push(el.meta.fontSize ?? 16)
                     return parts.join("|")
                 }
+                // THE SCROLL COLUMN'S BUDGET PROBE — the max-words worth of the
+                // passage, measured instead of the page's own words. Every output
+                // draws the passage in ITS OWN box, so a small box (a second output
+                // on a lower-third or a white panel) was handed the same type size
+                // as the big one and its words ran off the edge. Solving the budget
+                // against THIS box gives each output a size that really holds the
+                // page: one size per box for the whole walk, nothing clipped.
+                readonly property int scrollBudget: (el.readingBlock && root.animateLineSteps
+                                                     && LiveOutputService.readingBudgetFitActive)
+                                                    ? Math.max(3, Number(LiveOutputService.readingWordBudget ?? 40)) : 0
+                readonly property string scrollProbe: {
+                    if (el.scrollBudget <= 0)
+                        return ""
+                    const words = String(LiveOutputService.readingFlowText ?? "").split(/\s+/)
+                    return words.slice(0, el.scrollBudget).join(" ")
+                }
                 readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
+                                                  el.scrollBudget,
                                                   el.meta.fontSize ?? 16,
                                                   MetadataFields.lineHeight(el.meta),
                                                   MetadataFields.lineSpacing(el.meta),
@@ -549,18 +566,18 @@ Item {
                     // The delegate is clipped to its box, so the token is cut at the edge
                     // instead of shrinking the type.
                     const tokenOrZero = bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)
-                    // Scrolling keeps the template's declared font size. Its word
-                    // budget fills the stream; it never resizes the template text.
-                    const fixedScrollText = hostAlive && el.readingBlock
-                        && root.animateLineSteps && LiveOutputService.readingBudgetFitActive
-                    if (fixedScrollText) {
-                        fitAnswer = Number(el.meta.fontSize ?? 16)
+                    // SCROLLING SOLVES THE BUDGET INTO THIS BOX (see scrollProbe):
+                    // the max-words worth of the passage, fitted to the box it will
+                    // be drawn in — one size per box for the whole walk, so a small
+                    // output shrinks to hold the page instead of running its words
+                    // off the edge. The size is latched by readingFitKey (pick, box
+                    // and budget — never the page's text), so a page turn cannot
+                    // re-solve and re-flow the column under the reader.
+                    const scrollFit = hostAlive && el.scrollProbe !== ""
+                    if (scrollFit && root.readingFitSize > 0
+                        && root.readingFitKey === el.readingFitKey) {
+                        fitAnswer = root.readingFitSize
                         fitProbe = fitAnswer
-                        root.readingFitKey = el.readingFitKey
-                        root.readingFitSize = fitAnswer
-                        LiveOutputService.noteReadingFit(root.readingStyleId, fitAnswer,
-                                                         el.width, el.height,
-                                                         el.style.padding ?? 0)
                         fitSolving = false
                         return
                     }
@@ -591,7 +608,10 @@ Item {
                         }
                     }
                     // grow: fill the box; shrink/none: at most the set size (the squeeze).
-                    fitAnswer = el.fitMode === "grow" ? lo : Math.min(el.meta.fontSize ?? 16, lo)
+                    // A scroll column always takes the solved answer: its content IS the
+                    // budget, so "fill this box with the budget" is the whole rule.
+                    fitAnswer = (scrollFit || el.fitMode === "grow")
+                                ? lo : Math.min(el.meta.fontSize ?? 16, lo)
                     fitProbe = fitAnswer
                     if (!tokenOrZero && hostAlive && el.readingBlock && root.animateLineSteps) {
                         // This is the walk's first page (or its first page at this box,
@@ -610,7 +630,9 @@ Item {
                     id: fitMeasure
                     visible: false
                     width: el.width - (el.style.padding ?? 0) * 2
-                    text: fitText.text
+                    // THE PROBE IS WHAT A SCROLL COLUMN IS MEASURED ON (see
+                    // el.scrollProbe): the budget's words, not this page's.
+                    text: el.scrollProbe !== "" ? el.scrollProbe : fitText.text
                     font.family: fitText.font.family
                     font.pixelSize: el.fitProbe
                     font.weight: fitText.font.weight

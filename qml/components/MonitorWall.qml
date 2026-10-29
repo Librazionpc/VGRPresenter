@@ -114,17 +114,26 @@ Item {
         const t = String(LiveOutputService.wallStepperId || "")
         return (t === "scripture" ? "scripture" : t === "show" ? "shows" : "table") + ".scrollWalk"
     }
-    // ADOPT THE TAB'S STORED MODE when the arrows change owner (a different tab's
-    // pick reaches the tile, or the first one claims them at startup).
-    onModeKeyChanged: LiveOutputService.scrollMode = SettingsService.values[root.modeKey] === true
-    Component.onCompleted: LiveOutputService.scrollMode = SettingsService.values[root.modeKey] === true
-    // ...AND WRITE THE CHOICE BACK. Every change of the service's mode lands here
-    // — the switch's press and an adopted value alike — so the tab's key is the
-    // only copy that has to be right; there is no second state to drift.
+    // A TAB THE OPERATOR HAS NEVER SWITCHED INHERITS THE MODE IN FORCE. The key
+    // holds "scroll" / "slide" once that tab has been chosen for, and "" until
+    // then — that third state is what makes "Scroll on in The Table, now click a
+    // verse in Scripture" keep scrolling instead of quietly falling back to a
+    // slide (reported: "what we did for the Table is not working for Bible").
+    function adoptMode() {
+        const stored = String(SettingsService.values[root.modeKey] ?? "")
+        if (stored !== "scroll" && stored !== "slide")
+            return
+        LiveOutputService.scrollMode = stored === "scroll"
+    }
+    onModeKeyChanged: root.adoptMode()
+    Component.onCompleted: root.adoptMode()
+    // ...AND WRITE THE CHOICE BACK, as that tab's own word. Every change of the
+    // service's mode lands here — the switch's press and an adopted value alike —
+    // so the tab's key is the only copy that has to be right.
     Connections {
         target: LiveOutputService
         function onScrollModeChanged() {
-            SettingsService.setValue(root.modeKey, LiveOutputService.scrollMode)
+            SettingsService.setValue(root.modeKey, LiveOutputService.scrollMode ? "scroll" : "slide")
         }
     }
     function goTo(page) {
