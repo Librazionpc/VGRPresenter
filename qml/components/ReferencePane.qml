@@ -2580,11 +2580,21 @@ Item {
         // The page break (the word budget below) is the only division left, and a
         // page fills from wherever it starts with as many words as the budget
         // allows, crossing into the next paragraph and the one after it.
+        // NO SPLIT IN THE SCROLL STREAM. "Divide long paragraphs" is a SLIDE rule:
+        // it cuts one paragraph into 1, 1-1, 1-2 so each slide fits. Reading is the
+        // whole passage, so a continuation row is dropped here — otherwise a chapter
+        // the service had cut would put the same words into the passage once per
+        // part. Whole paragraphs only, in their own order; the only division left
+        // is the word budget below.
         let text = ""
         let selectedOffset = 0
         for (let i = 0; i < root.chapterVerses.length; ++i) {
             const verse = root.chapterVerses[i]
-            if (i > 0)
+            const continuation = Number(verse.partIndex ?? 0) > 0
+                || String(verse.number ?? "").indexOf("-") >= 0
+            if (continuation)
+                continue
+            if (text !== "")
                 text += " "
             const verseText = String(verse.text ?? "")
             if (i === verseIndex) {
@@ -2631,6 +2641,50 @@ Item {
         if (pages.length > 0)
             selectedPage = Math.min(selectedPage, pages.length - 1)
         return { pages: pages, index: Math.max(0, selectedPage) }
+    }
+
+    // WHICH PIECE HOLDS A CHARACTER of that passage — how Scroll-off puts the slide
+    // back where the reader was. It walks the SAME text readingPagesFromChapter
+    // builds (whole items, one joining space, continuations skipped), so a page's
+    // `start` means the same thing here as it does there. The part is then refined
+    // inside the item: an item split by "Divide long paragraphs" has rows whose
+    // text is a slice of it, and the last part starting at or before the offset is
+    // the one on screen.
+    function pieceAtChapterOffset(charOffset) {
+        if (root.chapterVerses.length === 0)
+            return null
+        let at = 0
+        let lastKept = null
+        for (const verse of root.chapterVerses) {
+            const continuation = Number(verse.partIndex ?? 0) > 0
+                || String(verse.number ?? "").indexOf("-") >= 0
+            if (continuation)
+                continue
+            if (at > 0)
+                at += 1                       // the joining space between items
+            const text = String(verse.text ?? "")
+            lastKept = verse
+            if (charOffset > at + text.length) {
+                at += text.length
+                continue
+            }
+            let part = Number(verse.partIndex ?? 0)
+            let best = -1
+            for (const row of root.mainRows) {
+                if (Number(row.number) !== Number(verse.number))
+                    continue
+                const found = text.indexOf(String(row.text ?? ""))
+                if (found < 0 || found > charOffset - at)
+                    continue
+                if (found >= best) {
+                    best = found
+                    part = Number(row.partIndex ?? 0)
+                }
+            }
+            return { number: Number(verse.number), partIndex: part }
+        }
+        return lastKept ? { number: Number(lastKept.number),
+                            partIndex: Number(lastKept.partIndex ?? 0) } : null
     }
 
     // THE ON-AIR PICK (FreeShow's verse dblclick -> playScripture): the picked
@@ -4772,6 +4826,14 @@ Item {
                             // there — the canvas's rule, not a black slab
                             // standing in for a keyable frame.
                             background: root.preview.background ?? "transparent"
+                            // THE MODE REACHES THIS BOX TOO. Scroll on: the reading
+                            // block draws the passage itself (the same flow the
+                            // monitor tiles draw, at the budget-sized column), so the
+                            // pane preview reads like a book instead of showing the
+                            // one paragraph as a slide. Scroll off: plain page, its
+                            // own auto-size — exactly the tile's rule, because it is
+                            // the same flag driving the same block logic.
+                            animateLineSteps: LiveOutputService.scrollMode
                         }
                         Text {
                             visible: root.selected.length === 0
