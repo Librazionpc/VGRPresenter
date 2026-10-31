@@ -282,6 +282,30 @@ public:
     }
     // Is the render stream alive? (the UI's "engine audio on" state)
     virtual bool Rendering() const { return false; }
+
+    // ---- A SECOND render stream, for an output with its own endpoint --------
+    // The program stream above is the machine's playout. An OUTPUT may also play
+    // on a device of its own — an HDMI monitor's speakers are a separate WASAPI
+    // client from the default endpoint — so the engine can open one extra stream
+    // per such output. `streamId` is the caller's own key (an output node's
+    // hash), so starting a live id again is a no-op and stopping an unknown id is
+    // Ok. Platforms without a second client leave the default (unsupported): the
+    // caller then reports that the output's audio has nowhere to go, instead of
+    // silently playing it somewhere the operator did not choose.
+    virtual Result<void> StartRenderStream(uint64_t streamId, RenderCallback callback,
+                                           uint32_t deviceId)
+    {
+        (void)streamId;
+        (void)callback;
+        (void)deviceId;
+        return Error::Make(Err::Unsupported, "Audio",
+                           "per-output render streams are not implemented on this platform");
+    }
+    virtual Result<void> StopRenderStream(uint64_t streamId)
+    {
+        (void)streamId;
+        return Ok();
+    }
 };
 
 } // namespace bps::platform

@@ -100,24 +100,24 @@ Item {
     property int editStyleIndex: -1
     property string editStyleName: ""
     property string editStyleContentType: "shows"
-    property string editStyleTemplateKey: "lowerThird"
+    property string editStyleTemplateKey: ""
     property string editStyleBackgroundColor: "transparent"
     property string editStyleBackgroundImage: ""
     property bool editStyleClearOnText: false
-    // The four content chips (shows/media/scripture/table) — buffer the
-    // EDITED flags, loaded from the row on open. The dialog starts them
-    // INACTIVE so a brand-new style's chips read as an empty slate (the row
-    // itself carries the same default; the open overwrites these anyway).
+    // The three content chips (shows/scripture/table) — buffer the EDITED flags,
+    // loaded from the row on open. The dialog starts them INACTIVE so a brand-new
+    // style's chips read as an empty slate (the row itself carries the same
+    // default; the open overwrites these anyway).
+    //
+    // MEDIA AND OVERLAY ARE NOT HERE ANY MORE. Those two gates moved to the
+    // Routing canvas — the Overlays and Media cards at the head of the STYLES
+    // column — because they are allow-list facts about an output, and the canvas
+    // is where every other allow-list already lives. Their values still ride this
+    // dialog's save path untouched (nothing here writes them), so a style's
+    // stored gates are never clobbered by opening its editor.
     property bool editShowShows: false
-    property bool editShowMedia: false
     property bool editShowScripture: false
     property bool editShowTable: false
-    // A fifth gate, same on/off shape as the four content-type chips above
-    // but NOT one of them: it doesn't drive editTemplateFamily and has no
-    // template of its own (overlays render from their own design's blocks,
-    // via OverlayLibraryService) — it just refuses the Overlays pane's
-    // compositor layer on an output wearing this style.
-    property bool editShowOverlay: false
     // PER-FAMILY template picks — each active content type carries its OWN
     // template ("" = none for that family). NO INHERIT: a family only ever
     // renders a template picked for IT (Shows alone falls back to the Bible
@@ -153,16 +153,19 @@ Item {
         root.editStyleBackgroundImage = data.backgroundImage
         root.editStyleClearOnText = data.clearBackgroundOnText
         root.editShowShows = data.showShows
-        root.editShowMedia = data.showMedia
         root.editShowScripture = data.showScripture
         root.editShowTable = data.showTable
-        root.editShowOverlay = data.showOverlay
         root.editFamilyShows = data.familyTemplateShows
         root.editFamilyMedia = data.familyTemplateMedia
         root.editFamilyScripture = data.familyTemplateScripture
         root.editFamilyTable = data.familyTemplateTable
-        // A clicked card pill pre-targets ITS family in the dialog.
-        root.editTemplateFamily = family || data.contentType || "shows"
+        // A clicked card pill pre-targets ITS family in the dialog. MEDIA has no
+        // template (its gate moved to Routing, and media never wore a family
+        // template), so a media style opens on Shows rather than a family the
+        // Template row cannot edit.
+        const wanted = family || String(data.contentType || "")
+        root.editTemplateFamily = (wanted === "shows" || wanted === "scripture"
+                                   || wanted === "table") ? wanted : "shows"
         root.editStyleCategory = data.category
     }
 
@@ -175,13 +178,13 @@ Item {
         StyleListModel.setBackgroundColor(root.editStyleIndex, root.editStyleBackgroundColor)
         StyleListModel.setBackgroundImage(root.editStyleIndex, root.editStyleBackgroundImage)
         StyleListModel.setClearBackgroundOnText(root.editStyleIndex, root.editStyleClearOnText)
+        // The MEDIA and OVERLAY gates are NOT written here: they belong to the
+        // Routing canvas's two gate cards now, and writing a value this dialog
+        // never edited is how a stale buffer would silently undo a card click.
         StyleListModel.setShowTemplate(root.editStyleIndex, "shows", root.editShowShows)
-        StyleListModel.setShowTemplate(root.editStyleIndex, "media", root.editShowMedia)
         StyleListModel.setShowTemplate(root.editStyleIndex, "scripture", root.editShowScripture)
         StyleListModel.setShowTemplate(root.editStyleIndex, "table", root.editShowTable)
-        StyleListModel.setShowTemplate(root.editStyleIndex, "overlay", root.editShowOverlay)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "shows", root.editFamilyShows)
-        StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "media", root.editFamilyMedia)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "scripture", root.editFamilyScripture)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "table", root.editFamilyTable)
         StyleListModel.setCategory(root.editStyleIndex, root.editStyleCategory)
@@ -795,6 +798,11 @@ Item {
         // (editStyleContentType, what the Template picker below edits) follows
         // the chips: picking a chip re-targets the family, deactivating the
         // family's own chip migrates it to another active one.
+        //
+        // MEDIA AND OVERLAY LEFT THIS ROW: they are gates an OUTPUT reads, so
+        // they moved to Settings · Routing's two gate cards at the top of the
+        // STYLES column (Overlays, Media) — one allow-list, one place to read it.
+        // Media has no template, so its family is not one the Template row edits.
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -812,7 +820,6 @@ Item {
                 Repeater {
                     model: [
                         { key: "shows", label: qsTr("Shows") },
-                        { key: "media", label: qsTr("Media") },
                         { key: "scripture", label: qsTr("Scripture") },
                         { key: "table", label: qsTr("The Table") }
                     ]
@@ -820,7 +827,6 @@ Item {
                         required property var modelData
                         readonly property bool on: {
                             if (modelData.key === "shows") return root.editShowShows
-                            if (modelData.key === "media") return root.editShowMedia
                             if (modelData.key === "scripture") return root.editShowScripture
                             return root.editShowTable
                         }
@@ -829,7 +835,6 @@ Item {
                         onPicked: {
                             const next = !on
                             if (modelData.key === "shows") root.editShowShows = next
-                            else if (modelData.key === "media") root.editShowMedia = next
                             else if (modelData.key === "scripture") root.editShowScripture = next
                             else root.editShowTable = next
                             // The template family must stay on an ACTIVE
@@ -842,10 +847,9 @@ Item {
                                 root.editStyleContentType = modelData.key
                                 root.editTemplateFamily = modelData.key
                             } else if (root.editTemplateFamily === modelData.key) {
-                                const others = ["shows", "media", "scripture", "table"]
+                                const others = ["shows", "scripture", "table"]
                                     .filter((k) => k !== modelData.key
                                             && (k === "shows" ? root.editShowShows
-                                                : k === "media" ? root.editShowMedia
                                                 : k === "scripture" ? root.editShowScripture
                                                 : root.editShowTable))
                                 if (others.length > 0)
@@ -854,30 +858,6 @@ Item {
                         }
                     }
                 }
-            }
-
-        }
-
-        // OVERLAY — a plain on/off gate, same effect as the four chips above
-        // (refused on an output wearing this style) but NOT one of them: it
-        // never targets editTemplateFamily and has no template row of its
-        // own, since an overlay always renders from its own design's blocks
-        // (the Overlays pane), never a style template.
-        Column {
-            width: parent.width
-            spacing: Theme.space2
-
-            Text {
-                text: qsTr("Overlay")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-
-            SelectableChip {
-                label: qsTr("Overlay")
-                selected: root.editShowOverlay
-                onPicked: root.editShowOverlay = !root.editShowOverlay
             }
 
         }
@@ -906,8 +886,10 @@ Item {
             spacing: Theme.space2
 
             Text {
+                // Media is not in this map: it has no template, and its
+                // family is no longer one the chips can target.
                 text: qsTr("Template for ") + ({
-                    "shows": qsTr("Shows"), "media": qsTr("Media"),
+                    "shows": qsTr("Shows"),
                     "scripture": qsTr("Scripture"), "table": qsTr("The Table")
                 }[root.editTemplateFamily] ?? qsTr("Shows"))
                 color: Theme.textSecondary

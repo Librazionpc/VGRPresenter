@@ -1344,13 +1344,18 @@ rendering::RgbaImage ToRgbaImage(uint32_t w, uint32_t h, const std::vector<uint8
 // has content again anyway.
 void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneId,
                       const std::string& objId, const rendering::RgbaImage& img,
-                      const rendering::Rect& bounds, uint64_t sourceSeq = 0) {
+                      const rendering::Rect& bounds, uint64_t sourceSeq = 0,
+                      rendering::BlendMode blend = rendering::BlendMode::Alpha) {
     auto existing = engine.GetObject(sceneId, objId);
     if (existing.ok()) {
         if (auto* v = dynamic_cast<rendering::VideoObject*>(existing.value())) {
             v->SetFrame(img);
             v->SetBounds(bounds);
             v->SetSourceSeq(sourceSeq);
+            // A BUS WINDOW'S BLEND MODE (the MEDIA tab's row): set on every
+            // upsert, so picking Screen/Multiply on a window changes the frame it
+            // composites into instead of being a stored value nothing reads.
+            v->SetBlendMode(blend);
         }
         return;
     }
@@ -1360,6 +1365,7 @@ void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneI
     videoObj->SetFrame(img);
     videoObj->SetBounds(bounds);
     videoObj->SetSourceSeq(sourceSeq);
+    videoObj->SetBlendMode(blend);
     videoObj->SetLayer("media");
     (void)engine.AddObject(sceneId, videoObj, "media");
 }
@@ -1423,6 +1429,13 @@ struct BusPlane {
     int busId = 0;
     std::string objId;          // stable per block, so the frame upserts in place
     rendering::Rect rect;
+    // THE WINDOW'S OWN MEDIA VALUES (the Edit screen's MEDIA tab, which a bus
+    // item reuses): Fit / Crop / Flips / Filters, read off the block's meta at
+    // RECORD time — geometry is decided once per build, and these ride the same
+    // decision because they decide the picture's box too. The pixel work is
+    // applied to each NEW frame in RefreshBusPlanes (identity values cost
+    // nothing), so the window on air is the picture the operator edited.
+    MediaItemValues media;
 };
 std::mutex g_busPlaneMutex;
 std::map<std::string, std::vector<BusPlane>> g_busPlanes;
@@ -1440,17 +1453,72 @@ int BusIdOf(const ContentBlock& block) {
 // that knows a scene's block layout (the build path of BuildSlideScene); a bus
 // removed from a design replaces the list, so its plane stops being refreshed.
 void RecordBusPlanes(const std::string& sceneId, const std::vector<ContentBlock>& blocks,
-                     const rendering::Size& size) {
+                     const rendering::Size& size, const OutputStyleSpec* gate = nullptr) {
     std::vector<BusPlane> planes;
     for (size_t i = 0; i < blocks.size(); ++i) {
         const ContentBlock& block = blocks[i];
         const int busId = BusIdOf(block);
         if (busId <= 0)
             continue;
+        // WIRED OR NOTHING (OutputStyleSpec::gateVideoBuses): a bus window is a
+        // live feed on this design, and an output with no wire to that bus has no
+        // business painting it. Skipping here — rather than blanking a plane —
+        // means an unwired output's pass records no bus plane at all, so its frame
+        // is the design MINUS the window, not the design with a black hole in it.
+        if (gate && gate->gateVideoBuses &&
+            std::find(gate->allowedVideoBuses.begin(), gate->allowedVideoBuses.end(), busId) ==
+                gate->allowedVideoBuses.end())
+            continue;
         // The block's own id keeps the object stable across refreshes; a block
         // that somehow has none falls back to its index (still unique here).
         const std::string key = block.id.empty() ? std::to_string(i) : block.id;
-        planes.push_back(BusPlane{busId, "bus:" + key, BlockRect(block, size)});
+        planes.push_back(BusPlane{busId, "bus:" + key, BlockRect(block, size),
+                                  ParseMediaItemValues(block.metaJson)});
+    }
+    std::lock_guard<std::mutex> lock(g_busPlaneMutex);
+    if (planes.empty())
+        g_busPlanes.erase(sceneId);
+    else
+        g_busPlanes[sceneId] = std::move(planes);
+}
+
+// THE WINDOWS OF A TEMPLATE BUS (see BuildTemplateBusScene). A template design's
+// `bus` blocks, in document order, each recorded with the plane it paints:
+//
+//   - the block's OWN assignment (meta busId) when it names one — a window's
+//     bus is configured on the window, independently of every other window, so
+//     two windows on one template can show two different buses;
+//   - otherwise the template bus's own routed video source for that window's
+//     POSITION (CompositorState::TemplateWindowPlaneKey) — the "route cameras in
+//     and they fill the windows" fallback.
+//
+// Nothing is stored on the bus: the windows ARE the template, so an edited
+// template (a window moved, added or re-assigned) reaches the bus's picture
+// without recreating the bus — the caller bakes the blocks fresh on every push.
+void RecordTemplateWindows(const std::string& sceneId, const std::vector<ContentBlock>& blocks,
+                           const rendering::Size& size, int busNumber)
+{
+    std::vector<BusPlane> planes;
+    // `route` counts OPEN windows only — it indexes the bus's routed video
+    // sources, which LiveOutputService publishes as TemplateWindowPlaneKey(bus, i)
+    // for route i. Counting every bus block here instead put the first route in
+    // a window a named block occupied: on a template of [named window, open
+    // window] route 0 landed on a key nothing reads and route 1 painted the only
+    // open window, so routing one camera showed the next one's feed (or nothing).
+    int route = 0;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const ContentBlock& block = blocks[i];
+        if (block.kind != "bus")
+            continue;
+        const int named = BusIdOf(block);
+        const int planeKey = named > 0
+            ? named
+            : CompositorState::TemplateWindowPlaneKey(busNumber, route++);
+        if (planeKey <= 0)
+            continue;
+        const std::string key = block.id.empty() ? std::to_string(i) : block.id;
+        planes.push_back(BusPlane{planeKey, "w:" + key, BlockRect(block, size),
+                                  ParseMediaItemValues(block.metaJson)});
     }
     std::lock_guard<std::mutex> lock(g_busPlaneMutex);
     if (planes.empty())
@@ -1463,6 +1531,31 @@ void RecordBusPlanes(const std::string& sceneId, const std::vector<ContentBlock>
 // build, cache hits included (see BusPlane). A bus whose feed stopped gets an
 // empty frame, which UpsertVideoLayer already turns into "invisible" rather
 // than a frozen last picture.
+// What a window shows while its bus has no picture: a flat plate the size of the
+// window, so an unfed window reads as a window and not as a hole in the design.
+rendering::RgbaImage BusPlaceholder(const rendering::Rect& rect) {
+    rendering::RgbaImage img;
+    img.width = std::max(1, static_cast<int>(rect.width));
+    img.height = std::max(1, static_cast<int>(rect.height));
+    const uint8_t plate[4] = {0x24, 0x26, 0x30, 0xff};   // the app's dark card ground
+    uint32_t pixel = 0;
+    std::memcpy(&pixel, plate, sizeof(pixel));
+    img.pixels.assign(static_cast<size_t>(img.width) * img.height, pixel);
+    return img;
+}
+
+// Where a window's picture sits once its FIT is honoured — the same four choices
+// a placed picture has (the MEDIA tab's Fit row, which a bus item reuses). The
+// engine cannot clip, so cover crops the SOURCE to the window's own aspect; blur
+// keeps the sharp feed contain-fitted, because a per-frame 24px blur over a live
+// feed is the faint difference the canvas already draws in its preview only.
+rendering::Rect BusFitRect(const rendering::RgbaImage& img, const rendering::Rect& box,
+                           const std::string& fit) {
+    if (fit == "fill")
+        return box;
+    return ContainRectIn(img.width, img.height, box);
+}
+
 void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneId) {
     std::vector<BusPlane> planes;
     {
@@ -1486,10 +1579,30 @@ void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneI
             continue;
         }
         const auto frame = compositor.GetBusFrame(plane.busId);
-        const rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
-        if (!img.empty())
+        rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
+        rendering::Rect outBox = plane.rect;
+        if (!img.empty()) {
             ++withFrame;
-        UpsertVideoLayer(engine, sceneId, plane.objId, img, plane.rect, seq);
+            // THE WINDOW'S MEDIA VALUES, on the pixels the output draws — the
+            // same work a placed picture gets (ApplyMediaPixelWork), so a flip, a
+            // crop or a filter set on the window is the same picture in preview
+            // and on air. Identity values skip the pass entirely: a live feed runs
+            // this on every new frame, and nothing should pay for "unchanged".
+            const MediaItemValues& media = plane.media;
+            const bool identity = !media.HasCrop() && !media.flipH && !media.flipV
+                               && !media.HasFilter();
+            if (!identity)
+                img = ApplyMediaPixelWork(std::move(img), media);
+            // ...and FIT decides the box it lands in (cover crops the source to
+            // the window's aspect first, because the engine cannot clip).
+            if (media.fit == "cover")
+                img = CropToAspect(img, plane.rect.width, plane.rect.height);
+            outBox = BusFitRect(img, plane.rect, media.fit);
+        } else {
+            img = BusPlaceholder(plane.rect);   // no feed yet: a plate, not a hole
+        }
+        UpsertVideoLayer(engine, sceneId, plane.objId, img, outBox, seq,
+                         rendering::ParseBlendMode(plane.media.blend));
     }
     // THE ENGINE HALF OF THE BUS-WINDOW DIAGNOSTIC. "the canvas has the bus but
     // the output is empty" is answered here: a plane count of 0 means the scene
@@ -2453,6 +2566,28 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
     // latter COPIES the decoded frame (megabytes, at the preview's frame rate).
     if (presentation::CompositorState::Instance().HasMediaFrame())
         id += "@m:on";
+    // WHICH BUSES MAY PAINT (OutputStyleSpec::gateVideoBuses). A gated build is a
+    // DIFFERENT PICTURE from an ungated one even under the same style, so it has to
+    // be a different scene: without this token the program's own cached scene —
+    // bus windows and all — would be served to an unwired output as a cache hit,
+    // which is exactly the bug this key exists to prevent.
+    //
+    // Sorted and de-duplicated: the order wires happen to arrive in is not part of
+    // what the picture means, so re-wiring the same set must not rebuild.
+    if (style.gateVideoBuses) {
+        std::vector<int> buses = style.allowedVideoBuses;
+        std::sort(buses.begin(), buses.end());
+        buses.erase(std::unique(buses.begin(), buses.end()), buses.end());
+        std::string token = "@gb:";
+        for (size_t i = 0; i < buses.size(); ++i) {
+            if (i > 0)
+                token += ",";
+            token += std::to_string(buses[i]);
+        }
+        if (buses.empty())
+            token += "none";
+        id += token;
+    }
     return id;
 }
 
@@ -2544,6 +2679,164 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
     return sceneId;
 }
 
+// ---------------------------------------------------------------------------
+// A WIRED VIDEO BUS AS AN OUTPUT'S OWN PICTURE (Settings · Routing)
+// ---------------------------------------------------------------------------
+// The wiring canvas has always been able to DRAW a bus into an output, and the
+// engine has always STORED that (ProductionGraph::AssignOutputBuses validates
+// it and the production document persists it) — but nothing composed it, so the
+// wire was a note rather than a route: every screen, NDI sender and recording
+// kept showing the program feed. This is the composer half.
+//
+// It reuses the ONE per-bus picture source the rest of the engine already
+// draws from (CompositorState::GetBusFrame, keyed by the bus's stable number —
+// the same frames a design's `bus` block paints and Media › Inputs' bus windows
+// show), so an output wired to "Camera" shows exactly what the camera's window
+// in the pane shows, and a Table bus shows the Table. Nothing here starts a
+// device or a tap: a bus with no feed simply has no frame, which paints nothing.
+Result<std::string> SceneBuilder::BuildBusFeedScene(int busId, rendering::RenderEngine& engine,
+                                                   rendering::Size size) {
+    if (busId <= 0)
+        return Error::Make(Err::InvalidArgument, "SceneBuilder",
+                           "a bus feed needs the bus's own number");
+
+    const int sw = static_cast<int>(size.width);
+    const int sh = static_cast<int>(size.height);
+    // The id carries BOTH the bus and the size (see the header): an output at
+    // 720p and one at 4K never share a scene, and a resolution edit re-keys.
+    const std::string sceneId = std::format("busfeed:{}@{}x{}", busId, sw, sh);
+    if (!engine.GetScene(sceneId).ok()) {
+        auto scene = engine.CreateScene(sceneId, std::format("Bus {}", busId), size);
+        if (!scene.ok())
+            return scene.error();
+        // The video layer the picture is painted on ("media" — the layer the
+        // compositor's own live layers use), declared once with the scene.
+        (void)engine.AddLayer(sceneId, rendering::Layer("media", "Bus feed",
+                                                        rendering::LayerKind::Video, 1));
+    }
+
+    // The picture, on EVERY call — cache hit included. A scene that already
+    // exists must still show the bus's CURRENT frame; the seq compare is what
+    // keeps that honest without copying an unchanged 1080p frame per output per
+    // tick (see LayerFrameCurrent).
+    const auto& compositor = presentation::CompositorState::Instance();
+    const uint64_t seq = compositor.GetBusFrameSeq(busId);
+    const std::string objId = std::format("busfeed:{}", busId);
+    if (!LayerFrameCurrent(engine, sceneId, objId, seq)) {
+        const auto frame = compositor.GetBusFrame(busId);
+        const rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
+        // Full-frame at THIS scene's size: the bus's own aspect is scaled by the
+        // rasterizer the same way every other video layer is.
+        UpsertVideoLayer(engine, sceneId, objId, img,
+                         rendering::Rect(0, 0, size.width, size.height), seq);
+    }
+    // The bus-feed half of the routing diagnostic: "the wire is drawn but the
+    // screen is black" is answered here — a quiet bus (no seq) means the feed
+    // never reached the compositor, a live one means the fault is downstream.
+    ReportLayerState(sceneId, "bus feed",
+                     std::format("bus {} {}", busId, seq == 0 ? "has no frame" : "live"));
+    return sceneId;
+}
+
+// ---------------------------------------------------------------------------
+// A TEMPLATE BUS AS AN OUTPUT'S OWN PICTURE
+// ---------------------------------------------------------------------------
+// A bus created from a template is a DESIGN with holes in it: its `bus` blocks
+// are windows, and the bus's picture is that design with each window filled.
+// This is the composer half — the routing canvas can already wire a template bus
+// to an output, and this is what makes the wire a picture instead of a note.
+//
+// It is deliberately NOT BuildBusFeedScene (one full-frame layer): a template
+// bus's whole point is its layout. Nor is it BuildSlideScene (which composes
+// CONTENT — text bound to a slide, family gates, a style's template): a template
+// bus carries no slide content, and its windows are its own.
+//
+// The windows are refreshed on EVERY call, cache hit included — the geometry is
+// the scene's, the pixels are the feeds' (see BusPlane), so a window that stops
+// producing frames goes blank rather than freezing on its last picture.
+Result<std::string> SceneBuilder::BuildTemplateBusScene(int busNumber,
+                                                        const std::vector<ContentBlock>& blocks,
+                                                        const std::string& background,
+                                                        rendering::RenderEngine& engine,
+                                                        rendering::Size size) {
+    if (busNumber <= 0)
+        return Error::Make(Err::InvalidArgument, "SceneBuilder",
+                           "a template bus scene needs the bus's own number");
+
+    const int sw = static_cast<int>(size.width);
+    const int sh = static_cast<int>(size.height);
+    // THE ID CARRIES THE LAYOUT, not just the bus and the size (the bus-feed
+    // scene's rule, plus one more thing): the windows' GEOMETRY is part of what
+    // the scene means, so a template edit that moves, adds, removes or re-assigns
+    // a window has to re-key the scene — otherwise the engine serves the old
+    // layout as a cache hit and the operator's edit reaches nothing, while only
+    // the pixels would have been refreshed. Hashing the blocks (ids, kinds, rects,
+    // assignment) keeps this the SAME scene while nothing about the layout moved,
+    // which is the every-frame case.
+    uint64_t layout = 1469598103934665603ull;   // FNV offset basis
+    const auto mix = [&layout](std::string_view sv) {
+        for (const char c : sv) {
+            layout ^= static_cast<unsigned char>(c);
+            layout *= 1099511628211ull;   // FNV prime
+        }
+        layout ^= 0x1f;   // separator, so "ab"+"c" never equals "a"+"bc"
+        layout *= 1099511628211ull;
+    };
+    const auto mixCoord = [&layout](double v) {
+        // Stage units, quantised to a thousandth — far finer than a pixel on any
+        // output, and it keeps two rects that differ only in float noise from
+        // re-keying the scene every frame.
+        layout ^= static_cast<uint64_t>(static_cast<int64_t>(v * 1000.0));
+        layout *= 1099511628211ull;
+    };
+    for (const ContentBlock& b : blocks) {
+        mix(b.id);
+        mix(b.kind);
+        mix(b.metaJson);
+        mixCoord(b.x);
+        mixCoord(b.y);
+        mixCoord(b.width);
+        mixCoord(b.height);
+    }
+    mix(background);
+    const std::string sceneId =
+        std::format("tplbus:{}@{}x{}#{:x}", busNumber, sw, sh, layout);
+    if (!engine.GetScene(sceneId).ok()) {
+        auto scene = engine.CreateScene(sceneId, std::format("Template bus {}", busNumber), size);
+        if (!scene.ok())
+            return scene.error();
+        (void)engine.AddLayer(sceneId, rendering::Layer("bg", "Background",
+                                                        rendering::LayerKind::Background, 0));
+        (void)engine.AddLayer(sceneId, rendering::Layer("media", "Media",
+                                                        rendering::LayerKind::Video, 1));
+        (void)engine.AddLayer(sceneId, rendering::Layer("text", "Text",
+                                                        rendering::LayerKind::Text, 2));
+        // The template's own background: named = painted, ""/transparent = a
+        // keyable frame (the same reading ComposeSlide gives a style's colour).
+        if (!background.empty() && background != "transparent") {
+            auto bgObj = std::make_shared<rendering::BackgroundObject>(
+                "bg", "Background", StyleBuilder::ParseColor(background));
+            bgObj->SetBounds(rendering::Rect(0, 0, size.width, size.height));
+            bgObj->SetLayer("bg");
+            (void)engine.AddObject(sceneId, bgObj, "bg");
+        } else {
+            scene.value()->SetTransparentBackground(true);
+        }
+        // The design's own content (text, bands, images) — the same block pass
+        // every design renders through — and then the windows' geometry. A `bus`
+        // block paints no text, so AddStageBlocks skips it and
+        // RecordTemplateWindows owns it: one block, one owner.
+        (void)AddStageBlocks(engine, sceneId, blocks, size, "tpw", "text");
+        RecordTemplateWindows(sceneId, blocks, size, busNumber);
+        Logger::Instance().Debug(
+            std::format("Template bus scene built: {} ({} block(s))", sceneId, blocks.size()),
+            "SceneBuilder");
+    }
+    RefreshBusPlanes(engine, sceneId);
+    return sceneId;
+}
+
+// ---------------------------------------------------------------------------
 Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentation,
                                                   const Slide& slide,
                                                   const OutputStyleSpec& style,
@@ -2702,7 +2995,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         RecordBusPlanes(sceneId,
                         comp.source == SlideComposition::Source::SlideBlocks ? slide.blocks
                                                                             : comp.blocks,
-                        size);
+                        size, &style);
         RefreshBusPlanes(engine, sceneId);
     }
 

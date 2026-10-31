@@ -2,12 +2,24 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Outputs — CRUD hub for the outputs a show is sent to: the
-// output roster (Add / Edit / Duplicate / Delete), each output's live state
-// and on/off toggle. Styles live in their own section (StylesScreen.qml);
-// both read the same C++ singletons (OutputListModel / StyleListModel) —
-// the SAME roster the Edit screen's output monitor renders — so a rename,
-// restyle, duplicate or delete here is reflected everywhere at once.
+// Settings · Screens — the screens a show is sent to: the roster (Add / Edit /
+// Duplicate / Delete), each screen's live state and its on/off toggle. It reads
+// the same C++ singletons the Edit screen's monitor wall renders
+// (OutputListModel), so a rename, duplicate or delete here is reflected
+// everywhere at once.
+//
+// WHAT THIS PAGE NO LONGER OWNS. Two things moved to Settings · Routing, and
+// they are gone from here on purpose:
+//   • the KIND. A row on this page is a SCREEN — an HDMI display surface. The
+//     transports that are not screens (NDI, SDI, recording, streaming) are the
+//     Routing canvas's OUTPUTS, where you add one and wire its video and audio
+//     buses. Picking a kind belonged with the wiring, not with the screen it
+//     ended up on.
+//   • the STYLE. A look is a wire on that canvas (drag a screen onto a style) —
+//     the same style id the engine composes with, set where the routing is
+//     visible, instead of a pill on a roster row.
+// Both are still real OutputListModel state; this page just stopped being the
+// place that decides them, so there is one editor for each fact.
 Item {
     id: root
 
@@ -19,10 +31,37 @@ Item {
     property int contextMenuIndex: -1
     property string defaultMediaFit: "contain"
 
+    // ---- "Edit screen" asked for from Settings · Routing --------------------
+    // The canvas right-clicks a card; a screen's editor is THIS page's, so the
+    // shell switches here with the row it wants open. -1 = nothing pending.
+    property int editRequestRow: -1
+    // Told to the shell once the request has been acted on, so a LATER visit to
+    // this page does not pop the same editor again (the shell owns the value; a
+    // page that reset only its own copy would reopen the dialog next time).
+    signal editRequestConsumed()
+    function consumeEditRequest() {
+        if (root.editRequestRow < 0)
+            return
+        const row = root.editRequestRow
+        root.editRequestConsumed()
+        // The shell clears its own pending value, which drives this property back
+        // to -1 through its binding — and the binding must SURVIVE so the next
+        // request still arrives. Only a page nobody wired (no shell) resets it
+        // itself, once, here.
+        if (root.editRequestRow === row)
+            root.editRequestRow = -1
+        if (row < OutputListModel.rowCount())
+            root.openEdit(row)
+    }
+    onEditRequestRowChanged: root.consumeEditRequest()
+
     Component.onCompleted: {
         const saved = String(SettingsService.value("outputs.defaultMediaFit") ?? "contain")
         root.defaultMediaFit = ["contain", "cover", "fill"].indexOf(saved) >= 0 ? saved : "contain"
         LiveOutputService.setDefaultMediaFit(root.defaultMediaFit)
+        // A row asked for before this page existed (the canvas set it, then the
+        // shell switched sections) opens as soon as the page does.
+        root.consumeEditRequest()
     }
 
     function chooseDefaultMediaFit(fit) {
@@ -59,7 +98,7 @@ Item {
             return
         root.firewallPending = false
         firewallConfirmTimer.stop()
-        EventBus.notify(qsTr("Still waiting on the Windows Firewall decision — NDI output may not reach other computers until it is allowed. Re-run from Settings · Outputs."),
+        EventBus.notify(qsTr("Still waiting on the Windows Firewall decision — NDI output may not reach other computers until it is allowed. Re-run from Settings · Screens."),
                         "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.pending")
     }
     function handleNdiFirewallRule(allowed) {
@@ -87,7 +126,7 @@ Item {
             EventBus.notify(qsTr("Allow the Windows Firewall request so other computers can receive this app's NDI output."),
                             "info", qsTr("NDI ready"), "outputs.ndi.firewall.prompt")
         } else if (outcome === "denied" || outcome === "failed") {
-            EventBus.notify(qsTr("Windows Firewall wasn't set — NDI output may not reach other computers. Re-run it from Settings · Outputs."),
+            EventBus.notify(qsTr("Windows Firewall wasn't set — NDI output may not reach other computers. Re-run it from Settings · Screens."),
                             "warning", qsTr("NDI firewall"), "outputs.ndi.firewall.failed")
         }
         // "unavailable" (non-Windows): silent — no firewall concept to grant.
@@ -138,16 +177,22 @@ Item {
     property bool addStayOnTop: false
     // "smpte" | "gradient" | "checker" | "solidred"
     property string addPattern: "smpte"
+    // Where the new row's audio plays ("" = the program stream).
+    property string addAudioDevice: ""
 
     function submitAdd() {
         OutputListModel.addScreen(root.addName, root.addType, root.addRes, root.addRefresh, root.addPattern)
         // Placement/lock/stayOnTop are post-insert setters — the row must
         // exist first.
-        if (root.addScreenName !== "" || root.addLocked || root.addStayOnTop) {
+        if (root.addScreenName !== "" || root.addLocked || root.addStayOnTop
+                || root.addAudioDevice !== "") {
             const row = OutputListModel.rowCount() - 1
             OutputListModel.setScreenName(row, root.addScreenName)
             OutputListModel.setBoundsLocked(row, root.addLocked)
             OutputListModel.setStayOnTop(row, root.addStayOnTop)
+            // Its own endpoint, if one was picked: the routing pass opens the
+            // stream once a bus is wired to this row.
+            OutputListModel.setAudioDevice(row, root.addAudioDevice)
         }
         // Reset for next time, close.
         root.addName = ""
@@ -156,6 +201,7 @@ Item {
         root.addLocked = false
         root.addStayOnTop = false
         root.addPattern = "smpte"
+        root.addAudioDevice = ""
         root.addShown = false
     }
 
@@ -175,11 +221,8 @@ Item {
     // Whether this output's real destination window (OutputWindow.qml)
     // stays above other windows — off by default.
     property bool editStayOnTop: false
-    // Style assignment by the style's STABLE id ("" = None). Outputs
-    // reference styles by id — surviving restarts and roster edits — never
-    // by row index (deleting a style would re-point every later output at
-    // the wrong theme).
-    property string editStyleId: ""
+    // This row's audio endpoint ("" = the program stream).
+    property string editAudioDevice: ""
     // Media fit is a shared default above, with optional per-file overrides;
     // it is not stored separately on each output.
     property string editDefaultMediaFit: "contain"
@@ -195,7 +238,8 @@ Item {
         root.editScreenName = data.screenName
         root.editLocked = data.boundsLocked
         root.editStayOnTop = data.stayOnTop
-        root.editStyleId = data.styleId
+        root.editAudioDevice = data.audioDevice !== undefined && data.audioDevice !== null
+            ? String(data.audioDevice) : ""
         root.editDefaultMediaFit = root.defaultMediaFit
         root.editOriginalName = data.name
     }
@@ -233,16 +277,13 @@ Item {
             return
         }
         root.editIndex = row
-        const requestedStyleId = root.editStyleId
         OutputListModel.renameOutput(root.editIndex, root.editName)
-        OutputListModel.setKind(root.editIndex, root.editType)
-        // The screen assignment must go back FIRST so a kind change's
-        // unassignment (setKind clears the display binding for non-HDMI
-        // kinds) isn't immediately overwritten by the dialog's stale value —
-        // that round-trip used to resurrect the HDMI transport on a row
-        // switched to NDI ("Main Output to NDI still shows the monitor
-        // window"). Empty editScreenName on a form that never touched the
-        // picker must also not CLEAR a valid binding, so it is normalized
+        // The KIND is deliberately not written any more (it is chosen and
+        // changed on Settings · Routing, beside the buses that feed it), so a
+        // save here can never quietly re-transport a row — the round-trip that
+        // used to resurrect the HDMI window on a row switched to NDI is gone
+        // with the picker. Empty editScreenName on a form that never touched
+        // the picker must also not CLEAR a valid binding, so it is normalized
         // to the row's current one before writing.
         if (root.editScreenName === "")
             root.editScreenName = OutputListModel.getOutput(root.editIndex).screenName
@@ -252,18 +293,14 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
-        OutputListModel.setStyle(row, requestedStyleId)
+        // The endpoint this row's mix leaves on. Written last among the routing
+        // fields because setAudioDevice re-asks the routing pass, which reads the
+        // row as it now stands.
+        OutputListModel.setAudioDevice(root.editIndex, root.editAudioDevice)
+        // The STYLE is not written here either: a screen's look is the style
+        // wire on Settings · Routing, and this dialog no longer carries a
+        // control that could silently restyle a screen on an unrelated save.
         root.chooseDefaultMediaFit(root.editDefaultMediaFit)
-        const savedOutput = OutputListModel.getOutput(row)
-        if (!savedOutput || savedOutput.styleId !== requestedStyleId) {
-            // The style did not stick. Everything else in the form DID save, so
-            // the honest thing is to say so and CLOSE: leaving the dialog open
-            // made the Save button look dead, which is what the operator
-            // reported. (setStyle refuses an id the style roster no longer
-            // knows — e.g. the style was deleted in another view meanwhile.)
-            EventBus.notify(qsTr("The selected style could not be saved — the style list changed. Your other changes were saved; pick a style again to restyle this output."),
-                            "error", qsTr("Style not saved"), "outputs.style.saveFailed")
-        }
         root.editIndex = -1
     }
 
@@ -276,6 +313,52 @@ Item {
         function onDataChanged() { root.modelsRev++ }
         function onRowsInserted() { root.modelsRev++ }
         function onRowsRemoved() { root.modelsRev++ }
+    }
+
+    // ---- What Settings · Routing has wired to the row being edited ----------
+    // The canvas is the ONE editor for a wire, so this page only REPORTS one:
+    // every label below is read from RoutingService's published snapshot (the
+    // canvas's own truth), never from a copy kept here. `revision` is that
+    // snapshot's version, so making or cutting a wire on the canvas re-derives
+    // these labels on the next binding pass.
+    function busLabel(busRow) {
+        if (busRow < 0)
+            return qsTr("not wired")
+        const bus = BusListModel.getBus(busRow)
+        const name = bus && bus.name ? String(bus.name) : ""
+        return name.length > 0 ? name : qsTr("Bus %1").arg(busRow + 1)
+    }
+    function styleLabel(styleId) {
+        if (!styleId || String(styleId).length === 0)
+            return qsTr("none")
+        const at = StyleListModel.rowForId(String(styleId))
+        if (at < 0)
+            return qsTr("missing (deleted)")
+        const style = StyleListModel.getStyle(at)
+        const name = style && style.name ? String(style.name) : ""
+        return name.length > 0 ? name : qsTr("Style %1").arg(at + 1)
+    }
+    readonly property var editRouting: {
+        void RoutingService.revision
+        const rows = RoutingService.rows
+        for (let i = 0; i < rows.length; ++i) {
+            const entry = rows[i]
+            if (Number(entry.row) !== root.editIndex)
+                continue
+            return {
+                video: root.busLabel(Number(entry.videoBus)),
+                // A row that does not accept audio cannot be "unwired" for it —
+                // saying "not wired" on an HDMI screen would read as a fault
+                // the operator could fix by dragging, and there is nothing to
+                // drag onto it.
+                audio: entry.acceptsAudio ? root.busLabel(Number(entry.audioBus))
+                                           : qsTr("not carried"),
+                style: root.styleLabel(String(entry.styleId || "")),
+                wired: !!entry.wired
+            }
+        }
+        return { video: qsTr("not wired"), audio: qsTr("not carried"),
+                 style: qsTr("none"), wired: false }
     }
 
     Flickable {
@@ -314,16 +397,6 @@ Item {
                     required property string res
                     required property bool active
                     required property bool isEnabled
-                    required property string styleName
-                    // What that style does with a slide, in the engine's own
-                    // words (OutputListModel::styleLayoutNote): whether it
-                    // restyles the content tabs' designs while a show keeps
-                    // its own authored layout, or it lays shows out too, or it
-                    // has no template layout at all. The report it answers —
-                    // "scripture and The Table work, shows do not" — was
-                    // invisible here: a row said which style it wears and
-                    // nothing about what that style does to the slide.
-                    required property string styleLayout
                     required property string screenName
                     required property bool onAirOnly
 
@@ -381,44 +454,46 @@ Item {
                     // as of the NDI feed — that is the whole point of one line
                     // per row instead of one line per kind.
                     readonly property string statusText: {
+                        // The KIND is not printed: a row here is a screen, and
+                        // what transports its picture is the Routing canvas's
+                        // business. What is left is the row's own feed — the
+                        // engine's own frame count and stall age.
                         let text = ""
-                        if (!card.isEnabled) {
-                            text = card.kind + " · switched off"
-                        } else if (card.kind === "NDI") {
-                            if (card.ndiFeedIsThisRow) {
-                                const state = LiveOutputService.ndiOutputStates[card.name]
-                                text = "NDI · sending · " + state.frames + " frames"
-                            } else if (card.ndiWarmingIsThisRow) {
-                                text = "NDI · warming up · waiting for the first frame"
-                            } else if (!EngineBridge.ndiAvailable) {
-                                text = "NDI · runtime not installed"
-                            } else {
-                                text = LiveOutputService.live
-                                    ? "NDI · not sending — no frame yet"
-                                    : "NDI · ready (go live to send)"
-                            }
-                        } else if (card.kind === "SDI") {
-                            text = EngineBridge.sdiAvailable
-                                ? "SDI · " + EngineBridge.sdiDevices.length + " DeckLink device(s)"
-                                : "SDI · " + EngineBridge.sdiStatus
-                        } else {
-                            // HDMI / whatever else the roster grows: the row's own
-                            // buffer, counted by the engine.
-                            const rowKind = card.kind
-                            if (!LiveOutputService.live)
-                                text = rowKind + " · ready (go live to send)"
-                            else if (card.delivering)
-                                text = rowKind + " · live · " + card.runtime.frames + " frames delivered"
-                            else
-                                text = rowKind + " · warming up · waiting for the first frame"
-                        }
+                        if (!card.isEnabled)
+                            text = qsTr("Switched off")
+                        else if (!LiveOutputService.live)
+                            text = qsTr("Ready (go live to send)")
+                        else if (card.delivering)
+                            text = qsTr("Live · %1 frames delivered").arg(card.runtime.frames)
+                        else
+                            text = qsTr("Warming up · waiting for the first frame")
                         if (card.isEnabled && LiveOutputService.blackedOut
                                 && text.indexOf("blackout") < 0)
-                            text += " · blackout up"
+                            text += " · " + qsTr("blackout up")
                         if (card.isEnabled && card.stalledNow && text.indexOf("no feed") < 0)
-                            text += " · no feed"
+                            text += " · " + qsTr("no feed")
                         return text
                     }
+                    // Where this screen's picture comes from: the video bus
+                    // Settings · Routing has wired to this row (the canvas is
+                    // the one editor for that wire). `revision` is the routing
+                    // snapshot's version, so a wire made or cut there re-derives
+                    // this line.
+                    readonly property int videoBusRow: {
+                        void RoutingService.revision
+                        const rows = RoutingService.rows
+                        for (let i = 0; i < rows.length; ++i) {
+                            const entry = rows[i]
+                            if (Number(entry.row) === card.index && entry.acceptsVideo)
+                                return Number(entry.videoBus)
+                        }
+                        return -1
+                    }
+                    readonly property bool hasVideoFeed: card.videoBusRow >= 0
+                    readonly property string feedText: card.hasVideoFeed
+                        ? qsTr("Fed by %1").arg(root.busLabel(card.videoBusRow))
+                        : qsTr("No video wired")
+
                     readonly property color statusColor: !card.isEnabled
                         ? Theme.textMuted
                         : (card.stalledNow ? Theme.dangerLight
@@ -458,15 +533,13 @@ Item {
                                 font.weight: Font.Medium
                             }
 
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: "·  " + card.kind
-                                color: Theme.textMuted
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textXs
-                            }
                         }
 
+                        // The screen's own facts: the display mode it renders
+                        // at, and what feeds it. The kind and the style are
+                        // wires on Settings · Routing, so the feed below is a
+                        // READ of that canvas (feedText), never a second copy
+                        // of it.
                         Row {
                             spacing: Theme.space2
 
@@ -476,33 +549,20 @@ Item {
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
                             }
+
                             Text {
-                                text: "·  Style:"
+                                text: "·"
                                 color: Theme.textMuted
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
                             }
-                            Pill {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: card.styleName
-                                tint: false
-                            }
-                        }
 
-                        // WHAT THE STYLE DOES TO A SLIDE. One muted line, only
-                        // when the row wears a style (an unstyled output has
-                        // nothing to describe). It reads the same rule the
-                        // engine composes with, so a style that restyles the
-                        // content tabs and one that lays shows out say so here
-                        // instead of showing up as a different picture on air.
-                        Text {
-                            visible: card.styleLayout !== ""
-                            text: card.styleLayout
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
-                            wrapMode: Text.WordWrap
-                            width: parent.width
+                            Text {
+                                text: card.feedText
+                                color: card.hasVideoFeed ? Theme.textSecondary : Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textXs
+                            }
                         }
 
                         // EVERY OUTPUT'S OWN RUNTIME — real state, not a label
@@ -628,7 +688,7 @@ Item {
         color: Theme.surface
     }
 
-    // "Outputs" title — pinned alongside the Add-Output button (sits above
+    // "Screens" title — pinned alongside the Add-Screen button (sits above
     // the Flickable in paint order, same as that button) so the header
     // stays put while the roster scrolls underneath it, instead of
     // scrolling away with the tiles it used to sit inside.
@@ -636,64 +696,27 @@ Item {
         anchors.left: parent.left
         anchors.leftMargin: Theme.space6
         anchors.verticalCenter: addOutputBtn.verticalCenter
-        text: "Outputs"
+        text: "Screens"
         color: Theme.textPrimary
         font.family: Theme.fontFamily
         font.pixelSize: Theme.textXl
         font.weight: Font.DemiBold
     }
 
-    // "+ Add Output" pinned top-right — always visible no matter how far
-    // the roster scrolls (sits above the Flickable in paint order). A
-    // custom Rectangle rather than plain AppButton: a drawn plus glyph
-    // (matching this app's hand-drawn icon language — see ScreenForm's
-    // Identify/Lock rows) plus a touch more padding/presence than
-    // AppButton's default 34px height gives it, since this is the
-    // section's one primary call-to-action, not a row-level action.
-    Rectangle {
+    // "+ Add Screen" pinned top-right — always visible no matter how far
+    // the roster scrolls (sits above the Flickable in paint order). The control
+    // itself is PrimaryAddButton, shared with the Routing canvas's column
+    // footers, so both surfaces create things with the same-looking button (see
+    // that file for why it is not plain AppButton).
+    PrimaryAddButton {
         id: addOutputBtn
         objectName: "selfTestAddOutput"
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.topMargin: Theme.space6
         anchors.rightMargin: Theme.space6 + Theme.space2
-        width: addOutputRow.width + Theme.space6 * 2
-        height: 40
-        radius: Theme.radiusMd
-        color: addOutputArea.pressed ? Qt.darker(Theme.accent, 1.15)
-             : addOutputArea.containsMouse ? Qt.lighter(Theme.accent, 1.1)
-             : Theme.accent
-        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-        Row {
-            id: addOutputRow
-            anchors.centerIn: parent
-            spacing: 8
-
-            Item {
-                width: 11; height: 11
-                anchors.verticalCenter: parent.verticalCenter
-                Rectangle { anchors.centerIn: parent; width: 11; height: 1.6; radius: 0.8; color: Theme.controlInk }
-                Rectangle { anchors.centerIn: parent; width: 1.6; height: 11; radius: 0.8; color: Theme.controlInk }
-            }
-
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Add Output")
-                color: Theme.controlInk
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textSm
-                font.weight: Font.DemiBold
-            }
-        }
-
-        MouseArea {
-            id: addOutputArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.addShown = true
-        }
+        text: qsTr("Add Screen")
+        onClicked: root.addShown = true
     }
 
     AppScrollBar {
@@ -740,12 +763,12 @@ Item {
     ConfirmDialog {
         id: deleteDialog
         shown: root.deleteIndex >= 0
-        title: "Delete output?"
+        title: "Delete screen?"
         message: {
             if (root.deleteIndex < 0)
                 return ""
             const data = OutputListModel.getOutput(root.deleteIndex)
-            return "\u201C" + data.name + "\u201D will be removed from the output roster. This affects every view that renders it."
+            return "\u201C" + data.name + "\u201D will be removed from the screens roster. This affects every view that renders it."
         }
         confirmLabel: "Delete"
         onConfirmed: {
@@ -760,7 +783,7 @@ Item {
         id: editDialog
         objectName: "selfTestEditOutputDialog"
         shown: root.editIndex >= 0
-        title: "Edit output"
+        title: "Edit screen"
         cardWidth: 760
         saveText: "Save"
         onCancelled: root.editIndex = -1
@@ -774,13 +797,17 @@ Item {
             width: parent.width
             name: root.editName
             type: root.editType
+            // No kind picker: a row on this page is a screen, and the
+            // transport behind it is wired on Settings · Routing.
+            showType: false
             res: root.editRes
             refresh: root.editRefresh
             pattern: root.editPattern
             placement: root.editScreenName
             locked: root.editLocked
+            audioDevice: root.editAudioDevice
+            onAudioDevicePicked: (id) => root.editAudioDevice = id
             onNameEdited: (t) => root.editName = t
-            onTypePicked: (k) => root.editType = k
             onResPicked: (v) => root.editRes = v
             onRefreshPicked: (v) => root.editRefresh = v
             onPatternPicked: (k) => {
@@ -824,127 +851,121 @@ Item {
                 onToggled: root.editStayOnTop = !root.editStayOnTop
             }
         }
+        // (The style control lived here. A screen's look is now the style
+        // wire on Settings · Routing, beside the buses that feed it — one
+        // editor for each fact, and the one where the routing is visible.)
+
+        // ---- What this screen is actually carrying (read-only) ------------
+        // Kind and style used to be editable here; both are WIRES now, and the
+        // canvas is where a wire is drawn. What is left for this dialog is the
+        // thing the operator opened it to check: what feeds this screen,
+        // whether it carries sound, and which look it wears — read from the
+        // canvas's own snapshot (root.editRouting), so this block can never
+        // disagree with the wiring on the Routing page.
+        Rectangle {
+            width: parent.width
+            height: routingCol.height + Theme.space4 * 2
+            radius: Theme.radiusMd
+            color: Theme.surface
+
+            Column {
+                id: routingCol
+                x: Theme.space4
+                y: Theme.space4
+                width: parent.width - Theme.space4 * 2
+                spacing: Theme.space2
+
+                Text {
+                    text: qsTr("Signal — from Settings · Routing")
+                    color: Theme.textMuted
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textXs
+                }
+
+                Repeater {
+                    model: [
+                        { label: qsTr("Video"), value: root.editRouting.video },
+                        { label: qsTr("Audio"), value: root.editRouting.audio },
+                        { label: qsTr("Style"), value: root.editRouting.style }
+                    ]
+
+                    delegate: Row {
+                        required property var modelData
+                        width: routingCol.width
+                        spacing: Theme.space3
+
+                        Text {
+                            text: modelData.label
+                            width: 64
+                            color: Theme.textSecondary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                        }
+
+                        Text {
+                            // "not wired" / "none" / "not carried" are states
+                            // of the wiring, not faults: muted, not alarming.
+                            readonly property bool absent: modelData.value === qsTr("not wired")
+                                || modelData.value === qsTr("none")
+                                || modelData.value === qsTr("not carried")
+
+                            width: parent.width - 64 - Theme.space3
+                            text: modelData.value
+                            color: absent ? Theme.textMuted : Theme.textPrimary
+                            elide: Text.ElideRight
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                        }
+                    }
+                }
+            }
+        }
 
         Column {
             width: parent.width
             spacing: Theme.space2
 
             Text {
-                text: "Style"
+                text: qsTr("Default media fit")
                 color: Theme.textSecondary
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textXs
             }
 
-            // Swatch+"Change" row — same language as EditScreen.qml's
-            // Background row and TextItemPanel's font-color row. Opens
-            // StylePickerModal (below) instead of the old inline chip Flow,
-            // which didn't preview anything and got unwieldy once the
-            // roster grew past a handful of styles.
-            Rectangle {
-                width: parent.width
-                height: 46
-                radius: Theme.radiusMd
-                color: Theme.inset
-
-                Text {
-                    x: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: {
-                        const rows = StyleListModel.rowCount()
-                        if (rows === 0)
-                            return root.editStyleId === "" ? qsTr("None") : qsTr("Missing style")
-                        if (root.editStyleId === "")
-                            return qsTr("None")
-                        const row = StyleListModel.rowForId(root.editStyleId)
-                        if (row < 0)
-                            return qsTr("Missing style")
-                        return StyleListModel.data(StyleListModel.index(row, 0), StyleListModel.NameRole)
-                    }
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
-
-                Rectangle {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 26
-                    width: changeStyleLabel.implicitWidth + 22
-                    radius: 13
-                    color: changeStyleArea.containsMouse ? Theme.hoverBg : Theme.inset
-                    border.color: Theme.borderSubtle
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        id: changeStyleLabel
-                        anchors.centerIn: parent
-                        text: qsTr("Change")
-                        color: "#aeb6c8"
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                        font.weight: Font.Medium
-                    }
-
-                    MouseArea {
-                        id: changeStyleArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            // The picker's currency is the style's stable id
-                            // (row -1 = the None card); mapped on both sides.
-                            stylePicker.selectedId = root.editStyleId
-                            stylePicker.open = true
-                        }
-                    }
-                }
-            }
-
-            Column {
-                width: parent.width
+            Row {
                 spacing: Theme.space2
 
-                Text {
-                    text: qsTr("Default media fit")
-                    color: Theme.textSecondary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXs
-                }
+                Repeater {
+                    model: [
+                        { value: "contain", label: qsTr("Contain") },
+                        { value: "cover", label: qsTr("Cover") },
+                        { value: "fill", label: qsTr("Stretch") }
+                    ]
 
-                Row {
-                    spacing: Theme.space2
-                    Repeater {
-                        model: [
-                            { value: "contain", label: qsTr("Contain") },
-                            { value: "cover", label: qsTr("Cover") },
-                            { value: "fill", label: qsTr("Stretch") }
-                        ]
-                        delegate: Rectangle {
-                            id: editFitOption
-                            required property var modelData
-                            width: Math.max(92, editFitLabel.implicitWidth + 28)
-                            height: 34
-                            radius: Theme.radiusMd
-                    color: root.editDefaultMediaFit === modelData.value
-                                   ? Qt.alpha(Theme.accent, 0.18) : Theme.surface
-                    border.width: root.editDefaultMediaFit === modelData.value ? 1 : 0
-                            border.color: Theme.accent
-                            Text {
-                                id: editFitLabel
-                                anchors.centerIn: parent
-                                text: editFitOption.modelData.label
-                        color: editFitOption.modelData.value === root.editDefaultMediaFit
-                                       ? Theme.accentLight : Theme.textPrimary
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textSm
-                                font.weight: Font.Medium
-                            }
-                            HoverHandler { cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: root.editDefaultMediaFit = editFitOption.modelData.value }
+                    delegate: Rectangle {
+                        id: editFitOption
+                        required property var modelData
+                        width: Math.max(92, editFitLabel.implicitWidth + 28)
+                        height: 34
+                        radius: Theme.radiusMd
+                        color: root.editDefaultMediaFit === modelData.value
+                               ? Qt.alpha(Theme.accent, 0.18) : Theme.surface
+                        border.width: root.editDefaultMediaFit === modelData.value ? 1 : 0
+                        border.color: Theme.accent
+
+                        Text {
+                            id: editFitLabel
+                            anchors.centerIn: parent
+                            text: editFitOption.modelData.label
+                            color: editFitOption.modelData.value === root.editDefaultMediaFit
+                                   ? Theme.accentLight : Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                            font.weight: Font.Medium
                         }
+
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: root.editDefaultMediaFit = editFitOption.modelData.value }
                     }
                 }
             }
@@ -952,23 +973,14 @@ Item {
 
     }
 
-    StylePickerModal {
-        id: stylePicker
-        onApplied: (styleId) => {
-            root.editStyleId = styleId
-            stylePicker.open = false
-        }
-        onCancelled: stylePicker.open = false
-    }
-
-    // ---- Add dialog (VGRPresenter · Settings · Outputs · Add) ----
+    // ---- Add dialog (VGRPresenter · Settings · Screens · Add) ----
     ModalCard {
         id: addDialog
         objectName: "selfTestAddOutputDialog"
         shown: root.addShown
-        title: "Add Output"
+        title: "Add Screen"
         cardWidth: 760
-        saveText: "Add Output"
+        saveText: "Add Screen"
         onCancelled: root.addShown = false
         onAccepted: root.submitAdd()
 
@@ -976,13 +988,17 @@ Item {
             width: parent.width
             name: root.addName
             type: root.addType
+            // A new row here is a screen. Other transports are added on
+            // Settings · Routing, where their buses are wired.
+            showType: false
             res: root.addRes
             refresh: root.addRefresh
             pattern: root.addPattern
             placement: root.addScreenName
             locked: root.addLocked
+            audioDevice: root.addAudioDevice
+            onAudioDevicePicked: (id) => root.addAudioDevice = id
             onNameEdited: (t) => root.addName = t
-            onTypePicked: (k) => root.addType = k
             onResPicked: (v) => root.addRes = v
             onRefreshPicked: (v) => root.addRefresh = v
             onPatternPicked: (k) => {

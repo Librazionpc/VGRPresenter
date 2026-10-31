@@ -13,11 +13,21 @@
 
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace bps::production {
+
+// An immutable copy of the graph's nodes and edges, published on every committed
+// change. The audio render thread reads only this, never the live maps the GUI
+// thread edits.
+struct GraphSnapshot {
+    std::map<std::string, NodeInfo, std::less<>> nodes;
+    std::map<std::string, std::set<std::string>, std::less<>> edges;
+};
 
 class ProductionGraph {
 public:
@@ -92,6 +102,7 @@ public:
     Result<void> AssignOutputBuses(std::string_view outputId,
                                    std::string_view videoBusId,
                                    std::string_view audioBusId);
+    Result<void> ClearOutputBusAssignment(std::string_view outputId, SignalType type);
     Result<OutputConfig> GetOutputConfig(std::string_view outputId) const;
     Result<void> SetOutputPriority(std::string_view outputId, OutputPriority p);
     Result<void> SetOutputGroup(std::string_view outputId, std::string_view group);
@@ -147,10 +158,15 @@ public:
         return edges_;
     }
 
+    // The last committed state, safe to read from any thread. Null until the first
+    // commit publishes one.
+    std::shared_ptr<const GraphSnapshot> PublishedSnapshot() const;
+
 private:
     static std::string NextId(const std::map<std::string, NodeInfo, std::less<>>& nodes,
                               std::string_view kind, std::string_view requested);
     void QueuePersist();   // run the installed saver (skipped during edits)
+    void PublishSnapshot();
     Result<void> EnsureNode(std::string_view id) const;
     bool Reachable(std::string_view from, std::string_view to,
                    const std::map<std::string, std::set<std::string>, std::less<>>& edges) const;
@@ -178,6 +194,9 @@ private:
     uint64_t nodeSeq_ = 0;
 
     std::function<void(json::Value)> saver_;   // auto-save sink (engine wires the DB)
+
+    mutable std::mutex snapshotMutex_;         // guards published_ only
+    std::shared_ptr<const GraphSnapshot> published_;
 };
 
 } // namespace bps::production

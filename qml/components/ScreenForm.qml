@@ -3,7 +3,7 @@ import VGRPresenterUI
 import "."
 
 // The Add/Edit screen form (VGRPresenter · Settings · Outputs · Add/Edit):
-// Screen name, Output type chips, Resolution + Refresh rate selects, Screen
+// Screen name, Resolution + Refresh rate selects, Screen
 // placement (a geometry mini-map of the REAL displays — FreeShow's Screens
 // model: tiles sit at each display's actual x/y, resolution derives from the
 // assigned display, Identify flashes the number on every physical screen,
@@ -21,6 +21,13 @@ Item {
     property string name: ""
     // "HDMI" | "NDI" | "SDI" | "REC" | "STREAM"
     property string type: "HDMI"
+    // Whether this form asks for a KIND at all. Settings · Screens sets it
+    // false: a row there is a screen (an HDMI display surface), and the
+    // transports that are not screens (NDI, SDI, recording, streaming) are
+    // created and wired on Settings · Routing, where the signal that reaches
+    // them is decided. The picker stays available for any form that really is
+    // choosing a transport.
+    property bool showType: true
     property string res: "1920 × 1080"
     property string refresh: "60 Hz"
     // Physical display the output sits on (QScreen::name, "" = windowed —
@@ -31,6 +38,13 @@ Item {
     property bool locked: false
     // "smpte" | "gradient" | "checker" | "solidred"
     property string pattern: "smpte"
+    // Where this output's AUDIO plays: the audio roster's own endpoint id
+    // ("waveout:<n>"), or "" for the program stream — the engine's single
+    // playout, which is where every row's audio went before this existed. Picking
+    // an endpoint gives the row a render stream of its own (RoutingService opens
+    // it from the row's audio wires), so an HDMI output's sound comes out of that
+    // monitor instead of the booth speakers.
+    property string audioDevice: ""
 
     // ---- Change signals (consumer writes state on each) ----
     signal nameEdited(string text)
@@ -44,9 +58,49 @@ Item {
     signal placementPicked(string screenName, string res, string refresh)
     signal lockToggled(bool locked)
     signal patternPicked(string key)
+    signal audioDevicePicked(string deviceId)
 
     readonly property var resOptions: ["1920 × 1080", "3840 × 2160", "1280 × 720", "1280 × 800"]
     readonly property var refreshOptions: ["60 Hz", "50 Hz", "30 Hz", "24 Hz"]
+
+    // ---- Output endpoints ----
+    // Outward devices only: a microphone is not somewhere to play a mix, so the
+    // engine's capture half of the roster is filtered out here. "Same as program"
+    // comes first because it is what an unset row MEANS.
+    readonly property var audioDeviceOptions: {
+        const out = [{ label: qsTr("Same as program"), key: "" }]
+        void root.deviceRev
+        const list = EngineBridge.audioDevices
+        for (let i = 0; i < list.length; ++i) {
+            const d = list[i]
+            if (d.isInput === true)
+                continue
+            const id = d.id === undefined ? "" : String(d.id)
+            if (id === "")
+                continue
+            out.push({ label: d.label === undefined ? id : String(d.label), key: id })
+        }
+        return out
+    }
+    // The chosen endpoint's NAME, or "Same as program". A saved device that is no
+    // longer attached says so instead of silently reading as the program — that
+    // would be the form telling the operator their sound is going somewhere it
+    // is not.
+    readonly property string audioDeviceLabel: {
+        const opts = root.audioDeviceOptions
+        for (let i = 0; i < opts.length; ++i)
+            if (opts[i].key === root.audioDevice)
+                return opts[i].label
+        return root.audioDevice === "" ? qsTr("Same as program")
+                                       : qsTr("%1 (not connected)").arg(root.audioDevice)
+    }
+    // Bumped by devicesChanged so the option list re-reads when a device is
+    // plugged in or pulled while the dialog is open.
+    property int deviceRev: 0
+    Connections {
+        target: EngineBridge
+        function onDevicesChanged() { root.deviceRev++ }
+    }
 
     // ---- Real displays ----
     // OutputListModel enumerates QGuiApplication::screens(). Q_INVOKABLE
@@ -148,6 +202,8 @@ Item {
         Column {
             width: parent.width
             spacing: Theme.space2
+            visible: root.showType
+            height: root.showType ? implicitHeight : 0
 
             Text {
                 text: "Output type"
@@ -265,6 +321,62 @@ Item {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: refreshMenu.openAt(refreshBox, 0, refreshBox.height + 4, root.Window.contentItem)
                     }
+                }
+            }
+        }
+
+        // ---- Where this output's sound comes out ----------------------------
+        // The row's audio is its own mix (whatever buses are wired to it on
+        // Settings · Routing), so the endpoint is a real destination the operator
+        // picks: a stage monitor, the HDMI panel's speakers, or the program. It
+        // sits under Resolution/Refresh because it is a property OF the output,
+        // like them — not a global preference.
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+
+            Text {
+                text: qsTr("Plays audio on")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            Rectangle {
+                id: audioDeviceBox
+                width: parent.width
+                height: 34
+                radius: Theme.radiusMd
+                color: Theme.inset
+                border.width: 1
+                border.color: Theme.border
+
+                Text {
+                    x: 12
+                    width: parent.width - 36
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.audioDeviceLabel
+                    color: root.audioDevice === "" ? Theme.textMuted : Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
+                    elide: Text.ElideRight
+                }
+
+                IconGlyph {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: "chevronDown"
+                    color: Theme.textMuted
+                    width: 12; height: 12
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: audioDeviceMenu.openAt(audioDeviceBox, 0,
+                                                      audioDeviceBox.height + 4,
+                                                      root.Window.contentItem)
                 }
             }
         }
@@ -713,4 +825,22 @@ Item {
         }
     }
     MenuCatcher { menu: refreshMenu; closesOnWheel: false }
+
+    // The endpoint list, read live from the engine's own roster each time it
+    // opens (a device plugged in while the dialog is up must be pickable), with
+    // the pick reported as an ID rather than a label — two panels can carry the
+    // same name, and a name is not a stable thing to store.
+    DropdownPanel {
+        id: audioDeviceMenu
+        visible: false
+        model: root.audioDeviceOptions.map((o) => {
+            return { label: o.label, key: o.key, accent: o.key === root.audioDevice }
+        })
+        onItemActivated: (label, item) => {
+            void label
+            root.audioDevicePicked(item && item.key !== undefined ? String(item.key) : "")
+            audioDeviceMenu.visible = false
+        }
+    }
+    MenuCatcher { menu: audioDeviceMenu; closesOnWheel: false }
 }

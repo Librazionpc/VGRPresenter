@@ -7,6 +7,9 @@
 
 #include "platform/IAudio.hpp"
 
+#include <cstdint>
+#include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -75,6 +78,11 @@ public:
     Result<void> StartRender(RenderCallback callback, uint32_t deviceId = UINT32_MAX) override;
     Result<void> StopRender() override;
     bool Rendering() const override;
+    // Per-output streams (see IAudio): one extra WASAPI client per output that has
+    // a device of its own. The program stream above is untouched by these.
+    Result<void> StartRenderStream(uint64_t streamId, RenderCallback callback,
+                                   uint32_t deviceId) override;
+    Result<void> StopRenderStream(uint64_t streamId) override;
 
 private:
     // The one walk Enumerate()/EnumerateFor() share: `only` narrows both the
@@ -123,8 +131,14 @@ private:
     std::unique_ptr<MeterTable> streams_;
 
     // The render stream (pimpl'd like the meter table: the thread handle and
-    // its stop flag live out-of-line). One stream at a time.
+    // its stop flag live out-of-line). The PROGRAM stream — one at a time.
     std::unique_ptr<RenderStream> render_;
+    // Per-output streams, keyed by the caller's id (an output node's hash). A
+    // separate map rather than a list of the program stream because their
+    // lifetimes follow the ROUTING, not playout: stopping playout must not tear
+    // down a monitor's feed, and deleting an output must not stop the program.
+    std::mutex renderStreamsMutex_;
+    std::map<uint64_t, std::unique_ptr<RenderStream>> renderStreams_;
 };
 
 } // namespace bps::platform

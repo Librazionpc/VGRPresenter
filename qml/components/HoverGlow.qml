@@ -27,9 +27,11 @@ Rectangle {
     // The surface's own hover state — every host already has one (a
     // HoverHandler, a PositionHoverArea, a MouseArea's containsMouse).
     property bool hovered: false
-    // The wash. Defaults to the theme accent at the shared hover alpha; a
-    // neutral surface (a menu row, a list row) passes a wash of its own.
-    property color glowColor: Qt.alpha(Theme.accent, Theme.hoverGlowAlpha)
+    // The wash. Defaults to Theme.hoverBg — the app's one hover value — so a
+    // surface that says nothing about hover still follows the theme (it used to
+    // spell out the accent alpha here, which meant the token and the default could
+    // disagree); a surface wanting a wash of its own still passes one.
+    property color glowColor: Theme.hoverBg
     // Draw a hover EDGE as well as the wash (cards and pills want it; menu rows
     // do not).
     property bool edge: false

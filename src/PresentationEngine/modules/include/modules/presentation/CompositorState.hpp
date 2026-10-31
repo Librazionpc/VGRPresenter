@@ -145,6 +145,29 @@ public:
     // Empty = no frame (the bus's source is not delivering): the renderer
     // clears that plane rather than freezing on the last picture it had.
     MediaFrame GetBusFrame(int busId) const;
+    // ---- A TEMPLATE BUS's WINDOW PLANES --------------------------------
+    // A template bus is a DESIGN whose `bus` blocks are windows. Each window
+    // names the bus it shows (its own, independently configured assignment —
+    // the block's meta busId, exactly like a window on a slide); a window that
+    // names none falls back to the template bus's own routed video sources, in
+    // route order. A fallback window needs a plane of its own — one compositor
+    // slot per window — and this is its key.
+    //
+    // POSITIVE on purpose: SetBusFrame refuses 0 and below (a plane key has
+    // always been a bus NUMBER), and the ONE frame store behind both kinds of
+    // plane is what lets a window be refreshed, cleared and seq-skipped exactly
+    // like a bus plane. The base sits far above any bus number a session could
+    // mint (buses are numbered from 1, one per created bus) and the stride caps
+    // a template bus at 1000 windows, so a window key can never collide with a
+    // real bus.
+    static constexpr int kTemplateWindowPlaneBase = 1000000;
+    static constexpr int kTemplateWindowPlaneStride = 1000;
+    static constexpr int TemplateWindowPlaneKey(int busNumber, int windowIndex)
+    {
+        if (busNumber <= 0 || windowIndex < 0)
+            return 0;
+        return kTemplateWindowPlaneBase + busNumber * kTemplateWindowPlaneStride + windowIndex;
+    }
     // Any bus plane with pixels — the render loop's "this frame is live"
     // question, answering without copying a single pixel buffer.
     bool HasBusFrames() const;

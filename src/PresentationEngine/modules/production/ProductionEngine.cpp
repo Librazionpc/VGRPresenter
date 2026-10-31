@@ -267,6 +267,26 @@ Result<void> ProductionEngine::AssignOutputBuses(std::string_view outputId,
     return r;
 }
 
+Result<void> ProductionEngine::ClearOutputBusAssignment(std::string_view outputId,
+                                                        SignalType type) {
+    PersistGate _save(*this);
+    Result<void> r = Ok();
+    OutputConfig config;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        r = graph_.ClearOutputBusAssignment(outputId, type);
+        if (r.ok()) {
+            auto current = graph_.GetOutputConfig(outputId);
+            if (current.ok()) config = current.value();
+            Record("unassign_output_bus", std::string(outputId) + " " + ToString(type));
+        }
+    }
+    if (r.ok())
+        (void)EventBus::Instance().Publish(events::OutputChanged{
+            std::string(outputId), config.videoBusId, config.audioBusId});
+    return r;
+}
+
 Result<void> ProductionEngine::SetOutputPriority(std::string_view outputId,
                                                  OutputPriority p) {
     PersistGate _save(*this);

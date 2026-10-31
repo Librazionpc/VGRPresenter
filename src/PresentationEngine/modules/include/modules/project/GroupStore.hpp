@@ -26,6 +26,11 @@ struct StoredGroup {
     std::string name;
     std::string color = "#5825f5";
     std::string shortcut;                  // single letter, uppercase by convention; "" = none
+    // The layout template this group's slides use (an engine template design id,
+    // "tpl-…"): how the group looks, not only what colour it is tagged with. "" =
+    // none, and the style's own pick governs — see StyleSpecBuilder::specForStyleId,
+    // which is where a slide's tag turns into its template.
+    std::string templateId;
     // The eight ship-with-the-app groups (FreeShow's own default set) — a
     // renamed default stops being one (see GroupListModel::renameGroup), the
     // same "editing a default detaches it" rule StyleItem's showShows etc.

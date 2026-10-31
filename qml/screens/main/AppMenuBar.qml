@@ -91,9 +91,11 @@ Item {
     readonly property var settingsSubmenuItems: [
         { label: "General", key: "general" },
         { label: "Smart Config", key: "smart" },
-        { label: "Outputs", key: "outputs" },
+        // Screens are left out of Settings for now (see NavRail.qml).
+        // { label: "Screens", key: "outputs" },
         { label: "Styles", key: "styles" },
         { label: "Audio & Video", key: "av" },
+        { label: "Routing", key: "routing" },
         { label: "Recording", key: "recording" },
         { label: "Plugins", key: "plugins" }
     ]
@@ -271,7 +273,7 @@ Item {
         { label: "Fullscreen", trailing: "F11" },
         { label: "Reset layout" },
         { divider: true },
-        { label: "Outputs", trailing: "›" }
+        { label: "Screens", trailing: "›" }
     ]
 
     readonly property var helpMenuItems: [

@@ -1981,11 +1981,75 @@ QImage EngineBridge::previewPixelsFor(const QString &label)
 // The status light's probe (see the header): the cached answer when there is
 // one, otherwise a RATE-LIMITED ping that NAMES the source, so the sweep that
 // answers it is asked for that device instead of hoping it is in the used set.
+void EngineBridge::refreshWindow(const QString &label)
+{
+    const QString want = label.trimmed();
+    if (want.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return;
+    constexpr qint64 kWindowRefreshGapMs = 1500;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (windowRefreshPending_.contains(want)
+        || now - windowRefreshMs_.value(want, 0) < kWindowRefreshGapMs)
+        return;
+    windowRefreshMs_.insert(want, now);
+    windowRefreshPending_.insert(want);
+    vgr::EngineWorker::instance().runOffThread([this, want] {
+        // WINDOWS ONLY: nothing here opens a camera or reads a display's modes, which
+        // is what makes it cheap enough to repeat while a window source is closed.
+        QString foundId;
+        for (const auto &w : bps::platform::PlatformAccessor::Get().Video().EnumerateWindows()) {
+            if (QString::fromStdString(w.title).trimmed().compare(want, Qt::CaseInsensitive) == 0) {
+                foundId = QString::fromStdString(w.id);
+                break;
+            }
+        }
+        vgr::EngineWorker::onInterfaceThread(this, [this, want, foundId] {
+            windowRefreshPending_.remove(want);
+            // Where this window already sits in the screen roster ("win:<hwnd>" ids).
+            int at = -1;
+            for (int i = 0; i < screenDevices_.size(); ++i) {
+                const QVariantMap d = screenDevices_.at(i).toMap();
+                if (d.value(QStringLiteral("id")).toString().startsWith(QLatin1String("win:"))
+                    && d.value(QStringLiteral("label")).toString().trimmed()
+                           .compare(want, Qt::CaseInsensitive) == 0) {
+                    at = i;
+                    break;
+                }
+            }
+            if (foundId.isEmpty()) {
+                if (at < 0)
+                    return;                       // still closed: nothing changed
+                screenDevices_.removeAt(at);      // it closed since the last sweep
+            } else {
+                const QVariantMap entry{
+                    {QStringLiteral("id"), foundId},
+                    {QStringLiteral("label"), want},
+                    {QStringLiteral("value"), want},
+                    {QStringLiteral("primary"), false},
+                    {QStringLiteral("widthPx"), 0},
+                    {QStringLiteral("heightPx"), 0},
+                };
+                if (at >= 0) {
+                    if (screenDevices_.at(at).toMap().value(QStringLiteral("id")).toString() == foundId)
+                        return;                   // already known, same window
+                    screenDevices_[at] = entry;   // reopened: a new handle
+                } else {
+                    screenDevices_.append(entry); // it just opened
+                }
+            }
+            emit devicesChanged();
+        });
+    });
+}
+
 bool EngineBridge::inputSourceAlive(const QString &label, const QString &kind)
 {
-    if (inputSourceReachable(label, kind))
-        return true;
     const QString want = label.trimmed();
+    const QString pingKey = kind + QLatin1Char('|') + want;
+    if (inputSourceReachable(label, kind)) {
+        lightPingState_.remove(pingKey);   // found: the next miss starts the quick pings again
+        return true;
+    }
     if (!bps::platform::PlatformAccessor::Installed())
         return false;
     // A Media-kind source is a FILE: it does not appear in any device sweep, so
@@ -2031,12 +2095,22 @@ bool EngineBridge::inputSourceAlive(const QString &label, const QString &kind)
     // comes right within a few seconds. The refresh itself is refused outright
     // while a scan is in flight, so this can never stack enumerations.
     constexpr qint64 kLightPingGapMs = 5000;
+    // A source that stays missing is asked about three times quickly (a device plugged
+    // in while the operator watches shows within seconds), then once a minute: every
+    // ping is a whole device sweep, and a source that is simply closed (a window) used
+    // to keep re-reading the camera's modes every few seconds.
+    constexpr int kQuickPings = 3;
+    constexpr qint64 kSlowPingGapMs = 60000;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QPair<int, qint64> pingState = lightPingState_.value(pingKey, qMakePair(0, qint64(0)));
+    if (pingState.first >= kQuickPings && now - pingState.second < kSlowPingGapMs)
+        return false;
     if (lastLightPingMs_ > 0 && now - lastLightPingMs_ < kLightPingGapMs)
         return false;
     if (deviceEnumerationBusy_)
         return false;
     lastLightPingMs_ = now;
+    lightPingState_.insert(pingKey, qMakePair(pingState.first + 1, now));
     // The ping is the SAME sweep boot ran, with this source's label added to
     // what it walks (see enumeratePlatformDevicesAsync): the used-device filter
     // STAYS ON, so a status light still never opens or activates a device it is
@@ -2542,7 +2616,8 @@ bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString
         // never run EnumWindows/monitor enumeration inside a take or render UI.
         if (!deviceEnumerationBusy_)
             enumerateDevicesOffThread();
-        qWarning("EngineBridge: no cached display named '%s' to preview yet", qUtf8Printable(want));
+        qInfo("EngineBridge: display '%s' is not cached yet; refresh queued for preview retry",
+              qUtf8Printable(want));
         return false;
     }
     previewOwners_[want].insert(owner);

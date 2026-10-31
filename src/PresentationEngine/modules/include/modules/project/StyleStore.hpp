@@ -30,7 +30,7 @@ struct StoredStyle {
     std::string name;
     std::string res;                      // display string ("1920×1080")
     std::string contentType = "shows";    // the style's own type (which picker lists it in)
-    std::string templateKey = "lowerThird";
+    std::string templateKey;              // "" = no template picked; the engine's fallback layout applies
     std::string backgroundColor = "transparent";
     std::string backgroundImage;          // absolute file path; "" = none
     bool clearBackgroundOnText = false;
@@ -59,6 +59,13 @@ struct StoredStyle {
     std::string templateKeys[4];                        // shows | media | scripture | table
     // Shows-only category label (free text; FreeShow styles name a category).
     std::string category;
+    // IS THIS STYLE ON THE ROUTING BOARD? The board is a patch bay: a style card
+    // exists there only because the operator put it there, so a style made on the
+    // Styles page stays off the board until it is added. Persisted here because
+    // the roster is the style's own home (a missing key reads as FALSE, so a
+    // roster saved before the board had membership reads as "none added" — the
+    // rule, not a migration).
+    bool onBoard = false;
 };
 
 class StyleStore {

@@ -51,6 +51,13 @@ Item {
         "#e74c3c", "#8b5cf6", "#2ecc71", "#e84393"
     ]
 
+    function previewColor(value, index) {
+        if (typeof value === "string" && value.length > 0 && value !== "transparent")
+            return value
+        const swatch = root.swatchColors[index % root.swatchColors.length]
+        return swatch || Theme.windowBg
+    }
+
     // Selection by the style's STABLE id ("" = the None card). Ids survive
     // roster edits between the dialog opening and the pick landing; an id
     // that no longer exists reads as None.
@@ -254,7 +261,8 @@ Item {
                         required property string res
                         required property string backgroundColor
                         readonly property bool selected: root.selectedId === styleCard.styleId
-                        readonly property bool transparentBg: styleCard.backgroundColor === "transparent"
+                        readonly property bool transparentBg: !styleCard.backgroundColor
+                                                             || styleCard.backgroundColor === "transparent"
 
                         width: (parent.width - 28) / 3
                         height: 140
@@ -273,9 +281,7 @@ Item {
                             width: parent.width - 20
                             height: 80
                             radius: 6
-                            color: styleCard.transparentBg
-                                   ? root.swatchColors[styleCard.index % root.swatchColors.length]
-                                   : styleCard.backgroundColor
+                            color: root.previewColor(styleCard.backgroundColor, styleCard.index)
                             opacity: 0.85
 
                             Text {

@@ -7,10 +7,12 @@ Rectangle {
     property var sections: [
         { key: "general",   label: "General",        icon: "sliders" },
         { key: "smart",     label: "Smart Config",    icon: "spark" },
-        { key: "outputs",   label: "Outputs",         icon: "monitor" },
+        // Screens are left out of Settings for now (the page stays coded, see OutputsScreen).
+        // { key: "outputs",   label: "Screens",         icon: "monitor" },
         { key: "styles",    label: "Styles",          icon: "layoutTemplate" },
         { key: "lookfeel",  label: "Appearance & Actions", icon: "sliders" },
         { key: "av",        label: "Audio & Video",   icon: "monitor" },
+        { key: "routing",   label: "Routing",         icon: "routing" },
         { key: "recording", label: "Recording",       icon: "recordDot" },
         { key: "plugins",   label: "Plugins",         icon: "grid" }
     ]

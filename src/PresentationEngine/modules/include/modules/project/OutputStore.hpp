@@ -49,10 +49,33 @@ struct StoredOutput {
     bool active = false;
     bool enabled = true;
     std::string styleId;                       // "" = no style
+    // "direct" shows this output's routed video bus full-frame; "compose"
+    // renders the design and its independently assigned bus windows.
+    std::string videoMode = "direct";
+    // THIS OUTPUT's own content gates. They are PER OUTPUT, not per style: two
+    // screens wearing one theme may disagree about whether media or the overlay
+    // layer paints, and allowing one must not allow the other. The style's own
+    // gates still apply ON TOP (both must allow), so a theme that forbids media
+    // cannot be opened by a row.
+    //
+    // THEY ARE WIRES NOW (Settings · Routing): the Overlays and Media cards at the
+    // head of the Styles column each carry an output dot, and a wire from one of
+    // them to an output IS the permission — exactly as a bus wire is. No wire,
+    // nothing paints. So the stored default is "not allowed": the flag on the row
+    // is that wire, and setting it is what draws the line.
+    bool showOverlay = false;
+    bool showMedia = false;
     // How a taken media file sits on THIS output — "contain" (default, whole
     // picture, own aspect kept), "cover" (cropped to fill) or "fill"
     // (stretched). Settings · Outputs' Fill picker; empty = default.
     std::string mediaFit;
+    // Which OUTPUT endpoint this row's audio plays on, as the audio roster's own
+    // id ("waveout:<n>"). Empty = the program: this row's mix is summed into the
+    // engine's single playout, exactly as before. Set = the row's audio leaves on
+    // that device's own stream, which is what makes an HDMI output's sound come
+    // out of that monitor instead of the booth speakers. Settings · Outputs picks
+    // it; RoutingService opens and closes the stream from the wires.
+    std::string audioDevice;
     // On-air-only transport: this output carries ONLY its own feed (NDI etc.)
     // — no physical-screen window, no slot in the screen pipeline. The QML
     // model's transport mutual-exclusion switch (OutputListModel's

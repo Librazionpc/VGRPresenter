@@ -76,6 +76,53 @@ public:
                                              rendering::RenderEngine& engine,
                                              rendering::Size size = rendering::Size(1920, 1080));
 
+    // THE BUS FEED SCENE — what an output whose VIDEO WIRE is drawn shows.
+    //
+    // One full-frame video layer carrying that bus's current picture, read from
+    // the SAME per-bus frames a design's bus block and Media › Inputs' bus
+    // windows draw (CompositorState::GetBusFrame) — so the canvas's wire, the
+    // block on a slide and the window in the pane are literally one picture.
+    //
+    // The scene id carries the BUS and the SIZE: two outputs never share one
+    // scene, and a resolution edit re-keys it (a 4K output rasterises at 4K,
+    // exactly like a styled per-output pass). The frame is refreshed on every
+    // call, cache hit included, with the frame-seq skip that keeps an unchanged
+    // feed from being copied and re-uploaded again (see LayerFrameCurrent) — a
+    // camera slower than the composition is the normal case here. A bus whose
+    // feed has stopped yields an empty frame, which reads as "the wire is drawn,
+    // the feed is quiet" instead of leaving the last picture frozen on air.
+    //
+    // `busId` is the bus's stable NUMBER (0 or less is refused: there is nothing
+    // to show, and guessing would show the wrong bus).
+    Result<std::string> BuildBusFeedScene(int busId, rendering::RenderEngine& engine,
+                                          rendering::Size size = rendering::Size(1920, 1080));
+
+    // A TEMPLATE BUS'S PICTURE — the template design, with its windows filled.
+    //
+    // A template bus is a bus created from a template (Edit's template tab): its
+    // `bus` blocks ARE its windows, so the bus's picture is that design, drawn
+    // with each window showing its own assigned bus feed. Nothing about the
+    // windows is stored on the bus — `blocks` is the template's block list, baked
+    // by the caller on every push (the same bake a style's template gets), which
+    // is what makes an edited template reach the bus without recreating it.
+    //
+    // WINDOW → FEED. A window whose block names a bus (meta `busId`) shows THAT
+    // bus: the design's own, independently configured assignment, and the only
+    // thing a window on a slide has ever meant. A window that names none falls
+    // back to the template bus's own routed video sources in route order — the
+    // per-window planes LiveOutputService fills (CompositorState
+    // ::TemplateWindowPlaneKey) — so "route three cameras in and they fill the
+    // three windows" works without assigning anything by hand.
+    //
+    // The scene id carries the bus and the SIZE (two outputs never share one
+    // scene; a resolution edit re-keys it) and the windows are refreshed on every
+    // call, cache hit included, exactly like BuildBusFeedScene's picture.
+    Result<std::string> BuildTemplateBusScene(int busNumber,
+                                              const std::vector<ContentBlock>& blocks,
+                                              const std::string& background,
+                                              rendering::RenderEngine& engine,
+                                              rendering::Size size = rendering::Size(1920, 1080));
+
     // WHICH OF A DESIGN'S BLOCKS PAINT UNDER THE COMPOSITOR'S VIDEO LAYER.
     // `underVideo[i]` answers for block i (parallel to the list handed in) and
     // `stageCovered` says whether the rule's leading run reached the stage.

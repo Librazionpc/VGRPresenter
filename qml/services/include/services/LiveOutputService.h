@@ -24,6 +24,7 @@
 #include <QtQml/qqmlregistration.h>
 #include <QVariantMap>
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -744,6 +745,12 @@ public:
     // against 754x124 here), and the wrap width IS the box.
     Q_INVOKABLE void noteReadingFit(const QString &styleId, qreal size,
                                     qreal boxWidth, qreal boxHeight, qreal pad);
+    // SCROLL'S COLUMN, SOLVED ONCE (see the definition): the type size for the max-words
+    // budget in `block`'s text area, which is also the size the scroll's line table is
+    // measured at. `block` is the reading block the surface draws (its geometry, style
+    // and meta); an empty styleId is the reference (active) style's surface. Returns 0
+    // until there is a passage and a budget to solve.
+    Q_INVOKABLE qreal scrollColumnSize(const QString &styleId, const QVariantMap &block);
     // The character starts of that style's run lines — the table the two functions
     // above read. Exposed for the walk's own diagnostic (and cheap: cached).
     Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
@@ -938,6 +945,10 @@ private:
     int onAirIndex_ = -1;
     int onAirTotal_ = 0;
     QVariantMap onAirSlide_;
+    // The GROUP the on-air slide carries, as last pushed to the engine's style
+    // spec — a group can name a template (Manage groups), so the pushed spec has
+    // to follow the slide, and only a CHANGE is worth a push.
+    QString onAirGroupTag_;
     QVariantMap onAirSlideRaw_;
 
     // ---- stageSlides() — see the header comment on stagedSlide ----
@@ -992,6 +1003,15 @@ private:
     // boundary): committed when the move finishes, so the boundary is ONE move
     // and never a cut followed by a scroll. -1 = nothing owed.
     int readingRebaseSlide_ = -1;
+    // SET WHILE lineStep RESTAGES A MOVE THE GLIDE IS ABOUT TO PLAY. The restage
+    // settles readingScroll_ at the line the move is heading for, and announcing
+    // that made every surface read the TARGET for one call, then the glide's own
+    // first frame put it back at the start and walked it forward again — a
+    // position that went forward, back, forward on each press (the character
+    // position the reading pane follows dipped by about a line). While set, the
+    // restage still stages everything but does not announce a scroll change: the
+    // glide announces the position, from where the picture really is.
+    bool readingStepGlide_ = false;
     // The one animator EVERY surface rides: it changes readingScroll_, and its
     // every value is pushed to the engine's live loop (SetLineScroll) — so the
     // tile and the HDMI/NDI frame are two views of the same number instead of
@@ -1174,6 +1194,16 @@ private:
     // OPERATOR-STAGED outright (readingJumpSerial: a click, the pane's ‹ ›, a search
     // pick), which is exactly the moment a column should be allowed to solve again.
     mutable QHash<QString, int> readingFitAcceptedJump_;
+    // SCROLL'S OWN COLUMN, apart from everything a slide measures: per style, the block
+    // its surface draws the passage in and the one size the budget solved for it. The
+    // line table is measured from this and nothing else while the passage is the JSON's.
+    struct ScrollColumn {
+        QVariantMap block;
+        qreal size = 0.0;
+        QString sig;
+    };
+    QHash<QString, ScrollColumn> scrollColumns_;
+    QHash<QString, qreal> scrollSizeBySig_;   // block + pick + budget -> solved size
     // THE WALK'S ONE TYPE SIZE PER STYLE (see styleRunLinesForText): solved by the
     // first page the passage was measured on and held for the rest of the walk, so a
     // page turn cannot re-flow the column. Cleared by resetReadingRun (a new pick, or
@@ -1346,6 +1376,12 @@ private:
     // states the UI reports per output through ndiOutputStates.
     struct NdiProbeResult {
         QString outputName;
+        // The graph output this row's sender is the transport for ("out:<id>"),
+        // resolved on the walk because the roster is only readable there.
+        QString nodeId;
+        // Whether an audio bus is wired into that node — decided on the walk from
+        // the published graph, so an unwired output sends no silent audio track.
+        bool audioWired = false;
         QString senderName;
         float fps = 30.0f;
         std::shared_ptr<bps::display::NdiDisplayProvider> provider;
@@ -1359,6 +1395,41 @@ private:
     QVariantMap ndiOutputStates_;                 // GUI thread: name -> {sending, warming, frames}
     QHash<QString, std::shared_ptr<bps::display::NdiDisplayProvider>> ndiProviders_; // GUI thread owns each output sender
     void stopNdiFeed();
+
+    // ---- NDI audio: an output's OWN mix, on the wire ----------------------
+    // The mixer renders a separate mix per graph output (AudioMixer::AddMixTap:
+    // the sum of the audio buses wired to that node) and a recording already
+    // listens on its node. The NDI sender did not: an audio wire into an NDI
+    // output reached the graph and the meters but never the network, because
+    // nobody drained that output's tap. One listener per SENDING NDI row, on the
+    // row's own node ("out:<stable id>"), filled on the audio render thread and
+    // drained on the NDI feed thread — the SDK send must never run inside the
+    // render callback, and the callback must never wait on one.
+    struct NdiAudioBlock {
+        std::vector<float> samples;   // interleaved, frames * channels
+        uint32_t frames = 0;
+        uint32_t channels = 0;
+        uint32_t rateHz = 0;
+        uint64_t startFrame = 0;      // its place on the mixer's sample clock
+    };
+    struct NdiAudio {
+        std::string nodeId;
+        uint64_t mixTap = 0;                  // 0 = not listening yet
+        std::mutex mutex;                     // guards queue/queuedFrames
+        std::deque<NdiAudioBlock> queue;
+        uint64_t queuedFrames = 0;            // the backlog bound counts FRAMES, not blocks
+        std::atomic<qulonglong> blocksSent{0};
+        std::atomic<qulonglong> framesSent{0};
+    };
+    // A second of audio, then the OLDEST block goes: a stalled sender drops the
+    // past instead of growing a latency the operator can only escape by restarting.
+    static constexpr uint32_t kNdiAudioBacklogMs = 1000;
+    // GUI thread: begin/end listening on one output's node.
+    void listenOnNdiOutput(const QString &nodeId, const std::shared_ptr<NdiAudio> &audio);
+    void silenceNdiOutput(const std::shared_ptr<NdiAudio> &audio);
+    // Feed thread: hand this output's queued mix to its sender (planar float32).
+    static void ndiWorkerSendAudio(void *providerVoid, const std::shared_ptr<NdiAudio> &audio);
+    QHash<QString, std::shared_ptr<NdiAudio>> ndiAudio_;   // GUI thread only, keyed by node id
     // The network-visible NDI source name for an output row: "<AppName>-<Row
     // name>" when the row has a name, or
     // "" to fall back to the provider's own default. With no argument it
@@ -1369,6 +1440,18 @@ private:
     // from goLive's paths; tracks the name it last armed.
     void armNdiSenderForSession();
     QString ndiArmedName_;
+
+    // ---- THE PROGRAM'S PLAYOUT (AudioEngine) ---------------------------------
+    // GO LIVE opens the default endpoint's render stream; STOP closes it. Only the
+    // PROGRAM is touched: an output playing on its own audio endpoint
+    // (AudioEngine::StartOutputAudio) has a stream whose lifetime follows the
+    // ROUTING, not playout, so a monitor's speakers keep playing with the program
+    // off the air (see AudioEngine::Stop).
+    //
+    // Both directions hop to the engine worker: Start() opens a WASAPI client and
+    // Stop() joins the render thread, and either can park the caller on a device
+    // that is slow, gone or being unplugged.
+    void setProgramPlayout(bool onAir);
 
     // ---- bus video windows (see clearBusFeeds above) ----
     struct BusFeed {
@@ -1507,9 +1590,15 @@ private:
         std::shared_ptr<bps::rendering::FrameBufferOutput> buffer;
         QString senderName;
         float fps = 30.0f;
+        // The mix this sender carries beside the picture ("out:<stable row
+        // id>"), and the listener that collects it. Empty/null = picture only,
+        // which is what an output row with no graph node gets.
+        QString nodeId;
+        std::shared_ptr<NdiAudio> audio;
         bool operator==(const NdiSendPlan &o) const {
             return outputName == o.outputName && provider == o.provider && buffer == o.buffer
-                   && senderName == o.senderName && fps == o.fps;
+                   && senderName == o.senderName && fps == o.fps
+                   && nodeId == o.nodeId && audio == o.audio;
         }
     };
     // THE FEED THREAD'S OWN COPY — installed by the queued hand-over in

@@ -81,6 +81,10 @@ void TestShowSlideKeepsItsOwnDesign();
 // A "bus" block's live plane on the real output frame: the block's own rect,
 // a new frame through a cache hit, and a stopped feed going invisible.
 void TestBusWindowPlane();
+// A template bus's windows: a named window shows its own bus, the open ones take
+// the bus's routed sources in route order — on a design whose FIRST window is the
+// named one (the case an every-block index got wrong) — each at the block's rect.
+void TestTemplateBusWindows();
 void TestTransparentBackground();
 void TestFrameRule();
 void TestImageScale();
@@ -221,6 +225,9 @@ void TestProductionGraph();
 void TestProductionEngine();
 void TestProductionDispatchOutsideLock();
 void TestProductionAudioMixer();
+void TestProductionOutputSignalEdges();
+void TestProductionDisplayOutputAudioPlays();
+void TestProductionAudioDsp();
 void TestProductionPersistence();
 void TestProductionRoutingPolicy();
 void TestProductionGraphSavedToDisk();

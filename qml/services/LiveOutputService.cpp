@@ -8,6 +8,8 @@
 #include "services/DesignLibraryService.h"
 #include "services/MediaLibraryService.h"
 
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSet>
 #include <QStringList>
 #include "modules/presentation/CompositorState.hpp"
@@ -24,12 +26,16 @@
 #include "services/EngineWorker.h"
 #include "services/EventBus.h"
 #include "models/OutputListModel.h"
+#include "models/GroupListModel.h"
 #include "models/BusListModel.h"
 #include "models/VideoSourceListModel.h"
 
 #include "modules/display/DisplayEngine.hpp"
 #include "modules/display/Providers.hpp"
+#include "modules/audio/AudioEngine.hpp"
+#include "platform/PlatformAccessor.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
+#include "modules/production/ProductionEngine.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -174,9 +180,12 @@ void pushActiveOverlaysToCompositor(const QVariantList &activeOverlays)
 // Preview composition and style specs come from the engine's shared rules;
 // this file only maps the result to the QML preview shape.
 
-pl::OutputStyleSpec outputStyleForPreview(const QString &styleId)
+// `slideTag` is the group the composed slide carries: a group that names a
+// template composes through it (StyleSpecBuilder consolidates that rule), so the
+// picture a tile draws is the one the output would render for the same slide.
+pl::OutputStyleSpec outputStyleForPreview(const QString &styleId, const QString &slideTag = QString())
 {
-    return StyleSpecBuilder::specForStyleId(styleId);
+    return StyleSpecBuilder::specForStyleId(styleId, slideTag);
 }
 
 // Map the engine's slide composition to the QML preview shape. Keep layout and
@@ -356,6 +365,69 @@ QVariantMap preferredNdiOutput(const OutputListModel *model)
 
 LiveOutputService *LiveOutputService::s_instance = nullptr;
 
+// Listen on ONE NDI output's own mix. GUI thread: this only registers a listener
+// with the mixer (AudioMixer::AddMixTap), which renders that output's mix — the
+// sum of the audio buses wired to its node — on the audio render thread. The
+// listener only copies into a bounded queue; the send happens on the feed thread
+// (see ndiWorkerSendAudio), because an SDK send must never run in the callback.
+void LiveOutputService::listenOnNdiOutput(const QString &nodeId,
+                                          const std::shared_ptr<NdiAudio> &audio)
+{
+    if (!audio || audio->mixTap != 0 || nodeId.isEmpty())
+        return;
+    audio->nodeId = nodeId.toStdString();
+    // The callback OWNS a reference to the state: a tap can outlive this service
+    // (the engine is torn down after the UI), and it must then write into its own
+    // queue rather than into freed memory.
+    auto state = audio;
+    audio->mixTap = bps::audio::AudioEngine::Instance().AddMixTap(
+        audio->nodeId,
+        [state](const float *samples, uint32_t frames, uint32_t channels,
+                uint32_t rateHz, uint64_t startFrame) {
+            if (samples == nullptr || frames == 0 || channels == 0 || rateHz == 0)
+                return;
+            std::lock_guard<std::mutex> lock(state->mutex);
+            // Drop the OLDEST blocks once the backlog is a second long: a sender
+            // that stalls keeps its latency bounded instead of building a delay
+            // the operator can only escape by restarting.
+            const uint64_t backlog = static_cast<uint64_t>(rateHz) * kNdiAudioBacklogMs / 1000ull;
+            while (!state->queue.empty() && state->queuedFrames + frames > backlog) {
+                state->queuedFrames -= state->queue.front().frames;
+                state->queue.pop_front();
+            }
+            NdiAudioBlock block;
+            block.samples.assign(samples, samples + static_cast<size_t>(frames) * channels);
+            block.frames = frames;
+            block.channels = channels;
+            block.rateHz = rateHz;
+            block.startFrame = startFrame;
+            state->queuedFrames += frames;
+            state->queue.push_back(std::move(block));
+        });
+    qInfo("LiveOutputService: NDI output '%s' now carries its own audio mix (tap %llu)",
+          audio->nodeId.c_str(), static_cast<unsigned long long>(audio->mixTap));
+}
+
+void LiveOutputService::silenceNdiOutput(const std::shared_ptr<NdiAudio> &audio)
+{
+    if (!audio || audio->mixTap == 0)
+        return;
+    const std::string nodeId = audio->nodeId;
+    // RemoveMixTap takes the lock the render thread holds WHILE it calls a tap, so
+    // when this returns no callback for this listener is running — the state can
+    // then be emptied and dropped without a race.
+    bps::audio::AudioEngine::Instance().RemoveMixTap(audio->mixTap);
+    audio->mixTap = 0;
+    {
+        std::lock_guard<std::mutex> lock(audio->mutex);
+        audio->queue.clear();
+        audio->queuedFrames = 0;
+    }
+    qInfo("LiveOutputService: NDI output '%s' no longer carries audio (%llu block(s), %llu frame(s) sent)",
+          nodeId.c_str(), static_cast<unsigned long long>(audio->blocksSent.load()),
+          static_cast<unsigned long long>(audio->framesSent.load()));
+}
+
 // NDI sends run on the dedicated feed thread; the GUI only resolves and queues
 // frames. This worker owns the SDK send and its per-output diagnostics.
 void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
@@ -425,6 +497,83 @@ void LiveOutputService::ndiWorkerSendFrame(void *providerVoid,
     }
 }
 
+// The audio half of a send: this output's OWN mix, planar float32 as NDI wants
+// it. FEED THREAD ONLY.
+//
+// The tap fills a bounded queue on the audio render thread (it must never block
+// there, and the SDK send belongs to the feed thread), and this drains it. Every
+// chunk waiting is sent as ONE block — the mix is contiguous in time, so there is
+// no reason to pay an SDK call per 10 ms chunk — and a backlog longer than a
+// second drops its oldest blocks in the tap itself, so a stalled network costs
+// latency instead of memory.
+void LiveOutputService::ndiWorkerSendAudio(void *providerVoid,
+                                          const std::shared_ptr<NdiAudio> &audio)
+{
+    auto *provider = static_cast<bps::display::NdiDisplayProvider *>(providerVoid);
+    if (!provider || !audio)
+        return;
+    // A sender that has not opened yet (no frame has gone out) has no id to send
+    // to; the queue keeps filling and the first audio block goes with the first
+    // picture that does.
+    const std::string senderId = provider->SenderId();
+    if (senderId.empty())
+        return;
+
+    std::vector<NdiAudioBlock> ready;
+    {
+        std::lock_guard<std::mutex> lock(audio->mutex);
+        if (audio->queue.empty())
+            return;
+        // One rate/channel count is the normal case; a chunk that arrives in a new
+        // format starts a new block rather than being stretched into the old one.
+        const uint32_t rateHz = audio->queue.front().rateHz;
+        const uint32_t channels = audio->queue.front().channels;
+        uint32_t frames = 0;
+        while (!audio->queue.empty() && audio->queue.front().rateHz == rateHz
+               && audio->queue.front().channels == channels) {
+            frames += audio->queue.front().frames;
+            ready.push_back(std::move(audio->queue.front()));
+            audio->queue.pop_front();
+        }
+        audio->queuedFrames -= frames;
+    }
+    if (ready.empty())
+        return;
+
+    uint32_t frames = 0;
+    for (const auto &block : ready)
+        frames += block.frames;
+    if (frames == 0)
+        return;
+    const uint32_t channels = ready.front().channels;
+    const uint32_t rateHz = ready.front().rateHz;
+
+    // Interleaved (the mixer's layout) → PLANAR (NDI's channel_stride contract).
+    std::vector<float> planar(static_cast<size_t>(frames) * channels, 0.0f);
+    size_t atFrame = 0;
+    for (const auto &block : ready) {
+        for (uint32_t f = 0; f < block.frames; ++f) {
+            for (uint32_t c = 0; c < channels; ++c) {
+                const float v = c < block.channels
+                    ? block.samples[static_cast<size_t>(f) * block.channels + c] : 0.0f;
+                planar[static_cast<size_t>(c) * frames + atFrame + f] = v;
+            }
+        }
+        atFrame += block.frames;
+    }
+
+    bps::broadcast::AudioFrameInfo info;
+    info.sampleRate = static_cast<int>(rateHz);
+    info.channels = static_cast<int>(channels);
+    info.samples = static_cast<int>(frames);
+    info.timestampMs = rateHz > 0
+        ? static_cast<int64_t>(ready.front().startFrame * 1000ull / rateHz) : 0;
+    (void)bps::broadcast::BroadcastEngine::Instance().SendAudioFrame(
+        senderId, info, planar.data(), planar.size() * sizeof(float));
+    audio->blocksSent.fetch_add(1, std::memory_order_relaxed);
+    audio->framesSent.fetch_add(frames, std::memory_order_relaxed);
+}
+
 // One beat of the feed — FEED THREAD ONLY (the worker's own timer calls this,
 // and everything it touches is either thread-local or an atomic the GUI reads).
 //
@@ -449,6 +598,14 @@ void LiveOutputService::ndiWorkerTick()
         ndiSendClock_.invalidate();
         return;
     }
+    // AUDIO FIRST, AND ON EVERY TICK. The picture is paced at the output's own
+    // rate (the gate below skips the beats it does not need), but the mixer fills
+    // a chunk every ~10 ms and nobody waits for a video frame to carry it: an
+    // output with an audio wire sends its mix on each beat, including the ticks
+    // where no new picture is due.
+    for (const auto &plan : plans)
+        if (plan.audio)
+            ndiWorkerSendAudio(plan.provider.get(), plan.audio);
     for (const auto &plan : plans) {
         if (!plan.provider || !plan.buffer) continue;
         const float fps = plan.fps > 0.0f ? plan.fps : 30.0f;
@@ -637,6 +794,10 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     // This live session's NDI sender opens under the selected NDI output's
     // own name, or the first enabled NDI row when another transport is live.
     armNdiSenderForSession();
+    // ...and the program goes back on the air: GO LIVE is what re-opens the
+    // default endpoint's render stream after a STOP closed it. The output
+    // endpoints were never closed, so this only re-arms the program stream.
+    setProgramPlayout(true);
     // ANY OTHER CONTENT ENDS A BLACKOUT. The carrier is its own marker (a
     // clearStage slide is the blackout, not content), so a pick that goes on
     // air while blacked out drops what the blackout was hiding — otherwise a
@@ -1413,7 +1574,13 @@ int LiveOutputService::readingCharSpan(int from, int to) const
         const QString page = readingTextOf(lineSetRaw_.at(i).toMap());
         if (page.trimmed().isEmpty())
             continue;
-        total += page.size() + 1;   // the page, plus the break before the next one
+        // The page, plus the break before the next one — but a TEXT-ONLY run (the
+        // scroll's JSON passage) joins its pages with NOTHING (rebuildReadingRun
+        // appends them at their exact boundary), so counting a break there moved the
+        // passage origin one character per dropped page: ReadContinuity delta=1 at
+        // nearly every page commit, and a reading position that drifted ahead of the
+        // text the further the walk went.
+        total += page.size() + (lineSourceTextOnly_ ? 0 : 1);
     }
     return total;
 }
@@ -1458,6 +1625,38 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
         readingRunLinesLru_.removeOne(key);
         readingRunLinesLru_.append(key);
         return cached.value();
+    }
+    // SCROLL MEASURES ITS OWN COLUMN and nothing else (see scrollColumnSize): the
+    // block the surface draws the passage in, at the one size the budget solved. No
+    // slide is composed, no report is consulted, no solver runs here.
+    if (readingBudgetFitActive_) {
+        const auto *scrollModel = OutputListModel::instance();
+        const QString columnKey = styleId.isEmpty()
+            ? (scrollModel ? scrollModel->activeStyleId() : QString()) : styleId;
+        const auto column = scrollColumns_.constFind(columnKey);
+        if (column != scrollColumns_.constEnd() && column->size > 0.0) {
+            const QString columnCacheKey = QStringLiteral("c#") + columnKey + QLatin1Char('#')
+                                           + QString::number(qHash(text), 16);
+            const auto hit = readingRunLinesCache_.constFind(columnCacheKey);
+            if (hit != readingRunLinesCache_.constEnd()) {
+                readingRunLinesLru_.removeOne(columnCacheKey);
+                readingRunLinesLru_.append(columnCacheKey);
+                return hit.value();
+            }
+            const QVector<VisualSpan> spans = visualLinesOfTextAtSize(text, column->block, column->size);
+            StyleRunLines entry;
+            entry.lines.reserve(spans.size());
+            entry.charStarts.reserve(spans.size());
+            for (const VisualSpan &span : spans) {
+                entry.lines.append(text.mid(span.start, span.end - span.start));
+                entry.charStarts.append(span.start);
+            }
+            constexpr int kScrollLinesCap = 16;
+            while (readingRunLinesCache_.size() >= kScrollLinesCap && !readingRunLinesLru_.isEmpty())
+                readingRunLinesCache_.remove(readingRunLinesLru_.takeFirst());
+            readingRunLinesLru_.append(columnCacheKey);
+            return *readingRunLinesCache_.insert(columnCacheKey, entry);
+        }
     }
     const QVariantMap page = lineSetRaw_.at(lineSlideIndex_).toMap();
     // WHICH SLIDE'S COMPOSITION THE BOX IS MEASURED ON: THE ONE THE SURFACES DRAW.
@@ -1641,6 +1840,12 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
 {
     if (size <= 0.0)
         return;
+    // SCROLL DOES NOT REPORT. While the passage is the JSON's, the column's size is
+    // scrollColumnSize()'s — the max-words budget solved into the text area, once —
+    // and the table reads that same answer. A page fit arriving here is a slide's
+    // number; letting it in is how the table and the drawn column became two grids.
+    if (readingBudgetFitActive_)
+        return;
     // A `required property string` bound to a missing/transient model role
     // coerces JS `undefined` into the literal STRING "undefined" before any
     // QML-side `!== undefined` guard ever sees it (OutputMonitorTile's own
@@ -1716,7 +1921,8 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
         // per press).
         if (walkLive && sameBox
             && readingFitAcceptedJump_.value(styleId, -1) == readingJumpSerial_) {
-            // The box is the walk's; only the page's own answer moved.
+            // The box is the walk's; only the page's own answer moved. Recorded, as
+            // slide-mode reading always did (scroll never reaches here).
             readingFitReported_.insert(styleId, report);
             const auto *model = OutputListModel::instance();
             const QString reference = model ? model->activeStyleId() : QString();
@@ -1819,6 +2025,118 @@ void LiveOutputService::noteReadingFit(const QString &rawStyleId, qreal size,
     // instead, which fixes it without delaying the position by a frame.)
 }
 
+// SCROLL'S COLUMN — THE ONE PLACE ITS TYPE SIZE IS DECIDED.
+//
+// Scroll is not a slide. A slide fits ITS page into its box, page by page; a scroll
+// takes the passage from the JSON, caps what it measures at the max-words setting
+// (default 40), looks at the text area the template gives it, fits that many words
+// into it ONCE, and from then on only moves. Nothing here reads a slide, a page fit
+// or a surface's report, and nothing re-solves at a page commit or a new paragraph:
+// the answer is keyed by the pick, the budget and the block's own geometry/type, so
+// it is solved again only when one of those really changes.
+//
+// The surface draws the column at the size this returns, and the line table
+// (styleRunLinesForText) is measured from the very block and size stored here — the
+// drawn column and the table are one grid by construction, not by agreement.
+qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVariantMap &block)
+{
+    if (!readingBudgetFitActive_ || block.isEmpty())
+        return 0.0;
+    const QString flow = readingFlowText_;
+    if (flow.trimmed().isEmpty())
+        return 0.0;
+    const int budget = qMax(3, readingWordBudget_);
+
+    // WHAT MAKES IT A DIFFERENT COLUMN: the pick, the budget, the box and the type —
+    // never the text on screen or where the reader is in it. (x/y are where the box
+    // sits on the stage; they do not change what fits in it.)
+    QVariantMap shape;
+    shape.insert(QStringLiteral("w"), block.value(QStringLiteral("width")));
+    shape.insert(QStringLiteral("h"), block.value(QStringLiteral("height")));
+    shape.insert(QStringLiteral("pad"), blockPadding(block));
+    shape.insert(QStringLiteral("meta"), block.value(QStringLiteral("meta")));
+    const QString sig = lineSetName_ + QLatin1Char('#') + QString::number(budget) + QLatin1Char('#')
+        + QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(shape))
+                                .toJson(QJsonDocument::Compact));
+
+    qreal size = scrollSizeBySig_.value(sig, 0.0);
+    if (size <= 0.0) {
+        // THE BUDGET'S WORDS — exactly that many, cycling the passage's own words when
+        // it holds fewer yet — each with the break that follows it, so the paragraph
+        // breaks take the lines they will take when drawn.
+        QStringList words;
+        for (int i = 0, n = flow.size(); i < n && words.size() < budget; ) {
+            const int start = i;
+            while (i < n && !flow.at(i).isSpace())
+                ++i;
+            while (i < n && flow.at(i).isSpace())
+                ++i;
+            if (i > start)
+                words.append(flow.mid(start, i - start));
+        }
+        if (words.isEmpty())
+            return 0.0;
+        QString probe;
+        for (int i = 0; i < budget; ++i)
+            probe += words.at(i % words.size());
+        // A scroll column always takes the solved answer (it fills the box with the
+        // budget), so the declared size is no cap: autoSize "grow".
+        QVariantMap grown = block;
+        QVariantMap meta = grown.value(QStringLiteral("meta")).toMap();
+        meta.insert(QStringLiteral("autoSize"), QStringLiteral("grow"));
+        grown.insert(QStringLiteral("meta"), meta);
+        size = fittedPixelSize(probe.trimmed(), grown);
+        if (scrollSizeBySig_.size() >= 64)
+            scrollSizeBySig_.clear();
+        scrollSizeBySig_.insert(sig, size);
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("ScrollColumn"),
+                            QStringLiteral("style=%1 pick='%2' budget=%3 size=%4 box=%5x%6 pad=%7 "
+                                           "(solved once: the max-words budget into the text area)")
+                                .arg(rawStyleId.isEmpty() ? QStringLiteral("(ref)") : rawStyleId.left(8))
+                                .arg(lineSetName_.left(24))
+                                .arg(budget)
+                                .arg(size, 0, 'f', 2)
+                                .arg(block.value(QStringLiteral("width")).toDouble())
+                                .arg(block.value(QStringLiteral("height")).toDouble())
+                                .arg(blockPadding(block)));
+    }
+
+    // THE TABLE'S COLUMN. A surface the style names (an output's tile or window) owns
+    // it; the pane's reference preview, which names none, only seats it when no named
+    // surface has — so two surfaces of one style in different boxes cannot take turns
+    // re-measuring the table. Seating changes nothing on screen: the position is a
+    // character, the table only converts it to a line.
+    const auto *styleModel = OutputListModel::instance();
+    const bool named = !rawStyleId.isEmpty() && rawStyleId != QLatin1String("undefined")
+                       && rawStyleId != QLatin1String("null");
+    const QString active = styleModel ? styleModel->activeStyleId() : QString();
+    const QString key = named ? rawStyleId : active;
+    if (key.isEmpty())
+        return size;
+    const auto seated = scrollColumns_.constFind(key);
+    const bool vacant = seated == scrollColumns_.constEnd();
+    if ((named || vacant) && (vacant || seated->sig != sig)) {
+        ScrollColumn column;
+        column.block = block;
+        column.size = size;
+        column.sig = sig;
+        scrollColumns_.insert(key, column);
+        const QString prefix = QStringLiteral("c#") + key + QLatin1Char('#');
+        for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
+            if (it.key().startsWith(prefix))
+                it = readingRunLinesCache_.erase(it);
+            else
+                ++it;
+        }
+        readingRunLinesLru_.removeIf([&prefix](const QString &k) { return k.startsWith(prefix); });
+        // The reference grid is the active style's: re-measure the run in place, at the
+        // reader's own page and offset, exactly as a changed fit always did.
+        if (key == active)
+            applyReadingRestage(true, /*forceRebuild=*/ true);
+    }
+    return size;
+}
+
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
 {
     // An empty id means the REFERENCE grid, which is the active style's own column
@@ -1852,11 +2170,41 @@ qreal LiveOutputService::readingLineForStyle(const QString &styleId, qreal charA
     const QVector<int> starts = styleRunLines(styleId).charStarts;
     if (starts.isEmpty() || charAt < 0.0)
         return charAt;   // nothing to convert: the caller's number is already lines
+    // THE CHARACTER, IN WHOLE CHARACTERS. readingChar is a reference line's first
+    // character plus the glide's progress through that line (a fraction of a LINE,
+    // 0..1 — see readingCharForScroll). Added to this style's line index as it stood,
+    // that fraction moved this output at the wrong rate, and its line number only
+    // changed when the sweep crossed one of its own line starts: the reference output
+    // glided while the other ticked, sitting still for presses and then jumping a line
+    // or two at a paragraph stub (measured: s2 went 7 -> 9 while s1 went 7 -> 8). So
+    // the fraction is turned back into the characters it spans, and this style's line
+    // is where that character falls in ITS OWN line — a fraction of a line: the same
+    // words at the same moment on every output.
+    const auto *referenceModel = OutputListModel::instance();
+    const QString referenceId = referenceModel ? referenceModel->activeStyleId() : QString();
+    const QVector<int> refStarts = readingRunCharStarts(referenceId);
     const qreal whole = std::floor(charAt);
-    const int target = static_cast<int>(whole);
-    const auto it = std::upper_bound(starts.constBegin(), starts.constEnd(), target);
+    const qreal fraction = charAt - whole;
+    qreal character = whole;
+    if (!refStarts.isEmpty() && fraction > 0.0) {
+        const auto refIt = std::upper_bound(refStarts.constBegin(), refStarts.constEnd(),
+                                            static_cast<int>(whole));
+        const int refIndex = (refIt == refStarts.constBegin())
+            ? 0 : static_cast<int>(refIt - refStarts.constBegin()) - 1;
+        if (refIndex + 1 < refStarts.size() && refStarts.at(refIndex) == static_cast<int>(whole))
+            character = whole + fraction * (refStarts.at(refIndex + 1) - refStarts.at(refIndex));
+    }
+    const auto it = std::upper_bound(starts.constBegin(), starts.constEnd(),
+                                     static_cast<int>(std::floor(character)));
     const int index = (it == starts.constBegin()) ? 0 : static_cast<int>(it - starts.constBegin()) - 1;
-    return static_cast<qreal>(index) + (charAt - whole);
+    // This line's length: to the next line's start; the last line has no next, so the
+    // one before it stands in (never zero).
+    int span = 1;
+    if (index + 1 < starts.size())
+        span = qMax(1, starts.at(index + 1) - starts.at(index));
+    else if (index > 0)
+        span = qMax(1, starts.at(index) - starts.at(index - 1));
+    return static_cast<qreal>(index) + (character - starts.at(index)) / span;
 }
 
 // THE STYLE-INDEPENDENT PLACE IN THE PASSAGE — the character the line at the top
@@ -2328,14 +2676,23 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
                               .toString();
     readingScrollAnim_->stop();
     applyReadingScroll(from);   // starts where the picture already is
-    readingScrollAnim_->setStartValue(from);
-    readingScrollAnim_->setEndValue(to);
-    readingScrollAnim_->setDuration(ms);
-    // EASE IN AND OUT by default: zero velocity at both ends is what reads as a
-    // scroll rather than a jump that happens to be animated.
-    readingScrollAnim_->setEasingCurve(curve == QLatin1String("even") ? QEasingCurve::Linear
-                                        : curve == QLatin1String("settle") ? QEasingCurve::OutCubic
-                                                                           : QEasingCurve::InOutCubic);
+    // CONFIGURED SILENTLY. A finished animation sits parked at its END time, so
+    // setEndValue(to) below made it announce the NEW TARGET at once (valueChanged
+    // before start() rewound it) — every press published from -> to -> from: the
+    // position ran a line ahead for one call and back (measured in the ScrollJump
+    // log: "27 -> 26", "26 -> 27", "27 -> 26" inside 10 ms). Nothing is announced
+    // until start(), whose first value is `from`.
+    {
+        const QSignalBlocker quiet(readingScrollAnim_);
+        readingScrollAnim_->setStartValue(from);
+        readingScrollAnim_->setEndValue(to);
+        readingScrollAnim_->setDuration(ms);
+        // EASE IN AND OUT by default: zero velocity at both ends is what reads as a
+        // scroll rather than a jump that happens to be animated.
+        readingScrollAnim_->setEasingCurve(curve == QLatin1String("even") ? QEasingCurve::Linear
+                                            : curve == QLatin1String("settle") ? QEasingCurve::OutCubic
+                                                                               : QEasingCurve::InOutCubic);
+    }
     readingScrollAnim_->start();
 }
 
@@ -2350,6 +2707,9 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
 {
     if (lineSetRaw_.isEmpty() || lineSlideIndex_ < 0 || lineSlideIndex_ >= lineSetRaw_.size())
         return;
+    // WHERE IN THE PASSAGE THE WORDS ARE, before the run is touched, so a commit
+    // that moved the text can be told from one that kept it (ReadContinuity below).
+    const int passageBefore = readingPassageChar();
     // THE RUN, NOT ONE PAGE — rebuilt only when the window must move, and the
     // offset rebased with it (see rebuildReadingRun), so a page turn inside the
     // window changes no visible pixel at all.
@@ -2371,6 +2731,21 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     readingFlowText_ = readingRunText_;
     readingScroll_ = readingRunBaseLine_ + lineOffset_;
     const bool flowChanged = readingFlowText_ != previousFlow;
+    // ONE LINE WHEN THE RUN'S TEXT CHANGED: the character the reader is on before
+    // and after. They must be equal (the window slid under a still picture); a
+    // difference is the words themselves moving at the page commit — the text in
+    // the output jumping. -1 is "no run yet" and says nothing.
+    if (flowChanged && passageBefore >= 0) {
+        const int passageAfter = readingPassageChar();
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadContinuity"),
+                            QStringLiteral("slide=%1 passageBefore=%2 passageAfter=%3 delta=%4 "
+                                           "linesBefore=%5 linesAfter=%6 (delta != 0: the text moved)")
+                                .arg(lineSlideIndex_)
+                                .arg(passageBefore).arg(passageAfter)
+                                .arg(passageAfter - passageBefore)
+                                .arg(previousScroll, 0, 'f', 2)
+                                .arg(readingScroll_, 0, 'f', 2));
+    }
     // THE POSITION CHANGED, not only the text. A DIRECT JUMP (a click on another
     // paragraph, the pane's ‹ ›, a search pick) stages a page whose position is
     // base+0 while the passage's TEXT is the same run it already had — so
@@ -2385,8 +2760,9 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // next passage. Measured in engine.log: ReadRestage slide=2 base=14.00
     // scroll=14.00 with no readingScrollChanged, while both tiles' composition
     // was already the new page (RefreshOnAirSlide page=2, blocks0Text of 1-2).
-    const bool scrollChanged = forceScrollNotify
-        || !qFuzzyCompare(previousScroll + 1.0, readingScroll_ + 1.0);
+    const bool scrollChanged = !readingStepGlide_
+        && (forceScrollNotify
+            || !qFuzzyCompare(previousScroll + 1.0, readingScroll_ + 1.0));
     // THE RESULT, every time this runs — not just when LineStep calls it. A
     // call from noteReadingFit's reset cascade, or from a fresh pick, lands
     // here with no preceding LineStep line, so without this the glide this
@@ -2434,7 +2810,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
         }
         if (pageChanged)
             emit readingPageChanged();
-        if (flowChanged || scrollChanged)
+        if (!readingStepGlide_ && (flowChanged || scrollChanged))
             emit readingScrollChanged();
         return;
     }
@@ -2476,7 +2852,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
         // frame they already have at the new position instead of the loop being
         // handed a fresh presentation on every key press.
         if (!commitPage) {
-            if (flowChanged || scrollChanged)
+            if (!readingStepGlide_ && (flowChanged || scrollChanged))
                 emit readingScrollChanged();   // no block change this time: safe as-is
             return;
         }
@@ -2499,7 +2875,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
         // is the earliest point both halves of the memo key agree.
         if (pageChanged)
             emit readingPageChanged();
-        if (flowChanged || scrollChanged)
+        if (!readingStepGlide_ && (flowChanged || scrollChanged))
             emit readingScrollChanged();
         return;
     }
@@ -2515,7 +2891,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // as of the assignment just above, so readingPageChanged waits for here.
     if (pageChanged)
         emit readingPageChanged();
-    if (flowChanged || scrollChanged)
+    if (!readingStepGlide_ && (flowChanged || scrollChanged))
         emit readingScrollChanged();
 }
 
@@ -2608,7 +2984,9 @@ bool LiveOutputService::lineStep(int direction)
         // RUN numbering, so it keeps climbing across page turns.
         lineOffset_ = step.offset;
         readingScroll_ = step.absolute;
+        readingStepGlide_ = true;      // the glide below announces the position
         applyReadingRestage(false);
+        readingStepGlide_ = false;
         animateReadingScroll(readingWindowOffset(absoluteFrom), readingScroll_);
     } else if (direction > 0) {
         // THE PAGE BOUNDARY. The move that takes this page's last line out of the
@@ -2629,7 +3007,9 @@ bool LiveOutputService::lineStep(int direction)
         shiftPickBase(lineSlideIndex_, step.page);
         lineSlideIndex_ = step.page;
         lineOffset_ = step.offset;
+        readingStepGlide_ = true;      // the glide below announces the position
         applyReadingRestage();
+        readingStepGlide_ = false;
         animateReadingScroll(readingWindowOffset(absoluteFrom), readingScroll_);
     }
 
@@ -3158,12 +3538,59 @@ static pl::CompositorState::MediaFrame rgbaFrameOf(const QImage &frame)
 
 void LiveOutputService::refreshBusFeeds()
 {
+    // Resolve ONE bus into the feed the pump pulls: its FIRST routed video
+    // source — the very choice BusMonitor and the Media pane's bus card make, so
+    // a window (or an output) can never show a feed the operator's own bus card
+    // calls something else. false = nothing to take (a removed bus, no route in,
+    // an unnamed source): the caller leaves it out and the next tick retries.
+    // One ROSTER ROW resolved into a tap: its caption, kind, capture mode and —
+    // for the log — its resolved PAL id / NDI name (the frames themselves travel
+    // through the tap, not through this). false = nothing to take (a removed
+    // row, an unnamed source).
+    const auto feedForSourceRow = [](int sourceRow, BusFeed *feed) -> bool {
+        if (sourceRow < 0)
+            return false;
+        const QVariantMap source = VideoSourceListModel::Instance()->getSource(sourceRow);
+        const QString label = source.value(QStringLiteral("sublabel")).toString().trimmed();
+        if (label.isEmpty())
+            return false;
+        feed->label = label;
+        feed->kind = source.value(QStringLiteral("kind")).toString();
+        feed->mode = source.value(QStringLiteral("mode")).toString();
+        feed->deviceId = EngineBridge::instance().resolvedPreviewDeviceId(label);
+        return true;
+    };
+    // A BUS resolved into the feed its FIRST routed video source holds — the very
+    // choice BusMonitor and the Media pane's bus card make, so a window (or an
+    // output) can never show a feed the operator's own bus card calls something
+    // else.
+    const auto feedForBus = [&feedForSourceRow](int busId, BusFeed *feed) -> bool {
+        const int row = BusListModel::rowForBusNumber(busId);
+        if (row < 0)
+            return false;
+        const QVariantMap bus = BusListModel::Instance()->getBus(row);
+        // A TEMPLATE BUS HAS NO PICTURE OF ITS OWN: its design is the picture,
+        // and its feeds are per WINDOW (see addTemplateWindows). Taking the bus
+        // number's own plane here would claim the same device a second time for
+        // a picture nothing reads.
+        if (bus.value(QStringLiteral("type")).toString() == QLatin1String("template"))
+            return false;
+        const QVariantList routes = bus.value(QStringLiteral("routedVideoSources")).toList();
+        if (routes.isEmpty())
+            return false;   // nothing routed in: no device is opened
+        return feedForSourceRow(routes.first().toInt(), feed);
+    };
+
     // WHAT THE ON-AIR COMPOSITION ASKS FOR. onAirSlide_ is the STYLED
     // composition every output renders (slideToVariantMap), so its blocks are
     // the ones SceneBuilder's own bus pass walks: a bus window the outputs will
     // paint is exactly a bus block listed here, and one the style's template
     // replaced is not (and must not open a device either).
     QHash<int, BusFeed> wanted;
+    // Every bus this composition or its wires NAME (template buses included, and
+    // they are the reason this list exists: a template bus holds no plane of its
+    // own, so it never appears in `wanted` — its window planes are added below).
+    QList<int> namedBuses;
     const QVariantList blocks = onAirSlide_.value(QStringLiteral("blocks")).toList();
     for (const QVariant &v : blocks) {
         const QVariantMap block = v.toMap();
@@ -3171,32 +3598,64 @@ void LiveOutputService::refreshBusFeeds()
             continue;
         const QVariantMap meta = block.value(QStringLiteral("meta")).toMap();
         const int busId = meta.value(QStringLiteral("busId")).toInt();
+        if (busId > 0 && !namedBuses.contains(busId))
+            namedBuses.append(busId);
         if (busId <= 0 || wanted.contains(busId))
             continue;
-        // The bus's FIRST routed video source — the very choice BusMonitor and
-        // the Media pane's bus card make, so a window can never show a feed the
-        // operator's own bus card calls something else.
+        BusFeed feed;
+        if (feedForBus(busId, &feed))
+            wanted.insert(busId, feed);
+    }
+
+    // ...AND THE ROUTING WIRES. A bus wired into an OUTPUT is watched for the
+    // same reason a design block's is: the compositor's per-bus frame is what
+    // that output's own pass composes (SceneBuilder::BuildBusFeedScene). Without
+    // this, a wire into a screen whose slide carries no bus block would draw its
+    // wire and then show nothing — nothing ever pulled the device, which is
+    // exactly the reported "the wire is drawn but the screen is black".
+    if (const auto *outputs = OutputListModel::instance()) {
+        for (int i = 0; i < outputs->rowCount(); ++i) {
+            const int busId = outputs->routedVideoBus(i);
+            if (busId > 0 && !namedBuses.contains(busId))
+                namedBuses.append(busId);
+            if (busId <= 0 || wanted.contains(busId))
+                continue;
+            BusFeed feed;
+            if (feedForBus(busId, &feed))
+                wanted.insert(busId, feed);
+        }
+    }
+
+    // ...AND A TEMPLATE BUS's WINDOWS (Settings · Routing's bus picker →
+    // Template). A window that names a bus shows THAT bus; a window that names
+    // none shows the template bus's own routed video sources in route order, so
+    // each of those routes gets a plane of its own — one compositor slot per
+    // window (CompositorState::TemplateWindowPlaneKey), refreshed by this same
+    // pump and read by the engine's window pass exactly like a bus plane.
+    const auto addTemplateWindows = [&feedForSourceRow, &wanted](int busId) {
+        if (busId <= 0)
+            return;
         const int row = BusListModel::rowForBusNumber(busId);
         if (row < 0)
-            continue;   // removed, or the roster has not reported yet — next tick retries
+            return;
         const QVariantMap bus = BusListModel::Instance()->getBus(row);
+        if (bus.value(QStringLiteral("type")).toString() != QLatin1String("template"))
+            return;
         const QVariantList routes = bus.value(QStringLiteral("routedVideoSources")).toList();
-        if (routes.isEmpty())
-            continue;   // nothing routed in: the plane stays blank, no device is opened
-        const QVariantMap source =
-            VideoSourceListModel::Instance()->getSource(routes.first().toInt());
-        const QString label = source.value(QStringLiteral("sublabel")).toString().trimmed();
-        if (label.isEmpty())
-            continue;
-        BusFeed feed;
-        feed.label = label;
-        feed.kind = source.value(QStringLiteral("kind")).toString();
-        feed.mode = source.value(QStringLiteral("mode")).toString();
-        // The RESOLVED PAL id / NDI name — what the engine's log can name; the
-        // frames themselves travel through the tap below, not through this.
-        feed.deviceId = EngineBridge::instance().resolvedPreviewDeviceId(label);
-        wanted.insert(busId, feed);
-    }
+        for (int i = 0; i < routes.size(); ++i) {
+            const int planeKey = pl::CompositorState::TemplateWindowPlaneKey(busId, i);
+            if (planeKey <= 0 || wanted.contains(planeKey))
+                continue;
+            BusFeed feed;
+            if (feedForSourceRow(routes.at(i).toInt(), &feed))
+                wanted.insert(planeKey, feed);
+        }
+    };
+    // (Walk the NAMED buses, not `wanted`'s keys: a template bus contributes no
+    // key to `wanted` — only its windows do, and addTemplateWindows is what adds
+    // them.)
+    for (int busId : std::as_const(namedBuses))
+        addTemplateWindows(busId);
 
     // RELEASE FIRST: a bus whose feed changed (re-route, source swapped, bus
     // renamed to another device) must let its old tap go before the new one is
@@ -3656,6 +4115,28 @@ void LiveOutputService::runEnvSelfTest()
     });
 }
 
+// THE PROGRAM'S PLAYOUT, ON AIR AND OFF. Nothing here touches an output's own
+// endpoint: those streams belong to the routing (AudioEngine::StartOutputAudio),
+// and AudioEngine::Stop was changed to leave them playing — which is the whole
+// point of wiring STOP to it. A monitor with its own audio device keeps sounding
+// while the program is off the air; the booth speakers, which ARE the program
+// stream, go quiet with it.
+void LiveOutputService::setProgramPlayout(bool onAir)
+{
+    vgr::EngineWorker::instance().runOffThread([onAir] {
+        if (!bps::platform::PlatformAccessor::Installed())
+            return;   // platform torn down (shutdown): nothing left to open or close
+        auto &engine = bps::audio::AudioEngine::Instance();
+        // Start() is idempotent while the program is already on the air (and
+        // reuses the control thread a stop left alive for an output endpoint),
+        // so GO LIVE twice cannot open a second stream.
+        auto r = onAir ? engine.Start() : engine.Stop();
+        if (!r.ok())
+            qWarning("LiveOutputService: program playout %s refused: %s",
+                     onAir ? "start" : "stop", r.error().message.c_str());
+    });
+}
+
 void LiveOutputService::stop()
 {
     // ASYNC STOP (the "press GO LIVE then immediately STOP" crash): the
@@ -3664,6 +4145,12 @@ void LiveOutputService::stop()
     // at 20:13, 0.0.3). StopLiveAsync hands the join to a reaper thread —
     // this function returns at once and the UI keeps pumping.
     const bool wasLive = live_;
+    // THE PROGRAM COMES OFF THE AIR, SOUND INCLUDED. STOP is the program's own
+    // on/off switch, so the program's playout stops with the picture — and an
+    // output that plays on its own endpoint keeps going (see setProgramPlayout).
+    // Unconditional rather than `if (wasLive)`: playout starts with the engine at
+    // boot, so a STOP pressed before the first GO LIVE has one to stop too.
+    setProgramPlayout(false);
     bps::live::LiveOutputController::Instance().StopLiveAsync();
     if (live_) {
         live_ = false;
@@ -4442,6 +4929,20 @@ void LiveOutputService::refreshOnAirSlide()
     onAirSlide_ = slide ? slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle())
                         : QVariantMap{};
     onAirSlideRaw_ = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{}) : QVariantMap{};
+    // THE SLIDE'S GROUP DECIDES ITS TEMPLATE (a group can name one — Manage
+    // groups), and the engine renders from the spec that was PUSHED, not from
+    // anything computed here. So the push follows the slide: the group the
+    // on-air slide carries is re-pushed into the active style's spec, which is
+    // what keeps the real output on the same template the monitor tile composes
+    // (previewWithActiveStyle reads the same tag). Only a CHANGE pushes: this
+    // runs on every stage and step, and an unchanged spec is a no-op anyway.
+    const QString tag = (slide && !slide->tags.empty())
+                            ? QString::fromStdString(slide->tags.front()) : QString();
+    if (tag != onAirGroupTag_) {
+        onAirGroupTag_ = tag;
+        if (OutputListModel *outputs = OutputListModel::instance())
+            outputs->repushActiveStyleForTag(tag);
+    }
 }
 
 QVariantMap LiveOutputService::onAirSlideAt(int index) const
@@ -4476,6 +4977,16 @@ QVariantMap LiveOutputService::onAirSlideAt(int index) const
 QVariantMap LiveOutputService::previewWithActiveStyle(const QVariantMap &slide) const
 {
     const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
+    // A GROUP WITH A TEMPLATE COMPOSES THROUGH IT, the same rule the outputs get
+    // (see the group's own row in Manage groups). Read before composing, and only
+    // when there IS one: an ungrouped slide keeps the plain active-spec path
+    // byte for byte.
+    const QString tag = slide.value(QStringLiteral("tag")).toString();
+    if (!tag.isEmpty() && !GroupListModel::instance()->templateForTag(tag).isEmpty()) {
+        const QString styleId = OutputListModel::instance()
+                                    ? OutputListModel::instance()->activeStyleId() : QString();
+        return slideToVariantMap(&engineSlide, outputStyleForPreview(styleId, tag));
+    }
     return slideToVariantMap(&engineSlide);
 }
 
@@ -4483,7 +4994,9 @@ QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
                                                  const QString &styleId) const
 {
     const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
-    return slideToVariantMap(&engineSlide, outputStyleForPreview(styleId));
+    return slideToVariantMap(&engineSlide,
+                             outputStyleForPreview(styleId,
+                                                   slide.value(QStringLiteral("tag")).toString()));
 }
 
 
@@ -4596,12 +5109,16 @@ void LiveOutputService::sampleFeedHealth()
     // gated buffer, an unstyled one mirrors the shared preview feed. One
     // helper, because the probe now reads it twice (the runtime map below and
     // the stall pass further down) and two copies would be one copy too many.
-    const auto bufferForRow = [](const QVariantMap &row) -> QString {
-        const QString styleId = row.value(QStringLiteral("styleId")).toString();
-        const QString name = row.value(QStringLiteral("name")).toString();
-        return styleId.isEmpty()
-            ? QString::fromLatin1(bps::live::LiveOutputController::kPreviewName)
-            : QStringLiteral("__out_%1__").arg(qHash(name));
+    // The RULE is the model's (hasOwnPass): a style OR a video wire (Settings ·
+    // Routing) gives the row a pass of its own, and that pass is what draws its
+    // picture. Asking the model instead of re-reading styleId here is what keeps
+    // a wired output from rendering its bus into one buffer while this probe —
+    // and the stall watchdog's to-black list — watched the shared program feed.
+    const auto bufferForRow = [model](int row) -> QString {
+        if (!model || !model->hasOwnPass(row))
+            return QString::fromLatin1(bps::live::LiveOutputController::kPreviewName);
+        return QStringLiteral("__out_%1__")
+            .arg(qHash(model->getOutput(row).value(QStringLiteral("name")).toString()));
     };
 
     // ---- every row's own runtime state (what Outputs reads) ---------------
@@ -4613,7 +5130,7 @@ void LiveOutputService::sampleFeedHealth()
     QVariantMap runtime;
     for (int i = 0; i < model->rowCount(); ++i) {
         const QVariantMap row = model->getOutput(i);
-        const FeedSample sample = sampleByBuffer.value(bufferForRow(row));
+        const FeedSample sample = sampleByBuffer.value(bufferForRow(i));
         QVariantMap state;
         state.insert(QStringLiteral("presented"), sample.ageMs >= 0);
         state.insert(QStringLiteral("ageMs"), QVariant::fromValue<qint64>(sample.ageMs));
@@ -4649,7 +5166,7 @@ void LiveOutputService::sampleFeedHealth()
         const QString name = row.value(QStringLiteral("name")).toString();
         // The buffer this output's picture actually lands in (one helper, see
         // bufferForRow above — the runtime map reads the same key).
-        const QString buffer = bufferForRow(row);
+        const QString buffer = bufferForRow(i);
         const auto age = sampleByBuffer.constFind(buffer);
         if (age == sampleByBuffer.constEnd() || age.value().ageMs < 0)
             continue;   // never presented to yet: warming, not stalled
@@ -4887,23 +5404,41 @@ void LiveOutputService::pollTick()
 void LiveOutputService::recheckNdiPlanOffThread()
 {
     const auto *model = OutputListModel::instance();
-    struct Request { QString name, buffer, sender; float fps; std::shared_ptr<bps::display::NdiDisplayProvider> provider; };
+    struct Request { QString name, nodeId, buffer, sender; float fps; bool audioWired = false; std::shared_ptr<bps::display::NdiDisplayProvider> provider; };
     std::vector<Request> requests;
+    // An output carries audio only if a bus is actually wired into its node. An
+    // idle NDI sender streaming a 48 kHz stereo silence track is real bandwidth
+    // (about 380 kB/s per output) for nothing, so the wire itself decides.
+    const auto snap = bps::production::ProductionEngine::Instance().Graph().PublishedSnapshot();
+    const auto audioWired = [&snap](const std::string &nodeId) {
+        if (!snap || nodeId.empty())
+            return false;
+        for (const auto &[from, tos] : snap->edges)
+            if (from.ends_with("#a") && tos.count(nodeId) != 0)
+                return true;
+        return false;
+    };
     if (model) {
         for (int i = 0; i < model->rowCount(); ++i) {
             const QVariantMap row = model->getOutput(i);
             if (row.value("kind").toString() != QLatin1String("NDI") || !row.value("isEnabled").toBool()) continue;
             const QString name = row.value("name").toString();
+            // The row's OWN graph node, named exactly as RoutingService names it
+            // ("out:<stable id>"): that is the node whose mix this sender carries.
+            const QString nodeId = QStringLiteral("out:%1").arg(row.value("id").toString());
             auto provider = ndiProviders_.value(name);
             if (!provider) { provider = std::make_shared<bps::display::NdiDisplayProvider>(); ndiProviders_.insert(name, provider); }
-            const QString styleId = row.value("styleId").toString();
-            const std::string buffer = styleId.isEmpty() ? bps::live::LiveOutputController::kPreviewName
-                : QStringLiteral("__out_%1__").arg(qHash(name)).toStdString();
+            // The model's OWN-PASS rule (a style, or a Routing video wire): an
+            // NDI sender must send what the live loop paints for that row.
+            const std::string buffer = model->hasOwnPass(i)
+                ? QStringLiteral("__out_%1__").arg(qHash(name)).toStdString()
+                : std::string(bps::live::LiveOutputController::kPreviewName);
             const QString rate = row.value("refresh").toString();
             bool ok = false;
             const float rawFps = rate.left(rate.indexOf(QLatin1Char(' '))).toFloat(&ok);
             const float fps = bps::display::AcceptedOutputFrameRate(ok ? rawFps : 0.0f);
-            requests.push_back({name, QString::fromStdString(buffer), ndiSenderDisplayName(name), fps, provider});
+            requests.push_back({name, nodeId, QString::fromStdString(buffer), ndiSenderDisplayName(name), fps,
+                                audioWired(nodeId.toStdString()), provider});
         }
     }
     QStringList rosterParts;
@@ -4981,6 +5516,7 @@ void LiveOutputService::recheckNdiPlanOffThread()
         for (const auto &request : requests) {
             NdiProbeResult result;
             result.outputName = request.name; result.senderName = request.sender; result.fps = request.fps; result.provider = request.provider;
+            result.nodeId = request.nodeId; result.audioWired = request.audioWired;
             auto output = pr::RenderEngine::Instance().GetOutput(request.buffer.toStdString());
             if (output.ok()) { result.buffer = std::dynamic_pointer_cast<pr::FrameBufferOutput>(output.value()); result.bufferOk = bool(result.buffer); }
             if (result.buffer) { result.enabled = result.buffer->Enabled(); const auto frame = result.buffer->LastFrameSnapshot(); result.hasFrame = frame && !frame->empty(); }
@@ -5054,6 +5590,19 @@ void LiveOutputService::applyNdiPlanProbe(const std::vector<NdiProbeResult> &res
         if (ready) {
             NdiSendPlan plan; plan.outputName = result.outputName; plan.provider = result.provider;
             plan.buffer = result.buffer; plan.senderName = result.senderName; plan.fps = result.fps;
+            plan.nodeId = result.nodeId;
+            // A sender that is ABOUT to send gets its listener here, once: the
+            // plan is republished on every roster change and an existing listener
+            // is reused, so an audio glitch cannot come from a poll re-arming it.
+            // No audio wire into the node = no listener at all (see the walk).
+            if (result.audioWired && !plan.nodeId.isEmpty()) {
+                plan.audio = ndiAudio_.value(plan.nodeId);
+                if (!plan.audio) {
+                    plan.audio = std::make_shared<NdiAudio>();
+                    ndiAudio_.insert(plan.nodeId, plan.audio);
+                    listenOnNdiOutput(plan.nodeId, plan.audio);
+                }
+            }
             plans.push_back(std::move(plan));
         }
         if (sending && firstSending.isEmpty()) firstSending = result.outputName;
@@ -5199,11 +5748,29 @@ void LiveOutputService::ensureNdiWorker()
 void LiveOutputService::clearNdiPlan()
 {
     ndiClockArmed_ = false;   // no plan: the feed stops its own clock next beat
-    handOverNdiPlan({});
+    // Through setNdiPlan, not straight to the thread: an empty plan also RETIRES
+    // every audio listener (see the prune there). Handing it over directly left
+    // each stopped output's tap pulling its node's mix for the life of the process.
+    setNdiPlan({});
 }
 
 void LiveOutputService::setNdiPlan(const std::vector<NdiSendPlan> &plans)
 {
+    // WHAT WE LISTEN TO IS WHAT WE SEND. A row that stopped sending (switched
+    // off, its buffer gone, the session over) must stop pulling its node's mix,
+    // and every path that empties the plan — including clearNdiPlan — lands
+    // here, so this is the one place a listener is retired.
+    {
+        QSet<QString> sendingNodes;
+        for (const auto &plan : plans)
+            if (!plan.nodeId.isEmpty())
+                sendingNodes.insert(plan.nodeId);
+        for (auto it = ndiAudio_.begin(); it != ndiAudio_.end();) {
+            if (sendingNodes.contains(it.key())) { ++it; continue; }
+            silenceNdiOutput(it.value());
+            it = ndiAudio_.erase(it);
+        }
+    }
     // The thread that will run the feed has to exist before the plan is handed
     // to it (arm first, then publish — the order the mutex version used, so the
     // opening frame still does not wait for the next poll).

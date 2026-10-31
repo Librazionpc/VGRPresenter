@@ -3396,8 +3396,13 @@ void TestBusWindowPlane() {
                 }
             }
 
-            // A BUS WHOSE FEED STOPPED GOES INVISIBLE, not frozen on its last
-            // picture (the renderer skips a VideoObject with no frame).
+            // A BUS WHOSE FEED STOPPED LOSES ITS PICTURE — the last frame must
+            // not freeze on air. It does NOT go invisible: a window paints a flat
+            // plate of its own rectangle instead (SceneBuilder::BusPlaceholder —
+            // an unfed window reads as a window, not as a hole in the design), so
+            // the check is the one that matters either way: the stopped feed's
+            // picture is gone, nothing has been pushed since, and the plate is the
+            // WINDOW's size rather than a full frame.
             compositor.ClearBusFrames();
             CHECK(!compositor.HasBusFrames());
             (void)builder.BuildSlideScene(pres, slide, style, engine);
@@ -3406,8 +3411,12 @@ void TestBusWindowPlane() {
             if (blanked.ok()) {
                 auto* v = dynamic_cast<r::VideoObject*>(blanked.value());
                 CHECK(v != nullptr);
-                if (v)
-                    CHECK(!v->HasFrame());
+                if (v) {
+                    CHECK(v->SourceSeq() == 0);                              // no feed behind it
+                    CHECK(v->Frame().width != 4 || v->Frame().height != 4);   // not the stopped picture
+                    CHECK(std::abs(static_cast<float>(v->Frame().width) - expectW) < 1.5f);
+                    CHECK(std::abs(static_cast<float>(v->Frame().height) - expectH) < 1.5f);
+                }
             }
         }
     }
@@ -3426,6 +3435,166 @@ void TestBusWindowPlane() {
 
     compositor.SetBusFeeds({});
     compositor.ClearBusFrames();
+    (void)engine.DestroyScene(built.value());
+}
+
+// ---------------------------------------------------------------------------
+// A TEMPLATE BUS's WINDOWS — which feed each window reads, and where it draws
+// ---------------------------------------------------------------------------
+// A template bus is a design whose `bus` blocks are windows: a window that NAMES
+// a bus shows that bus, and a window that names none shows the template bus's own
+// routed video sources IN ROUTE ORDER. The two halves of that contract live in
+// different files — LiveOutputService publishes route i at
+// CompositorState::TemplateWindowPlaneKey(bus, i), SceneBuilder records which key
+// each window reads — so the pairing is pinned here, end to end.
+//
+// THE CASE THAT BREAKS: a design whose FIRST window names a bus and whose OPEN
+// windows follow it. Counting every bus block as a route index put the first
+// route on window index 1 — a key LiveOutputService never publishes — so routing
+// one camera into the bus painted nothing, and with two routes the open window
+// showed the SECOND camera. The index has to count OPEN windows only, and these
+// checks fail the moment it counts blocks again.
+void TestTemplateBusWindows() {
+    r::RenderEngine& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    auto& compositor = p::CompositorState::Instance();
+    // ONE DISTINCT SIZE PER FEED: a window's frame size is what says WHICH plane
+    // it ended up reading, and a route that was never pushed leaves the plane's
+    // SourceSeq at 0 (a place-holder plate carries pixels but no push counter).
+    auto solid = [](int w, int h) {
+        p::CompositorState::MediaFrame f;
+        f.width = static_cast<uint32_t>(w);
+        f.height = static_cast<uint32_t>(h);
+        f.rgba.assign(static_cast<size_t>(w) * h * 4, 0);
+        for (size_t i = 0; i < f.rgba.size(); i += 4) {
+            f.rgba[i + 0] = 0x00;   // R
+            f.rgba[i + 1] = 0xFF;   // G
+            f.rgba[i + 2] = 0x00;   // B
+            f.rgba[i + 3] = 0xFF;   // A
+        }
+        return f;
+    };
+
+    constexpr int kTemplateBus = 5;   // the bus the windows belong to
+    constexpr int kNamedBus = 3;      // the bus the FIRST window names
+
+    // namedA — its own assignment (bus 3), NOT a route of the template bus.
+    p::ContentBlock namedA;
+    namedA.id = "namedA";
+    namedA.kind = "bus";
+    namedA.x = 20; namedA.y = 20; namedA.width = 300; namedA.height = 169;
+    namedA.metaJson = R"({"busId":3,"busName":"Camera 1","busType":"video"})";
+    // openB / openC — no assignment: route 0 and route 1, in document order.
+    p::ContentBlock openB;
+    openB.id = "openB";
+    openB.kind = "bus";
+    openB.x = 340; openB.y = 20; openB.width = 300; openB.height = 169;
+    openB.metaJson = "{}";
+    p::ContentBlock openC;
+    openC.id = "openC";
+    openC.kind = "bus";
+    openC.x = 20; openC.y = 200; openC.width = 300; openC.height = 169;
+    openC.metaJson = "{}";
+
+    const std::vector<p::ContentBlock> blocks = { namedA, openB, openC };
+
+    const int route0 = p::CompositorState::TemplateWindowPlaneKey(kTemplateBus, 0);
+    const int route1 = p::CompositorState::TemplateWindowPlaneKey(kTemplateBus, 1);
+    // A window key is no bus number: the two spaces cannot collide, or a window
+    // would paint whatever bus happens to carry that number.
+    CHECK(route0 > kNamedBus && route1 > route0);
+
+    compositor.ClearBusFrames();
+    compositor.SetBusFrame(kNamedBus, solid(9, 9));
+    compositor.SetBusFrame(route0, solid(6, 6));
+    compositor.SetBusFrame(route1, solid(4, 4));
+
+    p::SceneBuilder builder;
+    auto built = builder.BuildTemplateBusScene(kTemplateBus, blocks, "#ff101010", engine);
+    CHECK(built.ok());
+    if (!built.ok())
+        return;
+
+    // The plane a window is drawn with, read the way the renderer reads it
+    // (SceneBuilder records it as "w:<block id>").
+    auto window = [&](const char *id) -> r::VideoObject* {
+        auto obj = engine.GetObject(built.value(), std::string("w:") + id);
+        if (!obj.ok())
+            return nullptr;
+        return dynamic_cast<r::VideoObject*>(obj.value());
+    };
+    // The rectangle the design names, in output pixels (the 754x428 stage grid
+    // scaled onto a 1920x1080 frame — BlockRect's one derivation).
+    auto expectRect = [](const p::ContentBlock& b) {
+        return r::Rect(static_cast<float>(b.x / 754.0 * 1920.0),
+                       static_cast<float>(b.y / 428.0 * 1080.0),
+                       static_cast<float>(b.width / 754.0 * 1920.0),
+                       static_cast<float>(b.height / 428.0 * 1080.0));
+    };
+    auto rectMatches = [](const r::VideoObject* v, const r::Rect& want) {
+        return v && std::abs(v->Bounds().x - want.x) < 0.5f
+                 && std::abs(v->Bounds().y - want.y) < 0.5f
+                 && std::abs(v->Bounds().width - want.width) < 0.5f
+                 && std::abs(v->Bounds().height - want.height) < 0.5f;
+    };
+
+    r::VideoObject* a = window("namedA");
+    CHECK(a != nullptr);
+    if (a) {
+        CHECK(a->HasFrame());
+        // ITS OWN BUS, not a route of the template bus — and, being named, it
+        // consumes no route index (the whole point of this design).
+        CHECK(a->Frame().width == 9 && a->Frame().height == 9);
+        CHECK(a->SourceSeq() == compositor.GetBusFrameSeq(kNamedBus));
+        CHECK(a->SourceSeq() != 0);
+        CHECK(rectMatches(a, expectRect(namedA)));
+        CHECK(a->LayerId() == "media");
+    }
+
+    r::VideoObject* b = window("openB");
+    CHECK(b != nullptr);
+    if (b) {
+        // ROUTE 0, even though it is the SECOND bus block on the design.
+        CHECK(b->HasFrame());
+        CHECK(b->Frame().width == 6 && b->Frame().height == 6);
+        CHECK(b->SourceSeq() == compositor.GetBusFrameSeq(route0));
+        CHECK(b->SourceSeq() != 0);
+        CHECK(rectMatches(b, expectRect(openB)));
+    }
+
+    r::VideoObject* c = window("openC");
+    CHECK(c != nullptr);
+    if (c) {
+        CHECK(c->HasFrame());
+        CHECK(c->Frame().width == 4 && c->Frame().height == 4);
+        CHECK(c->SourceSeq() == compositor.GetBusFrameSeq(route1));
+        CHECK(c->SourceSeq() != 0);
+        CHECK(rectMatches(c, expectRect(openC)));
+    }
+
+    // ...AND THE INDICES DO NOT COLLAPSE. With only route 1 fed, the SECOND open
+    // window is the one with a picture; the first reads its own key and shows the
+    // place-holder plate (no push, SourceSeq 0) instead of borrowing the
+    // neighbour's feed. This build is a CACHE HIT — the layout did not move —
+    // which is also what pins that the planes still refresh on one.
+    compositor.ClearBusFrames();
+    compositor.SetBusFrame(route1, solid(4, 4));
+    auto again = builder.BuildTemplateBusScene(kTemplateBus, blocks, "#ff101010", engine);
+    CHECK(again.ok() && again.value() == built.value());
+
+    r::VideoObject* b2 = window("openB");
+    CHECK(b2 != nullptr && b2->SourceSeq() == 0);
+    r::VideoObject* c2 = window("openC");
+    CHECK(c2 != nullptr);
+    if (c2) {
+        CHECK(c2->Frame().width == 4 && c2->Frame().height == 4);
+        CHECK(c2->SourceSeq() == compositor.GetBusFrameSeq(route1));
+    }
+
+    compositor.ClearBusFrames();
+    compositor.SetBusFeeds({});
     (void)engine.DestroyScene(built.value());
 }
 

@@ -90,10 +90,10 @@ MouseArea {
             root.dragLayerRef.drop()
         root.started = false
         // Where the pointer is now, not hover state: a control drawn above this one can take the hover away.
-        if (!wasDrag && mouse.x >= 0 && mouse.y >= 0 && mouse.x <= root.width && mouse.y <= root.height)
+        if (!wasDrag && mouse.button === Qt.LeftButton && mouse.x >= 0 && mouse.y >= 0 && mouse.x <= root.width && mouse.y <= root.height)
             root.activated(mouse.modifiers)
     }
-    onDoubleClicked: root.opened()
+    onDoubleClicked: (mouse) => { if (mouse.button === Qt.LeftButton) root.opened() }
     onCanceled: {
         if (root.started && root.dragLayerRef)
             root.dragLayerRef.cancel()

@@ -439,7 +439,10 @@ DesignLibraryConfig TemplateLibraryConfig() {
     c.defaultCategories = { DesignCategory{ "song", "Song", "music", true },
                             DesignCategory{ "presentation", "Presentation", "presentation", true },
                             DesignCategory{ "scripture", "Scripture", "bookOpen", true },
-                            DesignCategory{ "table", "The Table", "book", true } };
+                            DesignCategory{ "table", "The Table", "book", true },
+                            // Bus templates: the designs whose bus windows Audio & Video
+                            // lists. Shipped, so it cannot be renamed, re-iconed or removed.
+                            DesignCategory{ "buses", "Buses", "layers", true } };
     c.defaultDesigns = ShippedTemplates();
     c.starterBlocks = TemplateStarter;
     return c;

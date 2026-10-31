@@ -416,6 +416,20 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
             || activeStyle_.showScripture != style.showScripture
             || activeStyle_.showTable != style.showTable
             || activeStyle_.templateBlocks != style.templateBlocks
+            // WHICH BUS WINDOWS THIS OUTPUT MAY PAINT (see OutputStyleSpec): a wire
+            // added or pulled changes the composed picture — the design's bus
+            // blocks stop or start painting — so leaving these out would call that
+            // push a no-op and leave the old set on screen. Same rule as mediaFit's
+            // note above: any field a frame can depend on belongs in this list.
+            || activeStyle_.gateVideoBuses != style.gateVideoBuses
+            || activeStyle_.allowedVideoBuses != style.allowedVideoBuses
+            // THE TEMPLATE BUS A ROW SHOWS (see OutputStyleSpec): a wire onto a
+            // template bus, a re-assignment inside its template or a template
+            // edit all re-push the same style with a different picture, so a
+            // push that only differs here must not read as a no-op.
+            || activeStyle_.templateBus != style.templateBus
+            || activeStyle_.templateBusBlocks != style.templateBusBlocks
+            || activeStyle_.templateBusBackground != style.templateBusBackground
             // PER-FAMILY templates: a family re-pick (or a template design
             // edit under a family key) re-pushes with different per-family
             // keys/blocks — that must rebuild scenes, not no-op.

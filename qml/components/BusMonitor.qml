@@ -89,6 +89,19 @@ QtObject {
         target: EngineBridge
         function onDevicesChanged() { root.bump() }
     }
+    // A WINDOW source that is closed is in no device sweep until it exists, and
+    // sweeps are rare for a source that stays missing (every one of them wakes the
+    // cameras). So while its light reads "offline" this monitor asks the bridge to
+    // re-list the open windows — windows only, cheap, off the interface thread — and
+    // the answer comes back through devicesChanged above, so the light and the
+    // picture follow the moment the window opens. Held by a property for the same
+    // teardown reason as the Connections: it stops when the monitor is destroyed.
+    property Timer windowWatch: Timer {
+        interval: 2000
+        repeat: true
+        running: root.videoKind === "screen" && root.videoLabel !== "" && root.status === "offline"
+        onTriggered: EngineBridge.refreshWindow(root.videoLabel)
+    }
 
     // A signal handler takes the emit's arguments and ignores them; the revision
     // is all this needs. The `root` guard stays as a belt beside the connections'

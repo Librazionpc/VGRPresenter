@@ -2,49 +2,72 @@
 
 #include "core/events/EventBus.hpp"
 #include "core/logging/Logger.hpp"
+#include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
+#include "modules/recording/MediaFoundationMp4.hpp"
+#include "modules/rendering/RenderEngine.hpp"
+#include "modules/rendering/RenderOutputs.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <format>
+#include <thread>
 
 namespace bps::recording {
+struct RecordingEngine::Pump {
+    struct AudioBlock {
+        std::vector<float> samples;
+        uint32_t channels = 0;
+        uint32_t rateHz = 0;
+        double timestampMs = 0.0;
+    };
+
+    std::string recordingId;
+    std::string bufferName;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    uint64_t audioTap = 0;
+    uint64_t audioOrigin = 0;           // the mix's sample position when the recording began
+    uint64_t lastFrame = 0;             // the buffer's frame count already written
+    std::atomic<bool> stop{false};
+    std::thread thread;
+    std::mutex wakeMutex;
+    std::condition_variable wake;
+    std::mutex writeMutex;              // one writer at a time: the pump, a rotation, a stop
+    std::mutex audioMutex;              // guards audio
+    std::deque<AudioBlock> audio;
+
+    ~Pump() {
+        if (!thread.joinable())
+            return;
+        // The last reference can drop on the pump's own thread (a failed recording).
+        if (thread.get_id() == std::this_thread::get_id())
+            thread.detach();
+        else
+            thread.join();
+    }
+};
+
 
 namespace {
 
 constexpr const char* kModule = "RecordingEngine";
 
-// Default container: an in-engine sink that tracks open/close state. Real
-// containers (ffmpeg/mkvmerge/...) register via RegisterContainer.
-class SinkContainer final : public IRecordingContainer {
-public:
-    explicit SinkContainer(std::string name) : name_(std::move(name)) {}
-    const char* Name() const noexcept override { return name_.c_str(); }
-    Result<std::string> Open(const RecordingProfile&, std::string_view path) override {
-        path_ = std::string(path);
-        opened_ = true;
-        return std::string(path);
-    }
-    Result<void> Close(bool /*finalized*/) override {
-        opened_ = false;
-        return Ok();
-    }
-    bool Opened() const { return opened_; }
-
-private:
-    std::string name_;
-    std::string path_;
-    bool opened_ = false;
-};
-
-// Default software encoder: tracks initialization only. Hardware encoders
-// (NVENC/AMF/QuickSync) register via RegisterVideoEncoder.
-class SoftwareVideoEncoder final : public IVideoEncoder {
+// The Media Foundation encoders the MP4 container writes with. Initialize succeeds
+// only when Media Foundation has the encoder; the encoder selected is the one the
+// system provides (hardware where present, the Microsoft software encoder otherwise).
+class MediaFoundationVideoEncoder final : public IVideoEncoder {
 public:
     const char* Codec() const noexcept override { return "H.264"; }
     EncoderKind Kind() const noexcept override { return EncoderKind::Software; }
-    Result<void> Initialize(const RecordingProfile&) override { initialized_ = true; return Ok(); }
+    Result<void> Initialize(const RecordingProfile&) override {
+        auto probe = ProbeH264Encoder();
+        if (!probe.ok()) return probe;
+        initialized_ = true;
+        return Ok();
+    }
     Result<void> Shutdown() override { initialized_ = false; return Ok(); }
     bool Initialized() const { return initialized_; }
 
@@ -52,10 +75,15 @@ private:
     bool initialized_ = false;
 };
 
-class SoftwareAudioEncoder final : public IAudioEncoder {
+class MediaFoundationAudioEncoder final : public IAudioEncoder {
 public:
     const char* Codec() const noexcept override { return "AAC"; }
-    Result<void> Initialize(const RecordingProfile&) override { initialized_ = true; return Ok(); }
+    Result<void> Initialize(const RecordingProfile&) override {
+        auto probe = ProbeAacEncoder();
+        if (!probe.ok()) return probe;
+        initialized_ = true;
+        return Ok();
+    }
     Result<void> Shutdown() override { initialized_ = false; return Ok(); }
     bool Initialized() const { return initialized_; }
 
@@ -63,25 +91,6 @@ private:
     bool initialized_ = false;
 };
 
-// Test capture device used by the default registry and the unit tests.
-class TestCaptureSource final : public ICaptureSource {
-public:
-    TestCaptureSource(std::string id, std::string kind, production::SignalType sig)
-        : id_(std::move(id)), kind_(std::move(kind)), sig_(sig) {}
-    const char* DeviceId() const noexcept override { return id_.c_str(); }
-    const char* Kind() const noexcept override { return kind_.c_str(); }
-    const char* DisplayName() const noexcept override { return id_.c_str(); }
-    production::SignalType Signal() const noexcept override { return sig_; }
-    Result<void> Start() override { running_ = true; return Ok(); }
-    Result<void> Stop() override { running_ = false; return Ok(); }
-    bool Running() const { return running_; }
-
-private:
-    std::string id_;
-    std::string kind_;
-    production::SignalType sig_;
-    bool running_ = false;
-};
 
 const char* EncoderKindName(EncoderKind k) {
     switch (k) {
@@ -154,20 +163,19 @@ Result<void> RecordingEngine::Initialize() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (initialized_.load()) return Ok();   // lost the race; other caller finished
 
-    // Default providers: containers + software encoders (docs/specs/28 §11-§13).
-    for (auto c : {ContainerKind::MKV, ContainerKind::MP4, ContainerKind::MOV,
-                   ContainerKind::WebM, ContainerKind::WAV, ContainerKind::FLAC}) {
-        const std::string name = ContainerName(c);
-        containers_.emplace(name, [name]() -> std::shared_ptr<IRecordingContainer> {
-            return std::make_shared<SinkContainer>(name);
-        });
-    }
+    // Default providers (docs/specs/28 §11-§13). MP4 is the container this build
+    // writes; the other formats are not registered, so a profile that asks for one
+    // is refused rather than silently written as something else.
+    containers_.emplace(ContainerName(ContainerKind::MP4),
+                        []() -> std::shared_ptr<IRecordingContainer> {
+                            return std::make_shared<MediaFoundationMp4>();
+                        });
     videoEncoders_.emplace(EncoderKindName(EncoderKind::Software),
                            []() -> std::shared_ptr<IVideoEncoder> {
-                               return std::make_shared<SoftwareVideoEncoder>();
+                               return std::make_shared<MediaFoundationVideoEncoder>();
                            });
     audioEncoders_.emplace("AAC", []() -> std::shared_ptr<IAudioEncoder> {
-        return std::make_shared<SoftwareAudioEncoder>();
+        return std::make_shared<MediaFoundationAudioEncoder>();
     });
 
     // Default master profile (docs/specs/28 §2: Output Recording Profiles).
@@ -175,7 +183,7 @@ Result<void> RecordingEngine::Initialize() {
         RecordingProfile master;
         master.id = "master";
         master.name = "Master Recording";
-        master.container = ContainerKind::MKV;
+        master.container = ContainerKind::MP4;
         master.videoCodec = VideoCodec::H264;
         master.audioCodec = AudioCodec::AAC;
         master.segmentDurationMs = 0;  // single segment by default
@@ -225,6 +233,7 @@ Result<void> RecordingEngine::Shutdown() {
     }
     // Stop() finalizes containers; give it a lock-free window.
     (void)Stop();
+    StopAllPumps();
     // Bus work (unsubscribing), so it runs with NO engine lock held: a
     // subscriber that re-enters this engine would otherwise wait on mutex_.
     UnwireEvents();
@@ -259,6 +268,7 @@ Result<void> RecordingEngine::Reset() {
         if (!initialized_.load()) return Ok();
     }
     (void)Stop();
+    StopAllPumps();
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     sessions_.clear();
     replays_.clear();
@@ -583,6 +593,7 @@ Result<std::string> RecordingEngine::StartRecording(std::string_view profileId,
             events::RecordingFailed{rid, opened.error().message});
         return opened.error();
     }
+    StartPump(rid);
     (void)EventBus::Instance().Publish(events::SegmentCreated{rid, seg, openedPath});
     (void)EventBus::Instance().Publish(
         events::RecordingStarted{rid, std::string(profileId), std::string(nodeId)});
@@ -591,7 +602,7 @@ Result<std::string> RecordingEngine::StartRecording(std::string_view profileId,
 
 Result<void> RecordingEngine::StopRecording(std::string_view recordingId,
                                             std::string_view reason) {
-    std::shared_ptr<IRecordingContainer> container;
+    std::shared_ptr<Pump> pump;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto it = sessions_.find(recordingId);
@@ -603,9 +614,21 @@ Result<void> RecordingEngine::StopRecording(std::string_view recordingId,
                                "recording is not active (state: " +
                                    std::string(StateName(s.state)) + ")");
         s.state = RecordingState::Finalizing;
+        pump = std::move(s.pump);
+        s.pump.reset();
+    }
+    // The pump writes into the container, so it stops before the container closes.
+    StopPump(pump);
+
+    std::shared_ptr<IRecordingContainer> container;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
         // Detach the container so it can be finalized with no lock held.
-        container = std::move(s.container);
-        s.container.reset();
+        container = std::move(it->second.container);
+        it->second.container.reset();
     }
     // Finalize the provider container with NO lock held.
     if (container) (void)container->Close(true);
@@ -721,18 +744,39 @@ std::vector<RecordingStateView> RecordingEngine::Recordings(RecordingState state
 }
 
 Result<void> RecordingEngine::DeleteRecording(std::string_view recordingId) {
+    std::shared_ptr<Pump> pump;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end())
+            return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+        if (it->second.state == RecordingState::Recording ||
+            it->second.state == RecordingState::Paused ||
+            it->second.state == RecordingState::Preparing ||
+            it->second.state == RecordingState::Finalizing)
+            return Error::Make(Err::Recording_InvalidState, kModule,
+                               "cannot delete an active recording");
+        pump = it->second.pump;
+    }
+    // A failed recording's pump may still be finishing a pass; it has to end before
+    // the session goes, and it cannot end while this thread holds the engine lock.
+    StopPump(pump);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = sessions_.find(recordingId);
     if (it == sessions_.end())
         return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
-    if (it->second.state == RecordingState::Recording ||
-        it->second.state == RecordingState::Paused ||
-        it->second.state == RecordingState::Preparing ||
-        it->second.state == RecordingState::Finalizing)
-        return Error::Make(Err::Recording_InvalidState, kModule,
-                           "cannot delete an active recording");
     sessions_.erase(it);
     return Ok();
+}
+
+void RecordingEngine::StopAllPumps() {
+    std::vector<std::shared_ptr<Pump>> pumps;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        for (const auto& [id, s] : sessions_)
+            if (s.pump) pumps.push_back(s.pump);
+    }
+    for (const auto& pump : pumps) StopPump(pump);
 }
 
 Result<void> RecordingEngine::ArchiveRecording(std::string_view recordingId) {
@@ -1141,6 +1185,7 @@ std::string RecordingEngine::MakePath(const RecordingProfile& p, std::string_vie
 // while the provider was working.
 void RecordingEngine::RotateSegment(const std::string& recordingId) {
     std::shared_ptr<IRecordingContainer> closing;
+    std::shared_ptr<Pump> pumpRef;
     ContainerFactory factory;
     RecordingProfile profile;
     std::string path;
@@ -1170,12 +1215,19 @@ void RecordingEngine::RotateSegment(const std::string& recordingId) {
         path = MakePath(profile, defaultDir_, seg, clockMs_.load());
         closing = std::move(s.container);
         s.container.reset();
+        pumpRef = s.pump;
         ready = true;
     }
     if (!ready) return;
 
     // --- provider calls, no lock held ---
-    if (closing) (void)closing->Close(false);
+    if (closing) {
+        // The pump may be writing into the outgoing segment: wait for its write to
+        // finish, and it cannot write again until the new segment is in place.
+        std::unique_lock<std::mutex> writing;
+        if (pumpRef) writing = std::unique_lock<std::mutex>(pumpRef->writeMutex);
+        (void)closing->Close(false);
+    }
     auto container = factory();
     Result<std::string> opened =
         container ? container->Open(profile, path)
@@ -1422,6 +1474,192 @@ void RecordingEngine::WireEvents() {
 void RecordingEngine::UnwireEvents() {
     for (auto& s : subscriptions_) (void)EventBus::Instance().Unsubscribe(s);
     subscriptions_.clear();
+}
+
+// ---------------------------------------------------------------------------
+// The pump: one thread per recording. Frames come from the render buffer the
+// recording reads whenever it holds a new one; audio comes from a listener on the
+// program mix, queued until the pump writes it.
+
+namespace {
+
+// The buffer a recording reads when its production node names none: the on-air
+// feed (the same name LiveOutputController::kPreviewName carries).
+constexpr const char* kOnAirBuffer = "__live_preview__";
+// How often the pump looks for new frames and audio.
+constexpr auto kPumpInterval = std::chrono::milliseconds(10);
+// Bounded audio backlog: past this, the oldest queued block is dropped.
+constexpr size_t kMaxQueuedAudioBlocks = 512;
+
+double ElapsedMs(std::chrono::steady_clock::time_point start)
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+} // namespace
+
+void RecordingEngine::StartPump(const std::string& recordingId) {
+    auto pump = std::make_shared<Pump>();
+    pump->recordingId = recordingId;
+    pump->bufferName = kOnAirBuffer;
+    std::string nodeId;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end()) return;
+        nodeId = it->second.nodeId;
+    }
+    // A production node may name its own render buffer in its "recordBuffer" meta.
+    const auto node = production::ProductionEngine::Instance().Graph().GetNode(nodeId);
+    if (node.ok()) {
+        const auto meta = node.value().meta.find("recordBuffer");
+        if (meta != node.value().meta.end() && !meta->second.empty())
+            pump->bufferName = meta->second;
+    }
+    // Frames already in the buffer belong to before this recording.
+    if (auto out = rendering::RenderEngine::Instance().GetOutput(pump->bufferName); out.ok())
+        if (auto* fb = dynamic_cast<rendering::FrameBufferOutput*>(out.value().get()))
+            pump->lastFrame = fb->FramesReceived();
+
+    // The audio listener copies each rendered chunk; the pump writes it later. Audio is
+    // stamped on the mix's sample clock, counted from the moment this recording began.
+    // The listener hears only the buses wired to this recording's output node. With no
+    // output node there is nothing to hear: no tap, rather than the speaker mix (an
+    // empty id means the speakers to the mixer).
+    pump->audioOrigin = audio::AudioEngine::Instance().FramesRendered();
+    pump->audioTap = nodeId.empty() ? uint64_t{0} : audio::AudioEngine::Instance().AddMixTap(
+        nodeId,
+        [raw = pump.get()](const float* samples, uint32_t frames, uint32_t channels,
+                           uint32_t rateHz, uint64_t startFrame) {
+            Pump::AudioBlock block;
+            block.samples.assign(samples, samples + static_cast<size_t>(frames) * channels);
+            block.channels = channels;
+            block.rateHz = rateHz;
+            const uint64_t fromOrigin = startFrame > raw->audioOrigin ? startFrame - raw->audioOrigin : 0;
+            block.timestampMs = rateHz > 0 ? static_cast<double>(fromOrigin) * 1000.0 / rateHz : 0.0;
+            std::lock_guard<std::mutex> lock(raw->audioMutex);
+            if (raw->audio.size() >= kMaxQueuedAudioBlocks)
+                raw->audio.pop_front();
+            raw->audio.push_back(std::move(block));
+        });
+
+    pump->thread = std::thread([this, pump]() { PumpLoop(pump); });
+    bool attached = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it != sessions_.end()) {
+            it->second.pump = pump;
+            attached = true;
+        }
+    }
+    // Joined only with the engine lock released: the pump takes that lock to write.
+    if (!attached) StopPump(pump);
+}
+
+void RecordingEngine::StopPump(const std::shared_ptr<Pump>& pump) {
+    if (!pump) return;
+    if (pump->audioTap != 0) {
+        audio::AudioEngine::Instance().RemoveMixTap(pump->audioTap);
+        pump->audioTap = 0;
+    }
+    pump->stop.store(true);
+    pump->wake.notify_all();
+    if (pump->thread.joinable() && pump->thread.get_id() != std::this_thread::get_id())
+        pump->thread.join();
+}
+
+void RecordingEngine::PumpLoop(std::shared_ptr<Pump> pump) {
+    while (!pump->stop.load()) {
+        WriteVideoOnce(*pump);
+        WriteAudioOnce(*pump);
+        std::unique_lock<std::mutex> lock(pump->wakeMutex);
+        pump->wake.wait_for(lock, kPumpInterval, [&pump] { return pump->stop.load(); });
+    }
+}
+
+std::shared_ptr<IRecordingContainer> RecordingEngine::WritableContainer(std::string_view recordingId) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = sessions_.find(recordingId);
+    if (it == sessions_.end() || it->second.state != RecordingState::Recording)
+        return nullptr;
+    return it->second.container;
+}
+
+void RecordingEngine::WriteVideoOnce(Pump& pump) {
+    auto out = rendering::RenderEngine::Instance().GetOutput(pump.bufferName);
+    if (!out.ok()) return;
+    auto* fb = dynamic_cast<rendering::FrameBufferOutput*>(out.value().get());
+    if (!fb) return;
+    const uint64_t received = fb->FramesReceived();
+    if (received == pump.lastFrame) return;
+    pump.lastFrame = received;
+    const auto frame = fb->LastFrameSnapshot();
+    if (!frame || frame->empty()) return;
+
+    std::string failure;
+    {
+        std::lock_guard<std::mutex> writing(pump.writeMutex);
+        auto container = WritableContainer(pump.recordingId);
+        if (!container) return;
+        VideoFrameIn in;
+        in.pixels = frame->pixels.data();
+        in.width = frame->width;
+        in.height = frame->height;
+        in.timestampMs = ElapsedMs(pump.start);
+        if (auto written = container->WriteVideo(in); !written.ok())
+            failure = written.error().message;
+    }
+    if (!failure.empty()) FailRecording(pump.recordingId, failure);
+}
+
+void RecordingEngine::WriteAudioOnce(Pump& pump) {
+    std::deque<Pump::AudioBlock> blocks;
+    {
+        std::lock_guard<std::mutex> lock(pump.audioMutex);
+        blocks.swap(pump.audio);
+    }
+    if (blocks.empty()) return;
+
+    std::string failure;
+    {
+        std::lock_guard<std::mutex> writing(pump.writeMutex);
+        // Paused or not writing: the audio is not kept, so a resume starts clean.
+        auto container = WritableContainer(pump.recordingId);
+        if (!container) return;
+        for (const auto& block : blocks) {
+            AudioBlockIn in;
+            in.samples = block.samples.data();
+            in.channels = block.channels;
+            in.frames = block.channels > 0 ? block.samples.size() / block.channels : 0;
+            in.rateHz = block.rateHz;
+            in.timestampMs = block.timestampMs;
+            if (auto written = container->WriteAudio(in); !written.ok()) {
+                failure = written.error().message;
+                break;
+            }
+        }
+    }
+    if (!failure.empty()) FailRecording(pump.recordingId, failure);
+}
+
+void RecordingEngine::FailRecording(const std::string& recordingId, const std::string& message) {
+    std::shared_ptr<IRecordingContainer> container;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto it = sessions_.find(recordingId);
+        if (it == sessions_.end() || it->second.state != RecordingState::Recording) return;
+        errorCount_.fetch_add(1);
+        it->second.state = RecordingState::Failed;
+        Journal(JournalEntry::Kind::Failed, recordingId, message);
+        // The pump ends with its recording: it must not outlive a failed session.
+        if (it->second.pump) it->second.pump->stop.store(true);
+        // Keep what was written: the container finalizes the file it has.
+        container = std::move(it->second.container);
+        it->second.container.reset();
+    }
+    if (container) (void)container->Close(true);
+    (void)EventBus::Instance().Publish(events::RecordingFailed{recordingId, message});
 }
 
 } // namespace bps::recording

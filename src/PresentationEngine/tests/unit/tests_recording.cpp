@@ -97,7 +97,7 @@ void TestRecordingProfiles() {
     rk::RecordingProfile master;
     master.id = "sunday";
     master.name = "Sunday Service";
-    master.container = rk::ContainerKind::MKV;
+    master.container = rk::ContainerKind::MP4;
     master.videoCodec = rk::VideoCodec::H264;
     master.audioCodec = rk::AudioCodec::AAC;
     master.segmentDurationMs = 60000;
@@ -232,7 +232,11 @@ void TestRecordingLifecycle() {
     CHECK(st.ok() && st.value().state == rk::RecordingState::Recording);
     CHECK(st.value().tapPoint == rk::TapPoint::PostProcessing);
     CHECK(!st.value().filePath.empty());
-    CHECK(st.value().filePath.find(".mkv") != std::string::npos);
+    // The file's extension follows the profile's CONTAINER, and this profile keeps
+    // the struct's default (MP4). The check used to demand ".mkv", so it was
+    // asserting a default that had moved on rather than the contract it documents.
+    CHECK(seg.container == rk::ContainerKind::MP4);
+    CHECK(st.value().filePath.find(".mp4") != std::string::npos);
     CHECK(rec.SetMetadata(id, "event", "Sunday Service").ok());
     CHECK(rec.SetMetadata(id, "speaker", "John").ok());
     CHECK(rec.SetMetadata(id, "scripture", "John 3:16").ok());

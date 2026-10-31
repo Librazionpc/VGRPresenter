@@ -4,6 +4,7 @@
 #include "ChannelTrim.h"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
+#include "services/DesignLibraryService.h"
 #include "VideoSourceListModel.h"
 
 #include <QDebug>
@@ -147,6 +148,70 @@ int videoProviders(const std::string &planeNodeId)
         if (up.starts_with(kVideoSourcePrefix))
             ++n;
     return n;
+}
+
+// The audio half of videoProviders — read by a TEMPLATE bus's one-sound rule
+// (connectRefusal / connectAudioRoute): however many pictures it carries, a
+// template bus has one audio input, so a second input is refused where the
+// operator can read why instead of being summed in with no way to tell.
+int audioProviders(const std::string &planeNodeId)
+{
+    int n = 0;
+    for (const auto &up : graph().Upstream(planeNodeId))
+        if (up.starts_with(kAudioSourcePrefix))
+            ++n;
+    return n;
+}
+
+// THE WINDOWS A TEMPLATE BUS ACTUALLY HAS. A window is a `bus` block on the
+// template design, and the routing rule follows from what each one can show:
+//
+//   total — every `bus` block on the template (the design's windows);
+//   open  — the ones that name NO bus (meta busId empty/0). Those are the ones
+//           that take the template bus's routed video sources, in route order
+//           (SceneBuilder::RecordTemplateWindows / LiveOutputService's
+//           addTemplateWindows: TemplateWindowPlaneKey per position). A window
+//           that NAMES a bus shows that bus and no route can land in it.
+//
+// So a template with no bus items at all has nowhere to put a picture: routing a
+// camera into it is a wire that can never show anything, and that is refused at
+// the source rather than drawn and left black.
+//
+// `known` is what keeps the rule from acting on ignorance: the template library
+// is a lazily-built QML singleton, so at boot (and for a moment after) the
+// design map is empty for a reason that has nothing to do with the template —
+// "not read yet" must not be mistaken for "no windows" and sweep away routes
+// that are still valid.
+struct TemplateWindows
+{
+    bool known = false;
+    int total = 0;
+    int open = 0;
+};
+
+TemplateWindows templateWindows(const QString &templateId)
+{
+    TemplateWindows w;
+    if (templateId.isEmpty())
+        return w;
+    // The library answers with the DESIGN map (DesignLibraryService::toMap):
+    // blocks as QVariantMaps, each with `kind` and `meta` (a map — see
+    // ShowConverter::blockToVariant).
+    const QVariantMap design = TemplateLibraryService::templates().design(templateId);
+    if (design.isEmpty())
+        return w;   // not readable yet (or gone) — nothing to judge
+    w.known = true;
+    const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+    for (const QVariant &v : blocks) {
+        const QVariantMap block = v.toMap();
+        if (block.value(QStringLiteral("kind")).toString() != QStringLiteral("bus"))
+            continue;
+        ++w.total;
+        const QVariantMap meta = block.value(QStringLiteral("meta")).toMap();
+        if (meta.value(QStringLiteral("busId")).toInt() <= 0)
+            ++w.open;
+    }
+    return w;
 }
 
 void logIfFailed(const char *op, const auto &r)
@@ -433,12 +498,20 @@ void BusListModel::trimExtraVideoProviders()
         return;
     QList<QPair<std::string, std::string>> cuts;   // source node -> plane node
     for (int row = 0; row < m_buses.size(); ++row) {
+        const bool templateBus = m_buses.at(row).type == QStringLiteral("template");
         const std::string plane = m_buses.at(row).engineIdVideo.toStdString();
         QList<std::string> providers;
         for (const auto &up : graph().Upstream(plane)) {
             if (up.starts_with(kVideoSourcePrefix))
                 providers.append(up);
         }
+        // A TEMPLATE bus is the one bus that is SUPPOSED to carry several video
+        // sources, so the one-provider sweep leaves every route it has alone. It is
+        // not trimmed to its windows either: the windows name their own buses, and
+        // the feeds routed into the template bus are exactly the ones the operator
+        // chose to give it.
+        if (templateBus)
+            continue;
         if (providers.size() < 2)
             continue;
         // The first is the one the engine reads (the preview and the mixer take
@@ -454,9 +527,9 @@ void BusListModel::trimExtraVideoProviders()
         for (const auto &cut : cuts) {
             if (graph().Disconnect(cut.first, cut.second).ok()) {
                 qInfo() << "BusListModel:" << QString::fromStdString(cut.second)
-                        << "kept one video source and dropped the extra provider"
+                        << "dropped an extra video provider"
                         << QString::fromStdString(cut.first)
-                        << "— a bus shows one video source at a time";
+                        << "— a bus shows one video source, a template bus one per window";
             }
         }
     }
@@ -537,10 +610,16 @@ void BusListModel::rebuildFromGraph()
 
         // The UI's routing-policy type lives engine-side as node meta
         // (survives restarts with the rest of the graph).
-        if (auto r = graph().GetNode(a); r.ok())
+        if (auto r = graph().GetNode(a); r.ok()) {
             item.type = QString::fromStdString(
                 r.value().meta.count("uiBusType") ? r.value().meta.at("uiBusType")
                                                   : "audio");
+            // ON THE ROUTING BOARD? Absent meta = no (see BusItem::onBoard):
+            // every bus saved before the board had a membership reads as off it,
+            // which is the rule — only what the operator adds shows.
+            const auto shown = r.value().meta.find("uiOnBoard");
+            item.onBoard = shown != r.value().meta.end() && shown->second == "1";
+        }
         m_buses.append(item);
     }
 
@@ -637,13 +716,16 @@ void BusListModel::refresh()
 }
 
 int BusListModel::createBusRow(const QString &name, const QString &type,
-                               qreal level, bool muted)
+                               qreal level, bool muted, const QString &templateId,
+                               bool onBoard)
 {
     BusItem item;
     item.name = name;
     item.type = type;
     item.level = level;
     item.muted = muted;
+    item.templateId = templateId;
+    item.onBoard = onBoard;
 
     GraphEdit edit;   // 6 graph mutators, one save
 
@@ -670,6 +752,21 @@ int BusListModel::createBusRow(const QString &name, const QString &type,
                 graph().SetMeta(item.engineId.toStdString(), "uiBusType", type.toStdString()));
     logIfFailed("SetMeta(video)",
                 graph().SetMeta(item.engineIdVideo.toStdString(), "uiBusType", type.toStdString()));
+    if (!templateId.isEmpty()) {
+        logIfFailed("SetMeta(templateId audio)",
+                    graph().SetMeta(item.engineId.toStdString(), "templateId", templateId.toStdString()));
+        logIfFailed("SetMeta(templateId video)",
+                    graph().SetMeta(item.engineIdVideo.toStdString(), "templateId", templateId.toStdString()));
+    }
+    // Board membership, written only when it is ON: an absent key reads as "off"
+    // everywhere (see rebuildFromGraph), so a bus made off the board carries no
+    // meta at all until the operator adds it.
+    if (onBoard) {
+        logIfFailed("SetMeta(uiOnBoard audio)",
+                    graph().SetMeta(item.engineId.toStdString(), "uiOnBoard", "1"));
+        logIfFailed("SetMeta(uiOnBoard video)",
+                    graph().SetMeta(item.engineIdVideo.toStdString(), "uiOnBoard", "1"));
+    }
     // Buses open silent (level 0 = -60 dB) unless the caller says otherwise.
     const bps::production::VolumeControl v{ dbFromLevel(level), muted, false, 0.0, 0.0 };
     logIfFailed("SetVolume(audio)", graph().SetVolume(item.engineId.toStdString(), v));
@@ -713,6 +810,18 @@ void BusListModel::pullRow(int row)
             item.channelGains.append(gain);
             item.channelTrims.append(readMeta("uiChannelTrim" + std::to_string(channel), 0.0));
         }
+        // The TEMPLATE this bus was created from ("" = an ordinary bus), off the
+        // templateId meta a template bus carries. Read here as well as at rebuild
+        // so a bus that comes back from an undo or a late document restore knows
+        // its template without a restart.
+        const auto templateId = r.value().meta.find("templateId");
+        item.templateId = templateId == r.value().meta.end()
+            ? QString() : QString::fromStdString(templateId->second);
+        // ...and whether it is on the Routing board (absent = off, see
+        // BusItem::onBoard). Re-read here so adding it there takes effect without
+        // a restart, and so a document restored late carries its membership.
+        const auto shown = r.value().meta.find("uiOnBoard");
+        item.onBoard = shown != r.value().meta.end() && shown->second == "1";
     }
     // `type` stays cached: it's this model's routing policy, mirrored onto
     // both plane nodes (which always exist).
@@ -746,6 +855,7 @@ QVariant BusListModel::data(const QModelIndex &index, int role) const
     }
     case RoutedAudioInputsRole: return toVariantList(item.routedAudioInputs);
     case RoutedVideoSourcesRole: return toVariantList(item.routedVideoSources);
+    case OnBoardRole: return item.onBoard;
     default: return {};
     }
 }
@@ -760,6 +870,7 @@ QHash<int, QByteArray> BusListModel::roleNames() const
         { ChannelGainsRole, "channelGains" },
         { RoutedAudioInputsRole, "routedAudioInputs" },
         { RoutedVideoSourcesRole, "routedVideoSources" },
+        { OnBoardRole, "onBoard" },
     };
 }
 
@@ -772,6 +883,57 @@ void BusListModel::addBus(const QString &name, const QString &type)
     createBusRow(trimmed.isEmpty() ? QStringLiteral("New Bus %1").arg(row + 1) : trimmed,
                  type.isEmpty() ? QStringLiteral("audio") : type, 75, false);
     endInsertRows();
+}
+
+int BusListModel::addBusOnBoard(const QString &name, const QString &type)
+{
+    const QString trimmed = name.trimmed();
+    const int row = m_buses.size();
+    beginInsertRows(QModelIndex(), row, row);
+    createBusRow(trimmed.isEmpty() ? QStringLiteral("New Bus %1").arg(row + 1) : trimmed,
+                 type.isEmpty() ? QStringLiteral("audio") : type, 75, false, QString(),
+                 true);
+    endInsertRows();
+    return row;
+}
+
+void BusListModel::setBusOnBoard(int index, bool onBoard)
+{
+    if (index < 0 || index >= m_buses.size())
+        return;
+    BusItem &item = m_buses[index];
+    if (item.onBoard == onBoard)
+        return;
+    item.onBoard = onBoard;
+    GraphEdit edit;
+    for (const QString &id : { item.engineId, item.engineIdVideo })
+        logIfFailed("SetMeta(uiOnBoard)",
+                    graph().SetMeta(id.toStdString(), "uiOnBoard", onBoard ? "1" : "0"));
+    const QModelIndex changed = this->index(index, 0);
+    emit dataChanged(changed, changed, { OnBoardRole });
+}
+
+int BusListModel::addTemplateBus(const QString &name, const QString &templateId)
+{
+    const QString id = templateId.trimmed();
+    if (id.isEmpty() || TemplateLibraryService::templates().design(id).isEmpty())
+        return -1;
+    const int row = m_buses.size();
+    beginInsertRows(QModelIndex(), row, row);
+    const QString busName = name.trimmed().isEmpty()
+        ? QStringLiteral("Template Bus %1").arg(row + 1) : name.trimmed();
+    createBusRow(busName, QStringLiteral("template"), 75, false, id);
+    endInsertRows();
+    return row;
+}
+
+bool BusListModel::usesTemplate(const QString &templateId) const
+{
+    if (templateId.isEmpty())
+        return false;
+    return std::any_of(m_buses.cbegin(), m_buses.cend(), [&](const BusItem &bus) {
+        return bus.templateId == templateId;
+    });
 }
 
 void BusListModel::removeBus(int index)
@@ -872,6 +1034,26 @@ bool BusListModel::restoreRemovedBus()
                 graph().SetMeta(audio, "uiBusType", back.item.type.toStdString()));
     logIfFailed("SetMeta(video)",
                 graph().SetMeta(video, "uiBusType", back.item.type.toStdString()));
+    // ...and the template it came from, without which a restored template bus
+    // would come back as an ordinary one that accepts many video sources and
+    // composes none of them.
+    if (!back.item.templateId.isEmpty()) {
+        logIfFailed("SetMeta(templateId)",
+                    graph().SetMeta(audio, "templateId", back.item.templateId.toStdString()));
+        logIfFailed("SetMeta(templateId)",
+                    graph().SetMeta(video, "templateId", back.item.templateId.toStdString()));
+    }
+    // ...and its place on the Routing board. The membership lives in the same
+    // node meta as the template, so a restore that skips it puts the bus back
+    // into the roster and NOT onto the board it was deleted from: Undo would read
+    // as "it came back somewhere else", and every wire the operator had drawn to
+    // its card would point at a node the canvas no longer draws.
+    if (back.item.onBoard) {
+        logIfFailed("SetMeta(uiOnBoard audio)",
+                    graph().SetMeta(audio, "uiOnBoard", "1"));
+        logIfFailed("SetMeta(uiOnBoard video)",
+                    graph().SetMeta(video, "uiOnBoard", "1"));
+    }
     const bps::production::VolumeControl v{ dbFromLevel(back.item.level), back.item.muted,
                                             false, 0.0, 0.0 };
     logIfFailed("SetVolume(audio)", graph().SetVolume(audio, v));
@@ -919,10 +1101,27 @@ int BusListModel::duplicateBus(int index)
     if (index < 0 || index >= m_buses.size())
         return -1;
 
-    const BusItem &src = m_buses.at(index);
+    // COPIED BY VALUE, not held by reference: createBusRow() APPENDS to m_buses,
+    // which reallocates it — a `const BusItem &` into the vector would dangle for
+    // every read after that call (the template id below was read from freed
+    // memory, and "duplicate" of a template bus then copied garbage).
+    const BusItem src = m_buses.at(index);
     beginInsertRows(QModelIndex(), m_buses.size(), m_buses.size());
+    // A copy lands wherever the original was: duplicating a card on the board
+    // makes another card, duplicating a roster bus keeps it off the board.
     const int row = createBusRow(QStringLiteral("%1 · copy").arg(src.name), src.type,
-                                 src.level, false);
+                                 src.level, false, QString(), src.onBoard);
+    // A COPY OF A TEMPLATE BUS IS ONE TOO: the type alone would make it a
+    // template bus with no template — it would take many video sources and then
+    // have nothing to compose them into.
+    if (!src.templateId.isEmpty()) {
+        GraphEdit edit;
+        m_buses[row].templateId = src.templateId;
+        for (const QString &id : { m_buses[row].engineId, m_buses[row].engineIdVideo })
+            logIfFailed("SetMeta(templateId)",
+                        graph().SetMeta(id.toStdString(), "templateId",
+                                        src.templateId.toStdString()));
+    }
     endInsertRows();
     return row;
 }
@@ -952,6 +1151,12 @@ void BusListModel::setType(int index, const QString &type)
         return;
     if (m_buses[index].type == type)
         return;
+    // A TEMPLATE BUS KEEPS ITS KIND. Its many video inputs, its one audio input
+    // and the design it composes all follow from "template", and the dialogs
+    // that offer the three ordinary kinds know nothing about it — a save there
+    // would silently turn a layout back into a plain bus and lose its windows.
+    if (m_buses[index].type == QStringLiteral("template"))
+        return;
 
     GraphEdit edit;
     m_buses[index].type = type;
@@ -968,7 +1173,10 @@ void BusListModel::setType(int index, const QString &type)
                 graph().SetMeta(m_buses[index].engineIdVideo.toStdString(), "uiBusType",
                                 type.toStdString()));
     QList<int> roles = { TypeRole };
+    // "template" accepts video (its windows are fed by it), so it is on the
+    // video-accepting side of this rule and keeps whatever is routed.
     if (type != QStringLiteral("video") && type != QStringLiteral("both")
+        && type != QStringLiteral("template")
         && !m_buses[index].routedVideoSources.isEmpty()) {
         // Drop routes the narrowed type no longer accepts. routedVideoSources
         // holds ROSTER ROWS — re-derive their stable nodes to disconnect.
@@ -1147,6 +1355,14 @@ bool BusListModel::connectAudioRoute(int busIndex, int inputIndex)
         emit dataChanged(changed, changed, { RoutedAudioInputsRole });
         return true;
     }
+    // A TEMPLATE BUS HAS ONE SOUND (see connectRefusal): the board's drop is
+    // refused before it gets here, this catches the bus dialog's toggle list and
+    // anything scripted.
+    if (item.type == QStringLiteral("template") && audioProviders(plane) > 0) {
+        qWarning() << "BusListModel: audio route refused —" << item.name
+                   << "is a template bus and already carries its one audio input";
+        return false;
+    }
 
     GraphEdit edit;   // (AddSource + Connect), one save
     if (!graph().HasNode(src)) {
@@ -1236,7 +1452,20 @@ bool BusListModel::connectVideoRoute(int busIndex, int sourceIndex)
     // says which bus is already spoken for. A route comes OFF through that same
     // toggle, a line's right-click, or deleting the source row, never by
     // stacking a second provider on top.
-    if (videoProviders(plane) > 0) {
+    //
+    // A TEMPLATE bus is exempt from the ONE-video-provider rule: it takes many video
+    // sources, with no cap by window — the windows name their own buses, and routing
+    // those feeds into the template bus is how it gets them. Only a template with no
+    // bus items at all is refused (nothing to show). The board refuses that before it
+    // gets here; this catches the bus dialog's toggle list and anything scripted.
+    if (m_buses[busIndex].type == QStringLiteral("template")) {
+        const TemplateWindows windows = templateWindows(m_buses.at(busIndex).templateId);
+        if (windows.known && windows.total == 0) {
+            qWarning() << "BusListModel: video route refused —" << m_buses.at(busIndex).name
+                       << "is a template bus and its template has no bus items";
+            return false;
+        }
+    } else if (videoProviders(plane) > 0) {
         qWarning() << "BusListModel: video route refused —" << m_buses.at(busIndex).name
                    << "already carries a video source; remove that route first";
         return false;
@@ -1310,12 +1539,31 @@ QString BusListModel::connectRefusal(const QString &kind, int sourceRow, int bus
     if (srcQ.isEmpty())
         return QStringLiteral("no-source-row");   // a bad/vanished roster row has no node
     const BusItem &bus = m_buses.at(busIndex);
+    const bool templateBus = bus.type == QStringLiteral("template");
     if (!audio && bus.type == QStringLiteral("audio"))
         return QStringLiteral("audio-only-bus");
     const std::string plane = (audio ? bus.engineId : bus.engineIdVideo).toStdString();
     if (feedsFrom(plane, srcQ.toStdString()))
         return QStringLiteral("already-connected");
-    if (!audio && videoProviders(plane) > 0) {
+    // A TEMPLATE BUS HAS ONE SOUND. Its pictures may be many (one per window),
+    // its audio is single: a second input would be summed with the first with
+    // nothing on screen saying which one the operator is hearing.
+    if (audio && templateBus && audioProviders(plane) > 0)
+        return QStringLiteral("template-bus-has-audio");
+    // A TEMPLATE BUS ACCEPTS ONLY WHAT ITS TEMPLATE HAS A WINDOW FOR. Its windows
+    // ARE the template's bus items (see templateWindows), so a feed routed into
+    // it lands in one — and a template with no free window has nowhere to put the
+    // picture. Refusing here is the board's red card AND its toast; the same rule
+    // is enforced again in connectVideoRoute for the doors that skip the board.
+    if (!audio && templateBus) {
+        const TemplateWindows windows = templateWindows(bus.templateId);
+        // Only a template with NO bus items is refused: there is nothing for the feed to
+        // show in. A template whose windows already name their buses still takes routes —
+        // those are the feeds the template bus carries — so there is no cap by window.
+        if (windows.known && windows.total == 0)
+            return QStringLiteral("template-has-no-windows");
+    }
+    if (!audio && !templateBus && videoProviders(plane) > 0) {
         // ONE VIDEO PROVIDER PER BUS — the rule the header has always stated. A
         // bus's video plane carries one picture (the preview and the mixer read
         // the first route and ignore the rest), so a second video source is a
@@ -1359,5 +1607,11 @@ QVariantMap BusListModel::getBus(int index) const
         { "routedVideoSources", toVariantList(item.routedVideoSources) },
         { "engineId", item.engineId },
         { "engineIdVideo", item.engineIdVideo },
+        // "" for an ordinary bus; a template DESIGN id for a bus created from
+        // one (the Routing card's Template · N in subtitle and the output's
+        // composed picture both read it).
+        { "templateId", item.templateId },
+        // Whether this bus has a card on the Routing board (see BusItem::onBoard).
+        { "onBoard", item.onBoard },
     };
 }

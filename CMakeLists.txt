@@ -172,6 +172,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/rendering/PngCodec.cpp
     # Display & Output Engine (Phase 7, docs/specs/18)
     ${BPS_ROOT}/modules/display/Providers.cpp
+    ${BPS_ROOT}/modules/display/HtmlOutputServer.cpp
     ${BPS_ROOT}/modules/display/OutputRouter.cpp
     ${BPS_ROOT}/modules/display/DisplayProfiles.cpp
     ${BPS_ROOT}/modules/display/DisplayEngine.cpp
@@ -245,8 +246,11 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/production/ProductionGraph.cpp
     ${BPS_ROOT}/modules/production/ProductionEngine.cpp
     ${BPS_ROOT}/modules/production/AudioMixer.cpp
+    # Playout engine: renders the graph's audio buses to the default output device
+    ${BPS_ROOT}/modules/audio/AudioEngine.cpp
     # Recording, Replay & Media Capture Engine (Phase 16, docs/specs/28)
     ${BPS_ROOT}/modules/recording/RecordingEngine.cpp
+    ${BPS_ROOT}/modules/recording/MediaFoundationMp4.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastEngine.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastProviders.cpp
     # Project & Data System (Phase 4, docs/specs/15)
@@ -490,6 +494,8 @@ qt_add_executable(appVGRPresenterUI
     qml/services/RecordingService.cpp
     qml/services/include/services/FlowService.h
     qml/services/FlowService.cpp
+    qml/services/include/services/RoutingService.h
+    qml/services/RoutingService.cpp
     qml/services/include/services/MediaThumbnailProvider.h
     qml/services/MediaThumbnailProvider.cpp
     qml/services/include/services/TextFormatService.h
@@ -556,6 +562,13 @@ set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/TipService
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/components/NotificationCenter.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 # Shared ModalCard stacking-order counter — see ModalStack.qml's own comment.
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/ModalStack.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+# WORKAROUND, remove once the link is clean without it: the compiled-QML (AOT) C++ that
+# Qt generates for the Edit screen is ~47,000 lines, and linking it with this MinGW
+# toolchain fails with "undefined reference to typeinfo name for ...aotBuiltFunctions
+# {lambda}...::Storage". Skipping the generated code for this one file loads it from
+# QML at runtime instead (a slightly slower first open of the Edit screen); every other
+# file keeps its compiled form.
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/screens/edit/EditScreen.qml" PROPERTIES QT_QML_SKIP_CACHEGEN TRUE)
 
 qt_add_qml_module(appVGRPresenterUI
     URI VGRPresenterUI

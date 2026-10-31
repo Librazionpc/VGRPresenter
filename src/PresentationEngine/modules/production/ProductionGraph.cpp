@@ -11,8 +11,24 @@ bool IsUniversalSink(NodeKind kind) {
     return kind == NodeKind::Data || kind == NodeKind::Control;
 }
 
+// An OUTPUT is a sink, not a pipe: it terminates the signals that reach it, and
+// what a row may CARRY is its OutputConfig caps — video only for a physical
+// screen window, both for NDI / SDI / recording / streaming — enforced where
+// buses are assigned (AssignOutputBuses). Its node `signalType` is therefore a
+// label, not an edge filter.
+//
+// Filtering on it was a real fault, not a nicety: a row's node is created as a
+// VIDEO node (that is its picture), so the audio edge into it was refused and
+// the audio half of an NDI/recording/stream wire existed only in the
+// OutputConfig. Nothing read it there — AudioMixer resolves an output's feed set
+// through the EDGE set, and a recording taps the mix of its own output node \u2014
+// so the wire drew on the canvas and the sink stayed silent.
+bool IsSignalAgnosticSink(const NodeInfo& node) {
+    return node.kind == NodeKind::Output || IsUniversalSink(node.kind);
+}
+
 bool Accepts(SignalType from, const NodeInfo& node) {
-    if (IsUniversalSink(node.kind)) return true;
+    if (IsSignalAgnosticSink(node)) return true;
     return node.signalType == from;
 }
 
@@ -95,6 +111,9 @@ json::Value StageToJson(const ProcessingStage& s) {
     o["kind"] = JStr(EnumName(s.kind, kProcessKindNames));
     o["amount"] = JNum(s.amount);
     o["custom"] = JStr(s.custom);
+    o["freqHz"] = JNum(s.freqHz);
+    o["gainDb"] = JNum(s.gainDb);
+    o["q"] = JNum(s.q);
     return json::Value(std::move(o));
 }
 
@@ -104,6 +123,9 @@ ProcessingStage StageFromJson(const json::Value& v) {
         out.kind = EnumValue(k->asString("gain"), kProcessKindNames, ProcessKind::Gain);
     if (auto* a = v.Find("amount")) out.amount = a->asNumber(1.0);
     if (auto* c = v.Find("custom")) out.custom = std::string(c->asString());
+    if (auto* f = v.Find("freqHz")) out.freqHz = f->asNumber(out.freqHz);
+    if (auto* g = v.Find("gainDb")) out.gainDb = g->asNumber(out.gainDb);
+    if (auto* q = v.Find("q")) out.q = q->asNumber(out.q);
     return out;
 }
 
@@ -331,9 +353,12 @@ bool ProductionGraph::CanConnect(std::string_view from, std::string_view to,
     // which this pre-check never let happen. Treating a missing node as
     // "will be created with exactly `type`" matches what Connect() actually
     // does immediately afterward.
-    if (fit != nodes_.end() && fit->second.signalType != type)
+    // ONE rule, asked of Accepts() so the optimistic gate and Connect() can
+    // never disagree — an output takes any signal it is caps-allowed to carry,
+    // a bus/source still takes only its own type.
+    if (fit != nodes_.end() && !Accepts(type, fit->second))
         return false;
-    if (tit != nodes_.end() && tit->second.signalType != type)
+    if (tit != nodes_.end() && !Accepts(type, tit->second))
         return false;
     if (type == SignalType::Video && tit != nodes_.end()
         && tit->second.kind == NodeKind::Bus) {
@@ -586,22 +611,61 @@ Result<void> ProductionGraph::AssignOutputBuses(std::string_view outputId,
     if (oit == outputs_.end())
         return Error::Make(Err::Production_OutputNotFound, "ProductionGraph",
                            "no output: " + std::string(outputId));
+    std::string nextVideoBus = oit->second.videoBusId;
+    std::string nextAudioBus = oit->second.audioBusId;
     if (!videoBusId.empty()) {
+        if (!oit->second.caps.supportsVideo)
+            return Error::Make(Err::Production_SignalMismatch, "ProductionGraph",
+                               "output " + std::string(outputId) + " does not accept video");
         auto it = nodes_.find(std::string(videoBusId));
         if (it == nodes_.end() || it->second.kind != NodeKind::Bus ||
             it->second.signalType != SignalType::Video)
             return Error::Make(Err::Production_BusNotFound, "ProductionGraph",
                                "no video bus: " + std::string(videoBusId));
-        oit->second.videoBusId = std::string(videoBusId);
+        nextVideoBus = std::string(videoBusId);
     }
     if (!audioBusId.empty()) {
+        // AN OUTPUT ALWAYS TAKES AUDIO. It is a transport, and every transport this
+        // app draws — an HDMI/projector display exactly like NDI, SDI, recording
+        // and streaming — carries sound beside the picture. This used to ask the
+        // node's caps, which a display row was created with as audio-false, so an
+        // audio wire onto HDMI was refused at assignment (the toast "output
+        // out:out-1 does not accept audio") even though Connect() already treats
+        // every output as a signal-agnostic sink. What a transport can DELIVER is a
+        // separate question, answered where the mix is played, not here: a display
+        // with no speakers still renders its mix, it just has no device to come out
+        // of. Video stays gated by caps (the speaker endpoint has no picture).
         auto it = nodes_.find(std::string(audioBusId));
         if (it == nodes_.end() || it->second.kind != NodeKind::Bus ||
             it->second.signalType != SignalType::Audio)
             return Error::Make(Err::Production_BusNotFound, "ProductionGraph",
                                "no audio bus: " + std::string(audioBusId));
-        oit->second.audioBusId = std::string(audioBusId);
+        nextAudioBus = std::string(audioBusId);
     }
+    oit->second.videoBusId = std::move(nextVideoBus);
+    oit->second.audioBusId = std::move(nextAudioBus);
+    QueuePersist();
+    return Ok();
+}
+
+Result<void> ProductionGraph::ClearOutputBusAssignment(std::string_view outputId,
+                                                       SignalType type) {
+    auto oit = outputs_.find(std::string(outputId));
+    if (oit == outputs_.end())
+        return Error::Make(Err::Production_OutputNotFound, "ProductionGraph",
+                           "no output: " + std::string(outputId));
+    std::string* bus = nullptr;
+    switch (type) {
+        case SignalType::Video: bus = &oit->second.videoBusId; break;
+        case SignalType::Audio: bus = &oit->second.audioBusId; break;
+        case SignalType::Data:
+        case SignalType::Control:
+            return Error::Make(Err::Production_InvalidState, "ProductionGraph",
+                               "only audio and video buses can be assigned to outputs");
+    }
+    if (bus->empty())
+        return Ok();
+    bus->clear();
     QueuePersist();
     return Ok();
 }
@@ -834,6 +898,38 @@ std::vector<ValidationIssue> ProductionGraph::ValidateGraph(
         }
     }
 
+    // Connect() prevents cycles during normal edits, but restored graph data
+    // can bypass that path. Keep validation authoritative for persisted graphs.
+    std::map<std::string, size_t, std::less<>> indegree;
+    for (const auto& [id, node] : nodes) {
+        (void)node;
+        indegree[id] = 0;
+    }
+    for (const auto& [from, tos] : edges) {
+        if (!nodes.count(from)) continue;
+        for (const auto& to : tos)
+            if (nodes.count(to)) ++indegree[to];
+    }
+    std::vector<std::string> ready;
+    ready.reserve(indegree.size());
+    for (const auto& [id, degree] : indegree)
+        if (degree == 0) ready.push_back(id);
+    size_t visited = 0;
+    for (size_t i = 0; i < ready.size(); ++i) {
+        const auto& id = ready[i];
+        ++visited;
+        const auto eit = edges.find(id);
+        if (eit == edges.end()) continue;
+        for (const auto& to : eit->second) {
+            auto it = indegree.find(to);
+            if (it != indegree.end() && --it->second == 0)
+                ready.push_back(to);
+        }
+    }
+    if (visited != indegree.size())
+        issues.push_back({ValidationIssue::Severity::Error, "circular_routing",
+                          "routing graph contains a cycle"});
+
     for (const auto& [oid, cfg] : outputs) {
         if (cfg.videoBusId.empty() && cfg.audioBusId.empty()) {
             issues.push_back({ValidationIssue::Severity::Warning, "output_no_bus",
@@ -845,12 +941,26 @@ std::vector<ValidationIssue> ProductionGraph::ValidateGraph(
             if (it == nodes.end() || it->second.kind != NodeKind::Bus)
                 issues.push_back({ValidationIssue::Severity::Error, "output_no_bus",
                                   "output " + oid + " video bus missing: " + cfg.videoBusId});
+            else if (it->second.signalType != SignalType::Video)
+                issues.push_back({ValidationIssue::Severity::Error, "output_bus_signal_mismatch",
+                                  "output " + oid + " video assignment is not a video bus: " + cfg.videoBusId});
+            if (!cfg.caps.supportsVideo)
+                issues.push_back({ValidationIssue::Severity::Error, "output_signal_unsupported",
+                                  "output " + oid + " is assigned video but does not accept video"});
         }
         if (!cfg.audioBusId.empty()) {
             auto it = nodes.find(cfg.audioBusId);
             if (it == nodes.end() || it->second.kind != NodeKind::Bus)
                 issues.push_back({ValidationIssue::Severity::Error, "output_no_bus",
                                   "output " + oid + " audio bus missing: " + cfg.audioBusId});
+            else if (it->second.signalType != SignalType::Audio)
+                issues.push_back({ValidationIssue::Severity::Error, "output_bus_signal_mismatch",
+                                  "output " + oid + " audio assignment is not an audio bus: " + cfg.audioBusId});
+            // No "does not accept audio" issue: an output is a transport and takes
+            // audio (see AssignOutputBuses). A document saved by an older build
+            // carries `supportsAudio: false` on its display rows, and judging it by
+            // that would keep refusing a wire the canvas now offers.
+            (void)cfg.caps.supportsAudio;
         }
     }
 
@@ -961,6 +1071,12 @@ Result<json::Value> ProductionGraph::Serialize() const {
         json::Value::Object o;
         o["videoBus"] = JStr(cfg.videoBusId);
         o["audioBus"] = JStr(cfg.audioBusId);
+        json::Value::Object caps;
+        caps["video"] = JBool(cfg.caps.supportsVideo);
+        caps["audio"] = JBool(cfg.caps.supportsAudio);
+        caps["separateAudio"] = JBool(cfg.caps.supportsSeparateAudio);
+        caps["multipleChannels"] = JBool(cfg.caps.supportsMultipleChannels);
+        o["capabilities"] = json::Value(std::move(caps));
         o["priority"] = JStr(EnumName(cfg.priority, kPriorityNames));
         o["group"] = JStr(cfg.group);
         o["encoder"] = JStr(cfg.encoder);
@@ -1079,6 +1195,14 @@ Result<void> ProductionGraph::Restore(const json::Value& doc) {
                 OutputConfig cfg;
                 if (auto* v = ov.Find("videoBus")) cfg.videoBusId = std::string(v->asString());
                 if (auto* v = ov.Find("audioBus")) cfg.audioBusId = std::string(v->asString());
+                if (auto* caps = ov.Find("capabilities")) {
+                    if (auto* v = caps->Find("video")) cfg.caps.supportsVideo = v->asBool(true);
+                    if (auto* v = caps->Find("audio")) cfg.caps.supportsAudio = v->asBool(true);
+                    if (auto* v = caps->Find("separateAudio"))
+                        cfg.caps.supportsSeparateAudio = v->asBool(true);
+                    if (auto* v = caps->Find("multipleChannels"))
+                        cfg.caps.supportsMultipleChannels = v->asBool(false);
+                }
                 if (auto* v = ov.Find("priority"))
                     cfg.priority = EnumValue(v->asString("medium"), kPriorityNames,
                                              OutputPriority::Medium);
@@ -1145,6 +1269,7 @@ Result<void> ProductionGraph::Restore(const json::Value& doc) {
     outputs_ = std::move(newOutputs);
     busScenes_ = std::move(newScenes);
     snapshots_ = std::move(newSnaps);
+    PublishSnapshot();
     return Ok();
 }
 
@@ -1154,7 +1279,21 @@ void ProductionGraph::InstallSaver(std::function<void(json::Value)> saver) {
 
 void ProductionGraph::QueuePersist() {
     if (inEdit_) return;   // edit windows save once at commit
+    PublishSnapshot();
     if (auto doc = Serialize(); doc.ok() && saver_) saver_(doc.value());
+}
+
+void ProductionGraph::PublishSnapshot() {
+    auto snap = std::make_shared<GraphSnapshot>();
+    snap->nodes = nodes_;
+    snap->edges = edges_;
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    published_ = std::move(snap);
+}
+
+std::shared_ptr<const GraphSnapshot> ProductionGraph::PublishedSnapshot() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return published_;
 }
 
 Result<void> ProductionGraph::PersistDirty() {
@@ -1212,6 +1351,7 @@ void ProductionGraph::RollbackEdit() {
     baseEdges_.clear();
     baseBusScenes_.clear();
     baseSnapshots_.clear();
+    PublishSnapshot();
 }
 
 } // namespace bps::production

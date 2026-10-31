@@ -402,6 +402,10 @@ ApplicationWindow {
     }
 
     property string settingsSection: "general"
+    // A screen row to open for editing as soon as Settings · Screens appears —
+    // set by the Routing canvas's card menu, which knows WHICH row it right-
+    // clicked but not how to edit it (that editor is the Screens page's).
+    property int pendingScreenEdit: -1
     // The Hotkeys scope Settings pushes while it is open (Esc closes it) — see
     // the settingsScrim's onVisibleChanged and qml/settings/Hotkeys.qml.
     property int settingsHotkeyScope: 0
@@ -1111,6 +1115,7 @@ ApplicationWindow {
                         case "styles": return stylesScreenComponent
                         case "lookfeel": return lookFeelScreenComponent
                         case "av": return audioVideoScreenComponent
+                        case "routing": return routingScreenComponent
                         default: return placeholderComponent
                         }
                     }
@@ -1142,7 +1147,14 @@ ApplicationWindow {
 
     Component {
         id: outputsScreenComponent
-        OutputsScreen { objectName: "outputsScreen" }
+        OutputsScreen {
+            objectName: "outputsScreen"
+            // Routing's "Edit screen" hop: the row it wants opened, -1 = none.
+            editRequestRow: window.pendingScreenEdit
+            // Cleared once the page has opened it, so returning here later does
+            // not pop the same editor again.
+            onEditRequestConsumed: window.pendingScreenEdit = -1
+        }
     }
 
     Component {
@@ -1160,12 +1172,34 @@ ApplicationWindow {
         AudioVideoScreen { objectName: "audioVideoScreen" }
     }
 
+    // Settings · Routing — the four-layer routing canvas (Buses | Screens |
+    // Styles | Outputs). The engine's routing model is what this binds to; the
+    // canvas itself is RoutingScreen.qml.
+    Component {
+        id: routingScreenComponent
+        RoutingScreen {
+            objectName: "routingScreen"
+            // A node on the canvas links OUT to the one editor its layer already
+            // has: a bus to Audio & Video (sources, levels, channel trim), a
+            // screen to Screens (display binding, resolution, stay-on-top), a
+            // style to Styles. The canvas wires; it does not host three editors.
+            onSectionRequested: (key) => window.settingsSection = key
+            // "Edit screen" from a screen card: switch to Screens AND ask it to
+            // open that row's editor, instead of leaving the operator to find
+            // the row again.
+            onScreenEditRequested: (row) => {
+                window.pendingScreenEdit = row
+                window.settingsSection = "outputs"
+            }
+        }
+    }
+
     Component {
         id: placeholderComponent
         PlaceholderScreen {
             title: {
                 switch (window.settingsSection) {
-                case "outputs": return "Outputs"
+                case "outputs": return "Screens"
                 default: return window.settingsSection
                 }
             }
@@ -2919,13 +2953,13 @@ ApplicationWindow {
     }
 
     // ---- what each SOURCE CARD's light claims ------------------------------
-    // Read off the card itself (`lightState`, the property its colour is drawn
-    // from) and checked against the very probe that answers it
-    // (LiveOutputService.inputAvailable/inputDelivery — the same call the bus
-    // cards in the pane use). A click-through flow passes with every card
-    // painted one flat colour; this is the half that says the colour MEANS
-    // something. "The probe light is not showing correct state" is exactly a
-    // card disagreeing with its own probe.
+    // Read off the card itself (`lightState` for the colour's answer,
+    // `lightRouted` for the dot-vs-ring form) and checked against the very probe
+    // that answers it (LiveOutputService.inputAvailable/inputDelivery — the same
+    // call the bus cards in the pane use). A click-through flow passes with every
+    // card painted one flat colour; this is the half that says the colour MEANS
+    // something. "The probe light is not showing correct state" is exactly a card
+    // disagreeing with its own probe.
     function newBusCheckLights() {
         let state = ""
         window.newBusLightChecked = 0
@@ -2935,12 +2969,20 @@ ApplicationWindow {
             const light = card ? String(card.lightState) : "missing"
             const alive = LiveOutputService.inputAvailable(label, sourceKind)
             const starved = LiveOutputService.inputDelivery(label, sourceKind) === "starved"
-            const wanted = !alive ? "offline" : (starved ? "starved" : "connected")
+            const routed = card ? card.alreadyFed === true : false
+            // THE COLOUR IS THE PROBE'S, ALWAYS — routed or not. "Connected" vs
+            // "not routed" is the light's FORM (`lightRouted`: a filled dot vs a
+            // hollow ring), so an unrouted card must still answer with its device's
+            // state and a gone camera must never read like a healthy one.
+            const wanted = label === "" ? "none"
+                         : (!alive ? "offline" : (starved ? "starved" : "connected"))
+            const formOk = card ? card.lightRouted === routed : false
             window.newBusLightChecked++
-            if (light !== wanted)
+            if (light !== wanted || !formOk)
                 window.newBusLightWrong++
             state += (state === "" ? "" : " ") + name + "=" + light
                      + (light === wanted ? "" : "(wanted " + wanted + ")")
+                     + (formOk ? "" : "(form: routed=" + routed + ")")
         }
         for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
             const v = VideoSourceListModel.getSource(i)
@@ -3189,21 +3231,12 @@ ApplicationWindow {
             return
         }
         if (window.newBusStep === 14) {
-            // The picker that must appear is the CREATE one: its card, and at
-            // least one SOURCE card with a light. A bus-mode picker would show
-            // bus tiles instead (they carry no such name).
-            const pick = window.newBusFirstPick()
-            // The EDIT instance's own hooks (see the modal's hookPrefix note): the
-            // Media pane's picker is closed by now but still in the tree, and both
-            // are create-mode instances of the same component.
-            const sourceCard = pick
-                ? "editBusPicker_row_" + pick.kind + "_" + pick.row : ""
-            window.newBusEditPicker = SelfTest.itemVisible("editBusPicker_card")
-                                      && sourceCard !== ""
-                                      && SelfTest.itemVisible(sourceCard)
-            console.log("[SELFTEST-NEWBUS] editRing reachPicker=" + window.newBusEditPicker
-                        + " sourceCard=\"" + sourceCard + "\"")
-            SelfTest.clickItem("editBusPicker_cancel")
+            // The canvas's Bus chip must NOT offer to create a bus: its picker is the
+            // pick-an-existing-bus one, so the create dialog's card never appears and
+            // no bus is made by opening it. (The create picker is the Media pane's.)
+            window.newBusEditPicker = !SelfTest.itemVisible("editBusPicker_card")
+                                      && BusListModel.rowCount() === window.newBusBefore
+            console.log("[SELFTEST-NEWBUS] editRing noCreate=" + window.newBusEditPicker)
             window.newBusStep = 15
             return
         }
@@ -6229,6 +6262,127 @@ ApplicationWindow {
         interval: 5000
         onTriggered: {
             window.scriptureProbe("re-ask")
+            SelfTest.quit()
+        }
+    }
+
+    // ---- PICK LATENCY: a verse pick, measured to the tile ----------------------
+    // (VGR_PICKLAT_TEST=1 only.) "when I click on scripture it takes too long
+    // before it shows in the monitor preview" is a claim about milliseconds, so
+    // this measures them: it opens the Scripture tab exactly as the tab click does,
+    // then takes a verse through the pane's OWN staging gesture (stageOutputPart —
+    // the body of the row's double-click) and prints
+    //   syncMs  how long that call blocked the interface thread, and
+    //   tileMs  when the monitor tile's composition first held the verse.
+    // The tile is polled every 8 ms, and a poll cannot run while the interface
+    // thread is inside the pick, so tileMs always includes syncMs. A tile that
+    // fills in at ~syncMs is the pick's own cost; one that fills in much later is
+    // the compose/binding behind it.
+    property int plNumber: -1
+    property int plPart: 0
+    property string plNeed: ""
+    // REAL, not int: Date.now() is twelve digits and a QML `int` is 32-bit, so this
+    // used to arrive truncated and the poll's own elapsed check fired on the first
+    // tick ("no-tile after 1795296329785 ms").
+    property real plT0: 0
+    // WHERE THE VERSE LANDED: "tile" when the monitor tile's own composition holds
+    // it, "service" when only the staged composition the tile binds to does. The
+    // distinction matters — a tile that never recomposed is the binding, not the pick.
+    function plLandedOn(need) {
+        const tile = SelfTest.findItem("selfTestMonitorTile0")
+        if (tile && window.lsCompText(tile.onAirSlide).indexOf(need) >= 0)
+            return "tile"
+        if (window.lsCompText(LiveOutputService.stagedSlide).indexOf(need) >= 0)
+            return "service"
+        return ""
+    }
+    function plTileText() {
+        const tile = SelfTest.findItem("selfTestMonitorTile0")
+        const fromTile = tile ? window.lsCompText(tile.onAirSlide) : ""
+        const fromService = window.lsCompText(LiveOutputService.stagedSlide)
+        return fromTile.length > 0 ? fromTile : fromService
+    }
+    Timer {
+        id: selfTestPickLat
+        running: typeof SelfTestPickLat !== "undefined" && SelfTestPickLat
+        interval: 22000      // boot, the Bible restore and the sermon indexing
+        onTriggered: {
+            window.currentView = "show"
+            showScreen.showInLibrary("scripture", "")
+            selfTestPickLatReady.restart()
+        }
+    }
+    Timer {
+        id: selfTestPickLatReady
+        interval: 8000       // the pane's own reads land while the tab comes up
+        onTriggered: {
+            const p = SelfTest.findItem("selfTestScripturePane")
+            const verses = p ? (p.chapterVerses || []) : []
+            if (!p || verses.length < 2) {
+                console.log("[SELFTEST-PICKLAT] FAIL no-pane pane=" + (p ? "yes" : "no")
+                            + " verses=" + verses.length)
+                SelfTest.quit()
+                return
+            }
+            // The SECOND verse: the first is what a fresh tab already has staged,
+            // and a pick that changes nothing measures nothing.
+            const v = verses[1]
+            window.plNumber = Number(v.number ?? 0)
+            window.plPart = Number(v.partIndex ?? 0)
+            window.plNeed = String(v.text ?? "").trim().slice(0, 24)
+            if (window.plNeed === "") {
+                console.log("[SELFTEST-PICKLAT] FAIL no-text verse=" + window.plNumber)
+                SelfTest.quit()
+                return
+            }
+            const t0 = Date.now()
+            const pickOk = p.stageOutputPart(window.plNumber, window.plPart)
+            const syncMs = Date.now() - t0
+            window.plT0 = t0
+            const hit = window.plLandedOn(window.plNeed)
+            console.log("[SELFTEST-PICKLAT] kind=scripture verse=" + window.plNumber
+                        + " syncMs=" + syncMs + " pickOk=" + pickOk
+                        + " landedOn=" + (hit === "" ? "none" : hit)
+                        + " tile=" + (SelfTest.findItem("selfTestMonitorTile0") ? "yes" : "missing")
+                        + " staged='" + String(LiveOutputService.stagedName ?? "") + "'"
+                        + " paneRef=" + JSON.stringify(String(p.referenceText ?? ""))
+                        + " allows=" + OutputListModel.activeStyleAllows("scripture")
+                        + " need=" + JSON.stringify(window.plNeed))
+            if (hit !== "") {
+                console.log("[SELFTEST-PICKLAT] tileMs=" + (Date.now() - window.plT0)
+                            + " (the tile already held it when the pick returned)")
+                selfTestPickLatQuit.restart()   // ...the poll owns the quit otherwise
+            } else {
+                selfTestPickLatPoll.restart()
+            }
+        }
+    }
+    Timer {
+        id: selfTestPickLatPoll
+        interval: 8
+        repeat: true
+        onTriggered: {
+            const waited = Date.now() - window.plT0
+            const landed = window.plLandedOn(window.plNeed)
+            const got = window.plTileText()
+            if (landed !== "") {
+                selfTestPickLatPoll.stop()
+                console.log("[SELFTEST-PICKLAT] tileMs=" + waited + " landedOn=" + landed
+                            + " text=" + JSON.stringify(got.slice(0, 32)))
+                selfTestPickLatQuit.restart()
+            } else if (waited > 5000) {
+                selfTestPickLatPoll.stop()
+                console.log("[SELFTEST-PICKLAT] FAIL no-tile after " + waited
+                            + " ms text=" + JSON.stringify(got.slice(0, 32)))
+                selfTestPickLatQuit.restart()
+            }
+        }
+    }
+    Timer {
+        id: selfTestPickLatQuit
+        interval: 600
+        onTriggered: {
+            console.log("[SELFTEST-PICKLAT] done")
             SelfTest.quit()
         }
     }

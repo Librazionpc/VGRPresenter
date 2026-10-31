@@ -935,7 +935,12 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, bool 
     const std::vector<presentation::OutputStyleSpec> specs = pres_->LiveOutputStyles(&buffers, &sizes);
     const presentation::Presentation* active = pres_->Runtime().ActivePresentation();
     const presentation::Slide* slide = pres_->CurrentSlide();
-    if (!active || !slide) return;
+    // A WIRED BUS NEEDS NO SLIDE CONTENT: an output whose Routing wire names a
+    // bus shows that feed whatever the slide is (and whatever the style gates
+    // would have refused), so a missing slide is no longer a reason to skip the
+    // whole set. The check is per output now — the PROGRAM branch still needs a
+    // slide, the bus branch does not. (The loop still only runs while a
+    // presentation is Live: RenderOnce returns early without one.)
 
     rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
     for (size_t i = 0; i < specs.size() && i < buffers.size(); ++i) {
@@ -992,11 +997,35 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, bool 
                 ? bufSize
                 : rendering::Size(kFrameBufferWidth, kFrameBufferHeight);
 
-        // Build (or reuse) the GATED scene for THIS spec — each output's own
-        // rules decide content vs background-only. Style-fingerprinted ids
-        // keep the cache honest across edits and gate flips.
-        auto sceneId = pres_->Builder().BuildGatedSlideScene(*active, *slide, specs[i], engine,
-                                                             sceneSize);
+        // Build (or reuse) THE SCENE THIS OUTPUT SHOWS.
+        //
+        // WIRED (Settings · Routing's video wire): the output shows ITS bus —
+        // the bus feed scene, one full-frame live layer of that bus's current
+        // picture. This is the composer half of a wire the canvas has been able
+        // to draw since the routing screen existed; until now the assignment was
+        // stored and then never read, so a camera wired into a screen did not
+        // change a single pixel of it.
+        //
+        // UNWIRED: the GATED slide scene, exactly as before — each output's own
+        // style rules decide content vs background-only, and style-fingerprinted
+        // ids keep that cache honest across edits and gate flips.
+        const bool busWired = specs[i].videoBus > 0;
+        // A TEMPLATE BUS IS A DESIGN WITH WINDOWS, so it is composed (see
+        // SceneBuilder::BuildTemplateBusScene) rather than shown as one feed —
+        // and it needs no slide on air, which is why it is asked BEFORE the
+        // program-pass gate below.
+        const bool templateBusWired =
+            specs[i].templateBus > 0 && !specs[i].templateBusBlocks.empty();
+        if (!busWired && !templateBusWired && (!active || !slide))
+            continue;   // a program pass with nothing on air: nothing to compose
+        auto sceneId = templateBusWired
+            ? pres_->Builder().BuildTemplateBusScene(specs[i].templateBus,
+                                                     specs[i].templateBusBlocks,
+                                                     specs[i].templateBusBackground,
+                                                     engine, sceneSize)
+            : busWired
+                ? pres_->Builder().BuildBusFeedScene(specs[i].videoBus, engine, sceneSize)
+                : pres_->Builder().BuildGatedSlideScene(*active, *slide, specs[i], engine, sceneSize);
         if (!sceneId.ok()) {
             // No scene of its own this frame (build refused/errored): let the
             // main pass's program frame feed this buffer again, so the output
@@ -1042,10 +1071,12 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, bool 
         rendering::RenderOptions passOpts;
         passOpts.distribute = false;
         passOpts.capture = true;
-        // The same slide-wide filters the main pass applied: an output with its
-        // own styled scene is still showing THIS slide, and its picture must not
-        // come out unfiltered next to a filtered program feed.
-        passOpts.filters = slide->filters;
+        // The same slide-wide filters the main pass applied — but ONLY for an
+        // output showing this slide. A bus feed is not this slide's picture: a
+        // slide filter (a blur, a grade) has no business tinting a camera that
+        // was wired straight to a screen, so a wired output renders unfiltered.
+        if (!busWired && !templateBusWired && slide)
+            passOpts.filters = slide->filters;
         // ...and the same reading scroll, so an output with its own scene (a
         // different style or resolution) slides exactly like the program feed it
         // sits beside rather than cutting while the next screen moves.

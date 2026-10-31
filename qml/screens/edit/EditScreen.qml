@@ -225,6 +225,11 @@ Rectangle {
     // export never captured what TEXT/SLIDE should actually show, so the
     // panel content underneath doesn't vary by tab yet.
     property string rightPanelTab: "items"
+    // True once the operator has LEFT the item facets on purpose, by clicking ITEMS or
+    // SLIDE. From then on a new selection does not move the panel to TEXT or MEDIA on
+    // its own — not even after the selection is cleared and made again. It stays that way
+    // until they click TEXT or MEDIA themselves (see onPrimarySelectedItemChanged).
+    property bool rightTabPinned: false
     // Leaving the TEXT tab closes its font dropdowns — an open menu
     // belonging to a tab you've left is exactly the "not tied to its
     // parent" class of bug.
@@ -913,8 +918,13 @@ Rectangle {
     // The MEDIA tab edits a picture / video / audio item, so it has something to
     // say only while one of those is the primary selection — the same rule the
     // TEXT tab applies to text items.
+    // A WINDOW (a bus item) IS ONE OF THESE, by request: it is a picture in a
+    // box, so it reuses MEDIA rather than getting a tab of its own. The file row
+    // becomes the bus it names (with Change opening the bus picker — see
+    // MediaItemPanel's isWindow), and Fit / Blend / Flip / Cropping / Filters
+    // are the same values the canvas and the engine already apply to the window.
     readonly property bool primaryIsMedia: root.primarySelectedItem !== null
-        && ["image", "video", "audio"].includes(root.primarySelectedItem.kind)
+        && ["image", "video", "audio", "bus"].includes(root.primarySelectedItem.kind)
     readonly property var primaryMediaItem: root.primaryIsMedia ? root.primarySelectedItem : null
 
     // The TEXT tab edits a text item, so — like MEDIA — it is only OFFERED
@@ -940,23 +950,31 @@ Rectangle {
             borderStyleMenu.visible = false
         }
         // The selected item decides which facet the panel OPENS on: TEXT for a
-        // text item, MEDIA for a picture / video / audio one, ITEMS when the
-        // selection is gone. Any other kind (shape, clock, timer, bus, add-on
-        // blocks) owns no tab of its own, so the panel stays where the operator
-        // put it — unless it was on TEXT or MEDIA, which that selection has
-        // just taken off the strip; leaving it there would show a hidden tab's
-        // body, i.e. an empty panel.
+        // text item, MEDIA for a picture / video / audio one AND for a window
+        // (a bus item reuses MEDIA), ITEMS when the selection is gone. Any other
+        // kind (shape, clock, timer, add-on blocks) owns no tab of its own, so
+        // the panel stays where the operator put it — unless it was on TEXT or
+        // MEDIA, which that selection has just taken off the strip; leaving it
+        // there would show a hidden tab's body, i.e. an empty panel.
         // Truthiness, not `=== null`: canvasObjectByKey can hand back
         // undefined for a key whose item has gone, and that is "nothing to
         // show" just as much as an empty selection.
-        if (!root.primarySelectedItem)
-            root.rightPanelTab = "items"
-        else if (root.textTabAvailable)
+        // A tab the operator chose ON PURPOSE is not overridden: once they have left the
+        // facets for ITEMS or SLIDE the panel stays there, through any later selection and
+        // through a cleared one, until they click TEXT or MEDIA themselves. The panel only
+        // falls back to ITEMS when its body would be empty (TEXT with no text item, MEDIA
+        // with no media item). Never pinned, the next selection opens on its own facet.
+        if (!root.primarySelectedItem) {
+            if (root.rightPanelTab === "text" || root.rightPanelTab === "media" || !root.rightTabPinned)
+                root.rightPanelTab = "items"
+        } else if (!root.rightTabPinned && root.textTabAvailable) {
             root.rightPanelTab = "text"
-        else if (root.mediaTabAvailable)
+        } else if (!root.rightTabPinned && root.mediaTabAvailable) {
             root.rightPanelTab = "media"
-        else if (root.rightPanelTab === "text" || root.rightPanelTab === "media")
+        } else if ((root.rightPanelTab === "text" && !root.textTabAvailable)
+                   || (root.rightPanelTab === "media" && !root.mediaTabAvailable)) {
             root.rightPanelTab = "items"
+        }
     }
 
     // Background/Border only have a visible effect on a "text", "shape",
@@ -1339,6 +1357,14 @@ Rectangle {
     // adding mode (the "+" ring's Media chip), so one picker serves both and
     // there is no second dialog to keep in step.
     property string mediaReplaceKey: ""
+    // The replace key belongs to ONE open of the picker. However the picker closes (a
+    // pick, Cancel, Esc, a click away), the key goes with it: a key left behind made
+    // the next pick from the "+" ring try to REPLACE an item instead of adding one,
+    // and fail with "That item is no longer on the slide".
+    onMediaModalOpenChanged: {
+        if (!root.mediaModalOpen)
+            root.mediaReplaceKey = ""
+    }
 
     // Swaps the FILE of the media item already on the slide. Its box, position,
     // style and z-order stay exactly where the user put them — the point of a
@@ -1391,6 +1417,63 @@ Rectangle {
 
     function setMediaFlag(key, on) {
         root.setMediaMeta({ [key]: on === true })
+    }
+
+    // ---- A WINDOW'S OWN BUS (a canvas item of kind "bus") -------------------
+    // A bus item on a design is a WINDOW: a rectangle showing ONE bus's live
+    // feed. Each window names its own bus, independently of every other window
+    // on the design — that is what lets one design show three cameras in three
+    // boxes, and it is what a template bus's windows are made of. The name lives
+    // in the item's meta (busId), which is the same channel SceneBuilder reads
+    // when it paints the plane, so the canvas and the output cannot disagree.
+    readonly property bool primaryIsWindow: root.primarySelectedItem !== null
+        && root.primarySelectedItem.kind === "bus"
+    // The bus a window names (0 = none).
+    function windowBusId() {
+        const item = root.primarySelectedItem
+        return item !== null && item.meta && item.meta.busId !== undefined
+            ? Number(item.meta.busId) : 0
+    }
+    // The bus's roster ROW for that id (-1 = it is gone).
+    function windowBusRow(id) {
+        if (!(id > 0))
+            return -1
+        for (let i = 0; i < BusListModel.rowCount(); ++i) {
+            const bus = BusListModel.getBus(i)
+            if (bus && Number(bus.id) === id)
+                return i
+        }
+        return -1
+    }
+    function windowBusName() {
+        const row = root.windowBusRow(root.windowBusId())
+        if (row < 0)
+            return qsTr("No bus")
+        const bus = BusListModel.getBus(row)
+        return bus.name !== undefined ? String(bus.name) : qsTr("No bus")
+    }
+    // Re-point the window at the bus the picker returned. meta is the ENGINE's
+    // channel (SceneBuilder's bus plane reads meta busId), and the item's own
+    // caption follows the bus's CURRENT name — a canvas that labelled a window
+    // with a bus it no longer shows would be the same class of lie as a stale
+    // preview.
+    function assignWindowBus(bus) {
+        const item = root.primarySelectedItem
+        if (!item || item.kind !== "bus" || !bus)
+            return
+        const pickedRow = bus.row !== undefined ? Number(bus.row) : root.windowBusRow(Number(bus.id))
+        if (pickedRow < 0)
+            return
+        const info = BusListModel.getBus(pickedRow)
+        if (!info || info.id === undefined)
+            return
+        root.pushUndoSnapshot()
+        item.meta = Object.assign({}, item.meta ? item.meta : {}, {
+            busId: Number(info.id),
+            busName: info.name !== undefined ? String(info.name) : "",
+            busType: info.type !== undefined ? String(info.type) : ""
+        })
+        item.text = info.name !== undefined ? String(info.name) : ""
     }
 
     function setMediaCrop(side, percent) {
@@ -1496,6 +1579,9 @@ Rectangle {
     // (BusListModel), for the same reason the other pickers exist: an item
     // that names a bus has to be given one before it can land.
     property bool busModalOpen: false
+    // The WINDOW's own bus picker (see primaryIsWindow / assignWindowBus below):
+    // editing which bus an EXISTING bus item shows, rather than making a new one.
+    property bool windowBusModalOpen: false
     // The Metadata palette (the + menu's Metadata chip). Its fields come from
     // MetadataFields.qml — the one list of placeholders the engine's filler
     // knows, so a template being built here can be given any of them. `group`
@@ -1584,8 +1670,9 @@ Rectangle {
         // The bus a slide carries. Camera / Media / Audio are gone from this
         // ring by request — a service puts a BUS on screen, not a device
         // (Settings · Audio & Video owns the buses and what is routed into
-        // them). The chip opens BusSourceModal below; the engine receives a
-        // block of kind "bus" carrying that bus's stable id.
+        // them). The chip opens BusSourceModal below to PICK an existing bus
+        // (it never creates one); the engine receives a block of kind "bus"
+        // carrying that bus's stable id.
         { kind: "bus",    icon: "activity", label: "Bus" },
         // A media FILE placed on the slide. Not one kind but three, and the
         // chip opens them rather than adding anything (see mediaKinds below):
@@ -2874,13 +2961,136 @@ Rectangle {
                         color: "#000000"
                         clip: true
 
+                        // THE MEDIA TAB'S VALUES APPLY TO A WINDOW TOO — same
+                        // numbers, same order, same meaning as a placed picture
+                        // (see mediaPictureBody below): the bus item reuses MEDIA,
+                        // so Fit / Crops / Flips / Filters here must change the
+                        // window's picture, not just be stored on it. The engine
+                        // applies the same set to the bus plane's pixels
+                        // (SceneBuilder's RefreshBusPlanes), so the canvas and the
+                        // HDMI/NDI frame stay one picture.
+                        readonly property var bmeta: canvasItemObject.modelData.meta
+                        readonly property var bmedia: busBody.bmeta && busBody.bmeta.media
+                                                     ? busBody.bmeta.media : ({})
+                        readonly property var bcrop: busBody.bmedia.crop
+                                                     || ({ top: 0, right: 0, bottom: 0, left: 0 })
+                        readonly property var bfilter: busBody.bmedia.filter || ({})
+                        readonly property bool flipH: busBody.bmedia.flipH === true
+                        readonly property bool flipV: busBody.bmedia.flipV === true
+                        readonly property real cropSum: (busBody.bcrop.top ?? 0)
+                            + (busBody.bcrop.right ?? 0) + (busBody.bcrop.bottom ?? 0)
+                            + (busBody.bcrop.left ?? 0)
+                        readonly property bool cropActive: busBody.cropSum > 0
+                        readonly property bool filterActive: {
+                            const f = busBody.bfilter
+                            return (f.hueRotate ?? 0) !== 0 || (f.invert ?? 0) !== 0 || (f.blur ?? 0) !== 0
+                                || (f.grayscale ?? 0) !== 0 || (f.sepia ?? 0) !== 0
+                                || (f.brightness ?? 1) !== 1 || (f.contrast ?? 1) !== 1
+                                || (f.saturate ?? 1) !== 1 || (f.opacity ?? 1) !== 1
+                        }
+                        readonly property string fit: canvasItemObject.style
+                            ? String(canvasItemObject.style.mediaFit) : "contain"
+                        readonly property bool canShader: GraphicsInfo.api !== GraphicsInfo.Software
+
+                        // A LIVE PICTURE NEEDS A TAP, and BusMonitor never starts one itself.
+                        // While this window is on screen it asks for its feed's thumbnail tap
+                        // and lets it go when the window goes. A tap another card already holds
+                        // is left alone (card previews are one hold per source), and only a tap
+                        // THIS window started is released.
+                        property string heldLabel: ""
+                        readonly property string wantedLabel: busBody.visible ? busMonitor.videoLabel : ""
+                        onWantedLabelChanged: busBody.syncPreview()
+                        function syncPreview() {
+                            if (busBody.heldLabel !== "" && busBody.heldLabel !== busBody.wantedLabel) {
+                                LiveOutputService.endPreviewInput(busBody.heldLabel)
+                                busBody.heldLabel = ""
+                            }
+                            const want = busBody.wantedLabel
+                            if (want === "" || LiveOutputService.cardPreviews.indexOf(want) >= 0)
+                                return
+                            LiveOutputService.previewInput(want, busMonitor.videoKind,
+                                busMonitor.videoSource.mode !== undefined ? busMonitor.videoSource.mode : "")
+                            if (LiveOutputService.cardPreviews.indexOf(want) >= 0)
+                                busBody.heldLabel = want
+                        }
+                        Component.onCompleted: busBody.syncPreview()
+                        Component.onDestruction: {
+                            if (busBody.heldLabel !== "")
+                                LiveOutputService.endPreviewInput(busBody.heldLabel)
+                        }
+                        // A source that was not there (a closed window, an unplugged camera)
+                        // is asked for again every couple of seconds until it can be held.
+                        Timer {
+                            interval: 2000
+                            repeat: true
+                            running: busBody.wantedLabel !== "" && busBody.heldLabel === ""
+                            onTriggered: busBody.syncPreview()
+                        }
+
+                        // BLUR FILL: the feed fills the window softened and the
+                        // sharp copy sits on top — the picture's own fourth fit.
                         Image {
                             anchors.fill: parent
+                            visible: busBody.fit === "blur" && busMonitor.previewing
                             source: busMonitor.previewSource
                             fillMode: Image.PreserveAspectCrop
                             cache: false
                             asynchronous: false
-                            visible: busMonitor.previewing
+                            layer.enabled: visible && busBody.canShader
+                            layer.effect: SlideFilterEffect {
+                                filters: ({ blur: 24, brightness: 0.85 })
+                                stageWidth: StageGrid.w
+                                stageHeight: StageGrid.h
+                            }
+                        }
+
+                        // The filter set (and the file-level Opacity row) wraps the
+                        // feed exactly as it wraps a picture: an identity set never
+                        // pays for a layer.
+                        Item {
+                            id: busFeedLayer
+                            anchors.fill: parent
+                            opacity: busBody.bfilter.opacity ?? 1
+                            layer.enabled: busBody.filterActive && busBody.canShader
+                            layer.effect: SlideFilterEffect {
+                                filters: busBody.bfilter
+                                stageWidth: StageGrid.w
+                                stageHeight: StageGrid.h
+                            }
+
+                            Image {
+                                id: busFeed
+                                anchors.fill: parent
+                                source: busMonitor.previewSource
+                                cache: false
+                                asynchronous: false
+                                visible: busMonitor.previewing
+                                // FIT, mapped the way a picture's is (blur keeps the
+                                // sharp feed whole over its softened backdrop).
+                                fillMode: busBody.fit === "cover" ? Image.PreserveAspectCrop
+                                        : busBody.fit === "fill" ? Image.Stretch
+                                        : Image.PreserveAspectFit
+                                // CROP: Qt crops the source, then fits what is left.
+                                sourceClipRect: {
+                                    if (!busBody.cropActive || busFeed.sourceSize.width <= 1)
+                                        return Qt.rect(0, 0, 0, 0)
+                                    const c = busBody.bcrop
+                                    const w = busFeed.sourceSize.width
+                                    const h = busFeed.sourceSize.height
+                                    const l = (c.left ?? 0) / 100
+                                    const r = (c.right ?? 0) / 100
+                                    const t = (c.top ?? 0) / 100
+                                    const b = (c.bottom ?? 0) / 100
+                                    return Qt.rect(w * l, h * t, w * (1 - l - r), h * (1 - t - b))
+                                }
+                                mirror: busBody.flipH
+                                transform: Scale {
+                                    origin.x: busFeed.width / 2
+                                    origin.y: busFeed.height / 2
+                                    xScale: 1
+                                    yScale: busBody.flipV ? -1 : 1
+                                }
+                            }
                         }
 
                         Column {
@@ -3558,6 +3768,8 @@ Rectangle {
                     // The picker is what makes the item: it needs a FILE, and
                     // a media item without one is a card with no content.
                     root.addMenuOpen = false
+                    // The ring ADDS: never inherit a replace key from an earlier Change.
+                    root.mediaReplaceKey = ""
                     root.mediaPickKind = kind
                     root.mediaModalOpen = true
                     return
@@ -4188,7 +4400,7 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: -6
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.rightPanelTab = "items"
+                    onClicked: { root.rightPanelTab = "items"; root.rightTabPinned = true }
                 }
             }
             Text {
@@ -4221,7 +4433,7 @@ Rectangle {
                     // (an empty panel) until the next selection change.
                     enabled: rightTabRow.textShown
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.rightPanelTab = "text"
+                    onClicked: { root.rightPanelTab = "text"; root.rightTabPinned = false }
                 }
             }
             Text {
@@ -4249,7 +4461,7 @@ Rectangle {
                     // See the TEXT label: no clicks on a fading-out cell.
                     enabled: rightTabRow.mediaShown
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.rightPanelTab = "media"
+                    onClicked: { root.rightPanelTab = "media"; root.rightTabPinned = false }
                 }
             }
             Text {
@@ -4270,7 +4482,7 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: -6
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.rightPanelTab = "slide"
+                    onClicked: { root.rightPanelTab = "slide"; root.rightTabPinned = true }
                 }
             }
         }
@@ -4550,9 +4762,19 @@ Rectangle {
         // right one here too: how the item is PRESENTED (its opacity) is a
         // different question from how its box is shaped, and Opacity used to
         // live on the Filters card, which is about pixel effects.
+        // ---- WINDOW BUS lives in the MEDIA tab -----------------------------
+        // A window REUSES MEDIA (see MediaItemPanel's isWindow): its Media row
+        // names the bus it shows and Change opens the bus picker, with Fit /
+        // Blend / Flip / Cropping / Filters below it — the same values a placed
+        // picture has, applied to the bus's feed. There is no separate bus card
+        // here: that row was the window's only control, and it now sits where the
+        // selection actually opens.
+
         TransformCard {
             id: transformCard
             x: itemsTabContent.inset
+            // The geometry cards follow the Background row (the window's bus row
+            // is not part of this column any more — it is the MEDIA tab's).
             y: backgroundRow.y + backgroundRow.height + 10
             width: itemsTabContent.rowWidth
             // Every selected object's style, in selection order — the card
@@ -4731,13 +4953,24 @@ Rectangle {
                 // into the bar's condition).
                 width: mediaItemFlick.width - 12
                 item: mediaItemFlick.visible ? root.primaryMediaItem : null
+                // A WINDOW reuses this panel: its Media row names the bus this
+                // window shows (the item's meta busId, read through the roster)
+                // and its Change opens the BUS picker — see MediaItemPanel's
+                // isWindow. Fit / Blend / Flip / Cropping / Filters below are the
+                // same values, and they apply to the bus's feed on the canvas
+                // (busBody) and on the outputs (SceneBuilder's bus planes).
+                busName: root.primaryIsWindow ? root.windowBusName() : ""
                 undoHook: root.pushUndoSnapshot
                 focusHook: function () { mCanvas.forceActiveFocus() }
+                onChangeBusRequested: root.windowBusModalOpen = true
                 onChangeFileRequested: root.pickReplacementMedia()
+                // Opened against the WHOLE WINDOW (no bounds argument), not `root`: the menu
+                // is as wide as the field, and the field now runs the panel's full width, so
+                // clamping it inside `root` slid it left of its field and over the row below.
                 onFitFieldTapped: mediaFitMenu.openAt(mediaItemPanel.fitFieldItem, 0,
-                                                      mediaItemPanel.fitFieldItem.height + 2, root)
+                                                      mediaItemPanel.fitFieldItem.height + 2)
                 onBlendFieldTapped: mediaBlendMenu.openAt(mediaItemPanel.blendFieldItem, 0,
-                                                          mediaItemPanel.blendFieldItem.height + 2, root)
+                                                          mediaItemPanel.blendFieldItem.height + 2)
                 onBlendPicked: (blend) => root.setMediaMeta({ blend: blend })
                 onClearFileRequested: root.clearItemFile()
                 onFitPicked: (fit) => root.applyMediaFit(fit)
@@ -4767,7 +5000,7 @@ Rectangle {
             color: Theme.textMuted
             font.family: Theme.fontFamily
             font.pixelSize: 13
-            text: qsTr("Select a picture, video or audio item on the canvas to edit it.")
+            text: qsTr("Select a picture, video, audio or bus window on the canvas to edit it.")
         }
 
         // SLIDE tab — the slide's own settings (SlidePanel.qml): its background
@@ -5182,56 +5415,62 @@ Rectangle {
         }
     }
 
-    // The Bus chip's picker — the SAME picker Media › Inputs' "New bus" uses
-    // (BusSourceModal in its create mode), so the two doors are one flow: the
-    // operator picks the SOURCE the bus is built from, the bus is created with
-    // that route already made, and the item lands carrying it. A bus that feeds
-    // nothing can no longer be made from the ring either — which matters more
-    // here than anywhere, because a slide's bus block is a window that would
-    // simply paint a hole if the bus it named carried no source.
+    // The Bus chip's picker PICKS an existing bus and never makes one. It is the same
+    // picker the window's re-point uses, in its bus mode: a bus is made in Audio &
+    // Video or on Media › Inputs, and the canvas only places a window onto it.
     //
     // What lands on the slide carries the bus's STABLE id in its meta (and its
     // name as the item's text), so renaming or reordering the bus later leaves
     // the item pointing at the same bus.
     BusSourceModal {
         id: busSourceModal
-        // Its own name for the test hooks: this instance is in create mode at the
-        // same time as the Media pane's, so the two cannot share them.
         objectName: "editBusPicker"
-        mode: "newBus"
+        mode: "bus"
         open: root.busModalOpen
-        onCreated: (busRow) => {
+        onApplied: (bus) => {
             // The picker reports and leaves `open` alone — `open` is bound to
             // busModalOpen here, so writing it from inside the modal would break
             // that binding and the picker would never open again.
             root.busModalOpen = false
+            const pickedRow = bus && bus.row !== undefined ? Number(bus.row)
+                            : (bus ? root.windowBusRow(Number(bus.id)) : -1)
+            if (pickedRow < 0)
+                return
             // Its name and type are read from the model HERE, so the item is
             // named what the bus is called now and not what a stale list said.
-            const info = BusListModel.getBus(busRow)
-            const item = root.addCanvasItem("bus")
-            if (!item) {
-                // The engine refused the item (no show, or no slide open) —
-                // addCanvasItem returns null then and nothing is added. The bus
-                // this picker just made would otherwise be left in the roster
-                // with nothing on the canvas carrying it, which is the "a bus
-                // nobody asked for" half of what this picker exists to prevent:
-                // take it back out. (The Media pane's own door keeps its bus —
-                // there the bus IS the thing the operator asked for.)
-                BusListModel.removeBus(busRow)
+            const info = BusListModel.getBus(pickedRow)
+            if (!info || info.id === undefined)
                 return
-            }
-            item.text = info.name !== undefined ? info.name : ""
+            const item = root.addCanvasItem("bus")
+            if (!item)
+                return   // the engine refused the item (no show, or no slide open)
+            item.text = info.name !== undefined ? String(info.name) : ""
             // A 16:9 tile — the window is the bus's feed, so it is sized
             // like a picture rather than like a line of text.
             item.width = 240
             item.height = 135
             item.meta = {
-                busId: info.id,
+                busId: Number(info.id),
                 busName: item.text,
-                busType: info.type !== undefined ? info.type : ""
+                busType: info.type !== undefined ? String(info.type) : ""
             }
         }
         onCancelled: root.busModalOpen = false
+    }
+
+    // The WINDOW's bus picker: re-points an EXISTING bus item at another bus
+    // (editBusPicker above places a NEW window on the bus the operator picks). The
+    // picker is told nothing about the item — its answer is applied by id here.
+    BusSourceModal {
+        id: windowBusPicker
+        objectName: "editWindowBusPicker"
+        mode: "bus"
+        open: root.windowBusModalOpen
+        onApplied: (bus) => {
+            root.windowBusModalOpen = false
+            root.assignWindowBus(bus)
+        }
+        onCancelled: root.windowBusModalOpen = false
     }
 
     TimerSourceModal {

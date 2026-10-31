@@ -1,13 +1,16 @@
 #include "OutputListModel.h"
+#include "BusListModel.h"
 #include "FamilySlots.h"
 #include "StyleListModel.h"
 #include "services/DesignLibraryService.h"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
+#include "services/RoutingService.h"
 #include "services/SettingsService.h"
 #include "services/ShowConverter.h"
 #include "services/StyleSpecBuilder.h"
 #include "modules/presentation/PresentationTypes.hpp"
+#include "modules/presentation/CompositorState.hpp"
 #include "modules/presentation/SlideRules.hpp"
 #include "modules/project/OutputStore.hpp"
 
@@ -178,6 +181,14 @@ OutputListModel::OutputListModel(QObject *parent)
 // Wraps in begin/endResetModel: rows are replaced wholesale.
 void OutputListModel::reloadFromStore()
 {
+    // Was THIS read able to see kernel.json? Only a read with the engine booted
+    // can (the Database is opened during boot, and this singleton is constructed
+    // at QML load, before that). Sticky: once a real read has happened the roster
+    // is trustworthy from then on — an empty roster is then the operator's own
+    // doing, which is a different fact from "not read yet" (see rosterReady).
+    if (EngineBridge::instance().booted())
+        rosterReady_ = true;
+
     beginResetModel();
     m_outputs.clear();
 
@@ -198,6 +209,7 @@ void OutputListModel::reloadFromStore()
     bool sawActive = false;
     for (const bps::project::StoredOutput &so : bps::project::OutputStore::Instance().Get()) {
         OutputItem item;
+        item.id = QString::fromStdString(so.id);
         item.name = QString::fromStdString(so.name);
         item.badge = QString::fromStdString(so.badge);
         item.kind = QString::fromStdString(so.kind);
@@ -210,8 +222,15 @@ void OutputListModel::reloadFromStore()
         item.fullscreenOutput = so.fullscreenOutput;
         item.isEnabled = so.enabled;
         item.styleId = QString::fromStdString(so.styleId);
+        item.videoMode = so.videoMode == "compose" ? QStringLiteral("compose")
+                                                    : QStringLiteral("direct");
+        // This row's own gates (absent in an older roster = on, the default).
+        item.showOverlay = so.showOverlay;
+        item.showMedia = so.showMedia;
         item.mediaFit = so.mediaFit.empty() ? QStringLiteral("contain")
                                             : QString::fromStdString(so.mediaFit);
+        // "" = the program stream (the default, and what every older row is).
+        item.audioDevice = QString::fromStdString(so.audioDevice);
         // Legacy rows (before onAirOnly was a thing): an NDI row never wears
         // a screen window — enforce the transport rule on hydrate so pre-
         // existing rosters get the fix without a settings round-trip.
@@ -262,12 +281,37 @@ void OutputListModel::reloadFromStore()
         m_outputs[i].name = unique;
     }
 
+    // HEAL the stable ids. A roster saved before ids existed, or written by a
+    // path that never minted one, would otherwise hand RoutingService an empty
+    // identity — and an output node keyed on nothing is worse than no node:
+    // every such row would share one graph node (or none), so their wires would
+    // merge. Duplicates are healed too, for the same reason a duplicate NAME is
+    // healed above: two rows with one id are one output to every reader.
+    QStringList seenIds;
+    int healedId = 0;
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        const QString id = m_outputs.at(i).id.trimmed();
+        if (!id.isEmpty() && !seenIds.contains(id)) {
+            seenIds.append(id);
+            continue;
+        }
+        // nextStableId scans the WHOLE roster, so it cannot collide with a row
+        // this loop has not healed yet either.
+        m_outputs[i].id = nextStableId();
+        seenIds.append(m_outputs[i].id);
+        ++healedId;
+    }
+    if (healedId > 0)
+        qInfo("OutputListModel: healed %d output row id(s) — a row without a stable id cannot own a routing wire",
+              healedId);
+
     // First-run seed only: a brand-new (EMPTY) roster starts with the
     // primary display so the Outputs screen isn't empty. A DELETED Main
     // Output stays deleted — no re-seed on a non-empty roster (the user's
     // roster is the truth), and removeOutput no longer refuses it.
     if (m_outputs.isEmpty()) {
         OutputItem main;
+        main.id = nextStableId();
         main.name = QStringLiteral("Main Output");
         main.badge = QStringLiteral("LIVE 1");
         main.kind = QStringLiteral("HDMI");
@@ -316,7 +360,7 @@ void OutputListModel::saveRoster()
     stored.reserve(m_outputs.size());
     for (const OutputItem &item : m_outputs) {
         bps::project::StoredOutput so;
-        so.id = QStringLiteral("out-%1").arg(qHash(item.name)).toStdString();
+        so.id = item.id.toStdString();
         so.name = item.name.toStdString();
         so.badge = item.badge.toStdString();
         so.kind = item.kind.toStdString();
@@ -330,7 +374,11 @@ void OutputListModel::saveRoster()
         so.active = item.active;
         so.enabled = item.isEnabled;
         so.styleId = item.styleId.toStdString();
+        so.videoMode = item.videoMode.toStdString();
+        so.showOverlay = item.showOverlay;
+        so.showMedia = item.showMedia;
         so.mediaFit = item.mediaFit.toStdString();
+        so.audioDevice = item.audioDevice.toStdString();
         so.onAirOnly = item.onAirOnly;
         for (int i = 0; i < item.content.size() && i < 6; ++i)
             so.contentToggles[i] = item.content.at(i).enabled;
@@ -477,6 +525,7 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     const OutputItem &item = m_outputs.at(index.row());
     switch (role) {
     case NameRole: return item.name;
+    case IdRole: return item.id;
     case BadgeRole: return item.badge;
     case KindRole: return item.kind;
     case ResRole: return item.res;
@@ -491,6 +540,10 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     case EnabledRole: return item.isEnabled;
     case StyleIdRole: return item.styleId;
     case MediaFitRole: return item.mediaFit;
+    case AudioDeviceRole: return item.audioDevice;
+    case VideoModeRole: return item.videoMode;
+    case OverlayGateRole: return item.showOverlay;
+    case MediaGateRole: return item.showMedia;
     case StyleNameRole: {
         // Resolved through StyleListModel by id; "" / unknown ids render as
         // "None" (a style removed under us reads as None, never a stale name).
@@ -511,11 +564,13 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
         return styleBackground(index.row());
     case FrameBufferRole:
         // Keyed exactly like the engine-side buffer push (saveRoster's id
-        // keying): a styled output has its own gated buffer, an unstyled one
-        // mirrors the shared preview feed.
-        return item.styleId.isEmpty()
-                   ? QString()
-                   : QStringLiteral("__out_%1__").arg(qHash(item.name));
+        // keying): an output with its OWN pass — a style, or a video wire — has
+        // its own buffer; anything else mirrors the shared preview feed. Read
+        // through hasOwnPass so the tile, the sender and the spec push cannot
+        // disagree about which of the two a row's picture lands in.
+        return hasOwnPass(index.row())
+                   ? QStringLiteral("__out_%1__").arg(qHash(item.name))
+                   : QString();
     default: return {};
     }
 }
@@ -537,12 +592,17 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { EnabledRole, "isEnabled" },
         { StyleIdRole, "styleId" },
         { MediaFitRole, "mediaFit" },
+        { AudioDeviceRole, "audioDevice" },
+        { VideoModeRole, "videoMode" },
+        { OverlayGateRole, "showOverlay" },
+        { MediaGateRole, "showMedia" },
         { StyleNameRole, "styleName" },
         { OnAirOnlyRole, "onAirOnly" },
         { ContentRole, "content" },
         { StyleBackgroundRole, "styleBackground" },
         { FrameBufferRole, "frameBuffer" },
         { StyleLayoutRole, "styleLayout" },
+        { IdRole, "outputId" },
     };
 }
 
@@ -610,6 +670,7 @@ void OutputListModel::addScreen(const QString &name, const QString &type,
 
     beginInsertRows(QModelIndex(), m_outputs.size(), m_outputs.size());
     OutputItem item;
+    item.id = nextStableId();
     item.name = uniqueOutputName(wanted);
     item.kind = type;
     item.res = res.isEmpty() ? QStringLiteral("1920×1080") : res;
@@ -642,6 +703,7 @@ void OutputListModel::duplicateOutput(int index)
         return;
 
     OutputItem copy = m_outputs.at(index);
+    copy.id = nextStableId();   // a copy is a NEW output — never the same identity as its source
     copy.name = QStringLiteral("%1 (copy)").arg(copy.name);
     copy.badge = QStringLiteral("OUT %1").arg(m_outputs.size() + 1);
     copy.active = false; // a duplicate starts dark, never fighting the original
@@ -1057,6 +1119,89 @@ void OutputListModel::setStayOnTop(int index, bool stayOnTop)
     saveRoster();
 }
 
+// WHICH ENDPOINT THIS OUTPUT'S AUDIO PLAYS ON (Settings · Outputs' picker).
+// "" = the program stream everything has always been summed into; a roster id
+// ("waveout:<n>") = that device's own render stream, opened by RoutingService
+// from this row's audio wires. Written here and persisted; nothing is opened
+// from this call — the routing pass owns the stream's lifetime, because the
+// wire is what decides whether there is anything to play.
+void OutputListModel::setAudioDevice(int index, const QString &deviceId)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    if (m_outputs[index].audioDevice == deviceId)
+        return;
+
+    m_outputs[index].audioDevice = deviceId;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { AudioDeviceRole });
+    saveRoster();
+    // The device is part of the ROUTING, so the wires have to be re-bound: a row
+    // that just gained an endpoint starts playing there, and one that gave it up
+    // goes back into the program instead of going silent.
+    if (RoutingService *routing = RoutingService::instance())
+        routing->refresh();
+}
+
+void OutputListModel::setVideoMode(int index, const QString &mode)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    const QString normalized = mode == QStringLiteral("compose")
+        ? QStringLiteral("compose") : QStringLiteral("direct");
+    if (m_outputs[index].videoMode == normalized)
+        return;
+
+    m_outputs[index].videoMode = normalized;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { VideoModeRole, FrameBufferRole });
+    saveRoster();
+    pushActiveEngineStyle();
+    emit activeStyleChanged();
+}
+
+// The two per-output gates. Each is one flag on THIS row, and each IS A WIRE on
+// Settings · Routing: the Overlays and Media cards at the head of the Styles
+// column send a wire to an output, and that wire is this flag (no wire, nothing
+// paints). Allowing media here must not allow it on the other screens wearing the
+// same style — that was the whole point of moving them off the style — and the
+// engine's per-output spec is re-pushed immediately so the change lands on the
+// next frame.
+void OutputListModel::setShowOverlay(int index, bool on)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    if (m_outputs[index].showOverlay == on)
+        return;
+    m_outputs[index].showOverlay = on;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { OverlayGateRole });
+    saveRoster();
+    pushActiveEngineStyle();
+    // A GATE IS A WIRE on Settings · Routing (the Overlays card → this output), so
+    // the canvas rows have to be re-published for the line to appear or go without
+    // waiting for the next unrelated refresh — the same reason a wire dropped on the
+    // canvas lands within a frame (see setAudioDevice above).
+    if (RoutingService *routing = RoutingService::instance())
+        routing->refresh();
+}
+
+void OutputListModel::setShowMedia(int index, bool on)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    if (m_outputs[index].showMedia == on)
+        return;
+    m_outputs[index].showMedia = on;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { MediaGateRole });
+    saveRoster();
+    pushActiveEngineStyle();
+    // Same contract as setShowOverlay: the flag IS the wire, so the canvas is told.
+    if (RoutingService *routing = RoutingService::instance())
+        routing->refresh();
+}
+
 void OutputListModel::setFullscreenOutput(int index, bool fullscreen)
 {
     if (index < 0 || index >= m_outputs.size())
@@ -1290,7 +1435,7 @@ int OutputListModel::activeIndex() const
     return -1;
 }
 
-void OutputListModel::pushEngineStyle(const QString &styleId)
+void OutputListModel::pushEngineStyle(const QString &styleId, const QString &slideTag)
 {
     // Compose the engine's view of the style (PresentationTypes.hpp's
     // OutputStyleSpec): background + layout preset + the clear-on-text flag +
@@ -1300,7 +1445,27 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     // composes the same spec from the same function, so a style cannot render
     // one way on an output and another way on a monitor tile.
     bps::presentation::OutputStyleSpec spec =
-        StyleSpecBuilder::specForStyleRow(styleRowForId(styleId), styleRoster());
+        StyleSpecBuilder::specForStyleRow(styleRowForId(styleId), styleRoster(), slideTag);
+    // THE PROGRAM PASS PAINTS NO BUS WINDOW.
+    //
+    // The program frame is what an output with no look of its own MIRRORS (see
+    // hasOwnPass), so a bus window left in it would reach every such row —
+    // including rows holding no wire to that bus, which is the "it came active
+    // there" report. It is gated with an EMPTY set, not with the active row's
+    // wires, for exactly that reason: an unwired row copying the program must not
+    // inherit whatever the active row happens to be wired to. Nothing is lost on
+    // the active output itself — when it IS wired, its own pass composes that bus
+    // full-frame (SceneBuilder::BuildBusFeedScene).
+    spec.gateVideoBuses = true;
+    spec.allowedVideoBuses.clear();
+    // THE ACTIVE OUTPUT'S OWN GATES, on top of its style's (see
+    // OutputItem::showOverlay): a row that has closed media or the overlay layer
+    // for itself must not paint them just because the style allows them.
+    const int activeRow = activeIndex();
+    if (activeRow >= 0 && activeRow < m_outputs.size()) {
+        spec.showOverlay = spec.showOverlay && m_outputs.at(activeRow).showOverlay;
+        spec.showMedia = spec.showMedia && m_outputs.at(activeRow).showMedia;
+    }
     if (SettingsService *settings = SettingsService::instancePtr())
         settings->setActiveOutputStyle(spec);
     // THE OTHER LIVE OUTPUTS: push the per-output style set so the engine's
@@ -1313,29 +1478,97 @@ void OutputListModel::pushEngineStyle(const QString &styleId)
     std::vector<std::pair<int, int>> sizes;
     for (int i = 0; i < m_outputs.size(); ++i) {
         const OutputItem &item = m_outputs.at(i);
-        // ENABLED + styled only (the comment below is the contract): the old
+        // ENABLED only (the comment below is the contract): the old
         // `!isEnabled || hasStyle` De-Morgan slip also pushed specs for
         // DISABLED styled outputs — wasted gated passes per frame, and a
         // live output whose style was just removed kept its old spec pushed
         // (the tile went unstyled while the real output stayed styled).
-        if (item.isEnabled && !item.styleId.isEmpty()) {
-            const int styleRow = styleRowForId(item.styleId);
-            if (styleRow >= 0) {
-                bps::presentation::OutputStyleSpec outSpec =
-                    StyleSpecBuilder::specForStyleRow(styleRow, styleRoster());
-                // (NO mediaFit here: how a taken file sits is the FILE's own
-                // choice, else contain — one picture, one shape on every output.
-                // A per-output fill is what made the wall show one take two
-                // ways, and the field it read could not even be corrected on the
-                // active output: PresentationEngine::SetActiveOutputStyle did
-                // not compare mediaFit, so the change was swallowed as a no-op.)
-                // Buffer name keyed by output identity (qHash(name) — the same
-                // keying saveRoster uses for StoredOutput ids).
-                specs.push_back(std::move(outSpec));
-                buffers.push_back(QStringLiteral("__out_%1__").arg(qHash(item.name)).toStdString());
-                sizes.push_back(parseResolution(item.res));
+        //
+        // What earns a per-output pass: a LOOK to compose (a style) or a WIRE to
+        // show (a video bus). A wired row with no style used to be skipped
+        // entirely — which is exactly the row an operator wires a camera into,
+        // and the one pass it most needs. Disabled rows are excluded by the same
+        // rule, in one place (hasOwnPass), because they are not on air.
+        if (!hasOwnPass(i))
+            continue;
+        // THE WIRED VIDEO BUS FOR THIS ROW (Settings · Routing). 0 = unwired.
+        const int routedBus = i < routedVideoBuses_.size() ? routedVideoBuses_.at(i) : 0;
+        const int styleRow = item.styleId.isEmpty() ? -1 : styleRowForId(item.styleId);
+        // An unwired-but-styled row keeps its style; a wired row keeps whichever
+        // it has (an empty spec = no style, the engine renders unstyled — the
+        // bus picture is the whole frame either way).
+        bps::presentation::OutputStyleSpec outSpec = styleRow >= 0
+            ? StyleSpecBuilder::specForStyleRow(styleRow, styleRoster(), slideTag)
+            : bps::presentation::OutputStyleSpec{};
+        // Each output chooses between its direct routed feed and the design.
+        // In compose mode every bus window paints its own assigned bus (see the gate
+        // below); in direct mode the windows are gated off and the selected bus fills
+        // the frame by itself. A window's bus is its own assignment, not a template bus.
+        const bool composeDesign = item.videoMode == QStringLiteral("compose");
+        outSpec.videoBus = composeDesign ? 0 : routedBus;
+        // A TEMPLATE BUS IS A DESIGN, not a mere feed: wiring this output to one
+        // means "show that layout", so its blocks ride the spec and the engine
+        // composes them with each window filled by its own assigned bus.
+        const int busRow = BusListModel::rowForBusNumber(routedBus);
+        const QVariantMap bus = busRow >= 0 ? BusListModel::Instance()->getBus(busRow) : QVariantMap{};
+        const QString templateId = bus.value(QStringLiteral("templateId")).toString();
+        if (!templateId.isEmpty()) {
+            const QVariantMap design = TemplateLibraryService::templates().design(templateId);
+            const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+            if (composeDesign) {
+                outSpec.templateBus = routedBus;
+                outSpec.templateBusBackground = design.value(QStringLiteral("background")).toString().toStdString();
+                outSpec.templateBusBlocks.clear();
+                for (const QVariant &entry : blocks)
+                    outSpec.templateBusBlocks.push_back(
+                        ShowConverter::blockFromVariant(entry.toMap()));
+            } else {
+                // A template bus has no ordinary video plane of its own. Direct
+                // mode shows the first window feed full-frame; an empty template
+                // therefore has no direct feed until a window is added.
+                outSpec.videoBus = 0;
+                int windowIndex = 0;
+                for (const QVariant &entry : blocks) {
+                    const QVariantMap block = entry.toMap();
+                    if (block.value(QStringLiteral("kind")).toString() != QStringLiteral("bus"))
+                        continue;
+                    const int assigned = block.value(QStringLiteral("meta")).toMap()
+                                             .value(QStringLiteral("busId")).toInt();
+                    outSpec.videoBus = assigned > 0 ? assigned
+                        : bps::presentation::CompositorState::TemplateWindowPlaneKey(routedBus, windowIndex);
+                    break;
+                }
             }
         }
+        // THE ALLOW-LIST FOR THE DESIGN'S BUS WINDOWS. A "bus" block in the on-air
+        // design is a live feed inside the design's own rectangle, and it used to
+        // paint on every output that composed that slide — an HDMI/NDI row with no
+        // wire to that bus included, which read as the bus "coming active" on an
+        // output it was never wired to. This row's own wired set is what it may
+        // paint; an unwired row gets an empty set and therefore no window.
+        // In compose mode every bus window paints the bus it is explicitly assigned
+        // (its own busId), whatever this output is wired to — the window's bus is
+        // the assignment, so the wire-based allow-list does not apply. Direct mode
+        // keeps the gate closed: the selected bus fills the frame by itself.
+        outSpec.gateVideoBuses = !composeDesign;
+        outSpec.allowedVideoBuses.clear();
+        // (NO mediaFit here: how a taken file sits is the FILE's own
+        // choice, else contain — one picture, one shape on every output.
+        // A per-output fill is what made the wall show one take two
+        // ways, and the field it read could not even be corrected on the
+        // active output: PresentationEngine::SetActiveOutputStyle did
+        // not compare mediaFit, so the change was swallowed as a no-op.)
+        // Buffer name keyed by output identity (qHash(name) — the same
+        // keying saveRoster uses for StoredOutput ids).
+        // ...and THIS ROW'S OWN GATES, applied last so they can only CLOSE what
+        // its style already allows (see OutputItem::showOverlay): the two chips on
+        // the row's Routing card write these, and every other row wearing the same
+        // style is untouched.
+        outSpec.showOverlay = outSpec.showOverlay && item.showOverlay;
+        outSpec.showMedia = outSpec.showMedia && item.showMedia;
+        specs.push_back(std::move(outSpec));
+        buffers.push_back(QStringLiteral("__out_%1__").arg(qHash(item.name)).toStdString());
+        sizes.push_back(parseResolution(item.res));
     }
     if (SettingsService *settings2 = SettingsService::instancePtr())
         settings2->setLiveOutputStyles(specs, buffers, sizes);
@@ -1352,6 +1585,66 @@ void OutputListModel::pushActiveEngineStyle()
     if (!styleRosterConnected_)
         return;
     pushEngineStyle(activeStyleId());
+}
+
+QString OutputListModel::frameBufferFor(int row) const
+{
+    if (!hasOwnPass(row))
+        return QString();
+    return QStringLiteral("__out_%1__").arg(qHash(m_outputs.at(row).name));
+}
+
+int OutputListModel::routedVideoBus(int row) const
+{
+    return row >= 0 && row < routedVideoBuses_.size() ? routedVideoBuses_.at(row) : 0;
+}
+
+bool OutputListModel::hasOwnPass(int row) const
+{
+    if (row < 0 || row >= m_outputs.size())
+        return false;
+    const OutputItem &item = m_outputs.at(row);
+    if (!item.isEnabled)
+        return false;   // not on air: the live loop skips it
+    if (!item.styleId.isEmpty() && styleRowForId(item.styleId) >= 0)
+        return true;
+    if (item.videoMode == QStringLiteral("compose"))
+        return true;
+    // A wired row with NO style is exactly the row an operator wires a camera
+    // into, and the pass it gets composes that bus full-frame.
+    return (row < routedVideoBuses_.size() ? routedVideoBuses_.at(row) : 0) > 0;
+}
+
+// RoutingService publishes the engine's per-output VIDEO WIRE here (see the
+// header). A change means some output's PICTURE just changed, so the live set
+// is re-pushed immediately: a wire dropped on the canvas must land within a
+// frame, not at the next style edit — that is the difference between a canvas
+// that draws the routing and a canvas that is the routing.
+//
+// Guarded like every other push (no style roster adopted = nothing to compose
+// yet); the boot path pushes again once the engine is up, so a wire made before
+// boot is not lost, it is just early.
+void OutputListModel::setRoutedVideoBuses(const QVector<int> &busNumberByRow,
+                                          const QVector<QVector<int>> &wiredByRow)
+{
+    if (routedVideoBuses_ == busNumberByRow && wiredVideoBuses_ == wiredByRow)
+        return;
+    routedVideoBuses_ = busNumberByRow;
+    wiredVideoBuses_ = wiredByRow;
+    if (styleRosterConnected_)
+        pushActiveEngineStyle();
+}
+
+// The on-air slide's GROUP changed (a new pick, a step, a group's template
+// edited): re-push the same style with that group's template slotted in, so the
+// real output renders the picture its monitor tile is already drawing. Cheap and
+// idempotent — SetActiveOutputStyle no-ops when the spec is unchanged, which is
+// what every ungrouped slide's push is.
+void OutputListModel::repushActiveStyleForTag(const QString &tag)
+{
+    if (!styleRosterConnected_)
+        return;
+    pushEngineStyle(activeStyleId(), tag);
 }
 
 void OutputListModel::connectToTemplateLibrary()
@@ -1415,6 +1708,7 @@ QVariantMap OutputListModel::getOutput(int index) const
         styleName = styleNameAt(row);
 
     return {
+        { "id", item.id },
         { "name", item.name },
         { "badge", item.badge },
         { "kind", item.kind },
@@ -1428,9 +1722,52 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "active", item.active },
         { "isEnabled", item.isEnabled },
         { "styleId", item.styleId },
+        { "videoMode", item.videoMode },
+        { "showOverlay", item.showOverlay },
+        { "showMedia", item.showMedia },
         { "mediaFit", item.mediaFit },
+        { "audioDevice", item.audioDevice },
         { "onAirOnly", item.onAirOnly },
         { "styleName", styleName },
         { "content", content },
     };
+}
+
+// ---------------------------------------------------------------------------
+// Stable identity (see OutputItem::id)
+// ---------------------------------------------------------------------------
+
+QString OutputListModel::nextStableId() const
+{
+    // "out-<n>", one past every id this roster holds. PARSED, never counted:
+    // rows get reordered and deleted, so a max-suffix scan is the only answer
+    // that cannot hand out a live id — and two rows sharing one id would share
+    // one engine node, which means they would share their routing wires.
+    qulonglong highest = 0;
+    for (const OutputItem &item : m_outputs) {
+        if (!item.id.startsWith(QLatin1String("out-")))
+            continue;
+        bool ok = false;
+        const qulonglong n = item.id.mid(4).toULongLong(&ok);
+        if (ok && n > highest)
+            highest = n;
+    }
+    return QStringLiteral("out-%1").arg(highest + 1);
+}
+
+QString OutputListModel::stableIdFor(int row) const
+{
+    if (row < 0 || row >= m_outputs.size())
+        return {};
+    return m_outputs.at(row).id;
+}
+
+int OutputListModel::rowForStableId(const QString &id) const
+{
+    if (id.isEmpty())
+        return -1;
+    for (int i = 0; i < m_outputs.size(); ++i)
+        if (m_outputs.at(i).id == id)
+            return i;
+    return -1;
 }

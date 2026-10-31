@@ -112,6 +112,12 @@ Item {
     property real readingDrawnBoxW: 0
     property real readingDrawnBoxH: 0
     function noteReadingDrawn(flow, block) {
+        // ONLY THE READING BLOCK'S COLUMN IS THE DRAWN COLUMN: every text block
+        // carries a flowText (hidden unless it is the one drawing the passage), and
+        // each used to report its line count here — whichever reported last (a
+        // 730x28 metadata strip) became "what this surface drew", which is not.
+        if (!block.readingBlock)
+            return
         readingDrawnLines = flow.lineCount
         readingDrawnBoxW = block.width
         readingDrawnBoxH = block.height
@@ -132,6 +138,66 @@ Item {
             + " pageFit=" + Number(block.fitAnswer).toFixed(2)
             + " pitch=" + Number(block.linePitch).toFixed(2)
             + " chars=" + flow.text.length)
+    }
+    // ---- WHAT THIS PREVIEW IS SHOWING, AND WHAT IT SHOWED BEFORE (diagnostic) ----
+    // One line (tag PreviewShows) each time this surface's top line changes, while a
+    // scroll walks: the words at the top and at the bottom of the box, and where they
+    // sit in the passage. `shownHighWater` is the furthest the TOP of this surface has
+    // reached in the passage; everything before it has been scrolled past. When the
+    // top comes back to a place before it, the words between are SHOWN AGAIN — counted
+    // in `shownRepeatWords` and flagged REPEAT on that line, so "the text jumps back"
+    // can be read as a number per preview instead of described. Passage positions (not
+    // run positions), so a window slide at a page commit does not look like a jump.
+    // The count starts over with each operator jump (a new pick).
+    property int shownHighWater: -1
+    property int shownRepeatWords: 0
+    property int shownSerial: -1
+    property int shownLastLine: -999
+    function noteReadingShown(flow, block) {
+        if (typeof EngineBridge === "undefined" || !root.animateLineSteps)
+            return
+        const line = Math.floor(root.stepLine)
+        if (line === root.shownLastLine)
+            return                       // a glide frame inside one line
+        root.shownLastLine = line
+        const serial = Number(LiveOutputService.readingJumpSerial ?? 0)
+        if (serial !== root.shownSerial) {
+            root.shownSerial = serial
+            root.shownHighWater = -1
+            root.shownRepeatWords = 0
+        }
+        const style = String(root.readingStyleId)
+        let starts = []
+        try { starts = LiveOutputService.readingRunLineStarts(style) } catch (e) { starts = [] }
+        const passage = LiveOutputService.readingPassageChar()
+        const local = LiveOutputService.readingCharOffset()
+        if (!starts || line < 0 || line >= starts.length || passage < 0 || local < 0)
+            return
+        const base = passage - local          // where this run's text begins in the passage
+        const pitch = Number(block.linePitch) > 0 ? Number(block.linePitch) : 1
+        const visible = Math.max(1, Math.floor(Number(block.height) / pitch))
+        const topLocal = Number(starts[line])
+        const endLine = Math.min(starts.length, line + visible)
+        const endLocal = endLine < starts.length ? Number(starts[endLine]) : flow.text.length
+        const topPassage = base + topLocal
+        let repeated = 0
+        if (root.shownHighWater >= 0 && topPassage < root.shownHighWater) {
+            const again = flow.text.slice(topLocal, Math.min(endLocal, topLocal + (root.shownHighWater - topPassage)))
+            repeated = (again.match(/\S+/g) || []).length
+            root.shownRepeatWords += repeated
+        }
+        root.shownHighWater = Math.max(root.shownHighWater, topPassage)
+        const clip = (s) => String(s).replace(/\s+/g, " ").trim()
+        EngineBridge.log("info", "PreviewShows",
+            (repeated > 0 ? "REPEAT " : "")
+            + "surface=" + (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
+            + " style=" + (style === "" ? "(ref)" : style.slice(0, 8))
+            + " line=" + line + "/" + starts.length
+            + " passage=[" + topPassage + ".." + (base + endLocal) + "]"
+            + " highWater=" + root.shownHighWater
+            + " repeatedNow=" + repeated + " repeatedTotal=" + root.shownRepeatWords
+            + " top=\"" + clip(flow.text.slice(topLocal, topLocal + 40)) + "\""
+            + " bottom=\"" + clip(flow.text.slice(Math.max(topLocal, endLocal - 30), endLocal)) + "\"")
     }
     // How long that text is, so a delegate can tell whether IT is the reading
     // block. Only that one draws the passage: every text block used to shift by
@@ -185,6 +251,22 @@ Item {
         const longest = root.stepTextLength
         if (longest <= 0)
             return -1
+        // SCROLL'S PASSAGE LIVES IN THE TEMPLATE'S OWN TEXT AREA — the block bound to
+        // the text field — not in whichever block happens to hold the most characters
+        // on the page on screen. That "longest" rule is a slide's (it follows the
+        // page's content), and it moved the scroll column into a 730x28 metadata strip
+        // whenever the strip's line was longer than a short paragraph: the tile drew
+        // the passage in a band while the service measured the template's 711x331 area.
+        if (typeof LiveOutputService !== "undefined"
+                && LiveOutputService.readingBudgetFitActive === true) {
+            for (let i = 0; i < bs.length; ++i) {
+                const b = bs[i]
+                if (b && (b.kind === undefined || b.kind === "text")
+                        && String(b.bind ?? "") === "text"
+                        && String(b.text ?? "") !== "")
+                    return i
+            }
+        }
         for (let i = 0; i < bs.length; ++i) {
             const b = bs[i]
             if (!b || (b.kind !== undefined && b.kind !== "text"))
@@ -331,11 +413,23 @@ Item {
                 // anywhere inside it, and the offset that positions the column is
                 // measured from the run's start, so whichever page the block holds,
                 // the line at the top of the box is the line being read.
+                //
+                // ...EXCEPT WHEN THE PASSAGE IS THE JSON'S (readingBudgetFitActive: Scroll
+                // is on and the service holds the chapter's text, not a slide set). That
+                // passage is the whole reading, drawn at the budget size, and the slide
+                // that happens to be staged is no part of it: testing the block's slide
+                // text against the flow made the surface draw that SLIDE until the walk's
+                // window grew to contain it, then flip to the flow — the flicker after
+                // staging, and the page-by-page "book" look. With the passage active the
+                // flow is drawn from the first frame. Its position comes from the service
+                // (stepLine), never from where the slide's text sits in it.
                 readonly property bool drawsFlow: el.readingBlock && el.kind === "text"
                     && !root.paintOnly && root.animateLineSteps
                     && String(el.modelData.text ?? "") !== ""
-                    && String(LiveOutputService.readingFlowText ?? "")
-                           .indexOf(String(el.modelData.text ?? "")) >= 0
+                    && (LiveOutputService.readingBudgetFitActive === true
+                        ? String(LiveOutputService.readingFlowText ?? "") !== ""
+                        : String(LiveOutputService.readingFlowText ?? "")
+                              .indexOf(String(el.modelData.text ?? "")) >= 0)
                 // ONE-SHOT DIAGNOSTIC: every TRANSITION of this gate, named —
                 // this is the EXACT moment the visible surface hands off
                 // between the animated flow (flowText) and the plain static
@@ -490,8 +584,22 @@ Item {
                 readonly property string scrollProbe: {
                     if (el.scrollBudget <= 0)
                         return ""
-                    const words = String(LiveOutputService.readingFlowText ?? "").split(/\s+/)
-                    return words.slice(0, el.scrollBudget).join(" ")
+                    // A word with the break that FOLLOWS it (a paragraph's new line
+                    // included), so the probe takes the lines the real page takes.
+                    const words = String(LiveOutputService.readingFlowText ?? "").match(/\S+\s*/g) || []
+                    if (words.length === 0)
+                        return ""
+                    // ALWAYS EXACTLY THE BUDGET'S WORDS. Right after a jump the flow text this
+                    // surface holds is only the page that was just staged (the walk's window
+                    // fills in a moment later) — a dozen words against a budget of dozens, and
+                    // a short probe fits a HUGE size (measured on a real double-click: 90.81 px
+                    // in a box the full window fits at 42.93, which the walk then kept). Cycling
+                    // the words it has up to the budget makes the answer the budget's, whatever
+                    // has loaded yet: scroll never auto-sizes to the words in front of it.
+                    const probe = []
+                    for (let i = 0; i < el.scrollBudget; ++i)
+                        probe.push(words[i % words.length])
+                    return probe.join("").trim()
                 }
                 readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
                                                   el.scrollBudget,
@@ -500,14 +608,20 @@ Item {
                                                   MetadataFields.lineSpacing(el.meta),
                                                   MetadataFields.letterSpacing(el.meta),
                                                   el.style.padding ?? 0]
+                // A scroll column whose passage had not arrived when it was asked
+                // (scrollColumnSize answers 0 until there are words to budget) asks again
+                // when the passage does arrive.
+                property bool scrollColumnPending: false
                 Connections {
                     target: LiveOutputService
-                    function onReadingScrollChanged() {
-                        const active = LiveOutputService.readingBudgetFitActive === true
-                        if (active && el.readingBlock && root.animateLineSteps
-                                && root.readingFitKey !== el.readingFitKey)
-                            el.solveFit()
-                    }
+                    function onReadingScrollChanged() { el.maybeResolveScroll() }
+                    function onReadingStageChanged() { el.maybeResolveScroll() }
+                }
+                function maybeResolveScroll() {
+                    const active = LiveOutputService.readingBudgetFitActive === true
+                    if (active && el.readingBlock && root.animateLineSteps
+                            && (el.scrollColumnPending || root.readingFitKey !== el.readingFitKey))
+                        el.solveFit()
                 }
                 // EVERY text block solves — "none" included: the box is the master and the
                 // text must always sit inside it (a "none" block renders at its set size
@@ -554,6 +668,32 @@ Item {
                     const hostAlive = typeof root !== "undefined" && root !== null && root !== undefined
                     if (hostAlive && root.probeSink)
                         root.probeSink.gridFitSolves++
+                    // SCROLL IS NOT SOLVED HERE. A scroll column's size comes from the
+                    // service, which fits the max-words budget into this block's text
+                    // area once (LiveOutputService.scrollColumnSize) and measures its
+                    // line table from the very same block and size. No bisection, no
+                    // report back, nothing a slide does: this surface draws the answer.
+                    if (hostAlive && el.readingBlock && root.animateLineSteps
+                            && LiveOutputService.readingBudgetFitActive === true) {
+                        if (root.readingFitSize > 0 && root.readingFitKey === el.readingFitKey) {
+                            fitAnswer = root.readingFitSize
+                        } else {
+                            const columnSize = Number(LiveOutputService.scrollColumnSize(
+                                                          root.readingStyleId, el.modelData))
+                            if (columnSize > 0) {
+                                root.readingFitKey = el.readingFitKey
+                                root.readingFitSize = columnSize
+                                fitAnswer = columnSize
+                                el.scrollColumnPending = false
+                            } else {
+                                fitAnswer = el.meta.fontSize ?? 16
+                                el.scrollColumnPending = true
+                            }
+                        }
+                        fitProbe = fitAnswer
+                        fitSolving = false
+                        return
+                    }
                     const pad = el.style.padding ?? 0
                     const bw = el.width - pad * 2, bh = el.height - pad * 2
                     let lo = 3, hi = 400
@@ -846,6 +986,13 @@ Item {
                             // decide whether the step and the words are one grid.
                             onLineCountChanged: root.noteReadingDrawn(flowText, el)
                             Component.onCompleted: root.noteReadingDrawn(flowText, el)
+                            // WHAT IS ON SCREEN, once per line this surface moves (see
+                            // noteReadingShown): the words at the top and bottom of the
+                            // box and how many have been shown again after scrolling past.
+                            Connections {
+                                target: root
+                                function onStepLineChanged() { root.noteReadingShown(flowText, el) }
+                            }
                         }
                     }
                 }
@@ -993,6 +1140,45 @@ Item {
                     }
                 }
 
+                // --- bus: a window onto a bus's live feed, drawn as the canvas draws it. The tile
+                // starts no tap of its own: it shows the picture while some holder (the Edit
+                // canvas's own window for the same bus) is pulling frames, and otherwise a plain
+                // dark plate with the bus's name. ---
+                Loader {
+                    anchors.fill: parent
+                    active: el.kind === "bus" && !root.paintOnly
+                    sourceComponent: Rectangle {
+                        radius: 6
+                        color: "#000000"
+                        clip: true
+
+                        BusMonitor {
+                            id: busMon
+                            busRow: busMon.rowForBusId(el.meta.busId ?? 0)
+                        }
+                        Image {
+                            anchors.fill: parent
+                            source: busMon.previewSource
+                            fillMode: Image.PreserveAspectCrop
+                            cache: false
+                            asynchronous: false
+                            visible: busMon.previewing
+                        }
+                        Text {
+                            visible: !busMon.previewing
+                            anchors.centerIn: parent
+                            width: parent.width - 8
+                            horizontalAlignment: Text.AlignHCenter
+                            text: (el.modelData.text ?? "") !== "" ? el.modelData.text : qsTr("Bus")
+                            color: "#8a90a6"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: 9
+                            font.weight: Font.Medium
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+
                 // --- a placed picture, and a video's poster (Media Foundation's still
                 // for the same file) — the engine's own thumbnail cache, the SAME url
                 // EditScreen's own canvas asks for (mediaPictureUrl), so a slide
@@ -1113,7 +1299,7 @@ Item {
                 // text fitting, in the canvas's terms ("shrink" / "grow" also arrive as "shrinkToFit" / "growToFit")
                 readonly property string fitMode: (el.meta.autoSize === "growToFit" || el.meta.autoSize === "grow") ? "grow"
                     : (el.meta.autoSize === "shrinkToFit" || el.meta.autoSize === "shrink") ? "shrink" : "none"
-                readonly property bool isPlaceholder: !screenWide && !["text", "shape", "clock", "timer", "camera", "image", "video"].includes(el.kind)
+                readonly property bool isPlaceholder: !screenWide && !["text", "shape", "clock", "timer", "camera", "image", "video", "bus"].includes(el.kind)
                 // a shape's look comes from the item's own style, exactly as on the canvas
                 readonly property color fillColor: el.style.backgroundColor !== undefined ? el.style.backgroundColor : "#3a3f55"
                 readonly property color strokeColor: el.style.borderColor !== undefined ? el.style.borderColor : "#6c5ce7"

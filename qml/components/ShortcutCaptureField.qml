@@ -18,6 +18,11 @@ Rectangle {
     property string shortcut: ""
     property bool capturing: false
     property string variant: "chip"      // "chip" | "field" | "boxed"
+    // Drops the field's own chrome (background, border, radius) so it can be a
+    // CELL of a joined row — Manage groups' FreeShow-style strip, where the cells
+    // share one surface. The layout and the key rules stay identical, which is the
+    // point of sharing this component instead of copying the capture handler.
+    property bool frameless: false
     // Drawn INSIDE the box, above the value — only read by "boxed".
     property string label: ""
     signal captureRequested()
@@ -32,10 +37,11 @@ Rectangle {
     // above it in the editor; both are "boxed" fields and must stay the
     // same size or the two rows read as misaligned).
     height: root.tall ? 44 : 28
-    radius: root.tall ? 7 : 6
-    color: root.capturing ? Qt.alpha(Theme.accent, 0.18)
-           : (root.tall ? Theme.inset : Theme.card)
-    border.width: 1
+    radius: root.frameless ? 0 : (root.tall ? 7 : 6)
+    color: root.frameless ? "transparent"
+           : (root.capturing ? Qt.alpha(Theme.accent, 0.18)
+                             : (root.tall ? Theme.inset : Theme.card))
+    border.width: root.frameless ? 0 : 1
     border.color: root.capturing ? Theme.accent : Theme.border
 
     onCapturingChanged: if (root.capturing) keySink.forceActiveFocus()

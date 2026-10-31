@@ -64,7 +64,20 @@ MouseArea {
     visible: menu ? menu.visible : false
     enabled: visible
 
-    onPressed: menu.visible = false
+    onPressed: (mouse) => {
+        if (!menu || !menu.visible)
+            return
+        // The catcher is below the popup, but platform input delivery can
+        // still reach it for a press handled by a popup child. Guard by the
+        // menu's actual window-space rectangle so interacting with any part
+        // of the menu never dismisses it as an outside click.
+        const point = root.mapToItem(menu, mouse.x, mouse.y)
+        if (point.x >= 0 && point.y >= 0 && point.x < menu.width && point.y < menu.height) {
+            mouse.accepted = true
+            return
+        }
+        menu.visible = false
+    }
     onWheel: (wheel) => {
         // Wheels OVER THE MENU ITSELF are the menu's business (its own list
         // scroll) — never forward them to the page/dialog behind it. The

@@ -2,6 +2,7 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QVector>
 #include <QMetaObject>
 #include <QPointer>
 #include <QVariantMap>
@@ -32,6 +33,15 @@ struct OutputContentToggle
 
 struct OutputItem
 {
+    // The row's STABLE identity, and the only thing that may name it on the
+    // engine side. A NAME cannot do that job: it is an editable label, so a
+    // rename would orphan everything keyed on it — this row's node in the
+    // production graph (Settings · Routing's wires) first of all. Assigned
+    // once when the row is created, healed here for older rosters, and
+    // persisted through OutputStore (`id`), exactly like StyleItem::id and
+    // BusItem's bus number — the same "identity, never position or label"
+    // rule the routing models already follow.
+    QString id;
     QString name;
     QString badge;
     // "HDMI" | "NDI" | "SDI" | "REC" | "STREAM" (legacy rows may carry
@@ -68,6 +78,20 @@ struct OutputItem
     // a style can't re-point every later output at the wrong theme the way an
     // index reference would (FreeShow keys outputs→styles by id the same way).
     QString styleId;
+    // "direct" uses the output's selected video bus full-frame; "compose"
+    // paints the output's design and only its wired bus windows.
+    QString videoMode = QStringLiteral("direct");
+    // THIS OUTPUT's own content gates — the WIRES from the Overlays / Media cards
+    // at the head of Settings · Routing's Styles column. PER OUTPUT on purpose:
+    // they used to live on the STYLE, so closing media for one screen closed it for
+    // every screen wearing that theme. A style's own gates still apply on top (both
+    // must allow), so nothing here can open what a theme forbids.
+    //
+    // FALSE is the default because the wire IS the permission: an output with no
+    // wire from the Overlays card paints no overlay, and the same for media (see
+    // StoredOutput::showOverlay). The row's own O/M chips are the same flag.
+    bool showOverlay = false;
+    bool showMedia = false;
     // LEGACY — a per-output Fill that NOTHING composes from any more. How a
     // taken file sits is the FILE's own choice (Media right-click → Fill), else
     // contain: one picture, one shape on every output (SceneBuilder
@@ -75,6 +99,12 @@ struct OutputItem
     // one take read as two pictures on the wall. The field is still read from
     // and written back to the roster so an older store round-trips unchanged.
     QString mediaFit = QStringLiteral("contain");
+    // Which audio endpoint THIS row's mix plays on, as the audio roster's id
+    // ("waveout:<n>"). Empty = the program stream, which is where every row's
+    // audio has always gone (and what an older roster means). Set = that device's
+    // own render stream, so an HDMI output's sound comes out of that monitor
+    // rather than the booth speakers (see OutputStore::audioDevice).
+    QString audioDevice;
     // NDI (and other network) outputs: carry ONLY their own transport — no
     // physical screen window, and no audience-facing window on this machine
     // (the receiver's monitor IS the audience screen). FreeShow's NDI output
@@ -153,6 +183,17 @@ public:
         // This output's media fill choice ("contain" | "cover" | "fill") —
         // legacy, see OutputItem::mediaFit: reported, never composed from.
         MediaFitRole,
+        // The row's stable id (see OutputItem::id). Settings · Routing keys its
+        // output node on this, so a wire survives a rename.
+        IdRole,
+        // This row's audio endpoint ("waveout:<n>", "" = the program). Settings ·
+        // Outputs' picker, and what RoutingService reads to decide whether the
+        // row plays on a stream of its own.
+        AudioDeviceRole,
+        VideoModeRole,
+        // This row's own Overlays / Media gates (see OutputItem::showOverlay).
+        OverlayGateRole,
+        MediaGateRole,
     };
     Q_ENUM(Role)
 
@@ -245,9 +286,25 @@ public:
     Q_INVOKABLE void setStyle(int index, const QString &styleId);
     Q_INVOKABLE void toggleContent(int index, const QString &key);
 
+    // ---- Stable identity (see OutputItem::id) ----
+    // The id of a row, and its row again ("" / -1 for a bad or vanished one).
+    // RoutingService builds each row's engine node id from this, so the two
+    // lookups are the only way anything outside should reach an identity: a
+    // QML delegate can read the `outputId` role instead.
+    Q_INVOKABLE QString stableIdFor(int row) const;
+    Q_INVOKABLE int rowForStableId(const QString &id) const;
+
     // Snapshot for edit dialogs — one QVariantMap per output with the same
     // keys as the role names, so QML editors don't keep parallel state.
     Q_INVOKABLE QVariantMap getOutput(int index) const;
+    // Has the PERSISTED roster actually been read? False until a hydrate has run
+    // with the engine booted, which is the only hydrate that can see kernel.json
+    // (this singleton is built at QML load, before the Database is opened, so its
+    // constructor's read always comes back empty). Anything that treats "no rows"
+    // as "the operator deleted them" — RoutingService prunes graph nodes the
+    // roster does not own — must ask this first, or a boot-time read of an empty
+    // roster erases what the graph just restored.
+    bool rosterReady() const { return rosterReady_; }
     // Row of the on-air (active) output; -1 when none is active.
     Q_INVOKABLE int activeIndex() const;
 
@@ -274,6 +331,22 @@ public:
     Q_INVOKABLE void setBoundsLocked(int index, bool locked);
     Q_INVOKABLE void setStayOnTop(int index, bool stayOnTop);
     Q_INVOKABLE void setFullscreenOutput(int index, bool fullscreen);
+    // Which endpoint this row's audio plays on ("waveout:<n>", "" = the program).
+    // Persisted and re-bound: the routing pass opens/closes the stream, because a
+    // wire is what decides whether the row has anything to play there.
+    Q_INVOKABLE void setAudioDevice(int index, const QString &deviceId);
+    Q_INVOKABLE void setVideoMode(int index, const QString &mode);
+    // THIS ROW's own gates, written by the two toggle chips on its Settings ·
+    // Routing card. Both re-push the engine's per-output specs, so the picture
+    // changes on the next frame rather than at the next style edit.
+    Q_INVOKABLE void setShowOverlay(int index, bool on);
+    Q_INVOKABLE void setShowMedia(int index, bool on);
+    // RoutingService's publish for the LIVE paths: `busNumberByRow` is each row's
+    // ON-AIR video bus (0 = none), `wiredByRow` its whole wired video SET. The set
+    // is what gates a design's bus windows per output — a row with no wire to a bus
+    // must not paint that bus, even though the block is in the shared composition.
+    void setRoutedVideoBuses(const QVector<int> &busNumberByRow,
+                             const QVector<QVector<int>> &wiredByRow);
 
     // Model-side entry point for StyleListModel::removeStyle — re-points
     // every output that used the removed id to "None" without a save/emit
@@ -367,6 +440,11 @@ private:
     // dies with the QScreen when it is unplugged.
     void trackScreen(QScreen *screen);
 
+    // A fresh stable id ("out-<n>", n one past every id in the roster — never
+    // reused, so a deleted row's wires can never be inherited by a new one).
+    // Used by addScreen, duplicateOutput and the hydrate-time heal.
+    QString nextStableId() const;
+
     int m_screensRevision = 0;
 
     // The adopted roster, or the C++ singleton as the fallback (null-safe).
@@ -397,7 +475,48 @@ private:
     // carry the style's category and fell back to the Bible layout on a
     // different condition, so the tile could render a layout the outputs were
     // not rendering.
-    void pushEngineStyle(const QString &styleId);
+    void pushEngineStyle(const QString &styleId, const QString &slideTag = QString());
+
+public:
+    // Re-push the active style with the on-air slide's GROUP template slotted in
+    // ("" = the plain style). Called when the on-air slide or a group's template
+    // changes, so the output and the monitor tile keep composing the same spec.
+    void repushActiveStyleForTag(const QString &tag);
+
+    // DOES THIS OUTPUT GET A RENDER PASS OF ITS OWN? Two things earn one: a
+    // STYLE (its gates decide what content it shows) and a VIDEO WIRE (Settings ·
+    // Routing — the pass composes that bus's feed). Everything else mirrors the
+    // shared program feed, which is also why this is the ONE rule the frame
+    // buffer name, the live style-set push and LiveOutputService's feed probe
+    // all read: a wired output that pushed a spec but was still READ from the
+    // shared buffer would render its bus and then show the program picture
+    // anyway. Disabled rows never have one (they are not on air).
+    Q_INVOKABLE bool hasOwnPass(int row) const;
+
+    // The VIDEO BUS this row's wire names (bus number, 0 = unwired) — what the
+    // engine composes for it and what has to be PULLED so there is a frame to
+    // compose: LiveOutputService's bus-feed pump watches every bus a wire names,
+    // not only the ones a design block draws (otherwise a wire into a screen with
+    // no bus block on the slide would draw its wire and show nothing).
+    int routedVideoBus(int row) const;
+
+    // The engine-side frame-buffer NAME this row's picture lands in ("" = the
+    // row mirrors the shared program feed). The same string FrameBufferRole
+    // hands QML, exposed to C++ so a reader that wants to look the buffer up in
+    // the render engine (RoutingService's feed health) does not re-derive the
+    // keying and cannot drift from it.
+    QString frameBufferFor(int row) const;
+
+    // THE WIRED VIDEO BUS, one entry per roster row — filled by RoutingService
+    // from the engine's own OutputConfig (the wire's truth, never a QML copy),
+    // 0 = nothing wired. It is read when the live style set is pushed: a row
+    // whose video is wired gets that bus number in its spec, and the engine
+    // composes THAT feed instead of the program picture (see OutputStyleSpec's
+    // videoBus). Indexed by ROW because that is how the spec loop walks the
+    // roster; a reorder re-pushes, so a stale index cannot outlive its row.
+    void setRoutedVideoBuses(const QVector<int> &busNumberByRow);
+
+private:
     // Re-pushes the ACTIVE output's style (the one entry point every "the
     // on-air look changed" relay funnels into). No-op before the roster is
     // adopted.
@@ -423,6 +542,12 @@ private:
     void connectToEngineBoot();
 
     QList<OutputItem> m_outputs;
+    // See setRoutedVideoBuses: bus NUMBER per roster row, 0 = unwired. Empty
+    // until the first routing refresh publishes.
+    QVector<int> routedVideoBuses_;
+    // Per row: every video bus wired to it, by bus NUMBER — the allow-list a
+    // gated scene build is given (OutputStyleSpec::gateVideoBuses).
+    QVector<QVector<int>> wiredVideoBuses_;
     // The roster Main.qml handed over (empty until then — see adoptStyleRoster).
     QPointer<StyleListModel> styleRoster_;
     // The same hand-over, visible to EVERY OutputListModel object (QML's and
@@ -432,6 +557,8 @@ private:
     bool styleRosterConnected_ = false;
     bool templateLibraryConnected_ = false;
     bool engineBootConnected_ = false;
+    // See rosterReady(): set by the first hydrate that ran with the engine up.
+    bool rosterReady_ = false;
 
     // Persists the roster into the engine's OutputStore (the kernel
     // database's "outputs" collection) — the style ASSIGNMENT, screen

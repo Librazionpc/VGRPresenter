@@ -80,6 +80,9 @@ Item {
     property string chosenLabel: ""
     // A refusal or a missing pick, said in the dialog instead of only the log.
     property string problem: ""
+    // (No template chooser here: a bus is a signal path, and a bus TEMPLATE is a
+    // design — made in Edit · Templates, listed on Audio & Video, composed onto an
+    // output. This picker only ever picks a source for a bus.)
 
     // ---- Esc = cancel, Enter = accept (qml/settings/Hotkeys.qml) -----------
     property int hotkeyScope: 0
@@ -252,21 +255,17 @@ Item {
                                                   : root.selectedBus !== null
 
     // ---- a source that ALREADY feeds a bus ---------------------------------
-    // A VIDEO source feeds ONE bus in this app (the graph refuses the second
-    // route — "That source is already feeding another bus"). The bus built from
-    // it therefore already EXISTS in the Buses pane, and picking that source
-    // again can only end at Create with a refusal — after the pick, when the
-    // operator has already committed to it. So the card asks here, before the
-    // pick: whose bus is it already, or -1. AUDIO is the opposite rule (an input
-    // may feed several buses), so audio cards are never held back.
+    // A source may feed SEVERAL buses (audio and video alike), so no card is held
+    // back. The card only says which bus already carries it — the first one found,
+    // or -1 — so the operator knows the source is already in use.
     function sourceBus(kind, row) {
         void root.rev
-        if (kind === "audio")
-            return -1
+        const audio = kind === "audio"
         const n = BusListModel.rowCount()
         for (let i = 0; i < n; ++i) {
             const b = BusListModel.getBus(i)
-            const routed = b.routedVideoSources !== undefined ? b.routedVideoSources : []
+            const field = audio ? b.routedAudioInputs : b.routedVideoSources
+            const routed = field !== undefined ? field : []
             for (let r = 0; r < routed.length; ++r)
                 if (Number(routed[r]) === Number(row))
                     return i
@@ -278,31 +277,6 @@ Item {
             return ""
         const b = BusListModel.getBus(row)
         return b.name !== undefined ? String(b.name) : ""
-    }
-
-    // A source whose bus is already in the Buses pane is HELD BACK, and this is what
-    // the refusal says. Said twice on purpose: in the dialog, next to the card that
-    // wears the mark, and as a NOTICE — the card may be scrolled out of view, and the
-    // notice is the app's one layer above every pane, so a click can never look like
-    // it did nothing.
-    function alreadyFeeds(sourceName, busName) {
-        const src = String(sourceName === undefined ? "" : sourceName)
-        const bus = String(busName === undefined ? "" : busName)
-        root.problem = qsTr("\u201c%1\u201d already feeds \u201c%2\u201d — a video source feeds one bus. Edit that bus instead.")
-                .arg(src).arg(bus)
-        EventBus.notify(qsTr("\u201c%1\u201d already feeds \u201c%2\u201d. A video source feeds one bus — edit that bus instead.")
-                        .arg(src).arg(bus),
-                        "warning", qsTr("Buses"), "ui.buses.alreadyFeeds")
-    }
-
-    function iconFor(kind, sourceKind) {
-        if (kind === "audio")
-            return "mic"
-        if (sourceKind === "screen")
-            return "layoutDashboard"
-        if (sourceKind === "ndi")
-            return "link"
-        return "camera"
     }
 
     // ---- create the bus (mode "newBus") ------------------------------------
@@ -447,9 +421,9 @@ Item {
                 Text {
                     width: parent.width
                     wrapMode: Text.WordWrap
-                    text: root.creating
-                        ? qsTr("Pick the source this bus carries — it is created with that source already routed. The window is a feed the app is already pulling; the light says whether the device is there. Nothing opens a device until the bus is monitored or goes on air.")
-                        : qsTr("Pick the bus this item carries. The window is the bus's live feed; the light says whether it is connected.")
+                    // New Bus carries no description; only the pick-a-bus mode keeps its line.
+                    visible: !root.creating
+                    text: qsTr("Pick the bus this item carries. The window is the bus's live feed; the light says whether it is connected.")
                     color: Theme.textMuted
                     font.family: Theme.fontFamily
                     font.pixelSize: 12
@@ -512,20 +486,40 @@ Item {
                             objectName: root.creating
                                 ? root.hookPrefix + "_row_" + busTile.modelData.kind + "_" + busTile.modelData.row
                                 : ""
-                            // Test hook: the LIGHT's own answer, so a scenario can
-                            // read what each card claims instead of guessing from
-                            // a colour ("the probe light is not showing correct
-                            // state" is only checkable against this).
-                            readonly property string lightState: monitor.status
                             // The bus this source already feeds (-1 = none, the
-                            // normal case). A tile that carries one is marked and
-                            // refuses the pick (see takePick), so a bus cannot be
-                            // picked a second time here while it already exists in
-                            // the Buses pane.
+                            // normal case). Only INFORMATION: a source may feed
+                            // several buses, so nothing is held back — the pick
+                            // still works, the line just says what already is.
                             readonly property int alreadyBus: root.creating
                                 ? root.sourceBus(busTile.modelData.kind, busTile.modelData.row)
                                 : -1
-                            readonly property bool selectable: busTile.alreadyBus < 0
+                            readonly property bool alreadyFed: busTile.alreadyBus >= 0
+                            readonly property bool selectable: true
+                            // WHAT THE CORNER LIGHT MEANS — and its COLOUR is never a
+                            // substitute for the probe.
+                            //
+                            // The colour is ALWAYS BusMonitor.statusColor, i.e. the
+                            // probe's own answer: green connected, amber offline or
+                            // starved (a closed window, an unplugged camera, a tap
+                            // handing nothing over), red when the row names no device.
+                            // Painting an unrouted source a fixed colour (red, muted,
+                            // whatever) made the light stop answering: a camera that
+                            // was gone and a camera that was fine read identically.
+                            //
+                            // What tells "connected" apart from "not routed" is the
+                            // FORM, not the colour: a source a bus already carries is a
+                            // FILLED dot (the connection light the operator learned in
+                            // Media › Inputs), while a source no bus carries is a hollow
+                            // RING of the same probe colour, so green still never means
+                            // "connected" about a source feeding nothing.
+                            readonly property color lightColor: monitor.statusColor
+                            readonly property bool lightRouted: !root.creating
+                                || busTile.alreadyFed
+                            // Test hook: the LIGHT's own answer, so a scenario can
+                            // read what each card claims instead of guessing from
+                            // a colour. The probe's word, unmodified — `lightRouted`
+                            // is the other half (see above).
+                            readonly property string lightState: monitor.status
 
                             // The one thing both the window and the light read —
                             // a bus in bus mode, a roster row in create mode.
@@ -540,17 +534,6 @@ Item {
                             // The name under the window: the bus's, or the source's.
                             readonly property string title: root.creating
                                 ? busTile.modelData.name : monitor.busName
-                            // The line under the name. A bus says its type and
-                            // whether it is connected; a source says its kind and
-                            // the device it names — the same sentences the Media
-                            // pane's own cards carry. A held-back source says WHY
-                            // it cannot be picked, in place of its device line.
-                            readonly property string caption: !busTile.selectable
-                                ? qsTr("already feeds \u201c%1\u201d").arg(String(root.busNameAt(busTile.alreadyBus) || ""))
-                                : (root.creating
-                                   ? busTile.modelData.sourceKind + " · "
-                                     + (busTile.modelData.sub !== "" ? busTile.modelData.sub : qsTr("not available"))
-                                   : qsTr("%1 bus · %2").arg(monitor.busType).arg(monitor.statusText))
 
                             width: 208
                             height: 168
@@ -559,10 +542,8 @@ Item {
                                 id: tileBody
                                 anchors.fill: parent
                                 radius: 10
-                                // A card whose source already feeds a bus reads as
-                                // unavailable instead of merely refusing the click:
-                                // its caption says which bus, and the wash is held
-                                // back so the grid shows at a glance what is left.
+                                // A card is dimmed only if it cannot be picked; every
+                                // source can be, so the grid is at full strength.
                                 opacity: busTile.selectable ? 1 : 0.55
                                 // THE SAME LANGUAGE AS THE PANE'S CARDS (Media ›
                                 // Buses), in the theme's accent so it inherits the
@@ -611,57 +592,28 @@ Item {
                                         visible: monitor.showingFeed
                                     }
 
-                                    // No feed yet: a busy but honest box. It says
-                                    // "no signal" rather than drawing nothing, so
-                                    // an idle bus still reads as a bus — and an
-                                    // idle source says what it is instead of
-                                    // pretending to be a picture.
-                                    Column {
-                                        anchors.centerIn: parent
-                                        spacing: 4
-                                        visible: !monitor.showingFeed
-
-                                        // No anchors INSIDE a Column (a
-                                        // positioner places its own children),
-                                        // so the glyph is centred by giving it
-                                        // the column's width.
-                                        IconGlyph {
-                                            name: root.creating
-                                                ? root.iconFor(busTile.modelData.kind, busTile.modelData.sourceKind)
-                                                : "activity"
-                                            color: Theme.textMuted
-                                            width: 22; height: 22
-                                            fit: true
-                                        }                                        Text {
-                                            // The window's words follow the LIGHT (see
-                                            // monitor.status): a card whose light is
-                                            // amber because the device is gone must
-                                            // not say "not open" as if it were merely
-                                            // waiting to be taken.
-                                            text: root.creating
-                                                ? (busTile.modelData.kind === "audio"
-                                                   ? qsTr("audio only")
-                                                   : monitor.status === "none" ? qsTr("no device")
-                                                   : monitor.status === "offline" ? qsTr("not available")
-                                                   : qsTr("not open"))
-                                                : (monitor.busType === "audio" ? qsTr("audio only") : qsTr("No signal"))
-                                            color: Theme.textMuted
-                                            font.family: Theme.fontFamily
-                                            font.pixelSize: 10
-                                        }
-                                    }
-
                                     // THE LIGHT: green connected · amber
-                                    // offline/starved · red nothing routed
-                                    // (nothing to capture, for a source).
+                                    // offline/starved · red no device — and the
+                                    // same colour as a RING while no bus carries
+                                    // this source (see lightColor).
                                     Rectangle {
                                         anchors.top: parent.top
                                         anchors.right: parent.right
                                         anchors.margins: 6
                                         width: 9; height: 9; radius: 4.5
-                                        color: monitor.statusColor
-                                        border.width: 1
-                                        border.color: Qt.alpha("#000000", 0.45)
+                                        color: busTile.lightRouted ? busTile.lightColor
+                                                                   : "transparent"
+                                        // A ring has to READ as a ring: at 1 px a 9 px
+                                        // dot's hollow centre is invisible, and the
+                                        // form is the whole point of the distinction.
+                                        border.width: busTile.lightRouted ? 1 : 2
+                                        // A filled dot keeps its dark halo so it
+                                        // reads against the picture; a ring IS the
+                                        // probe colour, so a second outline would
+                                        // just muddy it.
+                                        border.color: busTile.lightRouted
+                                                      ? Qt.alpha(Theme.windowBg, 0.45)
+                                                      : busTile.lightColor
                                     }
                                 }
 
@@ -670,10 +622,7 @@ Item {
                                 // glow, or a clicked tile reads as a stuck hover
                                 // (the report: "click it, it just remains cursor
                                 // hover"). A tick in the accent, nothing more.
-                                // It sits in the WINDOW's bottom-right corner:
-                                // the caption line reaches the card's own bottom,
-                                // so a tick at the card's bottom-left landed on
-                                // top of the words it competes with.
+                                // It sits in the WINDOW's bottom-right corner.
                                 Rectangle {
                                     anchors.right: window_.right
                                     anchors.bottom: window_.bottom
@@ -704,17 +653,6 @@ Item {
                                     font.weight: Font.DemiBold
                                     elide: Text.ElideRight
                                 }
-
-                                Text {
-                                    x: 10
-                                    y: 140
-                                    width: parent.width - 20
-                                    text: busTile.caption
-                                    color: Theme.textMuted
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: 10
-                                    elide: Text.ElideRight
-                                }
                             }
 
                             // The hover truth the tile's looks read — the app's
@@ -737,19 +675,6 @@ Item {
                                 function takePick() {
                                     if (!root.creating) {
                                         root.selectedId = Number(busTile.modelData.id)
-                                        return
-                                    }
-                                    if (!busTile.selectable) {
-                                        // The name falls back to the SOURCE's own model name
-                                        // (a tile whose light has not answered yet has no
-                                        // title), and both names are coerced to strings:
-                                        // arg(undefined) is Qt's "Invalid arguments" warning,
-                                        // which surfaced as a QML notice in place of this
-                                        // sentence.
-                                        const sourceName = busTile.title !== undefined && busTile.title !== ""
-                                                           ? busTile.title
-                                                           : (busTile.modelData && busTile.modelData.name ? busTile.modelData.name : "")
-                                        root.alreadyFeeds(sourceName, root.busNameAt(busTile.alreadyBus))
                                         return
                                     }
                                     root.chosenKind = busTile.modelData.kind

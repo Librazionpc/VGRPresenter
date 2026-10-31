@@ -22,6 +22,7 @@
 #include "core/rendering/RendererManager.hpp"
 #include "modules/adaptive/AdaptiveRuntime.hpp"
 #include "modules/automation/FlowEngine.hpp"
+#include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/recording/RecordingEngine.hpp"
 #include "modules/settings/Telemetry.hpp"
@@ -584,6 +585,20 @@ Result<void> Kernel::Boot(const BootOptions& options) {
         }
     }
 
+    // ---- 27b. AudioEngine (playout of the production graph's audio buses) ----
+    // Starts after the graph it plays, and stops before it (see shutdown below).
+    {
+        auto& playout = audio::AudioEngine::Instance();
+        if (auto r = playout.Initialize(); !r.ok()) {
+            Degrade("AudioEngine", r.error());
+        } else {
+            (void)services.Register<audio::AudioEngine>(&playout);
+            if (auto s = playout.Start(); !s.ok())
+                Degrade("AudioEngine start", s.error());
+            AppendBootLog("AudioEngine");
+        }
+    }
+
     // ---- 28. RecordingEngine (Phase 16, docs/specs/28) ----
     // Recording, replay & capture: recording is a first-class output consumer
     // of the Phase 15 production graph. Any valid signal (source, bus, virtual
@@ -778,6 +793,7 @@ Result<void> Kernel::ShutdownSystems() {
     // only because DatabaseManager::Shutdown happens to flush everything —
     // with nothing guaranteeing production got its say first. See
     // ProductionEngine::RequestPersist for the in-session counterpart.
+    (void)audio::AudioEngine::Instance().Shutdown();
     (void)production::ProductionEngine::Instance().Shutdown();
     // Phase 14 (26) stops next: it was booted after the rest of the engines, so
     // it tears down before them.

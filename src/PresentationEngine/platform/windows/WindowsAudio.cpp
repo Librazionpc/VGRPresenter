@@ -330,7 +330,20 @@ struct WindowsAudio::MeterTable {
 
 WindowsAudio::WindowsAudio() : meters_(std::make_unique<MeterTable>()) {}
 // ~MeterTable joins every live tap before the members die.
-WindowsAudio::~WindowsAudio() = default;
+WindowsAudio::~WindowsAudio()
+{
+    // A RenderStream owns a std::thread, and destroying a JOINABLE thread calls
+    // terminate — so every stream is stopped (which joins) before the maps go.
+    (void)StopRender();
+    std::vector<uint64_t> ids;
+    {
+        std::lock_guard<std::mutex> lock(renderStreamsMutex_);
+        for (const auto &entry : renderStreams_)
+            ids.push_back(entry.first);
+    }
+    for (const uint64_t id : ids)
+        (void)StopRenderStream(id);
+}
 
 void WindowsAudio::MeterThread(MeterTap &tap, std::mutex &publishMutex, bool loopback)
 {
@@ -1444,6 +1457,64 @@ Result<void> WindowsAudio::StopRender()
 bool WindowsAudio::Rendering() const
 {
     return render_ && render_->running.load();
+}
+
+Result<void> WindowsAudio::StartRenderStream(uint64_t streamId, RenderCallback callback,
+                                             uint32_t deviceId)
+{
+    if (!callback)
+        return Error::Make(Err::InvalidArgument, "Audio", "render callback is empty");
+
+    // A live stream with this id already serves the caller's device: starting it
+    // again is the routing asking twice, not a new mix (same contract as the
+    // program stream). Anything else is replaced below.
+    std::unique_ptr<RenderStream> dying;
+    {
+        std::lock_guard<std::mutex> lock(renderStreamsMutex_);
+        auto it = renderStreams_.find(streamId);
+        if (it != renderStreams_.end()) {
+            if (it->second && it->second->running.load() && it->second->deviceId == deviceId)
+                return Ok();
+            dying = std::move(it->second);
+            renderStreams_.erase(it);
+        }
+    }
+    // Joined OUTSIDE the lock: RenderThread never touches the map, and holding
+    // the mutex across a join would stall every other output's start/stop.
+    if (dying) {
+        dying->running.store(false);
+        if (dying->thread.joinable())
+            dying->thread.join();
+        dying.reset();
+    }
+
+    auto s = std::make_unique<RenderStream>();
+    s->callback = std::move(callback);
+    s->deviceId = deviceId;
+    s->running.store(true);
+    s->thread = std::thread([&sref = *s]() { RenderThread(sref); });
+    {
+        std::lock_guard<std::mutex> lock(renderStreamsMutex_);
+        renderStreams_[streamId] = std::move(s);
+    }
+    return Ok();
+}
+
+Result<void> WindowsAudio::StopRenderStream(uint64_t streamId)
+{
+    std::unique_ptr<RenderStream> dying;
+    {
+        std::lock_guard<std::mutex> lock(renderStreamsMutex_);
+        const auto it = renderStreams_.find(streamId);
+        if (it == renderStreams_.end())
+            return Ok();
+        dying = std::move(it->second);
+        renderStreams_.erase(it);
+    }
+    dying->running.store(false);
+    if (dying->thread.joinable())
+        dying->thread.join();
+    return Ok();
 }
 
 } // namespace bps::platform

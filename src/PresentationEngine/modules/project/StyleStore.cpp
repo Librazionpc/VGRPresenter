@@ -133,6 +133,8 @@ json::Value StyleStore::StyleToJson(const StoredStyle& s) {
     famKeys["table"] = json::Value::String(s.templateKeys[3]);
     o["templateKeys"] = json::Value(std::move(famKeys));
     o["category"] = json::Value::String(s.category);
+    // Routing-board membership (see StoredStyle::onBoard).
+    o["onBoard"] = json::Value::Bool(s.onBoard);
     return json::Value(std::move(o));
 }
 
@@ -161,7 +163,7 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
     s.name = str("name");
     s.res = str("res");
     s.contentType = str("contentType", "shows");
-    s.templateKey = str("templateKey", "lowerThird");
+    s.templateKey = str("templateKey");
     s.backgroundColor = str("backgroundColor", "transparent");
     s.backgroundImage = str("backgroundImage");
     s.clearBackgroundOnText = flag("clearBackgroundOnText", false);
@@ -189,6 +191,9 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
         s.templateKeys[3] = fkey("table");
     }
     s.category = str("category");
+    // Absent on every roster saved before the Routing board had membership, and
+    // absent must read as "not on the board" (see StoredStyle::onBoard).
+    s.onBoard = flag("onBoard", false);
     // An entry without an id (hand-edited file, partial write) is skipped by
     // the caller — ids are the stable identity everything else keys on.
     if (s.id.empty())

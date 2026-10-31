@@ -19,6 +19,10 @@ Item {
     // Used only when fixedColor is set; otherwise the bar is the gradient below.
     property color fillColor: Theme.success
     property bool fixedColor: false
+    // The signal dot that normally leads the bar. Off where the strip is drawn
+    // BESIDE a dot that already exists (Settings · Routing's port dots), so the
+    // meter is the bar alone instead of a second, smaller dot next to the first.
+    property bool showDot: true
 
     implicitWidth: 100
     implicitHeight: 4
@@ -48,6 +52,7 @@ Item {
         // Signal dot — on/off, not level-proportional (FreeShow's own convention).
         Rectangle {
             id: dot
+            visible: root.showDot
             anchors.verticalCenter: parent.verticalCenter
             width: 4; height: 4; radius: 2
             color: root.fixedColor ? root.fillColor : Theme.meterQuiet
@@ -58,7 +63,10 @@ Item {
         Item {
             id: bar
             anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - dot.width - parent.spacing
+            // No dot means the whole width is bar: subtracting a hidden dot's
+            // width AND the row's spacing would leave the bar short of the track
+            // it is supposed to fill.
+            width: parent.width - (root.showDot ? dot.width + parent.spacing : 0)
             height: parent.height
 
             Rectangle {

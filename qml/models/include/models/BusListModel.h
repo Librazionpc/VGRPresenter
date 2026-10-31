@@ -40,11 +40,29 @@ struct BusItem
     // — survives row removals; the routing matrix stores THESE, not rows.
     int id = 0;
     QString name;
-    // "audio" | "video" | "both" — which input roster(s) this bus ACCEPTS
-    // routing from. The reference image only shows audio-only and
-    // video-only buses; "both" is a real third option the Edit dialog
-    // exposes. Policy only — both plane nodes always exist in the graph.
+    // "audio" | "video" | "both" | "template" — which input roster(s) this bus
+    // ACCEPTS routing from. The reference image only shows audio-only and
+    // video-only buses; "both" is a real third option the Edit dialog exposes,
+    // and "template" is a bus made from a template design (see templateId).
+    // Policy only — both plane nodes always exist in the graph.
+    //
+    // "template" ACCEPTS MANY VIDEO (each routed source is one window's feed,
+    // see templateId) and exactly ONE AUDIO (the bus has one sound, however many
+    // pictures it carries).
     QString type = QStringLiteral("audio");
+    // The TEMPLATE DESIGN this bus was created from (Settings · Audio & Video's
+    // Add Bus → Template), "" for every other bus. The design's `bus` blocks ARE
+    // this bus's windows, and each window names its own bus — nothing about the
+    // windows is stored here, so editing the template moves them without
+    // recreating the bus. Rides the plane nodes' meta with uiBusType, so it comes
+    // back with the graph on the next boot.
+    QString templateId;
+    // IS THIS BUS ON THE ROUTING BOARD? The board is a patch bay, not a roster
+    // dump: a card exists there only because the operator put it there (the
+    // column's "+"), so a bus made anywhere else — Audio & Video's Add Bus, a
+    // template bus listed on A&V — stays off the board until it is added.
+    // Rides the plane nodes' meta ("uiOnBoard"), so it comes back with the graph.
+    bool onBoard = false;
     qreal level = 75;  // practical headroom by default, mapped to gainDb (-60..0 dB)
     bool muted = false;
     // PER-SIDE trim of the bus's own output, index 0 = L, 1 = R (1.0 = open,
@@ -120,6 +138,8 @@ public:
         ChannelGainsRole,
         RoutedAudioInputsRole,
         RoutedVideoSourcesRole,
+        // Whether this bus has a card on the Routing board (see BusItem::onBoard).
+        OnBoardRole,
     };
     Q_ENUM(Role)
 
@@ -131,6 +151,14 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     Q_INVOKABLE void addBus(const QString &name, const QString &type);
+    // Create AND put on the Routing board (the Buses column's "+" → New bus…).
+    // addBus() is the Audio & Video board's own Add Bus: the row exists there,
+    // off this board, until it is explicitly added.
+    Q_INVOKABLE int addBusOnBoard(const QString &name, const QString &type);
+    // Add / take this bus off the Routing board. Never touches the bus itself.
+    Q_INVOKABLE void setBusOnBoard(int index, bool onBoard);
+    Q_INVOKABLE int addTemplateBus(const QString &name, const QString &templateId);
+    Q_INVOKABLE bool usesTemplate(const QString &templateId) const;
     // Takes the row out and nothing else. The ROLLBACK form, on purpose: a bus a
     // half-finished dialog created and then walked away from is taken back out
     // with it, and offering to undo a bus the operator never saw himself create
@@ -212,7 +240,15 @@ public:
     //   "audio-only-bus"    a video source has no video plane to feed here
     //   "already-connected" this exact route is already in the graph
     //   "bus-has-video"     ONE VIDEO PROVIDER PER BUS — it already carries a
-    //                       different video source (see connectVideoRoute)
+    //                       different video source (see connectVideoRoute).
+    //                       Never answered for a TEMPLATE bus: it takes many
+    //                       video sources, one per window.
+    //   "template-bus-has-audio"  a template bus has ONE sound: its audio plane
+    //                       already carries a different input
+    //   "template-has-no-windows"   the template has no bus items, so the bus has
+    //                       nowhere to put a picture at all (the ONLY template
+    //                       refusal for video: a template whose windows already
+    //                       name their buses still takes routes)
     //   "engine-refused"    the graph itself said no (signal type, a cycle)
     Q_INVOKABLE QString connectRefusal(const QString &kind, int sourceRow, int busIndex) const;
 
@@ -247,7 +283,8 @@ private:
     std::optional<RemovedBus> m_removedBus;
 
     int createBusRow(const QString &name, const QString &type,
-                     qreal level, bool muted);
+                     qreal level, bool muted, const QString &templateId = QString(),
+                     bool onBoard = false);
     void pullRow(int row);
     void rebuildFromGraph();
     // One line per bus, once per session: what the board believes it is routing,

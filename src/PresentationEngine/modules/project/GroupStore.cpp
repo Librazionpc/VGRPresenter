@@ -15,6 +15,7 @@ json::Value GroupToJson(const StoredGroup& g) {
     o["name"] = json::Value::String(g.name);
     o["color"] = json::Value::String(g.color);
     o["shortcut"] = json::Value::String(g.shortcut);
+    o["template"] = json::Value::String(g.templateId);
     o["isDefault"] = json::Value::Bool(g.isDefault);
     return json::Value(std::move(o));
 }
@@ -40,6 +41,7 @@ Result<StoredGroup> GroupFromJson(const json::Value& v) {
     g.name = str("name");
     g.color = str("color", "#5825f5");
     g.shortcut = str("shortcut");
+    g.templateId = str("template");
     g.isDefault = flag("isDefault", false);
     return g;
 }

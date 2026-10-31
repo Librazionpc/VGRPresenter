@@ -8,6 +8,8 @@
 #include "modules/production/ProductionTypes.hpp"
 #include "modules/recording/RecordingTypes.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -33,6 +35,25 @@ public:
 };
 using CaptureSourceFactory = std::function<std::shared_ptr<ICaptureSource>()>;
 
+// One picture for the container: packed RGBA8 pixels (Color::Pack layout — R in the
+// low byte), `width` x `height`, stamped in milliseconds from the recording's start.
+struct VideoFrameIn {
+    const uint32_t* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    double timestampMs = 0.0;
+};
+
+// One block of interleaved float audio, `frames` frames of `channels` channels at
+// `rateHz`, stamped in milliseconds from the recording's start.
+struct AudioBlockIn {
+    const float* samples = nullptr;
+    size_t frames = 0;
+    uint32_t channels = 0;
+    uint32_t rateHz = 0;
+    double timestampMs = 0.0;
+};
+
 // A recording container (user brief §11): mkv/mp4/mov/webm/wav/flac/...
 class IRecordingContainer {
 public:
@@ -43,6 +64,9 @@ public:
                                      std::string_view path) = 0;
     // Flushes the current segment. finalized=false means a segment boundary.
     virtual Result<void> Close(bool finalized) = 0;
+    // Samples arrive on the recording's pump thread only, between Open and Close.
+    virtual Result<void> WriteVideo(const VideoFrameIn& frame) = 0;
+    virtual Result<void> WriteAudio(const AudioBlockIn& block) = 0;
 };
 using ContainerFactory = std::function<std::shared_ptr<IRecordingContainer>()>;
 

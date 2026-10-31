@@ -113,6 +113,20 @@ QtObject {
     readonly property color meterHot: "#ffc800"     // near the top of the scale
     readonly property color meterClip: "#c80000"    // at/over 0 dBFS
 
+    // ---- Routing wires (Settings · Routing) ----
+    // The canvas's wire colours are TYPED, not decorative: a colour IS the
+    // signal a wire carries, which is what lets an operator read a patch at a
+    // glance (and what makes a both-bus's two halves tell themselves apart).
+    // Fixed in both themes and NOT the user's accent: the accent moves when the
+    // user picks another colour, and a wire that changed meaning with a theme
+    // setting would be a lie. Audio is the violet the design gives it, video the
+    // warm orange-red, and a style link (which carries no signal at all) the
+    // info blue — every wire on the canvas is drawn dashed for a style, so the
+    // two cues agree.
+    readonly property color wireAudio: "#b45cf5"
+    readonly property color wireVideo: "#ff7a45"
+    readonly property color wireStyle: info
+
     // ---- Channel state (one vocabulary for off / trimmed / at unity) ----
     // WHICH state a channel is in is Db.channelState (a gain of 0 is off, 1 is
     // unity, between is a trim); this is only how each one LOOKS, named here so
@@ -195,9 +209,16 @@ QtObject {
     // These close the last gap Light mode had: the chrome files at one point
     // hardcoded their own dark shades, so picking Light recoloured the settings
     // screens and left the header/menus dark. Their families live here now.
-    // Hovers use the same visible accent tint as the highlighted paragraph,
-    // so hover affordances remain clear across cards, rows, and controls.
-    readonly property color hoverBg: Qt.alpha(accent, hoverGlowAlpha)
+    // HOVERS ARE A NEUTRAL LIFT, not an accent tint (user call, pointing at the
+    // hovered "Quick search" — the accent wash made the button read as a purple
+    // button rather than a lit one: "just change the value of hoverBg so that all
+    // design we update"). White lifted a little in Dark, black dropped a little in
+    // Light: the surface brightens without being tinted, so it works on a row, a
+    // card, a pill and a button alike.
+    // THE VALUE IS THE WHOLE KNOB: everything that lights up on hover reads this
+    // one token (or HoverGlow's default, which reads it too), so changing how
+    // hover feels is this line and nothing else — no per-surface audit.
+    readonly property color hoverBg: dark ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.05)
     readonly property color activeBg: dark ? "#1e1f29" : "#e9ebf1"    // active tab pill
     readonly property color iconChrome: dark ? "#b4bccb" : "#5a6272"  // header icon at rest
 
@@ -257,10 +278,9 @@ QtObject {
     //      app's hover is a one-line change and no surface can drift.
     readonly property int hoverFade: 220        // shared hover timing, including tabs
     readonly property var hoverEasing: Easing.InOutQuad
-    // The accent wash a lit surface takes, and the strength of its edge. Kept
-    // as ALPHAS so every surface derives its look from the user's own accent
-    // choice instead of hard-coding a purple.
-    readonly property real hoverGlowAlpha: 0.24
+    // The strength of a lit surface's EDGE (HoverGlow's default border). The wash
+    // itself is no longer derived from the accent — it is `hoverBg` above — so
+    // there is no hover-glow alpha here any more: one value, one knob.
     readonly property real hoverEdgeAlpha: 0.45
 
     // ---- Radius scale ----

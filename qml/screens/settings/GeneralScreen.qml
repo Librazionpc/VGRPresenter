@@ -362,13 +362,15 @@ Item {
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
                         ChoiceRow { settingKey: "appearance.language" }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }
-                        LabeledSlider {
+                        NumberField {
                             width: parent.width
-                            label: qsTr("Text size")
+                            label: qsTr("Text size (%)")
+                            value: Number(root.values["appearance.textScale"] ?? 120)
+                            step: 5
+                            decimals: 0
                             minValue: 80
                             maxValue: 160
-                            suffix: "%"
-                            value: Number(root.values["appearance.textScale"] ?? 120)
+                            showSlider: true
                             onMoved: (v) => SettingsService.setValue("appearance.textScale", Math.round(v))
                         }
                         Rectangle { x: 2; width: parent.width - 2; height: 1; color: Theme.border }

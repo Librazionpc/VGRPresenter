@@ -57,6 +57,7 @@ ModalCard {
     property int editingRow: -1
     property int editingStep: -1
     property int shortcutCaptureRow: -1
+    property string editingShortcut: ""
     property string catalogSearch: ""
     property bool showAllActions: false
     // true while editing an action that already exists (see the header note).
@@ -87,6 +88,7 @@ ModalCard {
     }
     function startEdit(row, existing) {
         editingRow = row
+        editingShortcut = String(root.actionAt(row).shortcut || "")
         editLayout = existing !== false
         iconPickerOpen = false
         shortcutCaptureRow = -1
@@ -525,12 +527,17 @@ ModalCard {
                     width: parent.width
                     variant: root.editLayout ? "boxed" : "field"
                     label: qsTr("Activate by keypress")
-                    shortcut: root.actionAt(root.editingRow).shortcut || ""
+                    shortcut: root.editingShortcut
                     capturing: root.shortcutCaptureRow === root.editingRow
                     onCaptureRequested: root.shortcutCaptureRow = capturing ? -1 : root.editingRow
                     onCaptureCancelled: root.shortcutCaptureRow = -1
                     onShortcutEdited: (value) => {
                         ActionListModel.setShortcut(root.editingRow, value)
+                        // Read back the accepted value immediately. The model can
+                        // reject a duplicate key, and model notifications alone
+                        // should not leave this open editor showing stale text.
+                        root.editingShortcut = String(
+                            ActionListModel.getAction(root.editingRow).shortcut || "")
                         root.shortcutCaptureRow = -1
                     }
                 }

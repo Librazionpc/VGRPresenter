@@ -1076,6 +1076,14 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestScripture"),
         QVariant(qEnvironmentVariableIsSet("VGR_SCRIPTURE_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The pick-latency scenario: it opens the Scripture tab, takes a verse through
+    // the pane's own staging gesture and times it to the monitor tile — so it owns
+    // an env var like the rest (a plain VGR_SELFTEST=1 run must never put content on
+    // a tile or quit).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestPickLat"),
+        QVariant(qEnvironmentVariableIsSet("VGR_PICKLAT_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     // The pane-rows scenario: it types a two-character query into The Table pane's
     // tab search, scrolls each of the pane's three result lists to its end and
     // quits — so it owns an env var like the rest (a plain VGR_SELFTEST=1 run must

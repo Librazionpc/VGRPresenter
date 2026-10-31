@@ -130,6 +130,8 @@ void StyleListModel::reloadFromStore()
         }
         item.showOverlay = s.showTemplates[StyleItem::kOverlaySlot];
         item.category = QString::fromStdString(s.category);
+        // Routing-board membership rides the roster (StoredStyle::onBoard).
+        item.onBoard = s.onBoard;
         m_styles.append(item);
     }
     endResetModel();
@@ -170,6 +172,7 @@ QVariant StyleListModel::data(const QModelIndex &index, int role) const
     case ShowTableRole: return item.showTable;
     case ShowOverlayRole: return item.showOverlay;
     case CategoryRole: return item.category;
+    case OnBoardRole: return item.onBoard;
     default: return {};
     }
 }
@@ -191,6 +194,7 @@ QHash<int, QByteArray> StyleListModel::roleNames() const
         { ShowTableRole, "showTable" },
         { ShowOverlayRole, "showOverlay" },
         { CategoryRole, "category" },
+        { OnBoardRole, "onBoard" },
     };
 }
 
@@ -231,6 +235,7 @@ void StyleListModel::save()
         }
         s.showTemplates[StyleItem::kOverlaySlot] = item.showOverlay;   // its own axis (see StyleItem)
         s.category = item.category.toStdString();
+        s.onBoard = item.onBoard;
         stored.append(s);
     }
     // The kernel's store owns the vector-based API here; a failed flush (disk
@@ -251,6 +256,18 @@ void StyleListModel::addStyle()
     item.res = defaultRes();
     m_styles.append(item);
     endInsertRows();
+    save();
+}
+
+void StyleListModel::setOnBoard(int index, bool onBoard)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    if (m_styles[index].onBoard == onBoard)
+        return;
+    m_styles[index].onBoard = onBoard;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { OnBoardRole });
     save();
 }
 
@@ -487,6 +504,8 @@ QVariantMap StyleListModel::getStyle(int index) const
         { "clearBackgroundOnText", item.clearBackgroundOnText },
         { "showOverlay", item.showOverlay },   // its own axis, not a family slot
         { "category", item.category },
+        // Whether this style has a card on the Routing board.
+        { "onBoard", item.onBoard },
     };
     // The four families' gates and template picks, named from the ONE table
     // (FamilySlots.h) instead of by hand: these are the property names the QML

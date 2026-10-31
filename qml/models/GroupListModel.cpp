@@ -1,5 +1,6 @@
 #include "GroupListModel.h"
 
+#include "models/OutputListModel.h"
 #include "services/EngineBridge.h"
 #include "modules/project/GroupStore.hpp"
 
@@ -98,6 +99,7 @@ void GroupListModel::reloadFromStore()
         item.name = QString::fromStdString(g.name);
         item.color = QString::fromStdString(g.color);
         item.shortcut = QString::fromStdString(g.shortcut);
+        item.templateId = QString::fromStdString(g.templateId);
         item.isDefault = g.isDefault;
         m_groups.append(item);
     }
@@ -115,6 +117,7 @@ void GroupListModel::save()
         g.name = item.name.toStdString();
         g.color = item.color.toStdString();
         g.shortcut = item.shortcut.toStdString();
+        g.templateId = item.templateId.toStdString();
         g.isDefault = item.isDefault;
         stored.push_back(std::move(g));
     }
@@ -140,6 +143,7 @@ QVariant GroupListModel::data(const QModelIndex &index, int role) const
     case NameRole: return item.name;
     case ColorRole: return item.color;
     case ShortcutRole: return item.shortcut;
+    case TemplateRole: return item.templateId;
     case DefaultRole: return item.isDefault;
     default: return {};
     }
@@ -152,6 +156,7 @@ QHash<int, QByteArray> GroupListModel::roleNames() const
         { NameRole, "name" },
         { ColorRole, "color" },
         { ShortcutRole, "shortcut" },
+        { TemplateRole, "templateId" },
         { DefaultRole, "isDefault" },
     };
 }
@@ -239,6 +244,36 @@ void GroupListModel::setShortcut(int index, const QString &shortcut)
     save();
 }
 
+void GroupListModel::setTemplate(int index, const QString &templateId)
+{
+    if (index < 0 || index >= m_groups.size())
+        return;
+    const QString trimmed = templateId.trimmed();
+    if (m_groups[index].templateId == trimmed)
+        return;
+    m_groups[index].templateId = trimmed;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { TemplateRole });
+    save();
+    // The composition has to re-compose the slides this group owns (the tag
+    // turns into a template in StyleSpecBuilder), and the outputs' own spec may
+    // be the one carrying it — the same "a roster edit lands on the next frame"
+    // contract every other roster mutation follows.
+    if (OutputListModel *outputs = OutputListModel::instance())
+        outputs->repushActiveStyleForTag(m_groups.at(index).name);
+}
+
+QString GroupListModel::templateForTag(const QString &tag) const
+{
+    if (tag.isEmpty())
+        return {};
+    for (const GroupItem &item : m_groups) {
+        if (item.name == tag)
+            return item.templateId;
+    }
+    return {};
+}
+
 void GroupListModel::resetToDefaults()
 {
     beginResetModel();
@@ -257,6 +292,7 @@ QVariantMap GroupListModel::getGroup(int index) const
         { "name", item.name },
         { "color", item.color },
         { "shortcut", item.shortcut },
+        { "templateId", item.templateId },
         { "isDefault", item.isDefault },
     };
 }

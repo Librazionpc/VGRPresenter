@@ -100,24 +100,24 @@ Item {
         }
     }
 
-    // ALWAYS under the cursor (user call), not centred over the owner's own
-    // rect: a wide owner (a whole list row) used to plant the bubble at the
-    // row's midpoint regardless of where in it the pointer actually was.
-    // AppCursor.point is the same position-truth every PositionHoverArea
-    // already reads, in the same window space this layer draws in.
+    // Place beside the pointer, not at a fixed window corner or the centre of
+    // the hovered control (which can be a full-width list row).
     function place() {
-        const p = AppCursor.point
-        if (!p || bubble.width <= 0)
+        if (bubble.width <= 0)
             return
-        bubble.x = Math.max(root.edge,
-                            Math.min(root.width - bubble.width - root.edge,
-                                     p.x - bubble.width / 2))
-        // Below the cursor by default...
-        let y = p.y + root.gap
-        // ...unless that would leave the window (or be clipped at its bottom).
-        if (y + bubble.height > root.height - root.edge)
-            y = p.y - bubble.height - root.gap
-        bubble.y = Math.max(root.edge, Math.min(root.height - bubble.height - root.edge, y))
+        const point = AppCursor.point
+        if (!point)
+            return
+
+        const offset = 16
+        const right = root.width - bubble.width - root.edge
+        const bottom = root.height - bubble.height - root.edge
+        const x = point.x + offset + bubble.width <= root.width - root.edge
+                  ? point.x + offset : point.x - bubble.width - offset
+        const y = point.y + offset + bubble.height <= root.height - root.edge
+                  ? point.y + offset : point.y - bubble.height - offset
+        bubble.x = Math.max(root.edge, Math.min(x, right))
+        bubble.y = Math.max(root.edge, Math.min(y, bottom))
     }
 
     Timer {
@@ -134,8 +134,7 @@ Item {
         function onChanged() { root.update() }
     }
 
-    // The bubble follows the cursor now (see place()), so it has to re-place
-    // on every pointer move while it is up, not just once when it appears.
+    // Keep the bubble beside a moving pointer while it is visible.
     Connections {
         target: root.shown ? AppCursor : null
         function onPointerMoved() { root.place() }

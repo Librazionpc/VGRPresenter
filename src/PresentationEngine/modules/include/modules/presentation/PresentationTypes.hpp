@@ -346,6 +346,55 @@ struct OutputStyleSpec {
     // on different values showed one take as two pictures on the monitor wall.
     // Kept so the roster round-trips; see SceneBuilder::AddCompositorLayers.
     std::string mediaFit;
+    // THE WIRED VIDEO BUS (Settings · Routing) — this output's own picture.
+    //
+    // The bus's STABLE number as the routing canvas's video wire names it
+    // (CompositorState keys its per-bus frames the same way), 0 = nothing
+    // wired. Until this field existed the wires were stored and validated and
+    // then went nowhere at render time: `AssignOutputBuses` wrote an
+    // OutputConfig no composer ever read, so every screen, every NDI sender and
+    // every recording showed the program feed no matter what the canvas said.
+    // A wired output now composes THAT bus's live frame full-frame
+    // (SceneBuilder::BuildBusFeedScene) instead of the on-air slide, and 0 keeps
+    // exactly the behaviour every existing setup has. It rides the spec rather
+    // than a separate push because the spec is already the per-output channel
+    // the live loop reads every frame.
+    int videoBus = 0;
+    // WHICH BUS WINDOWS THIS OUTPUT MAY PAINT. A design block of kind "bus" is a
+    // live feed drawn inside the design's own rectangle (SceneBuilder's bus
+    // planes), and it used to paint on EVERY output that composed that slide — an
+    // NDI or HDMI row with no wire to that bus included, because the block lives
+    // in the shared program composition. THE WIRES ARE THE ALLOW-LIST: when
+    // `gateVideoBuses` is set, a bus block paints only if its bus number is in
+    // `allowedVideoBuses` — the row's own wired video set, read from the routing
+    // edges. An unwired row carries no picture, so it paints none: "it is not
+    // wired, it must not come active there", on screen.
+    //
+    // OFF by default, and deliberately: the program/preview paths and every caller
+    // that does not know a roster row (the app's own preview tiles, the unit
+    // tests) keep painting bus windows exactly as before. A gated build is also a
+    // different scene id (StyledSceneIdFor), so the shared program scene can never
+    // be served to a gated output as a cache hit.
+    bool gateVideoBuses = false;
+    std::vector<int> allowedVideoBuses;   // bus NUMBERS (CompositorState's key)
+    // THE TEMPLATE BUS THIS OUTPUT SHOWS (Settings · Routing), 0 = none.
+    //
+    // A bus created from a template is a DESIGN with windows, so an output wired
+    // to one composes that design — the template's own blocks with each window
+    // filled — instead of a single full-frame picture
+    // (SceneBuilder::BuildTemplateBusScene). It is a field of its own rather than
+    // a meaning of `videoBus` because the two are different pictures: `videoBus`
+    // names ONE feed, this names a layout with several.
+    int templateBus = 0;
+    // The template's blocks, baked by the UI on every push (the same transient
+    // bake a style's template gets, StyleSpecBuilder): the engine never reads the
+    // template library itself, and a template edit re-pushes through the same
+    // path. Empty = the template is gone, and the output falls back to the
+    // program picture rather than rendering a blank design.
+    std::vector<ContentBlock> templateBusBlocks;
+    // The template design's background ("#rrggbb" / ""), painted under the
+    // windows exactly like a style's colour is painted under a slide.
+    std::string templateBusBackground;
     // FreeShow's clearStyleBackgroundOnText: when the slide itself carries a
     // background colour, the style's background steps aside for it.
     bool clearBackgroundOnText = false;

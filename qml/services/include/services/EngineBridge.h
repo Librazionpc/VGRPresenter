@@ -3,6 +3,8 @@
 #include <QQuickImageProvider>
 #include <QObject>
 #include <QMap>
+#include <QHash>
+#include <QPair>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -483,6 +485,13 @@ public:
     // while a scan is in flight and rate-limited here, so a binding re-evaluating
     // at the pump's rate cannot queue a second enumeration.
     Q_INVOKABLE bool inputSourceAlive(const QString &label, const QString &kind);
+    // Re-reads the list of open WINDOWS for one window source and, when that window
+    // has appeared, moved or gone, updates the screen roster and emits
+    // devicesChanged. Lists windows only — no camera or display is touched — so a
+    // light can call it every couple of seconds while its window is closed, and the
+    // moment the window opens the light and the picture follow. Rate-limited per
+    // label; the listing runs off the interface thread.
+    Q_INVOKABLE void refreshWindow(const QString &label);
     // THE STATUS LIGHT'S LIVE HALF — is anything actually ARRIVING from this
     // source right now? "" while the app is not pulling it at all (or was, but
     // stopped — see kWatchWindowMs), "ok" while it is and frames are being handed
@@ -956,6 +965,15 @@ private:
     // read from bindings that re-evaluate at the pump's rate, so an unthrottled
     // ping would queue a device refresh every tick.
     qint64 lastLightPingMs_ = 0;
+    // Per source (kind|label): how many pings it has cost and when the last one
+    // went out. A source that stays missing (a closed window) is pinged a few times
+    // quickly and then rarely — every ping is a whole device sweep, which reads the
+    // modes of each camera in use, so an always-missing source used to open the
+    // camera again every few seconds. Cleared when the source is found.
+    QHash<QString, QPair<int, qint64>> lightPingState_;
+    // refreshWindow: when each label was last listed, and which are in flight.
+    QHash<QString, qint64> windowRefreshMs_;
+    QSet<QString> windowRefreshPending_;
     // The sources the lights have asked about since the last sweep (see
     // inputSourceAlive). Each is added to what the next enumeration WALKS, so the
     // answer is about the device the light names and not about whatever the

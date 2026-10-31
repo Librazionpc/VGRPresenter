@@ -20,9 +20,13 @@ struct GroupItem
     // A single letter (uppercase by convention), or "" for none. Live: press
     // it during GO LIVE to jump to the next slide carrying this group.
     QString shortcut;
-    // The eight ship-with-the-app groups. Renaming one clears this (same
-    // "editing a default detaches it" rule FreeShow's ManageGroups.svelte
-    // applies when you touch its translated name).
+    // The layout template this group's slides use — an engine design id ("tpl-…")
+    // or "" for none. This is what makes a group more than a colour: a slide
+    // carrying this tag composes through THIS template instead of the style's
+    // own pick (StyleSpecBuilder::specForStyleId takes the tag).
+    QString templateId;
+    // The eight ship-with-the-app groups. Renaming one clears this (the same
+    // "editing a default detaches it" rule the rest of the roster follows).
     bool isDefault = false;
 };
 
@@ -44,6 +48,7 @@ public:
         NameRole,
         ColorRole,
         ShortcutRole,
+        TemplateRole,
         DefaultRole,
     };
     Q_ENUM(Role)
@@ -69,6 +74,14 @@ public:
     // shortcut, one group, same uniqueness ManageGroups.svelte's
     // `existingShortcuts` filter enforces.
     Q_INVOKABLE void setShortcut(int index, const QString &shortcut);
+    // "" clears it. The id of a template DESIGN ("tpl-…"); an id the template
+    // library does not know is still stored — the composition falls back to the
+    // style's own pick for it, exactly like a style naming a deleted template.
+    Q_INVOKABLE void setTemplate(int index, const QString &templateId);
+    // The template a slide carrying `tag` should compose through — "" when the tag
+    // names no group, or names one with no template of its own. This is the ONLY
+    // reader of the group → template link outside the model (StyleSpecBuilder).
+    Q_INVOKABLE QString templateForTag(const QString &tag) const;
     // Restores the eight built-ins, discarding every custom group and
     // override — the "more options" Reset button in the dialog.
     Q_INVOKABLE void resetToDefaults();

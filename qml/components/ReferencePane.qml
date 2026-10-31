@@ -769,7 +769,15 @@ Item {
     // Every move the reader makes is remembered on a short idle (see saveReading):
     // a scroll fires these hundreds of times a second, and the settings store is not
     // a place to write per frame.
-    onSelectedChanged: root.touchReading()
+    onSelectedChanged: {
+        // EVERY selection change while Scroll is walking, whoever made it: a jump
+        // back that is not followScrollWalk's own shows up here without a matching
+        // "walk moved to" line before it.
+        if (root.scrollSourced && LiveOutputService.scrollMode)
+            EngineBridge.log("info", "ScrollFollow", "selection is now " + JSON.stringify(root.selected)
+                             + " (walk paragraph " + (root.followedScrollPiece || "none") + ")")
+        root.touchReading()
+    }
     onChapterNumberChanged: root.touchReading()
     onBookIndexChanged: root.touchReading()
     Timer {
@@ -1383,6 +1391,18 @@ Item {
                 + " partIndex=" + Number(op.part)
                 + " previewIndex=" + root.previewSlideIndex
                 + " (the pane's own pick, not the paragraph's head)")
+            return
+        }
+        // SCROLL OWNS THE SELECTION WHILE IT WALKS (followScrollWalk). The service
+        // republishes the staged slide on every page turn, and that slide's parts
+        // name the paragraph the PAGE STARTS in — behind the line the reader is on.
+        // Following it here put the highlight back on the earlier paragraph the
+        // moment the walk passed into the next one (13 -> 14 -> back to 13).
+        if (root.scrollSourced && LiveOutputService.scrollMode) {
+            EngineBridge.log("info", "ScrollFollow",
+                "staged slide names paragraph " + parts[0].number + " part=" + (parts[0].partIndex ?? 0)
+                + " — ignored while scrolling; walk is on " + (root.followedScrollPiece || "none")
+                + " selected=" + JSON.stringify(root.selected))
             return
         }
         const number = parts[0].number
@@ -2607,6 +2627,12 @@ Item {
         // selecting verse 1 opened the passage at verse 2. Matching the item by its
         // OWN identity, against spans taken from the text that was actually built,
         // cannot drift like that.
+        // THE TABLE'S PARAGRAPHS EACH START AT THE LEFT EDGE: its items are paragraphs
+        // (the number leads the text), and the reader needs the line break to see one
+        // end and the next begin. The joiner is one character either way, so every
+        // offset in this passage (item spans, page starts, pieceAtChapterOffset's
+        // joining space) is unchanged. Scripture's items are verses that run on.
+        const paragraphBreak = root.adapter && String(root.adapter.contentType || "") === "table" ? "\n" : " "
         let text = ""
         const items = []
         for (const verse of root.chapterVerses) {
@@ -2615,7 +2641,7 @@ Item {
             if (continuation)
                 continue
             if (text !== "")
-                text += " "
+                text += paragraphBreak
             const verseText = root.chapterItemText(verse)
             items.push({ number: Number(verse.number),
                          partIndex: Number(verse.partIndex ?? 0),
@@ -2650,7 +2676,9 @@ Item {
                 return
             const start = from === 0 ? 0 : matches[from].start
             const end = to < matches.length ? matches[to].start : text.length
-            pages.push({ body: text.slice(start, end), start: start })
+            // A page that ends where a paragraph ends would carry that break as a
+            // trailing blank line; a space is the same one character and draws nothing.
+            pages.push({ body: text.slice(start, end).replace(/\n$/, " "), start: start })
         }
         // PAGES BEFORE THE PICK ARE PACKED BACKWARDS from it, each a full budget
         // ending where the pick begins. Packed forwards from word 0 they left a
@@ -2974,6 +3002,7 @@ Item {
         root.scrollIndex = index
         root.scrollPiece = { number: Number(number), part: Number(part) }
         root.scrollSourced = false
+        root.followedScrollPiece = ""
         // In Scroll, a click shows the chapter text from the clicked paragraph on, in
         // the template's box at the budget size, not the slide's own split.
         if (LiveOutputService.scrollMode)
@@ -3062,6 +3091,45 @@ Item {
         target: LiveOutputService
         function onLineStepPending(direction) { root.ensureScrollSource() }
         function onScrollModeChanged() { root.applyScrollMode() }
+        function onReadingScrollChanged() { root.followScrollWalk() }
+        function onReadingPageChanged() { root.followScrollWalk() }
+    }
+
+    // THE SELECTOR FOLLOWS THE SCROLL WALK. In Scroll the staged slide never
+    // changes while the text moves (one text source, many pages), so
+    // followLiveStep — which reacts to a NEW staged slide — never fired and the
+    // highlighted row stayed on the paragraph that was clicked. The walk's
+    // position is a character of the chapter passage; the paragraph holding it is
+    // the row to highlight. Runs on every scroll emit with no delay; the
+    // followedScrollPiece check makes frames inside one paragraph a no-op.
+    property string followedScrollPiece: ""
+    function followScrollWalk() {
+        if (!root.scrollSourced || root.scrollPages.length === 0 || !root.followSelectorMoves)
+            return
+        const passage = LiveOutputService.readingPassageChar()
+        if (passage < 0)
+            return
+        const origin = Number(root.scrollPages[0].start ?? 0)
+        const piece = root.pieceAtChapterOffset(origin + passage)
+        if (!piece)
+            return
+        const sig = piece.number + "|" + piece.partIndex
+        if (sig === root.followedScrollPiece)
+            return
+        // ONE LINE PER PARAGRAPH CHANGE (never per frame): where the walk is in
+        // numbers, and which paragraph that maps to, so a highlight that lands on
+        // the wrong paragraph can be told apart from one something else moved.
+        EngineBridge.log("info", "ScrollFollow",
+            "walk moved to paragraph " + piece.number + " part=" + piece.partIndex
+            + " (was " + (root.followedScrollPiece || "none") + ")"
+            + " passageChar=" + passage + " pageOrigin=" + origin
+            + " chapterOffset=" + (origin + passage)
+            + " readingPage=" + LiveOutputService.readingPage + "/" + root.scrollPages.length
+            + " selectedBefore=" + JSON.stringify(root.selected))
+        root.followedScrollPiece = sig
+        root.selected = [piece.number]
+        root.anchorVerse = piece.number
+        root.centerRow(piece.number, piece.partIndex)
     }
 
     function playSlideAt(index) {
@@ -4366,26 +4434,48 @@ Item {
 
         // ---- the floating reference chip (FreeShow's left FloatingInputs) ----
         Rectangle {
+            id: referenceChip
             visible: root.currentSource !== null && root.referenceText !== ""
             x: 12; y: parent.height - height - 12
-            height: 30; width: Math.min(refRow.implicitWidth + 24, Math.max(60, parent.width - pill.width - 36)); radius: 15
+            height: 30
+            width: Math.min(referenceTextMetrics.advanceWidth
+                             + (versesCol.width > 560
+                                ? referenceSourceLabel.implicitWidth + refRow.spacing : 0) + 24,
+                             Math.max(60, parent.width - pill.width - 36))
+            radius: 15
             color: Qt.alpha(Theme.windowBg, 0.9)
             border.color: Theme.border
+            clip: true
             Row {
                 id: refRow
-                anchors.centerIn: parent
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
                 spacing: 6
                 Text {
+                    id: referenceSourceLabel
                     visible: versesCol.width > 560   // a narrow pane keeps just the reference
                     text: (root.currentSource ? root.currentSource.name : "") + ":"
                     color: Theme.textSecondary
                     font.family: Theme.fontFamily; font.pixelSize: 14
                 }
                 Text {
+                    id: referenceText
+                    width: Math.max(0, refRow.width
+                                    - (referenceSourceLabel.visible
+                                       ? referenceSourceLabel.implicitWidth + refRow.spacing : 0))
                     text: root.referenceText
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily; font.pixelSize: 14
+                    elide: Text.ElideRight
+                    clip: true
                 }
+            }
+            TextMetrics {
+                id: referenceTextMetrics
+                font.family: Theme.fontFamily
+                font.pixelSize: 14
+                text: root.referenceText
             }
         }
 

@@ -35,11 +35,19 @@ StyleListModel *uiStyleRoster();
 // The engine's view of one style ROW of `styles` — the style's fields, its
 // per-family template keys, and the blocks of every template design it picks
 // baked in. A negative row yields an empty spec.
-bps::presentation::OutputStyleSpec specForStyleRow(int row, const StyleListModel *styles);
+//
+// `slideTag` is the group the SLIDE carries ("" = ungrouped). A group can name a
+// template design of its own, and when it does that design takes the shows
+// family slot — the slide is laid out the way its group was designed, whether or
+// not the caller is a preview, a tile or an output. That is the whole point of
+// the registry's template column: the group's look travels with the tag.
+bps::presentation::OutputStyleSpec specForStyleRow(int row, const StyleListModel *styles,
+                                                   const QString &slideTag = QString());
 
 // The same, resolving the row itself through uiStyleRoster(). An unknown id —
 // and "" (an output with no style at all) — yields an EMPTY spec, which the
 // engine renders unstyled.
-bps::presentation::OutputStyleSpec specForStyleId(const QString &styleId);
+bps::presentation::OutputStyleSpec specForStyleId(const QString &styleId,
+                                                  const QString &slideTag = QString());
 
 } // namespace StyleSpecBuilder

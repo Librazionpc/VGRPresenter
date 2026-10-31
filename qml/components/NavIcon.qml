@@ -2,7 +2,8 @@ import QtQuick
 import VGRPresenterUI
 
 // Small glyph drawn from primitives, matching the nav-rail icon set.
-// kind: "sliders" | "spark" | "monitor" | "layoutTemplate" | "recordDot" | "grid"
+// kind: "sliders" | "spark" | "monitor" | "layoutTemplate" | "recordDot" |
+//       "grid" | "routing"
 Item {
     id: root
     property string kind: "sliders"
@@ -62,6 +63,16 @@ Item {
             width: 10; height: 10; radius: 5
             color: root.color
         }
+    }
+
+    // routing (Settings · Routing) — two nodes joined by a signal: the canvas's
+    // own shape, drawn as primitives like the glyphs above.
+    Item {
+        visible: root.kind === "routing"
+        anchors.fill: parent
+        Rectangle { x: 1; y: 5; width: 6; height: 6; radius: 3; color: root.color }
+        Rectangle { x: 9; y: 5; width: 6; height: 6; radius: 3; color: root.color }
+        Rectangle { x: 6; y: 7.25; width: 4; height: 1.5; color: root.color }
     }
 
     // grid (Plugins)

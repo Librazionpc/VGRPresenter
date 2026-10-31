@@ -379,7 +379,11 @@ Item {
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             }
             IconGlyph {
-                anchors.centerIn: parent
+                // The five equal slots can have fractional widths. Snap each
+                // glyph's center in the row to a whole pixel so it stays visually
+                // centered instead of landing on a blurred half-pixel.
+                x: Math.round(toolBtn.x + (toolBtn.width - width) / 2) - toolBtn.x
+                y: Math.round((toolBtn.height - height) / 2)
                 name: toolBtn.icon
                 color: !toolBtn.enabled2 ? Theme.textMuted
                      : (toolBtn.danger ? (toolBtn.active ? Theme.dangerLight : Theme.textMuted)

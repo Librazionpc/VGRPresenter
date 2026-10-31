@@ -93,8 +93,14 @@ struct ResourceCost {
 
 struct ProcessingStage {
     ProcessKind kind = ProcessKind::Gain;
-    double amount = 1.0;       // 0..1 intensity (gain dB for Gain, seconds for Delay)
-    std::string custom;        // for ProcessKind::Custom
+    double amount = 1.0;       // 0..1 intensity (gain dB for Gain, seconds for Delay,
+                               // wet mix for a reverb Custom stage)
+    std::string custom;        // for ProcessKind::Custom ("reverb")
+    // Eq: one parametric (peaking) band per stage; a chain of Eq stages is a chain
+    // of bands.
+    double freqHz = 1000.0;
+    double gainDb = 0.0;
+    double q = 0.707;
 };
 
 // Volume control on every node (user brief §12).

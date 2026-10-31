@@ -6,6 +6,7 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "models/GroupListModel.h"
 #include "models/OutputListModel.h"
 #include "models/StyleListModel.h"
 #include "services/DesignLibraryService.h"
@@ -124,6 +125,39 @@ void bakeFamilyTemplates(bp::OutputStyleSpec &spec)
     }
 }
 
+// A GROUP'S OWN TEMPLATE GOVERNS ITS SLIDES. A slide can carry one of the
+// named groups (verse, chorus...), and a group can name a template design — so
+// a chorus slide is laid out the way that group was designed, not the way the
+// output's style happens to be. This is the slide's tag -> its template, the
+// one link the registry's template column exists for.
+//
+// Applied to the SHOWS family slot (the family a tagged section belongs to) and
+// AFTER the style's own bakes, so it is an override of that slot and nothing
+// else: the style still owns the background, the other three families and every
+// gate. An id the template library does not know leaves the style's pick in
+// place rather than blanking the layout — the same fallback a style naming a
+// deleted template gets.
+void bakeGroupTemplate(bp::OutputStyleSpec &spec, const QString &slideTag)
+{
+    if (slideTag.isEmpty())
+        return;
+    const QString key = GroupListModel::instance()->templateForTag(slideTag);
+    if (key.isEmpty())
+        return;
+    const QVariantMap design = TemplateLibraryService::instance().design(key);
+    const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+    if (blocks.isEmpty())
+        return;   // unknown/deleted id: the style's own slot stands
+    adoptTemplateBackground(design, spec);
+    spec.familyTemplateKeys[bps::presentation::kFamilySlotShows] = key.toStdString();
+    std::vector<bp::ContentBlock> &slot =
+        spec.familyTemplateBlocks[bps::presentation::kFamilySlotShows];
+    slot.clear();
+    slot.reserve(blocks.size());
+    for (const QVariant &b : blocks)
+        slot.push_back(ShowConverter::blockFromVariant(b.toMap()));
+}
+
 } // namespace
 
 namespace StyleSpecBuilder {
@@ -145,7 +179,8 @@ StyleListModel *uiStyleRoster()
     return StyleListModel::instance();
 }
 
-bps::presentation::OutputStyleSpec specForStyleRow(int row, const StyleListModel *styles)
+bps::presentation::OutputStyleSpec specForStyleRow(int row, const StyleListModel *styles,
+                                                    const QString &slideTag)
 {
     bps::presentation::OutputStyleSpec spec;
     if (!styles || row < 0 || row >= styles->rowCount())
@@ -174,15 +209,16 @@ bps::presentation::OutputStyleSpec specForStyleRow(int row, const StyleListModel
     spec.category = style.value(QStringLiteral("category")).toString().toStdString();
     bakeWholeStyleTemplate(spec);
     bakeFamilyTemplates(spec);
+    bakeGroupTemplate(spec, slideTag);
     return spec;
 }
 
-bps::presentation::OutputStyleSpec specForStyleId(const QString &styleId)
+bps::presentation::OutputStyleSpec specForStyleId(const QString &styleId, const QString &slideTag)
 {
     StyleListModel *styles = uiStyleRoster();
     if (!styles)
         return {};
-    return specForStyleRow(styles->rowForId(styleId), styles);
+    return specForStyleRow(styles->rowForId(styleId), styles, slideTag);
 }
 
 } // namespace StyleSpecBuilder

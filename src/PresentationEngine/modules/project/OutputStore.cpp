@@ -78,6 +78,17 @@ json::Value OutputStore::OutputToJson(const StoredOutput& o) {
     obj["styleId"] = json::Value::String(o.styleId);
     if (!o.mediaFit.empty())
         obj["mediaFit"] = json::Value::String(o.mediaFit);   // absent = "contain"
+    if (!o.audioDevice.empty())
+        obj["audioDevice"] = json::Value::String(o.audioDevice);   // absent = program
+    if (!o.videoMode.empty() && o.videoMode != "direct")
+        obj["videoMode"] = json::Value::String(o.videoMode);       // absent = direct
+    // The row's own gates ARE its allow-list wires (see StoredOutput::showOverlay).
+    // Written when OPEN, so a roster with nothing wired stays byte-identical and an
+    // older build reading it falls back to its own "on" default.
+    if (o.showOverlay)
+        obj["showOverlay"] = json::Value::Bool(true);
+    if (o.showMedia)
+        obj["showMedia"] = json::Value::Bool(true);
     obj["onAirOnly"] = json::Value::Bool(o.onAirOnly);
     obj["content"] = json::Value(std::move(c));
     obj["category"] = json::Value::String(o.category);
@@ -119,6 +130,14 @@ Result<StoredOutput> OutputStore::OutputFromJson(const json::Value& v) {
     out.enabled = flag("enabled", true);
     out.styleId = str("styleId");
     out.mediaFit = str("mediaFit");
+    out.audioDevice = str("audioDevice");
+    out.videoMode = str("videoMode");
+    if (out.videoMode != "compose")
+        out.videoMode = "direct";
+    // ABSENT = NOT ALLOWED: the gate is a wire on Settings · Routing, and a row
+    // with no wire to the Overlays/Media card paints neither (see the header).
+    out.showOverlay = flag("showOverlay", false);
+    out.showMedia = flag("showMedia", false);
     out.onAirOnly = flag("onAirOnly", false);
     out.category = str("category");
     if (const json::Value* c = v.Find("content"); c && c->asObject()) {

@@ -225,6 +225,19 @@ QString RecordingService::masterBusNodeId() const
 // (a session on this screen, or the refusal toast) follows a moment later.
 bool RecordingService::startRecording(const QVariantMap &settings)
 {
+    return beginRecording(settings, QString());
+}
+
+bool RecordingService::startRecordingOn(const QString &nodeId, const QVariantMap &settings)
+{
+    const QString node = nodeId.trimmed();
+    if (node.isEmpty())
+        return false;
+    return beginRecording(settings, node);
+}
+
+bool RecordingService::beginRecording(const QVariantMap &settings, const QString &nodeId)
+{
     const rr::RecordingProfile profile = profileFromSettings(settings);
     const QString pid = QStringLiteral("ui-program");
     const QString stamp = QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -236,7 +249,7 @@ bool RecordingService::startRecording(const QVariantMap &settings)
         connect(pump_, &QTimer::timeout, this, &RecordingService::pumpTick);
     }
     vgr::EngineWorker::instance().runOffThread(
-        [this, settings, profile, pid, stamp] {
+        [this, settings, profile, pid, stamp, nodeId] {
         auto &rec = rr::RecordingEngine::Instance();
         const auto refuse = [this](const QString &message) {
             vgr::EngineWorker::onInterfaceThread(this, [message] {
@@ -253,20 +266,55 @@ bool RecordingService::startRecording(const QVariantMap &settings)
             return;
         }
 
-        // The master program bus: the FIRST bus plane node in the graph.
+        // WHICH node this take listens to.
+        //
+        // Named (the Routing canvas's Recording card): the node the canvas wired.
+        // RecordingEngine attaches its audio tap to that node, and the mixer sums
+        // only the buses with an EDGE into it — so the take records exactly what
+        // the canvas shows wired to it. Refused when nothing is wired, because a
+        // take of silence is worse than a refusal: it looks like a recording.
+        //
+        // Unnamed (the Recording page / an automation action): the program's
+        // FIRST audio bus plane, which is what the page has always recorded.
         QString bus;
-        for (const auto &node : bpr::ProductionEngine::Instance().Graph().NodeIds()) {
-            const std::string s = node;
-            if (s.starts_with("bus:") && s.ends_with("#a")) {
-                bus = QString::fromStdString(s);
+        if (!nodeId.isEmpty()) {
+            auto &graph = bpr::ProductionEngine::Instance().Graph();
+            if (!graph.HasNode(nodeId.toStdString())) {
+                vgr::EngineWorker::onInterfaceThread(this, [] {
+                    toast(QStringLiteral("That output has no engine node yet — press Refresh on Routing, then start again."));
+                });
+                return;
+            }
+            bool wired = false;
+            for (const std::string &upstream : graph.Upstream(nodeId.toStdString())) {
+                const auto node = graph.GetNode(upstream);
+                if (!node.ok() || node.value().kind != bpr::NodeKind::Bus ||
+                    node.value().signalType != bpr::SignalType::Audio)
+                    continue;
+                wired = true;
                 break;
             }
-        }
-        if (bus.isEmpty()) {
-            vgr::EngineWorker::onInterfaceThread(this, [] {
-                toast(QStringLiteral("No audio bus to record — create a bus on the Audio & Video board first."));
-            });
-            return;
+            if (!wired) {
+                vgr::EngineWorker::onInterfaceThread(this, [] {
+                    toast(QStringLiteral("Wire an audio bus to this output first — a recording with nothing wired would be silence."));
+                });
+                return;
+            }
+            bus = nodeId;
+        } else {
+            for (const auto &node : bpr::ProductionEngine::Instance().Graph().NodeIds()) {
+                const std::string s = node;
+                if (s.starts_with("bus:") && s.ends_with("#a")) {
+                    bus = QString::fromStdString(s);
+                    break;
+                }
+            }
+            if (bus.isEmpty()) {
+                vgr::EngineWorker::onInterfaceThread(this, [] {
+                    toast(QStringLiteral("No audio bus to record — create a bus on the Audio & Video board first."));
+                });
+                return;
+            }
         }
 
         auto started = rec.StartRecording(pid.toStdString(), bus.toStdString(),
@@ -283,14 +331,18 @@ bool RecordingService::startRecording(const QVariantMap &settings)
         (void)rec.SetMetadata(sessionId.toStdString(), "time", stamp.mid(11, 8).toStdString());
 
         const QString busLabel = bus;
-        vgr::EngineWorker::onInterfaceThread(this, [this, sessionId, busLabel, settings] {
+        vgr::EngineWorker::onInterfaceThread(this, [this, sessionId, busLabel, settings, nodeId] {
             recordingId_ = sessionId;
+            // WHICH CARD OWNS THIS TAKE: the node it was started on ("" for a
+            // program take). The Routing canvas's REC / STREAM cards read it, so
+            // pressing Stop on a card can never end a take started elsewhere.
+            recordingNode_ = nodeId;
             profileId_ = QStringLiteral("ui-program");
             if (pump_ && !pump_->isActive())
                 pump_->start();
             refreshStatus();
             refreshStorage();
-            qInfo("RecordingService: recording '%s' from bus %s (%s/%s, %dkbps)",
+            qInfo("RecordingService: recording '%s' from %s (%s/%s, %dkbps)",
                   qUtf8Printable(recordingId_), qUtf8Printable(busLabel),
                   settings.value(QStringLiteral("container")).toString().toUtf8().constData(),
                   settings.value(QStringLiteral("resolution")).toString().toUtf8().constData(),
@@ -310,6 +362,7 @@ void RecordingService::stopRecording()
     // moment it is pressed; the engine's finalize (the container writes its
     // trailer) happens on the worker and the status is re-read from it after.
     recordingId_.clear();
+    recordingNode_.clear();
     if (pump_)
         pump_->stop();
     emit recordingChanged();
@@ -523,8 +576,10 @@ void RecordingService::refreshStatus()
             recording_ = active;
             paused_ = paused;
             streaming_ = streaming;
-            if (gone)
+            if (gone) {
                 recordingId_.clear();
+                recordingNode_.clear();   // the session ended engine-side
+            }
             status_ = next;
         });
     });

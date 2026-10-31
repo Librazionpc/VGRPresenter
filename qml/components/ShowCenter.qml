@@ -158,14 +158,56 @@ Item {
     // unsaved).
     function takeSlideLive(index, slide, styledPreview) {
         root.selectedSlide = index
+        // MEASURED, for the same reason the reference tabs' pick is: the tile only
+        // updates when this function returns, so the elapsed time here IS the wait
+        // the operator sees. Printed only when it is slow enough to notice.
+        const pickT0 = Date.now()
         const wordsPerScreen = Number(SettingsService.value("shows.wordsPerSlide"))
         LiveOutputService.readingWordBudget = wordsPerScreen > 0 ? wordsPerScreen : 40
-        // The WHOLE show goes over, with `index` saying which slide is being
-        // read: that is what gives Alt+Down (LiveOutputService.lineStep) the
-        // neighbour slide whose first line comes in at the bottom of this one.
-        // Staging only the slide itself left the stepper with no next line, so
-        // the reading step could not cross a show's slide boundary at all.
-        LiveOutputService.stageSlideSet(root.item ? root.item.name : "", root.slides, index)
+        // ONE SLIDE FIRST, THE WHOLE SHOW ONLY WHERE IT IS NEEDED.
+        //
+        // This used to hand stageSlideSet the WHOLE show with `index` saying which
+        // slide is being read — for the neighbour slide Alt+Down / the wall's ‹ ›
+        // step into. But the tile (and the air) only update when that call returns,
+        // and the call first measures the pick's whole READING RUN: every slide's
+        // words laid out as one passage at the active style. A show is far bigger
+        // than a Table section, so the same double-click sat visibly longer here
+        // ("the same for show, it takes a little too long to show on the monitor
+        // preview"). The picked slide goes out NOW; the set costs nothing on this
+        // click.
+        //
+        // What still wants the set is a SCROLL passage, which fills the screen from
+        // the slides AFTER the pick — so under Scroll the full set follows on a
+        // zero-delay timer, once the tile has been updated and painted. In Slide
+        // mode nothing needs it: the wall's ‹ › stages the neighbouring slide itself
+        // (see stepSlide), one slide at a time.
+        const name = root.item ? root.item.name : ""
+        const picked = slide ? slide
+                             : ((index >= 0 && index < root.slides.length) ? root.slides[index] : null)
+        if (picked)
+            LiveOutputService.stageSlideSet(name, [picked], 0)
+        showSetFill.restart()
+        const pickMs = Date.now() - pickT0
+        if (pickMs >= 80)
+            console.log("[PICKCOST] show slide " + index + " staged in " + pickMs + " ms"
+                        + (LiveOutputService.scrollMode ? " (scroll)" : " (slide)"))
+    }
+    // The show's own set, filled AFTER the click instead of inside it (see
+    // takeSlideLive). Read lazily on the timer, not captured: a second click
+    // restarts it with its own index, so only the newest pick is ever staged.
+    function fillShowSet() {
+        if (!root.item || !LiveOutputService.scrollMode)
+            return
+        const at = root.selectedSlide
+        if (at < 0 || at >= root.slides.length)
+            return
+        LiveOutputService.stageSlideSet(root.item.name, root.slides, at)
+    }
+    Timer {
+        id: showSetFill
+        interval: 0
+        repeat: false
+        onTriggered: root.fillShowSet()
     }
 
     // ---- The wall's ‹ › while a SHOW slide is on the tile -------------------

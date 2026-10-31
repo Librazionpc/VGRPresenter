@@ -1817,11 +1817,28 @@ Rectangle {
                                     // Indented past the mark; the width gives back the same 8px it used to start at.
                                     x: 31
                                     anchors.verticalCenter: parent.verticalCenter
-                                    width: parent.width - 263
+                                    width: parent.width - 263 - (showCategoryLabel.visible ? showCategoryLabel.width + 12 : 0)
                                     color: Theme.textPrimary
                                     elide: Text.ElideRight
                                     font.family: Theme.fontFamily; font.pixelSize: 14
                                     text: { table_body.probeEvals.rows++; return modelData.name }   // (scroll-cost probe: the row's name binding)
+                                    textFormat: Text.PlainText
+                                }
+                                // WHICH CATEGORY THE SHOW IS IN, in "All" only — inside a category (or
+                                // Unlabeled) every row would repeat the sidebar's own selection.
+                                Text {
+                                    id: showCategoryLabel
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 16 + 201 + 12
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 150
+                                    visible: media_table.currentCategory === 0
+                                             && String(modelData.category ?? "") !== ""
+                                    color: Theme.textMuted
+                                    elide: Text.ElideRight
+                                    font.family: Theme.fontFamily; font.pixelSize: 13
+                                    horizontalAlignment: Text.AlignRight
+                                    text: String(modelData.category ?? "")
                                     textFormat: Text.PlainText
                                 }
                                 Text {
@@ -1870,15 +1887,11 @@ Rectangle {
                                         // touches the engine's shared "open document" the
                                         // Edit screen owns.
                                         //
-                                        // stageSlideSet(name, WHOLE set, index), not
-                                        // stageSlides(name, [one slide]): the line stepper
-                                        // (Alt+Down/Alt+Up, LiveOutputService.lineStep) reads
-                                        // its neighbour slide's lines from that whole set —
-                                        // staging a single-slide array left it with no
-                                        // neighbour to step into (reported: "when I press Alt
-                                        // [+] down it doe[sn't] step in lines"). Same call
-                                        // ShowCenter.qml's takeSlideLive already uses for its
-                                        // own double-click.
+                                        // The WHOLE set goes over here, unlike the show
+                                        // centre's own pick (ShowCenter.qml takeSlideLive now
+                                        // stages just the clicked slide first): this path has
+                                        // no pane guaranteed to answer a step, so ‹ › has to be
+                                        // able to walk the set from the engine's side.
                                         const peeked = ShowService.peekShow(showRef)
                                         if (peeked && peeked.ok && peeked.show
                                                 && peeked.show.slides && peeked.show.slides.length > 0) {

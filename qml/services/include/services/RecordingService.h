@@ -56,6 +56,11 @@ class RecordingService : public QObject
     // The persisted settings blob ({ platform, serverUrl, streamKey, ... });
     // writes go through setConfig() so they save.
     Q_PROPERTY(QVariantMap config READ config WRITE setConfig NOTIFY configChanged)
+    // The graph node the LIVE take was started on ("out:<stable id>", or
+    // "out:stream" for the RTMP row) — "" while idle and for a program take. The
+    // Settings · Routing canvas reads it so the card that OWNS the take is the one
+    // that offers Stop: the engine runs one session at a time, and its node names it.
+    Q_PROPERTY(QString recordingNode READ recordingNode NOTIFY recordingChanged)
 
 public:
     static RecordingService &instance();
@@ -68,6 +73,7 @@ public:
     QVariantMap status() const { return status_; }
     QVariantMap storage() const { return storage_; }
     QVariantMap config() const { return config_; }
+    QString recordingNode() const { return recordingNode_; }
     void setConfig(const QVariantMap &cfg);
 
     // ---- Transport -------------------------------------------------------
@@ -76,6 +82,17 @@ public:
     // false + a toast on refusal (engine not running, disk full, already
     // recording, no program bus).
     Q_INVOKABLE bool startRecording(const QVariantMap &settings);
+    // Start a take ON ONE OUTPUT NODE — the Settings · Routing canvas's
+    // "Recording" card — instead of on the program.
+    //
+    // WHY IT MATTERS: RecordingEngine::StartPump attaches its audio tap to the
+    // node it was STARTED on (AudioEngine::AddMixTap(nodeId, …), "the listener
+    // hears only the buses wired to this recording's output node"), and
+    // startRecording() above can only name the program's first bus plane. So a
+    // take started from a node records exactly the bus the canvas wired to that
+    // node — and a node with nothing wired to it is refused here rather than
+    // producing a file that looks like a take and holds silence.
+    Q_INVOKABLE bool startRecordingOn(const QString &nodeId, const QVariantMap &settings);
     Q_INVOKABLE void stopRecording();
     Q_INVOKABLE void togglePause();
     // A named marker at the current position (the service notes it).
@@ -103,6 +120,10 @@ signals:
 
 private:
     explicit RecordingService(QObject *parent = nullptr);
+
+    // The one body behind startRecording / startRecordingOn. `nodeId` empty =
+    // the program (first audio bus plane); otherwise the node the canvas wired.
+    bool beginRecording(const QVariantMap &settings, const QString &nodeId);
     static RecordingService *s_instance;
 
     void loadConfig();
@@ -120,6 +141,9 @@ private:
     bool recording_ = false;
     bool paused_ = false;
     bool streaming_ = false;
+    // Which node the live take listens to (see the property); cleared with the
+    // session it belongs to.
+    QString recordingNode_;
     QVariantMap status_;
     QVariantMap storage_;
     QVariantMap config_;

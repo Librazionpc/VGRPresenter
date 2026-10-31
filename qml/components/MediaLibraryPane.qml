@@ -366,8 +366,11 @@ Item {
             return
 
         const type = String(bus.type || "audio").toLowerCase()
-        const needsAudio = type === "audio" || type === "both"
-        const needsVideo = type === "video" || type === "both"
+        // A "template" bus is a bus made from a template: it takes video (its
+        // windows are fed by it) AND one audio input, so it monitors both — the
+        // same pair a "both" bus does.
+        const needsAudio = type === "audio" || type === "both" || type === "template"
+        const needsVideo = type === "video" || type === "both" || type === "template"
         const audioRows = bus.routedAudioInputs || []
         const videoRows = bus.routedVideoSources || []
         if (needsVideo && videoRows.length === 0) {
@@ -686,7 +689,7 @@ Item {
             // the fix for it).
             model: root.gridItems
 
-            readonly property int columns: Math.max(3, Math.floor(width / 120))
+            readonly property int columns: 4
             cellWidth: Math.floor(width / columns)
             // The tile's 16:9 preview (its width less the 12 px of margins) plus the name bar.
             cellHeight: Math.round((cellWidth - 12) * 9 / 16) + 12 + 30

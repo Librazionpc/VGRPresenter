@@ -31,7 +31,8 @@ struct StyleItem
     // TemplatePickerModal.qml's own `templates` list, the single source of
     // truth for keys/names/descriptions this just stores a key into. The
     // ENGINE maps the key to a layout preset when the style is on air.
-    QString templateKey = QStringLiteral("lowerThird");
+    // "" until the operator picks one: the engine has no default template to impose.
+    QString templateKey;
     // Same "transparent" convention as BackgroundColorModal's
     // transparentValue / CanvasItemStyle.backgroundColor.
     QString backgroundColor = QStringLiteral("transparent");
@@ -111,6 +112,11 @@ struct StyleItem
     }
     // Shows-only category label (free text).
     QString category;
+    // IS THIS STYLE ON THE ROUTING BOARD? Same rule as BusItem::onBoard: the
+    // board shows only what the operator put there, so a style made on the Styles
+    // page has no card until it is added. Persisted with the roster
+    // (StoredStyle::onBoard).
+    bool onBoard = false;
 };
 
 // QML singleton backing the Settings · Outputs "Styles" card. Singleton so a
@@ -144,6 +150,8 @@ public:
         ShowTableRole,
         ShowOverlayRole,
         CategoryRole,
+        // Whether this style has a card on the Routing board (StyleItem::onBoard).
+        OnBoardRole,
     };
     Q_ENUM(Role)
 
@@ -174,6 +182,9 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     Q_INVOKABLE void addStyle();
+    // Put this style on the Routing board / take it off. Never touches the style
+    // itself; persisted with the roster (StoredStyle::onBoard).
+    Q_INVOKABLE void setOnBoard(int index, bool onBoard);
     // Only refuses the LAST style when something still points at it — the
     // UI re-points outputs to "None" first (removeStyle also does it
     // model-side, so a stale caller can't orphan a reference).

@@ -57,6 +57,7 @@ public:
     Result<void> ApplyBusScene(std::string_view busId, std::string_view sceneName);
     Result<void> AssignOutputBuses(std::string_view outputId, std::string_view videoBus,
                                    std::string_view audioBus);
+    Result<void> ClearOutputBusAssignment(std::string_view outputId, SignalType type);
     Result<void> SetOutputPriority(std::string_view outputId, OutputPriority p);
 
     // --- Virtual sources (docs/specs/27 §Virtual signals) ---

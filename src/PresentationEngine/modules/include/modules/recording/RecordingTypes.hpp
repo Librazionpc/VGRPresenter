@@ -48,7 +48,7 @@ enum class StorageAction { None, Warn, StopOptional, StopAll };
 struct RecordingProfile {
     std::string id;
     std::string name;
-    ContainerKind container = ContainerKind::MKV;
+    ContainerKind container = ContainerKind::MP4;
     VideoCodec videoCodec = VideoCodec::H264;
     AudioCodec audioCodec = AudioCodec::AAC;
     int width = 1920;

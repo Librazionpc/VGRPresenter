@@ -138,6 +138,10 @@ public:
 private:
     RecordingEngine() = default;
 
+    // The per-recording thread that feeds the container: frames from the on-air
+    // buffer and blocks of the program mix, at the moment they are produced.
+    struct Pump;
+
     struct Session {
         RecordingProfile profile;
         std::string nodeId;
@@ -154,10 +158,26 @@ private:
         std::vector<RecordingMarker> markers;
         RecordingMetadata metadata;
         std::shared_ptr<IRecordingContainer> container;
+        std::shared_ptr<Pump> pump;
     };
 
     void Journal(JournalEntry::Kind kind, std::string_view recordingId,
                  std::string_view detail = "");
+    // Starts the pump for a recording that has just opened its first segment.
+    void StartPump(const std::string& recordingId);
+    // Stops a pump: detaches it from the mix, then joins its thread. Takes no lock.
+    static void StopPump(const std::shared_ptr<Pump>& pump);
+    // Stops the pumps of every session (engine stop, reset, shutdown). Takes no lock.
+    void StopAllPumps();
+    void PumpLoop(std::shared_ptr<Pump> pump);
+    // Writes whatever the pump's buffer produced since its last pass.
+    void WriteVideoOnce(Pump& pump);
+    void WriteAudioOnce(Pump& pump);
+    // The container a pump may write to right now (null while a segment is being
+    // swapped, or once the recording is no longer Recording).
+    std::shared_ptr<IRecordingContainer> WritableContainer(std::string_view recordingId) const;
+    // Marks a recording Failed and publishes why. Called with no pump lock held.
+    void FailRecording(const std::string& recordingId, const std::string& message);
     // Closes the current segment container and opens the next one, with NO
     // engine lock held across the provider calls (see the .cpp).
     void RotateSegment(const std::string& recordingId);

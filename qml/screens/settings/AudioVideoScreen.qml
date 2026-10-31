@@ -974,16 +974,85 @@ Item {
         root.busDialogOpen = true
         root.busDialogIsAdd = false
     }
+    // The design a template bus is made from (the Buses category). "" = none.
+    property string editBusTemplateId: ""
+    // The Buses category's DEFAULT template — what the dropdown opens on, so the
+    // Template type is one click away from being valid instead of a list the
+    // operator has to hunt through (Templates · Buses names the default).
+    function defaultBusTemplateId() {
+        const list = root.busTemplates
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].isDefault === true)
+                return String(list[i].id)
+        }
+        return list.length > 0 ? String(list[0].id) : ""
+    }
+    function busTemplateIndex(id) {
+        const want = String(id || "")
+        for (let i = 0; i < root.busTemplates.length; ++i) {
+            if (String(root.busTemplates[i].id) === want)
+                return i
+        }
+        return -1
+    }
+    function busTemplateName(id) {
+        const at = root.busTemplateIndex(id)
+        return at >= 0 ? String(root.busTemplates[at].name || "") : ""
+    }
+    // SelectField carries the LABEL (the name); the bus stores the design ID.
+    function busTemplateIdForName(name) {
+        const want = String(name || "")
+        for (let i = 0; i < root.busTemplates.length; ++i) {
+            if (String(root.busTemplates[i].name || "") === want)
+                return String(root.busTemplates[i].id)
+        }
+        return ""
+    }
+
     function openAddBus() {
         root.editBusIndex = -1
         root.editBusName = ""
         root.editBusType = "audio"
+        root.editBusTemplateId = root.defaultBusTemplateId()
         root.editBusLevel = 75
         root.editBusMuted = false
         root.busDialogOpen = true
         root.busDialogIsAdd = true
     }
+    // Picking a template makes its bus: the design IS the bus's windows, so there
+    // is nothing else to place. Closes the dialog on success.
+    function createTemplateBus(templateId) {
+        // .trim(), not .trimmed(): `templateId` is a JavaScript value here, and
+        // only QString has trimmed() — the Qt call threw "Property 'trimmed' of
+        // object tpl-6 is not a function" on the first line, so Add Bus closed on
+        // nothing and no bus was ever created.
+        const id = String(templateId === undefined || templateId === null ? "" : templateId).trim()
+        if (id === "") {
+            root.editBusTemplateLocked = true
+            return
+        }
+        const design = TemplateLibraryService.designs().filter((d) => String(d.id) === id)[0]
+        const name = root.editBusName.trim() !== "" ? root.editBusName
+                   : String(design ? design.name : "")
+        const made = BusListModel.addTemplateBus(name, id)
+        if (made < 0) {
+            EventBus.notify(qsTr("The template bus could not be created. Try again."),
+                            "warning", qsTr("Bus"), "av.templateBus.failed")
+            return
+        }
+        BusListModel.setLevel(made, root.editBusLevel)
+        BusListModel.setMuted(made, root.editBusMuted)
+        root.editBusTemplateLocked = false
+        root.busDialogOpen = false
+    }
+    // Set when Add Bus was pressed with no template chosen: the dropdown says why
+    // instead of the dialog closing on nothing.
+    property bool editBusTemplateLocked: false
     function saveBusDialog() {
+        if (root.busDialogIsAdd && root.editBusType === "template") {
+            root.createTemplateBus(root.editBusTemplateId)
+            return
+        }
         if (root.busDialogIsAdd) {
             BusListModel.addBus(root.editBusName, root.editBusType)
             const idx = BusListModel.rowCount() - 1
@@ -999,6 +1068,39 @@ Item {
         }
         root.busDialogOpen = false
     }
+    // ---- Bus templates: LISTED here, never created here -----------------------
+    // A bus template is a DESIGN (Edit · Templates → Buses): its items are placed
+    // on the design, each bus item is a window, and each window names the bus it
+    // shows. Nothing is created on this screen — this is the list you reuse from,
+    // exactly as the Styles screen lists styles instead of drawing them, and the
+    // OUTPUT side composes one onto a screen (see OutputListModel's compose mode).
+    property int templateRev: 0
+    readonly property var busTemplates: {
+        root.templateRev
+        const all = TemplateLibraryService.designs()
+        const out = []
+        for (let i = 0; i < all.length; ++i) {
+            if (String(all[i].category || "") === "buses")
+                out.push(all[i])
+        }
+        return out
+    }
+    // How many WINDOWS a template carries: its bus items, which is what an output
+    // will fill with the feeds each one names.
+    function busTemplateWindows(design) {
+        const blocks = design && design.blocks ? design.blocks : []
+        let n = 0
+        for (let i = 0; i < blocks.length; ++i) {
+            if (String(blocks[i].kind || "") === "bus")
+                ++n
+        }
+        return n
+    }
+    Connections {
+        target: TemplateLibraryService
+        function onChanged() { root.templateRev++ }
+    }
+
     function busRoutedAudio() {
         root.modelsRev
         return root.editBusIndex < 0 ? [] : BusListModel.getBus(root.editBusIndex).routedAudioInputs
@@ -1133,8 +1235,18 @@ Item {
         root.dragConnectFromBus = -1
         const p = root.dragPoint(sceneX, sceneY)
         const s = root.sourceIndexAt(kindName, p)
-        if (s < 0)
+        if (s < 0) {
+            // Not on a source card: a VIDEO drag that ends on a TEMPLATE bus gives that
+            // bus this bus's feeds (see routeBusIntoTemplate).
+            if (kindName === "video") {
+                const target = root.busIndexAt(p)
+                if (target >= 0 && target !== busIndex) {
+                    const rootRef = root
+                    Qt.callLater(() => rootRef.routeBusIntoTemplate(busIndex, target))
+                }
+            }
             return
+        }
         const refusal = BusListModel.connectRefusal(kindName, s, busIndex)
         if (refusal !== "") {
             // The card under the pointer is the SOURCE here (the bus is where the
@@ -1152,6 +1264,46 @@ Item {
         Qt.callLater(() => {
             rootRef.flashSource(kindName, s, rootRef.addRoute(kindName, busIndex, s))
         })
+    }
+    // A bus dropped onto a TEMPLATE bus: the template bus gets the video feeds that bus
+    // carries. A bus's feed IS its routed video source(s), so each of those sources is
+    // routed into the template bus — add-only, and any the model refuses is left out and
+    // said once. Anything that is not a template bus on the other end is ignored: a
+    // normal bus takes its feed from a source, not from another bus.
+    function routeBusIntoTemplate(fromBus, templateBus) {
+        const from = BusListModel.getBus(fromBus)
+        const to = BusListModel.getBus(templateBus)
+        if (!from || !to || String(to.type) !== "template")
+            return
+        const fromName = String(from.name || "")
+        const toName = String(to.name || "")
+        const sources = from.routedVideoSources !== undefined ? from.routedVideoSources : []
+        if (sources.length === 0) {
+            EventBus.notify(qsTr("“%1” has no video source routed in, so there is no feed to give “%2”.")
+                            .arg(fromName).arg(toName),
+                            "info", qsTr("Audio & Video"), "av.busToTemplate.empty")
+            return
+        }
+        let added = 0
+        for (let i = 0; i < sources.length; ++i) {
+            const why = BusListModel.connectRefusal("video", sources[i], templateBus)
+            if (why === "already-connected") {
+                ++added                    // already feeding it: that is the goal met
+                continue
+            }
+            if (why !== "")
+                continue
+            if (BusListModel.connectVideoRoute(templateBus, sources[i]))
+                ++added
+        }
+        if (added === 0) {
+            EventBus.notify(qsTr("“%1” could not be routed into “%2”.")
+                            .arg(fromName).arg(toName),
+                            "warning", qsTr("Audio & Video"), "av.busToTemplate.refused")
+            return
+        }
+        EventBus.notify(qsTr("“%1” now feeds “%2”.").arg(fromName).arg(toName),
+                        "info", qsTr("Audio & Video"), "av.busToTemplate.ok")
     }
     // THE board's connect call — add-only and idempotent, so a drop can never
     // remove a route (a line's right-click, the bus dialog's toggle list and the
@@ -1374,6 +1526,16 @@ Item {
         switch (code) {
         case "bus-has-video":
             return qsTr("\u201C%1\u201D already carries a video source. Remove that route first \u2014 a bus shows one video source at a time.").arg(busName)
+        case "template-bus-has-audio":
+            // A template bus carries many pictures but ONE sound (see
+            // BusListModel::connectRefusal): a second input would be summed with
+            // the first with nothing on screen saying which one is being heard.
+            return qsTr("\u201C%1\u201D is a template bus \u2014 it takes one audio input. Remove the input it already carries first.").arg(busName)
+        // A TEMPLATE BUS'S PICTURES ARE ITS WINDOWS. A template with no bus items has
+        // nowhere to show a feed, so it refuses the route instead of drawing a wire
+        // that shows nothing; one whose windows already name their buses takes routes.
+        case "template-has-no-windows":
+            return qsTr("\u201C%1\u201D is built from a template that has no bus items, so there is no window to show this feed. Add bus items to the template in Edit \u00b7 Templates under Buses first.").arg(busName)
         case "already-connected":
             return qsTr("\u201C%1\u201D is already routed into \u201C%2\u201D.").arg(srcName).arg(busName)
         case "audio-only-bus":
@@ -1538,7 +1700,6 @@ Item {
                 readonly property int rowGap: Theme.space3
                 readonly property int headerBoxH: 40
                 readonly property int headerH: headerBoxH + rowGap
-
                 readonly property real audioX: 0
                 readonly property real busX: board.colW + board.gutterW
                 readonly property real videoX: board.busX + board.busColW + board.gutterW
@@ -1917,9 +2078,11 @@ Item {
 
                             readonly property color typeColor: busRow.type === "audio" ? Theme.success
                                                               : busRow.type === "video" ? Theme.info
+                                                              : busRow.type === "template" ? Theme.wireStyle
                                                               : Theme.accent
                             readonly property string typeLabel: busRow.type === "audio" ? qsTr("AUDIO")
                                                                : busRow.type === "video" ? qsTr("VIDEO")
+                                                               : busRow.type === "template" ? qsTr("TEMPLATE")
                                                                : qsTr("BOTH")
                             readonly property int srcCount: busRow.routedAudioInputs.length + busRow.routedVideoSources.length
 
@@ -2143,7 +2306,7 @@ Item {
                             // URL — the provider serves the engine receiver's
                             // converted frames for NDI taps (startNdiPreview).
                             readonly property url liveThumb:
-                                vidThumb.liveCam
+                                vidThumb.liveCam && vidThumb.activeTapLabel === vidRow.sublabel
                                 ? "image://videopreview/" + encodeURIComponent(vidRow.sublabel)
                                   + "?n=" + vidThumb.thumbNonce : ""
 
@@ -2381,8 +2544,6 @@ Item {
                                         return
                                     const old = activeTapLabel
                                     const oldKind = activeTapKind
-                                    activeTapLabel = want
-                                    activeTapKind = want !== "" ? vidRow.kind : ""
                                     if (old !== "") {
                                         if (oldKind === "screen")
                                             EngineBridge.stopScreenPreview(old, "board")
@@ -2391,14 +2552,27 @@ Item {
                                         else
                                             EngineBridge.stopVideoPreview(old, "board")
                                     }
-                                    if (want !== "") {
-                                        if (vidRow.kind === "screen")
-                                            EngineBridge.startScreenPreview(want, "board")
-                                        else if (vidRow.kind === "ndi")
-                                            EngineBridge.startNdiPreview(want, "board")
-                                        else
-                                            EngineBridge.startVideoPreview(want, "", "board")
+                                    activeTapLabel = ""
+                                    activeTapKind = ""
+                                    if (want === "") return
+
+                                    let accepted = false
+                                    if (vidRow.kind === "screen")
+                                        accepted = EngineBridge.startScreenPreview(want, "board")
+                                    else if (vidRow.kind === "ndi")
+                                        accepted = EngineBridge.startNdiPreview(want, "board")
+                                    else
+                                        accepted = EngineBridge.startVideoPreview(want, "", "board")
+                                    // Screen rosters can still be loading on first entry.
+                                    // Leave the request unclaimed so devicesChanged can retry.
+                                    if (accepted) {
+                                        activeTapLabel = want
+                                        activeTapKind = vidRow.kind
                                     }
+                                }
+                                Connections {
+                                    target: EngineBridge
+                                    function onDevicesChanged() { vidThumb.syncTap() }
                                 }
                                 Timer {
                                     interval: 125   // 8 fps thumbnail pump
@@ -2814,13 +2988,13 @@ Item {
                 KindRailRow {
                     width: parent.width
                     current: root.editAudioKind
-                    choices: root.audioKinds
+                    choices: root.audioKinds || []
                     onPicked: (key) => {
                         // Remember this kind's pick before leaving it, restore
                         // the new kind's last pick if it had one — a bare reset
                         // here permanently blanked Device's pick the moment you
                         // so much as glanced at Media and came back.
-                        const buf = Object.assign({}, root.editAudioSublabelByKind)
+                        const buf = Object.assign({}, root.editAudioSublabelByKind || ({}))
                         buf[root.editAudioKind] = root.editAudioSublabel
                         root.editAudioSublabelByKind = buf
                         root.editAudioKind = key
@@ -2981,11 +3155,11 @@ Item {
         KindRailRow {
             width: parent.width
             current: root.editVideoKind
-            choices: root.videoKinds
+            choices: root.videoKinds || []
             onPicked: (key) => {
                 // Remember this kind's pick, restore the new kind's last one —
                 // see editAudioSublabelByKind.
-                const buf = Object.assign({}, root.editVideoSublabelByKind)
+                const buf = Object.assign({}, root.editVideoSublabelByKind || ({}))
                 buf[root.editVideoKind] = root.editVideoSublabel
                 root.editVideoSublabelByKind = buf
                 root.editVideoKind = key
@@ -3155,18 +3329,89 @@ Item {
             Row {
                 spacing: Theme.space2
                 Repeater {
+                    // A bus carries audio, video, or both. TEMPLATE is the fourth
+                    // kind: a bus whose windows come from a Buses-category design
+                    // (Edit · Templates), so one wire carries a whole layout. The
+                    // design itself is still made (and edited) in the template tab
+                    // — picking it here is picking it as this bus's body.
                     model: [
                         { key: "audio", label: qsTr("Audio") },
                         { key: "video", label: qsTr("Video") },
-                        { key: "both", label: qsTr("Both") }
+                        { key: "both", label: qsTr("Both") },
+                        { key: "template", label: qsTr("Template") }
                     ]
                     delegate: SelectableChip {
                         required property var modelData
                         label: modelData.label
                         selected: root.editBusType === modelData.key
-                        onPicked: root.editBusType = modelData.key
+                        onPicked: {
+                            root.editBusType = modelData.key
+                            root.editBusTemplateLocked = false
+                            if (modelData.key === "template")
+                                root.editBusTemplateId = root.defaultBusTemplateId()
+                        }
                     }
                 }
+            }
+        }
+
+        // ---- TEMPLATE (Add Bus only): a DROPDOWN, wired to the Buses category's
+        // default design. The template is the bus's body — its `bus` blocks are
+        // the windows — so this is the only thing to choose once the type is
+        // Template. "" is refused by Add Bus (the note below says so) instead of
+        // creating a template bus with nothing to compose.
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+            visible: root.busDialogIsAdd && root.editBusType === "template"
+
+            Text {
+                text: qsTr("Choose a bus template")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            // The app's own select box (SelectField), not a Controls ComboBox: it
+            // is the same dropdown every other Settings picker uses, and it shows
+            // the template's NAME while the id travels underneath.
+            SelectField {
+                objectName: "selfTestAvBusTemplateChoice"
+                width: parent.width
+                showLabel: false
+                placeholder: qsTr("Choose a bus template")
+                // WIRED TO THE DEFAULT (see openAddBus/defaultBusTemplateId): the
+                // field opens on the Buses category's default design, so Add Bus →
+                // Template → Add Bus needs no extra click.
+                value: root.busTemplateName(root.editBusTemplateId)
+                options: root.busTemplates.map((d) => ({ label: String(d.name || ""),
+                                                         value: String(d.name || "") }))
+                onValuePicked: (label) => {
+                    const id = root.busTemplateIdForName(label)
+                    if (id !== "")
+                        root.editBusTemplateId = id
+                    root.editBusTemplateLocked = false
+                }
+            }
+
+            Text {
+                width: parent.width
+                visible: root.busTemplates.length === 0
+                text: qsTr("No bus templates yet. Make one in Edit · Templates under Buses: place the bus items that are its windows, then give each window the bus it shows.")
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
+            }
+
+            Text {
+                width: parent.width
+                visible: root.editBusTemplateLocked
+                text: qsTr("Pick a bus template first.")
+                color: Theme.dangerLight
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
             }
         }
 
@@ -3219,110 +3464,6 @@ Item {
             }
             onVolumeEdited: (v) => root.editBusLevel = v
             onMutedToggled: root.editBusMuted = !root.editBusMuted
-        }
-
-        // The per-source routing list ("Audio inputs routed in" below) is the one place that manages which sources feed this bus — the Channel 1/Channel 2 rows above are the bus's own output, independently selectable there.
-
-        Item {
-            width: parent.width
-            height: 34
-            Text {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: qsTr("Muted")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textSm
-            }
-            SettingsToggle {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                checked: root.editBusMuted
-                onToggled: root.editBusMuted = !root.editBusMuted
-            }
-        }
-
-        Column {
-            width: parent.width
-            spacing: Theme.space2
-            // Audio fits every bus, so this section is always available in
-            // edit mode (sourceFitsBus is the one rule; see its comment).
-            visible: !root.busDialogIsAdd
-            Text {
-                text: qsTr("Audio inputs routed in")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-            Repeater {
-                model: AudioInputListModel
-                delegate: Item {
-                    required property int index
-                    required property string name
-                    width: parent.width
-                    height: 30
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: name
-                        color: Theme.textPrimary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
-                    SettingsToggle {
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        checked: root.busRoutedAudio().indexOf(index) >= 0
-                        onToggled: BusListModel.toggleAudioRoute(root.editBusIndex, index)
-                    }
-                }
-            }
-        }
-
-        Column {
-            id: busVideoList
-            width: parent.width
-            spacing: Theme.space2
-            visible: !root.busDialogIsAdd && root.editBusType !== "audio"
-            // ONE VIDEO SOURCE PER BUS (the board's rule): at most one of these
-            // rows can be on. The routed one stays switchable — unticking it is
-            // how a route comes OFF — and every other row is inert and dimmed
-            // while it is on, with the line below saying why. Before this, the
-            // model refused the second one and the toggle simply sprang back.
-            readonly property bool videoSourceRouted: root.busRoutedVideo().length > 0
-            Text {
-                text: qsTr("Video sources routed in")
-                color: Theme.textSecondary
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.textXs
-            }
-            Repeater {
-                model: VideoSourceListModel
-                delegate: Item {
-                    required property int index
-                    required property string name
-                    readonly property bool routedHere: root.busRoutedVideo().indexOf(index) >= 0
-                    readonly property bool takenByOther: !routedHere && busVideoList.videoSourceRouted
-                    width: parent.width
-                    height: 30
-                    Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: name
-                        color: Theme.textPrimary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
-                    SettingsToggle {
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        enabled: !takenByOther
-                        opacity: takenByOther ? 0.4 : 1
-                        checked: routedHere
-                        onToggled: BusListModel.toggleVideoRoute(root.editBusIndex, index)
-                    }
-                }
-            }
         }
 
         Row {
@@ -3405,11 +3546,11 @@ Item {
                 KindRailRow {
                     width: parent.width
                     current: root.addSourceKind
-                    choices: root.audioKinds
+                    choices: root.audioKinds || []
                     onPicked: (key) => {
                         // Remember this kind's pick, restore the new
                         // kind's last one — see editAudioSublabelByKind.
-                        const buf = Object.assign({}, root.addSourceSublabelByKind)
+                        const buf = Object.assign({}, root.addSourceSublabelByKind || ({}))
                         buf[root.addSourceKind] = root.addSourceSublabel
                         root.addSourceSublabelByKind = buf
                         root.addSourceKind = key
@@ -3515,11 +3656,11 @@ Item {
             KindRailRow {
                 width: parent.width
                 current: root.addSourceKind
-                choices: root.videoKinds
+                choices: root.videoKinds || []
                 onPicked: (key) => {
                     // Remember this kind's pick, restore the new
                     // kind's last one — see editAudioSublabelByKind.
-                    const buf = Object.assign({}, root.addSourceSublabelByKind)
+                    const buf = Object.assign({}, root.addSourceSublabelByKind || ({}))
                     buf[root.addSourceKind] = root.addSourceSublabel
                     root.addSourceSublabelByKind = buf
                     root.addSourceKind = key

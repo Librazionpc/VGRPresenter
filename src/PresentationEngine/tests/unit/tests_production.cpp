@@ -4,9 +4,11 @@
 
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/production/ProductionGraph.hpp"
+#include "modules/production/AudioDsp.hpp"
 #include "modules/production/AudioMixer.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace pr = bps::production;
 
@@ -535,6 +537,11 @@ void TestProductionAudioMixer() {
     CHECK(graph.AddBus("bus1", "Main", pr::BusRole::Program, pr::SignalType::Audio).ok());
     CHECK(graph.AddSource("src1", "Mic", pr::SignalType::Audio).ok());
     CHECK(graph.Connect("src1", "bus1", pr::SignalType::Audio).ok());
+    // Only buses wired to the speaker output reach the endpoint.
+    pr::OutputConfig speakers;
+    speakers.caps.supportsVideo = false;
+    CHECK(graph.AddOutput(pr::kSpeakersOutputId, "Speakers", pr::SignalType::Audio, speakers).ok());
+    CHECK(graph.Connect("bus1", pr::kSpeakersOutputId, pr::SignalType::Audio).ok());
 
     pr::AudioMixer mixer;
     mixer.Attach(&graph);
@@ -702,6 +709,17 @@ void TestProductionAudioMixer() {
         CHECK(paired.AddSource("vsrc:1", "Media", pr::SignalType::Video).ok());
         CHECK(paired.Connect("vsrc:1", "bus:1#v", pr::SignalType::Video).ok());
 
+        // The PROGRAM mix is the sum of the buses wired to the SPEAKER endpoint
+        // (AudioMixer's contract, and what the app always has — AudioEngine
+        // creates that node and wires every bus to it). Without the endpoint this
+        // graph has no program mix to read, so it is part of the fixture, not an
+        // extra: the check below is about the video row's audio reaching it.
+        pr::OutputConfig spk;
+        spk.caps.supportsVideo = false;
+        spk.caps.supportsAudio = true;
+        CHECK(paired.AddOutput(pr::kSpeakersOutputId, "Speakers", pr::SignalType::Audio, spk).ok());
+        CHECK(paired.Connect("bus:1#a", pr::kSpeakersOutputId, pr::SignalType::Audio).ok());
+
         StubTapAudio vtaps;
         pr::AudioMixer vmix;
         vmix.Attach(&paired);
@@ -731,6 +749,188 @@ void TestProductionAudioMixer() {
         CHECK(!vmix.Render(afterCut, 4, 2, 48000));
         CHECK(afterCut[0] == 0.0f && afterCut[1] == 0.0f);
     }
+}
+
+// ---------------------------------------------------------------------------
+// An OUTPUT terminates any signal it carries.
+//
+// A row's node is created as a VIDEO node (its picture), so the audio edge into
+// an NDI / recording / streaming row used to be refused by the type check in
+// Connect(). The wire still appeared — the canvas draws it from the
+// OutputConfig the routing service writes — but nothing consumed it: the mixer
+// resolves an output's feeds through the EDGE set, and a recording taps the mix
+// of its own output node. So "audio wired to NDI" drew a wire and sent silence.
+//
+// What a row may carry is its CAPS, but sound is not one of the things a caps can
+// take away: every OUTPUT is a transport, so audio is assigned to one regardless of
+// what an older document saved on the node. Caps still gate VIDEO (the speaker
+// endpoint has no picture), and that is enforced where buses are assigned — not by
+// refusing the edge.
+void TestProductionOutputSignalEdges() {
+    pr::ProductionGraph g;
+    CHECK(g.AddBus("bus:9#a", "Program", pr::BusRole::Custom, pr::SignalType::Audio).ok());
+    CHECK(g.AddBus("bus:9#v", "Program", pr::BusRole::Custom, pr::SignalType::Video).ok());
+    (void)g.SetVolume("bus:9#a", pr::VolumeControl{});   // a bus starts muted
+
+    pr::OutputConfig ndi;
+    ndi.caps.supportsVideo = true;
+    ndi.caps.supportsAudio = true;
+    CHECK(g.AddOutput("out:ndi", "NDI 1", pr::SignalType::Video, ndi).ok());
+
+    // Both halves of the bus reach the one node, and the optimistic gate agrees
+    // with Connect() — the canvas asks CanConnect before it promises a wire.
+    CHECK(g.CanConnect("bus:9#v", "out:ndi", pr::SignalType::Video));
+    CHECK(g.CanConnect("bus:9#a", "out:ndi", pr::SignalType::Audio));
+    CHECK(g.Connect("bus:9#v", "out:ndi", pr::SignalType::Video).ok());
+    CHECK(g.Connect("bus:9#a", "out:ndi", pr::SignalType::Audio).ok());
+    CHECK(g.Upstream("out:ndi").size() == 2);
+
+    // The graph's own validation agrees: a sink taking both signals is not a
+    // "signal_mismatch" (a restored document is judged by this).
+    for (const auto& issue : g.Validate())
+        CHECK(issue.code != "signal_mismatch");
+
+    // A DISPLAY row takes audio too — including one whose node was saved by an
+    // older build with `supportsAudio: false` (which is the state a real HDMI row
+    // was in when the canvas started offering the audio dot). An output is a
+    // transport; what it can DELIVER is decided where its mix is played, not here.
+    pr::OutputConfig screen;
+    screen.caps.supportsVideo = true;
+    screen.caps.supportsAudio = false;
+    CHECK(g.AddOutput("out:hdmi", "Congregation", pr::SignalType::Video, screen).ok());
+    CHECK(g.AssignOutputBuses("out:hdmi", "bus:9#v", "bus:9#a").ok());
+
+    // The caps gate that REMAINS is the video side: the speaker endpoint has no
+    // picture to show, so a video bus assigned to it is still refused.
+    pr::OutputConfig speakers;
+    speakers.caps.supportsVideo = false;
+    speakers.caps.supportsAudio = true;
+    CHECK(g.AddOutput(pr::kSpeakersOutputId, "Speakers", pr::SignalType::Audio, speakers).ok());
+    CHECK(!g.AssignOutputBuses(pr::kSpeakersOutputId, "bus:9#v", "").ok());
+
+    // ...and the both-signal row takes both, which is the sending side of NDI /
+    // recording / streaming.
+    CHECK(g.AssignOutputBuses("out:ndi", "bus:9#v", "bus:9#a").ok());
+
+    // THE BEHAVIOUR, not the bookkeeping: a tap on that output hears the audio
+    // bus wired into it. A recording asks for exactly this tap (AddMixTap with
+    // its own output node id), so this is the check that the wire now CARRIES
+    // sound instead of only drawing one.
+    CHECK(g.AddSource("vsrc:9", "Media", pr::SignalType::Video).ok());
+    CHECK(g.Connect("vsrc:9", "bus:9#v", pr::SignalType::Video).ok());
+
+    StubTapAudio taps;
+    pr::AudioMixer mixer;
+    mixer.Attach(&g);
+    mixer.AttachTaps(&taps);
+    mixer.BindSourceDevice("vsrc:9", bps::platform::IAudio::kStreamTapBase);
+
+    int tapsHeard = 0;
+    double peak = 0.0;
+    const uint64_t tapId = mixer.AddMixTap(
+        "out:ndi", [&](const float* samples, uint32_t frames, uint32_t channels,
+                       uint32_t, uint64_t) {
+            ++tapsHeard;
+            for (uint32_t i = 0; i < frames * channels; ++i)
+                peak = std::max(peak, static_cast<double>(std::abs(samples[i])));
+        });
+
+    // No speaker edge here on purpose: this row's tap is fed by ITS OWN edge, so
+    // it must hear the bus whether or not the speakers are wired at all.
+    float out[8] = {};
+    (void)mixer.Render(out, 4, 2, 48000);
+    CHECK(tapsHeard == 1);       // one chunk reached the output's own tap
+    CHECK(peak > 0.5);           // ...with the bus's audio in it
+
+    // Cutting the audio edge is what silences that tap: the edge IS the wire.
+    CHECK(g.Disconnect("bus:9#a", "out:ndi").ok());
+    peak = 0.0;
+    (void)mixer.Render(out, 4, 2, 48000);
+    CHECK(peak == 0.0);
+
+    mixer.RemoveMixTap(tapId);
+}
+
+// ---------------------------------------------------------------------------
+// A DISPLAY output's audio is part of what the app plays.
+//
+// The app has ONE playout stream (IAudio::StartRender), so an HDMI row's monitor
+// cannot be a second render client. The buses wired to a plays-locally output are
+// therefore summed into the same program the speakers get — which IS the monitor's
+// speakers on a booth PC, where that monitor is the render endpoint. What must not
+// happen is a bus counted twice (a display attached to a program that is already on
+// the speakers) or an output's audio leaking into the program when that output
+// leaves through its own sink (NDI, recording, streaming).
+// ---------------------------------------------------------------------------
+namespace {
+class DisplayAudioFixture {
+public:
+    DisplayAudioFixture(bool onSpeakers, bool onDisplay, bool displayPlaysLocally) : g()
+    {
+        (void)g.AddBus("bus:3#a", "Program", pr::BusRole::Custom, pr::SignalType::Audio);
+        // -6 dB, so a bus summed TWICE is visibly louder instead of being hidden by
+        // the mixer's 0 dBFS ceiling.
+        pr::VolumeControl vc;
+        vc.gainDb = -6.0;
+        (void)g.SetVolume("bus:3#a", vc);
+        (void)g.AddSource("asrc:3", "Mic", pr::SignalType::Audio);
+        (void)g.Connect("asrc:3", "bus:3#a", pr::SignalType::Audio);
+
+        pr::OutputConfig spk;
+        spk.caps.supportsVideo = false;
+        spk.caps.supportsAudio = true;
+        (void)g.AddOutput(pr::kSpeakersOutputId, "Speakers", pr::SignalType::Audio, spk);
+        if (onSpeakers)
+            (void)g.Connect("bus:3#a", pr::kSpeakersOutputId, pr::SignalType::Audio);
+
+        pr::OutputConfig hdmi;
+        hdmi.caps.supportsVideo = true;
+        hdmi.caps.supportsAudio = true;
+        (void)g.AddOutput("out:hdmi", "Main Output", pr::SignalType::Video, hdmi);
+        if (displayPlaysLocally)
+            (void)g.SetMeta("out:hdmi", "playsLocally", "1");
+        if (onDisplay)
+            (void)g.AssignOutputBuses("out:hdmi", "", "bus:3#a");
+
+        mixer.Attach(&g);
+        mixer.AttachTaps(&taps);
+        mixer.BindSourceDevice("asrc:3", bps::platform::IAudio::kStreamTapBase);
+    }
+
+    double renderPeak()
+    {
+        float out[8] = {};
+        if (!mixer.Render(out, 4, 2, 48000))
+            return 0.0;
+        double peak = 0.0;
+        for (const float v : out)
+            peak = std::max(peak, static_cast<double>(std::abs(v)));
+        return peak;
+    }
+
+    pr::ProductionGraph g;
+    StubTapAudio taps;
+    pr::AudioMixer mixer;
+};
+} // namespace
+
+void TestProductionDisplayOutputAudioPlays() {
+    // Wired to the display only — the wire that used to be drawn and silent.
+    DisplayAudioFixture displayOnly(false, true, true);
+    CHECK(displayOnly.renderPeak() > 0.3);
+
+    // On the speakers as well: heard ONCE. If the display's copy were summed on
+    // top of the program, the peak would be twice as loud (0.5 → 1.0 at -6 dB).
+    DisplayAudioFixture both(true, true, true);
+    DisplayAudioFixture speakersOnly(true, false, true);
+    CHECK(speakersOnly.renderPeak() > 0.3);
+    CHECK(std::abs(both.renderPeak() - speakersOnly.renderPeak()) < 0.01);
+
+    // An output without the flag (NDI / recording / streaming) leaves through its
+    // own tap: its audio must NOT reach the program, or every feed would also play
+    // on the booth speakers nobody wired it to.
+    DisplayAudioFixture unflagged(false, true, false);
+    CHECK(unflagged.renderPeak() == 0.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -790,4 +990,126 @@ void TestProductionDispatchOutsideLock() {
     (void)EventBus::Instance().Unsubscribe(sub);
     CHECK(eng.Stop().ok());
     CHECK(eng.Shutdown().ok());
+}
+
+// ---------------------------------------------------------------------------
+// AudioDsp — the EQ band and the reverb on real sample buffers, and the graph's
+// save/restore of the stage fields those blocks read. No device, no fake taps.
+void TestProductionAudioDsp() {
+    constexpr double kRate = 48000.0;
+    constexpr double kPi = 3.14159265358979323846;
+
+    // The band's steady-state gain at one frequency: drive a sine, read the output
+    // peak once the filter has settled, and compare it with the input amplitude.
+    auto bandGain = [&](double freq, double gainDb) {
+        pr::dsp::PeakingBand band;
+        band.Configure(kRate, 1000.0, gainDb, 1.0);
+        float peak = 0.0f;
+        const int total = 24000;
+        for (int n = 0; n < total; ++n) {
+            const float x = 0.25f * static_cast<float>(std::sin(2.0 * kPi * freq * n / kRate));
+            const float y = band.Process(x);
+            if (n >= total - 2000)
+                peak = std::max(peak, std::abs(y));
+        }
+        return peak / 0.25f;
+    };
+    CHECK(std::abs(bandGain(1000.0, 6.0) - 1.995f) < 0.05f);    // +6 dB at the centre
+    CHECK(std::abs(bandGain(1000.0, -6.0) - 0.501f) < 0.03f);   // -6 dB at the centre
+    CHECK(std::abs(bandGain(100.0, 6.0) - 1.0f) < 0.05f);       // well below: untouched
+    CHECK(std::abs(bandGain(10000.0, 6.0) - 1.0f) < 0.05f);     // well above: untouched
+
+    // A band at 0 dB is the identity.
+    pr::dsp::PeakingBand flat;
+    flat.Configure(kRate, 1000.0, 0.0, 1.0);
+    float maxErr = 0.0f;
+    for (int n = 0; n < 4800; ++n) {
+        const float x = 0.5f * static_cast<float>(std::sin(2.0 * kPi * 440.0 * n / kRate));
+        maxErr = std::max(maxErr, std::abs(flat.Process(x) - x));
+    }
+    CHECK(maxErr < 1e-4f);
+
+    // Reverb: an impulse leaves a finite tail that is still ringing at one second and
+    // has decayed by then.
+    pr::dsp::Reverb reverb;
+    reverb.Configure(kRate);
+    double early = 0.0, late = 0.0;
+    bool finite = true;
+    const int frames = static_cast<int>(kRate * 1.5);
+    for (int n = 0; n < frames; ++n) {
+        const float y = reverb.Process(n == 0 ? 1.0f : 0.0f);
+        finite = finite && std::isfinite(y);
+        const double t = n / kRate;
+        if (t >= 0.10 && t < 0.20) early += std::abs(y);
+        if (t >= 1.00 && t < 1.10) late += std::abs(y);
+    }
+    CHECK(finite);
+    CHECK(early > 0.0);
+    CHECK(late > 0.0);
+    CHECK(late < early);
+
+    // The stage fields survive a save and a restore of the graph.
+    pr::ProductionGraph graph;
+    CHECK(graph.AddSource("eqsrc", "Mic", pr::SignalType::Audio).ok());
+    pr::ProcessingStage eq;
+    eq.kind = pr::ProcessKind::Eq;
+    eq.freqHz = 2500.0;
+    eq.gainDb = -4.5;
+    eq.q = 1.4;
+    CHECK(graph.AddProcessing("eqsrc", eq).ok());
+    auto doc = graph.Serialize();
+    CHECK(doc.ok());
+    pr::ProductionGraph restored;
+    CHECK(restored.Restore(doc.value()).ok());
+    auto node = restored.GetNode("eqsrc");
+    CHECK(node.ok());
+    CHECK(node.value().processing.size() == 1);
+    const pr::ProcessingStage &got = node.value().processing.front();
+    CHECK(got.kind == pr::ProcessKind::Eq);
+    CHECK(std::abs(got.freqHz - 2500.0) < 1e-6);
+    CHECK(std::abs(got.gainDb - (-4.5)) < 1e-6);
+    CHECK(std::abs(got.q - 1.4) < 1e-6);
+
+    // The noise reducer: at depth 0 it changes nothing; after it has learned a quiet
+    // floor, quiet noise comes down, and loud material passes.
+    uint32_t seed = 12345;
+    auto noise = [&seed]() {   // uniform in [-1, 1)
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed) / 2147483648.0f - 1.0f;
+    };
+    {
+        pr::dsp::NoiseReducer off;
+        float maxChange = 0.0f;
+        for (int n = 0; n < static_cast<int>(kRate); ++n) {
+            float l = 0.3f * noise(), r = 0.3f * noise();
+            const float l0 = l, r0 = r;
+            off.Process(l, r, 0.0, kRate);
+            maxChange = std::max({maxChange, std::abs(l - l0), std::abs(r - r0)});
+        }
+        CHECK(maxChange < 1e-6f);
+    }
+    {
+        pr::dsp::NoiseReducer reducer;
+        double quietIn = 0.0, quietOut = 0.0, loudIn = 0.0, loudOut = 0.0;
+        for (int n = 0; n < static_cast<int>(kRate * 3.0); ++n) {   // learn the floor
+            float l = 0.01f * noise(), r = 0.01f * noise();
+            const float il = l, ir = r;
+            reducer.Process(l, r, 1.0, kRate);
+            if (n >= static_cast<int>(kRate * 2.0)) {
+                quietIn += il * il + ir * ir;
+                quietOut += l * l + r * r;
+            }
+        }
+        for (int n = 0; n < static_cast<int>(kRate); ++n) {         // loud material
+            float l = 0.5f * noise(), r = 0.5f * noise();
+            const float il = l, ir = r;
+            reducer.Process(l, r, 1.0, kRate);
+            if (n >= static_cast<int>(kRate * 0.5)) {
+                loudIn += il * il + ir * ir;
+                loudOut += l * l + r * r;
+            }
+        }
+        CHECK(quietOut < 0.9 * quietIn);
+        CHECK(loudOut > 0.9 * loudIn);
+    }
 }

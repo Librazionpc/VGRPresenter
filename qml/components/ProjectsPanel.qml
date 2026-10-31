@@ -146,11 +146,13 @@ Item {
             entries.push({ label: qsTr("Collapse all folders") }, { label: qsTr("Expand all folders") }, { divider: true },
                          { label: root.showArchived ? qsTr("Hide archived projects") : qsTr("Show archived projects") })
         } else if (kind === "tree") {
-            // A project's own right-click: FreeShow's own order exactly (contextMenus.ts' project_button) - Rename, Duplicate,
-            // Delete, then Convert to template on its own below a divider, Archive last. No separate "Open": a click already
-            // does that (see the row's own onActivated below), the same reasoning FreeShow's list has none either.
+            // A project's own right-click: Rename, Duplicate, Delete, then Archive below a
+            // divider. No separate "Open": a click already does that (see the row's own
+            // onActivated below), the same reasoning FreeShow's own list has none either.
+            // No "Convert to template" either (user call: "remove the convert to template
+            // from it") — it was never a stored template, only a move into a "Templates"
+            // folder, and the + menu already offers a project to start from.
             if (target.type === "project") entries.push({ label: qsTr("Rename") }, { label: qsTr("Duplicate"), trailing: "Ctrl+D" }, { label: qsTr("Delete"), trailing: "Del", danger: true },
-                                                        { divider: true }, { label: qsTr("Convert to template") },
                                                         { divider: true }, { label: target.archived ? qsTr("Restore from archive") : qsTr("Archive") })
             else entries.push({ label: qsTr("New project here") }, { label: qsTr("New folder here") }, { label: qsTr("Rename") }, { divider: true }, { label: qsTr("Delete folder"), danger: true })
         } else if (kind === "item") {
@@ -192,7 +194,6 @@ Item {
             if (label === qsTr("Open")) ProjectService.openProject(t.id)
             else if (label === qsTr("Rename")) nameDialog.ask("rename", qsTr("Rename"), t.name, t.id)
             else if (label === qsTr("Duplicate")) ProjectService.duplicateProject(t.id)
-            else if (label === qsTr("Convert to template")) root.convertToTemplate(t.id)
             else if (label === qsTr("Archive") || label === qsTr("Restore from archive")) ProjectService.setArchived(t.id, !t.archived)
             else if (label === qsTr("Delete") || label === qsTr("Delete folder")) confirm.ask(t.id, t.name)
             else if (label === qsTr("New project here")) nameDialog.ask("project", qsTr("New project"), "", t.id)
@@ -229,15 +230,6 @@ Item {
         else if (what === "scripture") root.dockTabRequested("scripture")
         else if (what === "media") root.dockTabRequested("media")
         else if (what === "section") nameDialog.ask("section", qsTr("New section"), "", "")
-    }
-    // "Convert to template" (a project's own right-click - FreeShow's copy_to_template): the engine has no separate stored
-    // "template" concept to convert it INTO, so this files it in a root "Templates" folder instead (made the first time it is
-    // needed) - a real, visible place "Project template" in the + menu's picker (which lists every project) finds it again,
-    // reusing the folder/move the engine already has rather than a new stored idea.
-    function convertToTemplate(projectId) {
-        let folder = ProjectService.tree.find((r) => r.type === "folder" && r.parent === "" && r.name === qsTr("Templates"))
-        const folderId = folder ? folder.id : ProjectService.createFolder(qsTr("Templates"), "")
-        if (folderId) ProjectService.moveNode(projectId, folderId)
     }
     // "Project template": the shared dots/right-click menu (`menu`), reused for a THIRD kind of list - the tray already closed
     // itself (addChosen), so this opens where the tray was.

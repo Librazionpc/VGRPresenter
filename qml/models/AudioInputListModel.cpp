@@ -6,6 +6,7 @@
 #include "services/EngineWorker.h"
 #include "services/SettingsService.h"
 #include "platform/PlatformAccessor.hpp"
+#include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/production/ProductionTypes.hpp"
 
@@ -18,6 +19,14 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+
+// The engine plays and captures a source by its row id, so each row's chosen device
+// name goes to the engine whenever it changes (empty removes the binding).
+static void publishDeviceName(const AudioInputItem &item)
+{
+    bps::audio::AudioEngine::Instance().SetSourceDevice(item.id.toStdString(),
+                                                        item.sublabel.trimmed().toStdString());
+}
 
 // The one instance, for C++ AND QML — see the header for why this is eager.
 AudioInputListModel *AudioInputListModel::Instance()
@@ -286,6 +295,9 @@ void AudioInputListModel::removeInput(int index)
         buses->cutAudioSourceEdges(id);
 
     beginRemoveRows(QModelIndex(), index, index);
+    AudioInputItem removed = m_inputs.at(index);
+    removed.sublabel.clear();
+    publishDeviceName(removed);
     m_inputs.removeAt(index);
     endRemoveRows();
     scheduleSave();
@@ -313,6 +325,7 @@ int AudioInputListModel::duplicateInput(int index)
     // empty, so a copied matrix would claim routes the board doesn't have.
     copy.channelRoutes.clear();
     m_inputs.append(copy);
+    publishDeviceName(copy);
     endInsertRows();
     scheduleSave();
     return row;
@@ -345,6 +358,7 @@ void AudioInputListModel::setKind(int index, const QString &kind)
     scheduleSave();
 }
 
+
 void AudioInputListModel::setSublabel(int index, const QString &sublabel)
 {
     if (index < 0 || index >= m_inputs.size())
@@ -353,6 +367,7 @@ void AudioInputListModel::setSublabel(int index, const QString &sublabel)
         return;
 
     m_inputs[index].sublabel = sublabel;
+    publishDeviceName(m_inputs[index]);
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { SublabelRole });
     scheduleSave();
@@ -807,6 +822,7 @@ int AudioInputListModel::restoreRoster()
         if (okNum)
             nextId = std::max(nextId, num + 1);
         m_inputs.append(it);
+        publishDeviceName(it);
     }
     m_nextId = std::max(m_nextId, nextId);
     endResetModel();

@@ -73,10 +73,22 @@ Column {
         const slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))
         return slash >= 0 ? p.slice(slash + 1) : p
     }
+    // A WINDOW (a bus item) REUSES THIS TAB (EditScreen::primaryIsMedia): what a
+    // window shows is a picture in a box, so the same values describe it — Fit,
+    // Blend, Flip, Cropping and Filters all apply to the bus's feed on the canvas
+    // AND on the outputs. It has no FILE of its own, though: its source is the
+    // bus it names, so the Media row shows that bus (the host passes its current
+    // name in `busName`) and Change opens the BUS picker instead of a file picker.
+    property string busName: ""
+    readonly property bool isWindow: root.kind === "bus"
     readonly property string kindLabel: root.kind === "video" ? qsTr("Video")
-        : root.kind === "audio" ? qsTr("Audio") : qsTr("Picture")
+        : root.kind === "audio" ? qsTr("Audio")
+        : root.isWindow ? qsTr("Window bus") : qsTr("Picture")
     readonly property string kindIcon: root.kind === "audio" ? "audio"
-        : root.kind === "video" ? "camera" : "image"
+        : (root.kind === "video" || root.isWindow) ? "camera" : "image"
+    // What the Media row names: the bus a window shows, the file otherwise.
+    readonly property string displayName: root.isWindow
+        ? (root.busName !== "" ? root.busName : root.fileName) : root.fileName
     // FreeShow's section colour for its media-adjacent sections (#97c7ff).
     readonly property color mediaHue: "#97c7ff"
 
@@ -86,6 +98,7 @@ Column {
     // sections are not drawn for it at all — the tab keeps the file row (which is
     // the one thing an audio item has) and nothing else invented.
     readonly property bool isPicture: root.kind === "image" || root.kind === "video"
+                                      || root.isWindow
     readonly property string mediaFit: root.style && root.style.mediaFit ? String(root.style.mediaFit) : "contain"
     readonly property var mediaMeta: root.meta && root.meta.media ? root.meta.media : ({})
     readonly property bool flipH: root.mediaMeta.flipH === true
@@ -188,6 +201,9 @@ Column {
 
     // ---- the host's answers ----------------------------------------------
     signal changeFileRequested()
+    // A WINDOW's Change: pick a different bus for this window (the same picker
+    // the window's own row used to open).
+    signal changeBusRequested()
     // ✕: the file comes off the item (the box, its style and its place stay —
     // this is "not this picture", not "remove the item").
     signal clearFileRequested()
@@ -223,7 +239,8 @@ Column {
 
                 Text {
                     width: parent.width
-                    text: root.fileName !== "" ? root.fileName : qsTr("No file")
+                    text: root.displayName !== "" ? root.displayName
+                        : (root.isWindow ? qsTr("No bus") : qsTr("No file"))
                     color: Theme.textPrimary
                     font.family: Theme.fontFamily
                     font.pixelSize: 14
@@ -244,12 +261,13 @@ Column {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 4
 
-                // ✕ — take the file off the item.
+                // ✕ — take the file off the item (a window has no file to take
+                // off: its box stays and it simply has no bus yet).
                 Rectangle {
                     width: 24
                     height: 24
                     radius: 6
-                    visible: root.filePath !== ""
+                    visible: !root.isWindow && root.filePath !== ""
                     color: clearArea.containsMouse ? Theme.hoverBg : "transparent"
 
                     IconGlyph {
@@ -268,7 +286,9 @@ Column {
                     }
                 }
 
-                // The picture glyph — Change: a different file on this item.
+                // The picture glyph — Change: a different file on this item, or
+                // a different BUS for a window (one row, two answers, because a
+                // window's "file" IS the bus it names).
                 Rectangle {
                     width: 24
                     height: 24
@@ -287,7 +307,8 @@ Column {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.changeFileRequested()
+                        onClicked: root.isWindow ? root.changeBusRequested()
+                                                 : root.changeFileRequested()
                     }
                 }
             }
@@ -297,26 +318,21 @@ Column {
     // ---- Fit -------------------------------------------------------------
     // The shared FieldBox + the app's one DropdownPanel (the host owns the menu:
     // see EditScreen's mediaFitMenu), the same pair every other value picker in
-    // this inspector uses.
-    InspectorSection {
+    // this inspector uses. A plain labelled row, not a section card: the name is the
+    // label and the value sits under it; once the fit is not the default, a reset
+    // arrow says so.
+    FieldBox {
+        id: fitField
         width: parent.width
-        title: qsTr("Fit")
-        icon: "image"
-        iconColor: root.mediaHue
         visible: root.isPicture
-        hasChanges: root.hasItem && root.mediaFit !== "contain"
+        label: qsTr("Fit")
+        value: root.fitLabel
+        chevron: true
+        modified: root.hasItem && root.mediaFit !== "contain"
+        onTapped: root.fitFieldTapped()
         onResetRequested: {
             root.notifyUndo()
             root.fitPicked("contain")
-        }
-
-        FieldBox {
-            id: fitField
-            width: parent.width
-            label: ""
-            value: root.fitLabel
-            chevron: true
-            onTapped: root.fitFieldTapped()
         }
     }
 
@@ -325,25 +341,18 @@ Column {
     // persisted with the item (`meta.media.blend`) AND composited on air:
     // SceneBuilder sets it on the picture object and the rasterizer blends that
     // object against the frame underneath it.
-    InspectorSection {
+    FieldBox {
+        id: blendField
         width: parent.width
-        title: qsTr("Blend mode")
-        icon: "blend"
-        iconColor: root.mediaHue
         visible: root.isPicture
-        hasChanges: root.hasItem && root.blend !== "normal"
+        label: qsTr("Blend mode")
+        value: root.blendLabel
+        chevron: true
+        modified: root.hasItem && root.blend !== "normal"
+        onTapped: root.blendFieldTapped()
         onResetRequested: {
             root.notifyUndo()
             root.blendPicked("normal")
-        }
-
-        FieldBox {
-            id: blendField
-            width: parent.width
-            label: ""
-            value: root.blendLabel
-            chevron: true
-            onTapped: root.blendFieldTapped()
         }
     }
 
