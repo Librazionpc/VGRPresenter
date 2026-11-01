@@ -55,7 +55,7 @@ endif()
 # (qml/shaders/slidefilter.frag) into the .qsb package a Qt 6 ShaderEffect
 # requires — Qt 6 dropped inline GLSL source strings, so the effect has to be
 # built at build time like every other shader in a Qt 6 app.
-find_package(Qt6 6.11 REQUIRED COMPONENTS Quick QuickControls2 QuickShapes QuickEffects Multimedia ShaderTools)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Quick QuickControls2 QuickShapes QuickEffects Multimedia ShaderTools)
 
 qt_standard_project_setup(REQUIRES 6.11)
 
@@ -342,7 +342,7 @@ target_include_directories(engine_core PUBLIC ${BPS_ROOT}
                                                 ${BPS_ROOT}/modules/include
                                                 ${BPS_ROOT}/interfaces/include
                                                 ${BPS_ROOT}/platform/include)
-target_link_libraries(engine_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(engine_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS} Qt6::Gui)
 # zlib powers the DeflateCompressor (AssetCompressor) when available; the
 # compressor degrades to Stored/RLE on hosts without zlib. zlib is the one
 # deliberate hard link in the engine (NDI, libasound and libdrm are

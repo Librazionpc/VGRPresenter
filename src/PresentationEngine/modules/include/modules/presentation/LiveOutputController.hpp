@@ -27,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -144,6 +145,27 @@ public:
     // still moving ("keep composing" — see FlowCharMoving).
     float FlowChar() const { return flowChar_.load(); }
 
+    // ---- A READING PAGE COMMIT IS AN OFFSET UPDATE, NOT A NEW PICK ----------
+    //
+    // The stepper re-stages the SAME slide at every page boundary: in scroll
+    // mode the pick is one passage (LiveOutputService keeps the whole run as a
+    // single page), so what actually moves is the reading window and where in it
+    // the reader is. Committing that through StartFromSlides handed the render
+    // worker a whole CONTENT REPLACEMENT — recompile, runtime rebind, every
+    // output's scene rebuilt, composed frame dropped — at the one moment the
+    // reader is watching for smoothness (docs/scroll_mode_thread_audit.md, F3).
+    //
+    // This is the cheap path: the on-air pick's reading fields are updated IN
+    // PLACE on the loop thread and every scene that draws the flow is re-attached
+    // to the new window, so the pick is never re-committed. `slide` is the whole
+    // slide the caller would otherwise hand to StartFromSlides (its flow fields
+    // included) — the worker decides, because only it may read the on-air
+    // content: if anything but the reading fields differs (a real page change, a
+    // different reference), the whole pick IS re-committed, exactly as before —
+    // `name` is the pick's own name, used for that re-commit.
+    // Always safe to call from the interface thread; returns Ok once queued.
+    Result<void> UpdateReadingSlide(std::string_view name, const presentation::Slide& slide);
+
     // The preview output the loop feeds (its name in the RenderEngine's
     // OutputManager). Registered at first StartFromOpenShow and kept (a
     // disabled output receives nothing — empty frames before go-live are
@@ -170,6 +192,11 @@ private:
     // been composed yet, which is the caller's cue to compose instead.
     bool RepresentLastFrame(rendering::RenderEngine& render);
     void ApplyPendingLiveContent();
+    // The reading page commit's application (see UpdateReadingSlide): an in-place
+    // window/offset update when only the reading fields moved, else a normal
+    // content replacement. Runs at the top of RenderOnce — i.e. after Loop's
+    // ApplyPendingLiveContent, so a whole pick queued later still wins.
+    void ApplyPendingReadingSlide();
     // The shared off-air cleanup both stop paths run (unbind the runtime,
     // clear per-session state). Caller holds lifecycle_.
     Result<void> StopLiveTail();
@@ -228,6 +255,25 @@ private:
     std::mutex pendingContentMutex_;
     std::optional<presentation::Presentation> pendingLiveContent_;
     std::atomic<bool> liveContentReplacementPending_{false};
+    // The reading stepper's page commit (see UpdateReadingSlide): the slide it
+    // wanted on air and the pick it belongs to, newest only — a fast walk
+    // supersedes its own backlog the same way a run of picks does.
+    struct PendingReading {
+        std::string name;
+        presentation::Slide slide;
+    };
+    std::mutex pendingReadingMutex_;
+    std::optional<PendingReading> pendingReadingSlide_;
+    // TRUE WHILE THE ON-AIR CONTENT IS THIS CONTROLLER'S OWN PICK (StartFromSlides)
+    // — the only content whose reading flow it may rewrite in place. A show's
+    // document is never mutated behind the document's back. Read from the GUI
+    // thread (UpdateReadingSlide's gate) and written by the loop/start paths.
+    std::atomic<bool> ownsOnAirContent_{false};
+    // A reading WINDOW moved: every per-output scene that draws this slide still
+    // holds the old passage, and its id cannot say so (the flow is not part of the
+    // fingerprint). Set by ApplyPendingReadingSlide, consumed by the next
+    // RenderPerOutputPasses — worker-only state, always under control_.
+    bool readingFlowWindowMoved_ = false;
     // The stop reaper: joins the render worker OFF the GUI thread (StopLive
     // keeps its synchronous form for Shutdown/Reset, which must finish
     // before the process ends). Started detached per async stop; lifecycle_
@@ -278,6 +324,24 @@ private:
     std::atomic<int64_t> flowCharAtMs_{0};
     std::atomic<bool> flowCharSettle_{false};
     static constexpr int kFlowCharSettleMs = 60;
+
+    // THE SCROLL'S COMPOSE BUDGET (see RenderOnce): while the reading position is
+    // moving, one composed frame per this many milliseconds — the animator pushes a
+    // new character every 16 ms, which asked the software rasterizer for a frame
+    // rate no output can carry and pinned the CPU for the length of a walk. The
+    // interface's own preview is QML and still animates at the display rate; the
+    // outputs follow the same move at a rate they can hold, and the settle frame
+    // (one compose after the last push) lands the final position. 20 Hz: fast
+    // enough that a glide still reads as a scroll on a screen that can show it,
+    // slow enough that the loop is not the only thing the machine is doing.
+    std::chrono::steady_clock::time_point scrollComposedAt_{};
+    static constexpr int kScrollComposeMs = 50;
+    // THE POSITION THE LAST COMPOSED FRAME IS OF — see RenderOnce's
+    // `scrollUncomposed`: the budget can leave the last frame of a move behind the
+    // position it ended on, and a frame that has not been composed yet is a change
+    // the dirty-frame skip must not eat.
+    float lastComposedFlowChars_ = 0.0f;
+    bool hasComposedFlow_ = false;
 
     // IDLE PREVIEW: its own worker + flag, kept out of the live path's state
     // on purpose (see StartIdlePreview). One frame a second — the same light

@@ -401,6 +401,8 @@ private:
 
     std::vector<Subscription> subscriptions_;
     std::atomic<uint64_t> frameCounter_{0};
+    // The last frame's draw-command count — see RenderStats::commands.
+    std::atomic<uint32_t> lastCommandCount_{0};
     std::atomic<uint64_t> frameDrops_{0};
     std::atomic<uint64_t> errorCount_{0};
     std::atomic<bool> initialized_{false};

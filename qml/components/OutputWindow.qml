@@ -443,13 +443,9 @@ Window {
     DesignPreview {
         anchors.fill: parent
         visible: !root.blacked && root.hasSlidePreview && !root.framePriority
-        // THE READING STEP RIDES HERE TOO. This window is what a physical
-        // screen shows for a text slide (block-true, over the engine's frame),
-        // so it has to draw the same passage at the same offset as the engine's
-        // NDI/recording raster — otherwise the audience screen and the stream
-        // would scroll at two different points, which is the very split this
-        // step exists to remove.
-        animateLineSteps: true
+        // Only Scroll mode draws the passage flow, matching the engine's
+        // Slide::flowText contract. Slide mode renders the selected page whole.
+        animateLineSteps: LiveOutputService.scrollMode
         // ...AT THIS OUTPUT'S OWN STYLE, the same conversion the monitor tile
         // makes: the shared position is a character offset, and the line it names
         // is this style's own (see DesignPreview.stepLine). The engine raster of

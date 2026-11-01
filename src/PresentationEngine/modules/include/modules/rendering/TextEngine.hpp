@@ -11,6 +11,8 @@
 #include "modules/rendering/RenderObject.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 
+#include <QFont>
+
 #include <map>
 #include <memory>
 #include <mutex>
@@ -59,8 +61,10 @@ struct TextStyle {
     // different shape).
     float lineRadius = 0.0f;
     bool bold = false;
+    QFont::Weight fontWeight = QFont::Medium;
     bool italic = false;              // skews glyphs when rendering
     bool underline = false;
+    bool strikeout = false;
     bool rtl = false;                 // right-to-left ordering
 
     // Decorative text (stroke/shadow/glow).
@@ -94,7 +98,7 @@ struct FontGlyph {
     uint8_t codepoint = 0;
     int x = 0, y = 0;        // atlas cell
     int width = 0, height = 0;
-    int advance = 0;         // horizontal advance (px)
+    float advance = 0.0f;    // horizontal advance (px)
     int bearingX = 0, bearingY = 0;
 };
 
@@ -109,6 +113,10 @@ struct Font {
 class FontManager {
 public:
     FontManager() = default;
+
+    // QFont pixel sizes are positive integers; truncation matches QML's
+    // font.pixelSize behavior and is also used by the font-atlas cache key.
+    static int QtPixelSize(float sizePx);
 
     // Registers the built-in 5×7 bitmap font (id "builtin").
     void RegisterBuiltin();
@@ -130,26 +138,26 @@ public:
     RgbaImage BuildAtlas(float sizePx,
                          std::map<uint8_t, FontGlyph>& outGlyphs) const;
 
-    // REAL system font backend (Windows GDI+, docs/specs/17's own "TrueType/
-    // OpenType backends plug in behind the same interface"). `family` names
+    // Qt system-font backend (docs/specs/17's own "TrueType/OpenType
+    // backends plug in behind the same interface"). `family` names
     // an installed font ("Segoe UI"...); ASCII 32..126, antialiased, with
     // REAL measured per-glyph advances — not the builtin font's uniform
     // cellWidth-ratio estimate — so wrapping and drawing agree on width.
-    // Returns an empty atlas on non-Windows or if the family/GDI+ can't be
-    // resolved; every caller falls back to BuildAtlas (the builtin font)
-    // when this comes back empty, so a missing font never blanks a slide.
+    // Returns an empty atlas if Qt or the family cannot be resolved; every
+    // caller falls back to BuildAtlas (the builtin font) so a missing font
+    // never blanks a slide.
     RgbaImage BuildSystemAtlas(const std::string& family, float sizePx, bool bold, bool italic,
-                               std::map<uint8_t, FontGlyph>& outGlyphs) const;
-    // True if `family` is usable as a system font on this platform right
-    // now (GDI+ available and the family resolves) — callers branch on
-    // this rather than trying BuildSystemAtlas and inspecting for empty,
+                               std::map<uint8_t, FontGlyph>& outGlyphs,
+                               QFont::Weight fontWeight = QFont::Medium, bool underline = false,
+                               bool strikeout = false) const;
+    // True if `family` is usable as a system font through Qt right now.
+    // Callers branch on this rather than inspecting an empty atlas,
     // since an empty atlas can also legitimately mean "no glyphs fit".
     bool HasSystemFont(const std::string& family) const;
 
     // The family a style should ACTUALLY draw with: `family` when the host
-    // resolves it, otherwise the first installed substitute (the app's UI
-    // default, then the faces every Windows install carries). Empty when no
-    // substitute resolves — the caller then keeps the builtin bitmap font.
+    // resolves it, otherwise the installed Qt application UI default. Empty
+    // when no substitute resolves; callers then keep the builtin bitmap font.
     //
     // This is the difference between "the design names a font this machine does
     // not have" and "the output paints giant pixel blocks": the builtin 5x7
@@ -162,10 +170,9 @@ public:
     // resolve through THIS so what is measured is what is painted.
     std::string SubstituteFamily(std::string_view family) const;
 
-    // The face the OPERATING SYSTEM itself uses for UI text (Windows: the shell's
-    // message font from NONCLIENTMETRICS), or "" when no system-font backend can
-    // answer. This is the one substitute that is not a literal name: the point of
-    // a font-agnostic renderer is that nothing in it decides "Segoe UI" on the
+    // The face the Qt application uses for UI text, or "" when Qt cannot
+    // resolve it. This is the one substitute that is not a literal name: a
+    // font-agnostic renderer should not decide "Segoe UI" on the
     // app's behalf — the host already has a UI face, and the engine borrows it.
     // Cached (it is asked per text object through the substitution path).
     std::string SystemUiFamily() const;
@@ -175,40 +182,32 @@ public:
     std::string DefaultFamily() const;
     // Real measured advance width (px) for ONE character in the named
     // system font — what TextLayout::Measure/MeasureLine call per
-    // character when the style names a real font, instead of the builtin
-    // font's uniform estimate. 0 if the family can't be resolved.
+    // character from Qt's font metrics when the style names a real font,
+    // instead of the builtin font's uniform estimate. 0 if unresolved.
     float SystemCharAdvance(const std::string& family, float sizePx, bool bold, bool italic,
-                            uint8_t codepoint) const;
-    // Batch form — TextLayout::Measure's own word-wrap loop needs many
-    // characters' widths per call; this builds ONE GDI+ Font/Graphics
-    // context for the whole string instead of SystemCharAdvance's
-    // per-call setup cost repeated per character. One entry per character
-    // of `text`, same order; empty if the family doesn't resolve (the
-    // caller falls back to the builtin estimate for the whole string).
+                            uint8_t codepoint, QFont::Weight fontWeight = QFont::Medium) const;
+    // Batch form — Qt horizontal advances, one entry per character of `text`
+    // in the same order. Empty if the family doesn't resolve.
     std::vector<float> SystemCharAdvances(const std::string& family, float sizePx, bool bold,
-                                          bool italic, const std::string& text) const;
+                                          bool italic, const std::string& text,
+                                          QFont::Weight fontWeight = QFont::Medium) const;
 
-    // The font's REAL vertical rhythm: line gap between baselines and the
-    // last line's ink extent (ascent+descent, GDI+ GetCellDescent/GetLineSpacing
-    // family). Every other font metric in this engine is already REAL
-    // (SystemCharAdvances) — line height stayed the one estimated number,
-    // and it diverges per font (a display serif's natural line spacing is
-    // ~15% taller than Segoe UI's at the same pixel size), which is exactly
-    // the "fit works with one font, clips with another" report. False when
-    // the family can't be resolved or off Windows: callers fall back to the
-    // size+lineSpacing estimate, unchanged.
+    // The font's Qt vertical metrics: baseline spacing and line-box height.
+    // Qt is also used by the QML preview and live fit solver, so template line
+    // pitch is based on the same cross-platform font metric. False without a
+    // QGuiApplication or for invalid input; callers use their normal fallback.
     struct LineMetrics {
         float baselineStep = 0.0f;   // natural baseline-to-baseline distance
         float inkHeight = 0.0f;      // ascent+descent — one line's visual height
     };
     bool SystemLineMetrics(const std::string& family, float sizePx, bool bold, bool italic,
-                           LineMetrics& out) const;
+                           LineMetrics& out, QFont::Weight fontWeight = QFont::Medium) const;
 
 private:
     std::map<std::string, Font, std::less<>> fonts_;
     bool builtinRegistered_ = false;
     // Substitution answers, keyed by the REQUESTED family (it is asked on every
-    // measured and painted text object, and resolving costs a GDI+ FontFamily).
+    // measured and painted text object and resolves through Qt's font database).
     // Cached because the set of installed fonts does not change under a running
     // process; a family that was missing stays missing for the session.
     mutable std::mutex substituteMutex_;
@@ -223,6 +222,7 @@ private:
 struct LineLayout {
     std::string text;
     float width = 0.0f;
+    bool paragraphEnd = true;
 };
 
 struct TextLayoutResult {

@@ -108,13 +108,17 @@ private:
     struct FontAtlasKey {
         std::string fontId;
         int sizePx = 0;
-        bool bold = false;
+        QFont::Weight fontWeight = QFont::Medium;
         bool italic = false;
+        bool underline = false;
+        bool strikeout = false;
         bool operator<(const FontAtlasKey& o) const {
             if (fontId != o.fontId) return fontId < o.fontId;
             if (sizePx != o.sizePx) return sizePx < o.sizePx;
-            if (bold != o.bold) return bold < o.bold;
-            return italic < o.italic;
+            if (fontWeight != o.fontWeight) return fontWeight < o.fontWeight;
+            if (italic != o.italic) return italic < o.italic;
+            if (underline != o.underline) return underline < o.underline;
+            return strikeout < o.strikeout;
         }
     };
     std::map<FontAtlasKey, std::unique_ptr<AtlasEntry>> fontAtlases_;
@@ -141,6 +145,7 @@ private:
         float lineGap = 0;
         bool bold = false;
         bool italic = false;
+        QFont::Weight fontWeight = QFont::Medium;
         bool operator<(const LayoutKey& o) const {
             if (text != o.text) return text < o.text;
             if (font != o.font) return font < o.font;
@@ -152,7 +157,8 @@ private:
             if (lineSpacing != o.lineSpacing) return lineSpacing < o.lineSpacing;
             if (lineGap != o.lineGap) return lineGap < o.lineGap;
             if (bold != o.bold) return bold < o.bold;
-            return italic < o.italic;
+            if (italic != o.italic) return italic < o.italic;
+            return fontWeight < o.fontWeight;
         }
     };
     std::map<LayoutKey, TextLayoutResult> layouts_;

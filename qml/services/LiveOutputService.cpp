@@ -18,6 +18,7 @@
 #include "modules/presentation/PresentationEngine.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
+#include "modules/presentation/TemplateTextMetrics.hpp"
 #include "modules/presentation/SlideRules.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/rendering/RenderEngine.hpp"
@@ -338,6 +339,17 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
 QVariantMap slideToVariantMap(const pl::Slide *slide)
 {
     return slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle());
+}
+
+void setSlideReadingFlow(QVariantMap &slide, bool enabled, const QString &flowText, qreal flowChar)
+{
+    if (enabled && !flowText.isEmpty()) {
+        slide.insert(QStringLiteral("flowText"), flowText);
+        slide.insert(QStringLiteral("flowChar"), flowChar);
+    } else {
+        slide.remove(QStringLiteral("flowText"));
+        slide.remove(QStringLiteral("flowChar"));
+    }
 }
 
 // One NDI program sender exists today. Honor the row the operator marked LIVE
@@ -756,7 +768,10 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     bps::presentation::Presentation content;
     content.name = name.toStdString();
     for (const QVariant &v : slides) {
-        const QVariantMap raw = v.toMap();
+        QVariantMap raw = v.toMap();
+        setSlideReadingFlow(raw, scrollMode_,
+                            raw.value(QStringLiteral("flowText")).toString(),
+                            raw.value(QStringLiteral("flowChar"), 0.0).toDouble());
         auto slide = ShowConverter::slideFromVariant(raw);
         // ONE-SHOT DIAGNOSTIC (this log is the boot/behaviour source of truth):
         // "the outputs draw the code where the text belongs" can only be argued
@@ -908,14 +923,14 @@ static double metaLineFactor(const QVariantMap &meta)
 {
     bool ok = false;
     const double n = meta.value(QStringLiteral("lineHeight")).toDouble(&ok);
-    return (ok && n > 0.0) ? n : 1.0;   // MetadataFields::naturalLineHeight
+    return bps::presentation::template_text_metrics::lineHeightMultiplier(ok ? n : 0.0);
 }
 
 static double metaLineGap(const QVariantMap &meta)
 {
     bool ok = false;
     const double n = meta.value(QStringLiteral("lineSpacing")).toDouble(&ok);
-    return ok ? n : 0.0;                // MetadataFields::naturalLineSpacing
+    return bps::presentation::template_text_metrics::lineSpacing(ok ? n : 0.0);
 }
 
 static double blockPadding(const QVariantMap &block)
@@ -1050,13 +1065,14 @@ static double fittedPixelSize(const QString &text, const QVariantMap &block)
         const QFont font = blockFontAt(block, mid);
         const QFontMetricsF metrics(font);
         const double natural = metrics.height();
-        const double step = (qFuzzyIsNull(gap) || natural <= 0.0) ? factor : factor + gap / natural;
+        const double step = bps::presentation::template_text_metrics::linePitch(
+            natural, factor, gap);
         const QVector<VisualSpan> spans = layoutSpansAt(text, block, mid);
         double widest = 0.0;
         for (const VisualSpan &span : spans)
             widest = qMax(widest, metrics.horizontalAdvance(
                                        text.mid(span.start, span.end - span.start)));
-        if (widest <= width + 0.01 && spans.size() * natural * step <= height + 0.01)
+        if (widest <= width + 0.01 && spans.size() * step <= height + 0.01)
             lo = mid;
         else
             hi = mid;
@@ -1345,15 +1361,13 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
     rebuildReadingRun(0);
     readingFlowText_ = readingRunText_;
     emit readingScrollChanged();
-    // The first page goes out carrying its passage, so a step has somewhere to
-    // scroll from the very first press and the two surfaces are drawing the same
-    // thing before anything is pressed at all (at offset 0 the passage looks
-    // exactly like the page — that is the whole point of the layout being one).
+    // In Scroll mode the first page carries its passage, so a step has somewhere
+    // to scroll from the very first press and both output surfaces start at the
+    // same position. Slide mode keeps the page's ordinary slide data instead.
     QVariantList pick = slides;
     if (!pick.isEmpty()) {
         QVariantMap first = pick.first().toMap();
-        first[QStringLiteral("flowText")] = readingFlowText_;
-        first[QStringLiteral("flowChar")] = 0.0;
+        setSlideReadingFlow(first, scrollMode_, readingFlowText_, 0.0);
         pick[0] = first;
     }
     if (live_) {
@@ -1392,9 +1406,37 @@ void LiveOutputService::setScrollMode(bool on)
     if (on == scrollMode_)
         return;
     scrollMode_ = on;
-    if (!on)
+    if (!on) {
         pendingReadingSteps_ = 0;
+        bps::live::LiveOutputController::Instance().SetFlowChar(0.0f);
+    }
     emit scrollModeChanged();
+
+    if (on && !pendingTextSourcePages_.isEmpty()) {
+        activatePendingTextSource();
+        return;
+    }
+    if (!on && lineSourceTextOnly_ && !readingTextSourcePages_.isEmpty()) {
+        const int page = qBound(0, readingPage(),
+                                static_cast<int>(readingTextSourcePages_.size()) - 1);
+        lineSetRaw_ = readingTextSourcePages_;
+        lineSourceTextOnly_ = false;
+        readingBudgetFitActive_ = false;
+        readingTextSourcePages_.clear();
+        readingTextSourcePageEnds_.clear();
+        readingTextSourceText_.clear();
+        readingTextSourceStartChar_ = -1;
+        readingTextSourceInitialPositionPending_ = false;
+        lineSlideIndex_ = page;
+        readingScroll_ = 0.0;
+        lineOffset_ = 0;
+        readingLinesCache_.clear();
+        resetReadingRun();
+        rebuildReadingRun(lineSlideIndex_);
+        readingFlowText_ = readingRunText_;
+    }
+    if (!lineSetRaw_.isEmpty())
+        applyReadingRestage(true, /*forceRebuild=*/ false, /*forceScrollNotify=*/ true);
 }
 
 void LiveOutputService::setReadingWordBudget(int words)
@@ -2864,20 +2906,35 @@ void LiveOutputService::applyReadingScroll(qreal lines)
             QVariantList current = onAirSlidesRaw();
             if (!current.isEmpty()) {
                 QVariantMap shown = current.first().toMap();
-                shown[QStringLiteral("flowText")] = readingFlowText_;
-                shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(lines);
-                goLiveWithSlides(onAirTitle_, QVariantList{shown});
+                setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                                    readingFlowCharForScroll(lines));
+                updateReadingPick(onAirTitle_, shown);
             }
         } else if (!stagedSlidesRaw_.isEmpty()) {
             QVariantMap shown = stagedSlidesRaw_.first().toMap();
-            shown[QStringLiteral("flowText")] = readingFlowText_;
-            shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(lines);
+            setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                                readingFlowCharForScroll(lines));
             stagedSlidesRaw_ = QVariantList{shown};
             stagedSlide_ = previewWithActiveStyle(shown);
             emit stagedChanged();
         }
     }
     emit readingScrollChanged();
+}
+
+// THE PAGE COMMIT'S CHEAP PATH — see the header. One slide, a new passage window
+// and/or a new offset: the engine updates the pick it already has instead of
+// taking a fresh one. Only when there is nothing on air to update does this fall
+// back to the full commit, which is what it replaced.
+bool LiveOutputService::updateReadingPick(const QString &name, const QVariantMap &shown)
+{
+    auto &controller = bps::live::LiveOutputController::Instance();
+    const auto taken = controller.UpdateReadingSlide(
+        name.toStdString(), ShowConverter::slideFromVariant(shown));
+    if (taken.ok())
+        return true;
+    goLiveWithSlides(name, QVariantList{shown});
+    return false;
 }
 
 // WHERE A REFERENCE-GRID LINE LANDS IN THE PASSAGE: the character its first line
@@ -3101,15 +3158,15 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
                 QVariantList current = onAirSlidesRaw();
                 if (!current.isEmpty()) {
                     QVariantMap shown = current.first().toMap();
-                    shown[QStringLiteral("flowText")] = readingFlowText_;
-                    shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(readingScroll_);
+                    setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                                        readingFlowCharForScroll(readingScroll_));
                     goLiveWithSlides(onAirTitle_, QVariantList{shown});
                 }
             }
         } else if (flowChanged && !stagedSlidesRaw_.isEmpty()) {
             QVariantMap shown = stagedSlidesRaw_.first().toMap();
-            shown[QStringLiteral("flowText")] = readingFlowText_;
-            shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(readingScroll_);
+            setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                                readingFlowCharForScroll(readingScroll_));
             stagedSlidesRaw_ = QVariantList{shown};
             stagedSlide_ = previewWithActiveStyle(shown);
             emit stagedChanged();
@@ -3166,9 +3223,19 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
         // emit itself waits until the raw data below is also final.)
         QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
         // The two fields the engine scrolls by (Slide::flowText / Slide::flowChar).
-        shown[QStringLiteral("flowText")] = readingFlowText_;
-        shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(readingScroll_);
-        goLiveWithSlides(lineSetName_, QVariantList{shown});
+        setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                            readingFlowCharForScroll(readingScroll_));
+        // A PAGE COMMIT IS AN OFFSET/WINDOW UPDATE, NOT A NEW PICK. In scroll
+        // mode the run is ONE slide (see activatePendingTextSource), so crossing
+        // a page changes nothing the renderer's scene is built from — only where
+        // in the passage it is reading. Handing that to StartFromSlides made the
+        // render worker recompile the presentation, rebind the runtime, rebuild
+        // every output's scene and drop the composed frame at the exact moment
+        // the reader crossed a paragraph (docs/scroll_mode_thread_audit.md, F3).
+        // The engine decides, because only it may read the on-air slide: if the
+        // page's own words/reference really did change, it re-commits the pick
+        // itself. `false` here is "nothing is on air any more" — commit it.
+        (void)updateReadingPick(lineSetName_, shown);
         // The pick is ON AIR, so nothing is staged any more — the tiles read the
         // new on-air slide (same contract as stageSlidesWithPreview's live path).
         stagedName_.clear();
@@ -3187,9 +3254,9 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     }
     // OFF AIR the staged copy has to carry them: it is what GO LIVE will send.
     QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
-    shown[QStringLiteral("flowText")] = readingFlowText_;
-    shown[QStringLiteral("flowChar")] = lineSourceTextOnly_
-        ? readingFlowCharForScroll(readingScroll_) : readingCharForScroll(readingScroll_);
+    setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                        lineSourceTextOnly_ ? readingFlowCharForScroll(readingScroll_)
+                                            : readingCharForScroll(readingScroll_));
     stagedName_ = lineSetName_;
     stagedSlidesRaw_ = QVariantList{shown};
     stagedSlide_ = previewWithActiveStyle(shown);
@@ -5128,13 +5195,22 @@ bool LiveOutputService::stagedIsOurs(const QString &title) const
     // re-evaluate" but "what does it actually compare" (title vs
     // stagedName_ — a mismatched string is invisible from the QML side,
     // which only ever sees the bool).
-    EngineBridge::write(QStringLiteral("info"), QStringLiteral("StagedIsOurs"),
-                        QStringLiteral("title='%1' stagedName_='%2' live_=%3 stagedEmpty=%4 result=%5")
-                            .arg(title)
-                            .arg(stagedName_)
-                            .arg(live_)
-                            .arg(stagedSlidesRaw_.isEmpty())
-                            .arg(result));
+    //
+    // WRITTEN WHEN THE ANSWER CHANGES, not on every ask: this is a PREDICATE a
+    // QML binding reads, so it runs on every re-evaluation — several times a
+    // second per surface during a reading walk (measured: 10.8k records in one
+    // session, every one of them a formatted string on the interface thread for
+    // an answer that had not moved). Same information, on the transitions.
+    const QString line = QStringLiteral("title='%1' stagedName_='%2' live_=%3 stagedEmpty=%4 result=%5")
+                             .arg(title)
+                             .arg(stagedName_)
+                             .arg(live_)
+                             .arg(stagedSlidesRaw_.isEmpty())
+                             .arg(result);
+    if (line != lastStagedIsOursLine_) {
+        lastStagedIsOursLine_ = line;
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StagedIsOurs"), line);
+    }
     return result;
 }
 

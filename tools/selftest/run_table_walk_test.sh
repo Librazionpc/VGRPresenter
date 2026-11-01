@@ -16,10 +16,20 @@
 #      stdout+stderr -> build/table_walk_test.log
 #   2. the scenario opens the app-wide search, takes the first result (the real
 #      "search a citation, open it" path), stages the passage through the pane's
-#      own play, then presses the ordinary reading step 120 times, 700ms apart —
-#      past the glide's 600ms cap, so each press starts from the settled position,
-#      and far enough to cross SEVERAL paragraph boundaries (a real sermon's
-#      paragraphs run 10–25 lines each).
+#      own play, switches the wall to SCROLL mode through its own button, then
+#      presses the ordinary reading step 120 times, 700ms apart — past the glide's
+#      600ms cap, so each press starts from the settled position, and far enough
+#      to cross SEVERAL paragraph boundaries (a real sermon's paragraphs run 10–25
+#      lines each).
+#
+#      THE WALK IS MODE-GATED NOW. Alt+Down / Alt+Up are gone: the reading step is
+#      the wall's ‹ ›, and what those do is the wall's Slide/Scroll switch
+#      (MonitorWall). Only Scroll puts a passage on the slide at all, so a run that
+#      walks in Slide mode would measure a slide change and every number below
+#      would be meaningless. The runner therefore requires the scenario's own
+#      `[SELFTEST-READING] mode=scroll` line and a `mode=scroll` on every press,
+#      and judges the switch's contract at the end: Slide mode takes the passage
+#      off the slide (`slideFlow=0`), Scroll mode puts it back (`slideFlow>0`).
 #   3. asserts, per press:
 #        * abs (the position in the pick) moves +1.0 and never goes backwards;
 #        * the page index never regresses;
@@ -144,6 +154,18 @@ if [ -z "$LINES" ]; then
     exit 3
 fi
 
+# SCROLL MODE IS THE WALK'S PRECONDITION (see the header): without it the
+# scenario pressed the wall's › in Slide mode, which steps slides. The scenario
+# says which way it ran, so this can be judged instead of assumed.
+MODE_LINE="$(grep -a "\[SELFTEST-READING\] scenario=tablewalk " "$LOG" 2>/dev/null | tail -1)"
+if ! printf '%s\n' "$MODE_LINE" | grep -qa "mode=scroll"; then
+    echo "(no Scroll-mode line from the scenario: '${MODE_LINE:-none}')"
+    grep -a "\[SELFTEST-READING\]\|SELFTEST-TABLEWALK\] FAIL not-scroll" "$LOG" 2>/dev/null | head -5
+    echo "TABLE_WALK: FAIL nomode — the walk did not run in Scroll mode, so its steps were slide changes"
+    rm -f "$TILES" "$PANE"
+    exit 4
+fi
+
 # EVERY FAILURE LEAVES ITS OWN EVIDENCE. The first run of this check reported a
 # single finding whose message scrolled out of the terminal before it could be
 # read, and the passing runs after it overwrote the log — so the one observation
@@ -222,6 +244,15 @@ while IFS= read -r line; do
     page="$(get page)"
     press="$(get press)"
     skips="$(get glideSkips)"
+    mode="$(get mode)"
+    # THE WALK ITSELF MUST STAY IN SCROLL MODE. A press that reads mode=slide is a
+    # slide change reported as a reading step — the mode switched under the walk
+    # (the pane adopts a per-tab value), so the sequence is not one walk any more.
+    if [ -n "$mode" ] && [ "$mode" != "scroll" ]; then
+        echo "  FAIL press=$press: the walk ran in '$mode' mode — the wall's › changes slides there, not lines"
+        dump_ctx "$press" "walk-mode $mode"
+        FAILS=$((FAILS + 1))
+    fi
     PARA_NOW=""
     TILE_TEXT=""
     if [ -n "$skips" ] && [ "$skips" != "0" ]; then
@@ -400,8 +431,38 @@ if [ "$FAILS" -ne 0 ] && [ -f "$FINDINGS" ]; then
     echo "== the failing presses, with their neighbours ($(basename "$FINDINGS")) =="
     cat "$FINDINGS"
 fi
+# ---- THE SWITCH'S CONTRACT, judged from the scenario's own photographs ------
+# Turned OFF the passage must leave the slide the outputs draw (Slide mode: the
+# arrows change slides over the page as authored); turned back ON it must return.
+# `slideFlow` is the length of the flowText the SLIDE carries — the field the
+# engine raster, the monitor tiles and the NDI feed all scroll from — so a switch
+# that only repaints its own button fails here.
+MODE_SLIDE="$(grep -a "\[SELFTEST-TABLEWALK\] mode=slide " "$LOG" 2>/dev/null | tail -1)"
+MODE_SCROLL="$(grep -a "\[SELFTEST-TABLEWALK\] mode=scroll " "$LOG" 2>/dev/null | tail -1)"
+MODE_SLIDE_FLOW="$(printf '%s\n' "$MODE_SLIDE" | sed -n 's/.* slideFlow=\([0-9]*\).*/\1/p')"
+MODE_SCROLL_FLOW="$(printf '%s\n' "$MODE_SCROLL" | sed -n 's/.* slideFlow=\([0-9]*\).*/\1/p')"
+MODE_FAILS=0
+if [ -z "$MODE_SLIDE_FLOW" ] || [ -z "$MODE_SCROLL_FLOW" ]; then
+    echo "  FAIL the switch never reported both modes (slide='${MODE_SLIDE}' scroll='${MODE_SCROLL}')"
+    MODE_FAILS=$((MODE_FAILS + 1))
+else
+    if [ "$MODE_SLIDE_FLOW" != "0" ]; then
+        echo "  FAIL Slide mode still draws a passage on the slide (slideFlow=$MODE_SLIDE_FLOW) — the arrows would scroll where they should change slides"
+        MODE_FAILS=$((MODE_FAILS + 1))
+    fi
+    if [ "$MODE_SCROLL_FLOW" -le 0 ]; then
+        echo "  FAIL Scroll mode left the slide without a passage (slideFlow=$MODE_SCROLL_FLOW) — the arrows would have nothing to scroll"
+        MODE_FAILS=$((MODE_FAILS + 1))
+    fi
+fi
+FAILS=$((FAILS + MODE_FAILS))
+
 echo "== walk state =="
 cat "$PANE"
+echo "== the mode switch =="
+echo "  $(printf '%s\n' "$MODE_LINE")"
+echo "  slide : ${MODE_SLIDE:-missing}"
+echo "  scroll: ${MODE_SCROLL:-missing}"
 echo "== the two outputs, side by side =="
 echo "  ${GRID_PROOF:-no press read both outputs}"
 echo "  presses with both outputs read: $TWO_STYLE_PRESSES, furthest apart: $MAX_SPREAD char(s) (press ${SPREAD_AT:-none}) — one wrap is allowed, more is drift"
@@ -439,4 +500,4 @@ if [ "$FAILS" -ne 0 ]; then
     echo "TABLE_WALK: FAIL findings=$FAILS"
     exit 1
 fi
-echo "TABLE_WALK: PASS $MOVED press(es) on a real passage, $TILE_READS tile reads (none stale, all drawing the passage), pane advanced through $PARA_MOVES paragraph(s), no skipped frame, two outputs within $MAX_SPREAD char(s) of each other ($GRID_PROOF)"
+echo "TABLE_WALK: PASS $MOVED press(es) on a real passage in Scroll mode, $TILE_READS tile reads (none stale, all drawing the passage), pane advanced through $PARA_MOVES paragraph(s), no skipped frame, two outputs within $MAX_SPREAD char(s) of each other ($GRID_PROOF), switch slide/scroll slideFlow=$MODE_SLIDE_FLOW/$MODE_SCROLL_FLOW"

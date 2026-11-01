@@ -196,15 +196,12 @@ QtObject {
     //
     // 0 is NOT a line height — it would stack every line on one baseline, and in
     // QML it is a degenerate Text.lineHeight outright. It (and a missing/NaN
-    // value) therefore means THE FONT'S OWN spacing, Qt's own Text default, and
-    // that is exactly how the engine reads it (SceneBuilder's kNaturalLineHeight
-    // + its non-positive clamp, TextLayout::Measure's step guard). One constant,
-    // one function, every surface — the panel now shows the number that draws.
-    readonly property real naturalLineHeight: 1.0
+    // value) therefore means THE FONT'S OWN spacing, Qt's own Text default.
+    // The shared TemplateTextMetrics helper owns the default and normalization.
+    readonly property real naturalLineHeight: EngineBridge.templateLineHeightMultiplier(0)
     function lineHeight(meta) {
         const v = meta ? meta.lineHeight : undefined
-        const n = Number(v)
-        return (v === undefined || v === null || isNaN(n) || n <= 0) ? root.naturalLineHeight : n
+        return EngineBridge.templateLineHeightMultiplier(Number(v))
     }
 
     // The same rule for letter spacing: an ADDITIVE px value whose neutral is 0
@@ -232,11 +229,10 @@ QtObject {
     // The same additive px-value rule for the air BETWEEN line boxes —
     // FreeShow's "line spacing" row, separate from the line height above: the
     // height sizes a line box, this opens a gap before the next one. Neutral 0.
-    readonly property real naturalLineSpacing: 0
+    readonly property real naturalLineSpacing: EngineBridge.templateLineSpacing(0)
     function lineSpacing(meta) {
         const v = meta ? meta.lineSpacing : undefined
-        const n = Number(v)
-        return (v === undefined || v === null || isNaN(n)) ? root.naturalLineSpacing : n
+        return EngineBridge.templateLineSpacing(Number(v))
     }
 
     // THE LINE STEP QML MUST DRAW WITH. QML's Text has no additive gap — only a
@@ -249,9 +245,7 @@ QtObject {
     function lineHeightWithGap(meta, naturalHeightPx) {
         const lh = root.lineHeight(meta)
         const gap = root.lineSpacing(meta)
-        if (Math.abs(gap) < 0.0001 || !(naturalHeightPx > 0))
-            return lh
-        return lh + gap / naturalHeightPx
+        return EngineBridge.templateLineHeightWithGap(naturalHeightPx, lh, gap)
     }
 
     // The typed case, applied to a string — QML's font.capitalization does this

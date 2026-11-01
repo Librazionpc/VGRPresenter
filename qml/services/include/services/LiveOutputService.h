@@ -963,6 +963,11 @@ private:
     // ---- stageSlides() — see the header comment on stagedSlide ----
     QString stagedName_;
     QVariantList stagedSlidesRaw_;
+    // The last StagedIsOurs diagnostic written — see stagedIsOurs: the predicate is
+    // read from a QML binding (many times a second while a walk runs), so the record
+    // is written on a change of its answer rather than on every ask. Interface
+    // thread only, like every other member this predicate reads.
+    mutable QString lastStagedIsOursLine_;
     QVariantMap stagedSlide_;
 
     // ---- the line stepper (see stageSlideSet/lineStep) --------------------
@@ -1115,6 +1120,12 @@ private:
     void announceReadingPage();
     int readingPageAnnounced_ = -1;
     void applyReadingScroll(qreal lines);
+    // THE PAGE COMMIT'S CHEAP PATH (docs/scroll_mode_thread_audit.md, F3): while
+    // live, hand `shown` to the engine as a READING update instead of a new
+    // pick — the passage is one slide, so a page boundary only moves the
+    // window and the offset. False = the engine refused (nothing on air any
+    // more) and the caller re-committed the pick itself.
+    bool updateReadingPick(const QString &name, const QVariantMap &shown);
     void drainPendingReadingSteps();
     void animateReadingScroll(qreal from, qreal to);
     // Settles a page change a landing step owes (readingRebaseSlide_), the

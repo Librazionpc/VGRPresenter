@@ -180,16 +180,21 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(float sizePx) {
 Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& style,
                                                                 const FontManager& fonts) {
     // WHICH FACE THIS ATLAS IS FOR — resolved before the cache lock, because the
-    // substitution asks the system's font set (GDI+) and no lock here may be held
+    // substitution asks Qt's font database and no lock here may be held
     // across that. A design naming a font this machine lacks lands on the
     // substitute (see FontManager::SubstituteFamily) instead of the builtin 5x7
     // bitmap, and the KEY carries the resolved family so two styles that named
     // different missing fonts share ONE correct atlas instead of one wrong one.
     const std::string substituted = fonts.SubstituteFamily(style.fontId);
     const std::string drawFamily = substituted.empty() ? style.fontId : substituted;
+    const bool useSystemFont = !drawFamily.empty() && drawFamily != "builtin"
+                               && fonts.HasSystemFont(drawFamily);
     std::lock_guard<std::mutex> lock(mutex_);
-    const FontAtlasKey key{drawFamily, static_cast<int>(style.size + 0.5f),
-                           style.bold, style.italic};
+    const int sizeKey = useSystemFont ? FontManager::QtPixelSize(style.size)
+                                     : static_cast<int>(style.size + 0.5f);
+    const QFont::Weight fontWeight = style.bold ? QFont::Bold : style.fontWeight;
+    const FontAtlasKey key{drawFamily, sizeKey, fontWeight, style.italic,
+                           style.underline, style.strikeout};
     auto it = fontAtlases_.find(key);
     if (it != fontAtlases_.end()) return it->second.get();
 
@@ -199,9 +204,10 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& 
     // font at all) falls back to the SAME builtin atlas every other caller
     // already gets, so a style with no real font behaves exactly as before
     // this cache existed.
-    if (!drawFamily.empty() && drawFamily != "builtin" && fonts.HasSystemFont(drawFamily))
+    if (useSystemFont)
         entry->atlas = fonts.BuildSystemAtlas(drawFamily, style.size, style.bold,
-                                              style.italic, entry->glyphs);
+                                              style.italic, entry->glyphs, style.fontWeight,
+                                              style.underline, style.strikeout);
     if (entry->atlas.empty())
         entry->atlas = fonts.BuildAtlas(style.size, entry->glyphs);
     auto* raw = entry.get();
@@ -231,6 +237,7 @@ Result<TextLayoutResult> RenderCache::Layout(const std::string& text,
     key.lineGap = style.lineGap;
     key.bold = style.bold;
     key.italic = style.italic;
+    key.fontWeight = style.fontWeight;
     auto it = layouts_.find(key);
     if (it != layouts_.end()) return it->second;
     auto result = TextLayout::Measure(text, style, fonts);

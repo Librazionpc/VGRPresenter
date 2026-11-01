@@ -240,3 +240,13 @@ void TestBroadcastSenders();
 void TestBroadcastFeatures();
 void TestBroadcastNdiRuntime();
 void TestLineSpacingAndLineBands();
+// A reading window that moved under an already-built scene is re-attached to the
+// existing reading block (SceneBuilder::RefreshReadingFlow), not rebuilt.
+void TestReadingFlowWindowRefresh();
+// A page commit inside one passage is an OFFSET update on the pick already on
+// air (LiveOutputController::UpdateReadingSlide), not a content replacement.
+void TestReadingPageKeepsPick();
+// A reading block's frame costs its VIEWPORT, not its passage: the glyph pass is
+// culled to the visible lines (see DrawTextObject), so a scroll through a long
+// passage does not build-and-clip the whole thing at the frame rate.
+void TestReadingFlowDrawCost();

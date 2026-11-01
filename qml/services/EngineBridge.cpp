@@ -13,6 +13,7 @@
 #include "modules/display/DisplayEngine.hpp"
 #include "modules/display/Providers.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
+#include "modules/presentation/TemplateTextMetrics.hpp"
 #include "services/ShowConverter.h"
 #include "models/AudioInputListModel.h"
 #include "models/VideoSourceListModel.h"
@@ -359,6 +360,24 @@ QStringList EngineBridge::bootLog() const
 QString EngineBridge::health() const
 {
     return QString::fromStdString(bps::Kernel::Instance().GetHealth().detail);
+}
+
+double EngineBridge::templateLineHeightMultiplier(double value) const
+{
+    return bps::presentation::template_text_metrics::lineHeightMultiplier(value);
+}
+
+double EngineBridge::templateLineSpacing(double value) const
+{
+    return bps::presentation::template_text_metrics::lineSpacing(value);
+}
+
+double EngineBridge::templateLineHeightWithGap(double naturalHeightPx,
+                                               double multiplier,
+                                               double gapPx) const
+{
+    return bps::presentation::template_text_metrics::qmlLineHeight(
+        naturalHeightPx, multiplier, gapPx);
 }
 
 // The startup forensics verdict's ONE writer (see the header). It runs on the

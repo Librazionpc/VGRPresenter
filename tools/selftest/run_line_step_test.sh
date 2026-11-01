@@ -7,6 +7,13 @@
 # scrolled smoothly for the first page and a bit and then BLINKED / jumped at a
 # boundary. Property traces cannot see "the picture re-based"; these numbers can.
 #
+# THE STEP IS THE WALL'S › IN SCROLL MODE NOW — Alt+Down / Alt+Up were removed and
+# the wall's Slide/Scroll switch (MonitorWall) decides what its arrows do. The
+# scenario switches Scroll ON through that button before it stages the pick, and
+# says which way it ran (`[SELFTEST-READING] ... mode=scroll`); every press line
+# carries the mode too. A run in Slide mode is not a scroll measurement, so the
+# runner refuses it instead of judging numbers that describe something else.
+#
 # WHAT IT DOES
 #   1. launches the app with VGR_SELFTEST=1 + VGR_LINESTEP_TEST=1
 #      (stdout+stderr -> build/line_step_test.log). The scenario stages a
@@ -96,6 +103,19 @@ if [ -z "$LINES" ]; then
     exit 3
 fi
 
+# SCROLL MODE IS THE PRECONDITION (see the header): the presses are
+# LiveOutputService.lineStep, which is what the wall's › does in Scroll mode and
+# what only Scroll mode attaches a passage for. Judged from the scenario's own
+# line, so a switch that silently stayed in Slide mode fails here by name.
+MODE_LINE="$(grep -a "\[SELFTEST-READING\] scenario=linestep " "$LOG" 2>/dev/null | tail -1)"
+if ! printf '%s\n' "$MODE_LINE" | grep -qa "mode=scroll"; then
+    echo "(no Scroll-mode line from the scenario: '${MODE_LINE:-none}')"
+    grep -a "\[SELFTEST-READING\]\|SELFTEST-LINESTEP\] FAIL not-scroll" "$LOG" 2>/dev/null | head -5
+    echo "LINE_STEP: FAIL nomode — the walk did not run in Scroll mode, so its presses were slide changes"
+    rm -f "$WALL"
+    exit 4
+fi
+
 # The press's own `abs` is the SETTLED position the previous press left (the
 # scenario spaces its presses past the glide's maximum), so the sequence of
 # `abs` values IS what the reader's eye was following.
@@ -127,6 +147,13 @@ while IFS= read -r line; do
     # 5) the per-frame skip trace (over the glide this press followed)
     if [ -n "$skips" ] && [ "$skips" != "0" ]; then
         echo "  FAIL press=$press: $skips skipped frame(s) in the glide — $(get glideSkipAt)"
+        FAILS=$((FAILS + 1))
+    fi
+    # 0) the mode cannot change under the walk: a press that reads mode=slide is a
+    #    slide change wearing a reading step's numbers.
+    press_mode="$(get mode)"
+    if [ -n "$press_mode" ] && [ "$press_mode" != "scroll" ]; then
+        echo "  FAIL press=$press: the walk ran in '$press_mode' mode — the wall's › changes slides there, not lines"
         FAILS=$((FAILS + 1))
     fi
     [ "$moved" = "true" ] || continue
@@ -212,4 +239,4 @@ if [ "$FAILS" -ne 0 ]; then
     echo "LINE_STEP: FAIL findings=$FAILS"
     exit 1
 fi
-echo "LINE_STEP: PASS $MOVED press(es) ($MOVED_BACK back up), one line a press, one passage, wall on the page, no skipped frame"
+echo "LINE_STEP: PASS $MOVED press(es) ($MOVED_BACK back up) in Scroll mode, one line a press, one passage, wall on the page, no skipped frame"

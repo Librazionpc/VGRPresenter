@@ -200,6 +200,11 @@ public:
     Q_INVOKABLE QString bootError() const;
     Q_INVOKABLE QStringList bootLog() const;
     Q_INVOKABLE QString health() const;
+    Q_INVOKABLE double templateLineHeightMultiplier(double value) const;
+    Q_INVOKABLE double templateLineSpacing(double value) const;
+    Q_INVOKABLE double templateLineHeightWithGap(double naturalHeightPx,
+                                                 double multiplier,
+                                                 double gapPx) const;
 
     // The forensics verdict as QML binds it (see the crashTooling* properties
     // above). Plain member reads: the members have exactly ONE writer

@@ -111,6 +111,9 @@ Item {
     // the table can only be measured in one of them.
     property real readingDrawnBoxW: 0
     property real readingDrawnBoxH: 0
+    // The signature of the last ReadingDrawn line this surface wrote — see
+    // noteReadingDrawn: the log is change-driven, not lineCount-driven.
+    property string readingDrawnLogged: ""
     function noteReadingDrawn(flow, block) {
         // ONLY THE READING BLOCK'S COLUMN IS THE DRAWN COLUMN: every text block
         // carries a flowText (hidden unless it is the one drawing the passage), and
@@ -128,6 +131,16 @@ Item {
         let svcSize = -1
         try { table = LiveOutputService.readingRunLineStarts(style).length } catch (e) { table = -2 }
         try { svcSize = LiveOutputService.readingRunSizeForStyle(style) } catch (e) { svcSize = -2 }
+        // CHANGE-DRIVEN, like the memo above: this fires from lineCountChanged, which
+        // a reading walk trips many times a second per surface (45k records in one
+        // measured session — a formatted string on the interface thread for numbers
+        // that had not moved). The line is worth writing when the answer CHANGES: a
+        // drawn column that stops matching the table, or a type size that moves.
+        const drawnSig = style + "|" + flow.lineCount + "|" + table + "|" + block.width
+            + "x" + block.height + "|" + Number(flow.font.pixelSize).toFixed(2)
+        if (root.readingDrawnLogged === drawnSig)
+            return
+        root.readingDrawnLogged = drawnSig
         EngineBridge.log("info", "ReadingDrawn",
             "style=" + (style === "" ? "(ref)" : style.slice(0, 8))
             + " drawn=" + flow.lineCount + " table=" + table

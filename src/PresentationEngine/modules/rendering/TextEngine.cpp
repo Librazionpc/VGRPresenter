@@ -2,171 +2,41 @@
 
 #include "core/logging/Logger.hpp"
 
+#include <QFont>
+#include <QFontDatabase>
+#include <QFontMetricsF>
+#include <QGuiApplication>
+#include <QImage>
+#include <QPainter>
+#include <QString>
+
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <mutex>
 
-// ---------------------------------------------------------------------------
-// Real system font backend (Windows GDI+) — BuildSystemAtlas/HasSystemFont/
-// SystemCharAdvance below. gdiplus.lib is already linked (CMakeLists' win32
-// block, alongside gdi32) for the app's own icon/bitmap handling, so this
-// needs no new dependency. GDI+ (not classic GDI) specifically because its
-// text rendering is alpha-aware — DrawString onto a 32bppARGB bitmap with
-// AntiAlias hinting produces a real per-pixel coverage alpha channel, which
-// is exactly the "white glyph, alpha = shape" atlas convention DrawGlyph's
-// tint-blit (GraphicsBackends.cpp) already expects; classic GDI's TextOut
-// does not populate alpha at all on a 32bpp DIB.
-// ---------------------------------------------------------------------------
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <gdiplus.h>
-#ifdef _MSC_VER
-#pragma comment(lib, "gdiplus.lib")
-#endif
-
 namespace {
-
-// One-time process-wide GDI+ init. Never shut down: this matches the
-// process lifetime and sidesteps GDI+'s well-known shutdown-ordering
-// fragility (GdiplusShutdown after static destructors have already run
-// elsewhere in the process can crash on exit) — an intentional, common
-// leak-on-purpose for an app-lifetime graphics subsystem.
-void EnsureGdiplusStarted() {
-    static bool started = [] {
-        Gdiplus::GdiplusStartupInput input;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, nullptr);
-        return true;
-    }();
-    (void)started;
-}
-
-// GDI+ objects (Font/FontFamily/Bitmap/Graphics) are NOT documented as
-// thread-safe for concurrent use, and this engine renders MULTIPLE passes
-// (the shared preview + one gated pass per styled output) on separate
-// threads — live evidence (TEMPDIAG) showed DrawTextObject firing from
-// three different thread ids concurrently. RenderCache's own mutex only
-// serializes within ONE cache instance; with a separate RenderEngine/
-// RenderCache per pass, two instances could still call INTO GDI+ at the
-// exact same moment. One process-wide lock around every GDI+ call below
-// (not just the cache's map bookkeeping) is the standard fix for this
-// class of bug — reported live as "text missing/black on first go-live,
-// shows correctly after reselecting" (a race, not a hard failure, exactly
-// matches unsynchronized GDI+ corruption rather than a real logic bug).
-std::mutex& GdiplusMutex() {
-    static std::mutex m;
-    return m;
-}
-
-std::string WideToUtf8(const wchar_t* wide) {
-    std::string out;
-    if (!wide) return out;
-    for (const wchar_t* p = wide; *p; ++p) {
-        const unsigned long cp = static_cast<unsigned long>(*p);
-        if (cp < 0x80) {
-            out.push_back(static_cast<char>(cp));
-        } else if (cp < 0x800) {
-            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        } else {
-            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        }
-    }
-    return out;
-}
-
-std::wstring Utf8ToWide(const std::string& s) {
-    if (s.empty()) return {};
-    const int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    if (len <= 0) return {};
-    std::wstring out(static_cast<size_t>(len), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), len);
-    return out;
-}
-
-// A ready-to-use GDI+ Font for (family, size, bold, italic), or nullptr if
-// the family doesn't resolve — the single point every method below asks
-// "is this font usable" through.
-std::unique_ptr<Gdiplus::Font> MakeGdiplusFont(const std::string& family, float sizePx,
-                                               bool bold, bool italic) {
-    EnsureGdiplusStarted();
-    const std::wstring wfamily = Utf8ToWide(family);
-    if (wfamily.empty()) return nullptr;
-    Gdiplus::FontFamily fontFamily(wfamily.c_str());
-    if (fontFamily.GetLastStatus() != Gdiplus::Ok) return nullptr;
-    int style = Gdiplus::FontStyleRegular;
-    if (bold) style |= Gdiplus::FontStyleBold;
-    if (italic) style |= Gdiplus::FontStyleItalic;
-    auto font = std::make_unique<Gdiplus::Font>(&fontFamily, sizePx, style, Gdiplus::UnitPixel);
-    if (font->GetLastStatus() != Gdiplus::Ok) return nullptr;
+QFont MakeQtFont(const std::string& family, float sizePx, bool bold, bool italic,
+                 QFont::Weight fontWeight, bool underline = false, bool strikeout = false)
+{
+    QFont font(QString::fromUtf8(family.data(), static_cast<qsizetype>(family.size())));
+    font.setPixelSize(bps::rendering::FontManager::QtPixelSize(sizePx));
+    font.setWeight(bold ? QFont::Bold : fontWeight);
+    font.setItalic(italic);
+    font.setUnderline(underline);
+    font.setStrikeOut(strikeout);
     return font;
 }
 
-// Tight (no paragraph padding) string format — GDI+'s default MeasureString
-// pads for line-break fitting, which over-reports single-glyph width; the
-// well-known fix is GenericTypographic + these two flags.
-const Gdiplus::StringFormat& TightFormat() {
-    // GDI+'s StringFormat copy ctor is private — Clone() (returning a
-    // generic Gdiplus::Image*-style base) is the documented way to get a
-    // mutable copy of the built-in GenericTypographic format.
-    static const Gdiplus::StringFormat* fmt = [] {
-        auto* f = Gdiplus::StringFormat::GenericTypographic()->Clone();
-        f->SetFormatFlags(f->GetFormatFlags() | Gdiplus::StringFormatFlagsMeasureTrailingSpaces
-                          | Gdiplus::StringFormatFlagsNoWrap);
-        return f;
-    }();
-    return *fmt;
-}
-
-// True when the font actually OWNS `ch`'s glyph — GDI, marking
-// non-existing glyphs. GDI+ silently draws a font's .notdef for characters
-// it lacks, and .notdef is often BLANK ink: that is exactly how "TT Nooks
-// Trial" (a display font with no U+2019 in its cmap) made every folded
-// apostrophe vanish from the engine outputs while the QML tiles (Qt falls
-// back across fonts) kept showing them.
-bool FontOwnsGlyph(const std::string& family, bool bold, wchar_t ch) {
-    HDC hdc = CreateCompatibleDC(nullptr);
-    if (!hdc) return true;   // can't ask: assume yes (draw as before)
-    // Glyph PRESENCE is a property of the font's cmap, not of the size —
-    // a fixed height keeps this cheap and exact.
-    HFONT f = CreateFontW(-24, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE,
-                          FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                          CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                          DEFAULT_PITCH | FF_DONTCARE, Utf8ToWide(family).c_str());
-    if (!f) {
-        DeleteDC(hdc);
-        return true;
-    }
-    HFONT old = static_cast<HFONT>(SelectObject(hdc, f));
-    WORD index = 0;
-    const BOOL ok = GetGlyphIndicesW(hdc, &ch, 1, &index, GGI_MARK_NONEXISTING_GLYPHS);
-    SelectObject(hdc, old);
-    DeleteObject(f);
-    DeleteDC(hdc);
-    return ok && index != 0xFFFF;
-}
-
-// The wide char a codepoint's atlas cell draws AND measures: the folded
-// apostrophe renders as the typographic U+2019 WHEN the font owns it, else
-// as the ASCII quote it does have. Every site (atlas measure pass, atlas
-// draw pass, advance batch) must ask through THIS helper so wrap widths and
-// rasterized ink stay in agreement for fonts both with and without the
-// curly glyph. Call it ONCE per operation and reuse the result per loop —
-// it runs a font-metrics query.
-wchar_t AtlasCharFor(const std::string& family, bool bold, uint8_t cp) {
-    if (cp == 0x27)
-        return FontOwnsGlyph(family, bold, L'\u2019') ? L'\u2019' : L'\'';
-    return static_cast<wchar_t>(cp);
+QString QtGlyphFor(uint8_t codepoint)
+{
+    if (codepoint == 0x27)
+        return QString(QChar(0x2019));
+    return QString(QChar(static_cast<ushort>(codepoint)));
 }
 
 } // namespace
-#endif // _WIN32
 
 namespace bps::rendering {
 
@@ -341,6 +211,12 @@ FontGlyph FontManager::Glyph(uint8_t codepoint, float sizePx) const {
     return g;
 }
 
+int FontManager::QtPixelSize(float sizePx) {
+    if (!std::isfinite(sizePx) || sizePx < 1.0f)
+        return 1;
+    return static_cast<int>(sizePx);
+}
+
 RgbaImage FontManager::BuildAtlas(float sizePx,
                                   std::map<uint8_t, FontGlyph>& outGlyphs) const {
     const int cellW = kGlyphWidth;
@@ -389,225 +265,135 @@ RgbaImage FontManager::BuildAtlas(float sizePx,
     return atlas;
 }
 
-#ifdef _WIN32
-bool FontManager::HasSystemFont(const std::string& family) const {
-    std::lock_guard<std::mutex> lock(GdiplusMutex());
-    return MakeGdiplusFont(family, 24.0f, false, false) != nullptr;
-}
-
-float FontManager::SystemCharAdvance(const std::string& family, float sizePx, bool bold,
-                                     bool italic, uint8_t codepoint) const {
-    std::lock_guard<std::mutex> lock(GdiplusMutex());
-    auto font = MakeGdiplusFont(family, sizePx, bold, italic);
-    if (!font) return 0.0f;
-    // A 1x1 bitmap's Graphics is a real, valid measuring context (GDI+
-    // measurement doesn't rasterize into it — a device context is just
-    // where the DPI/transform come from) without needing a window or the
-    // full atlas bitmap this method is called ahead of building.
-    Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
-    Gdiplus::Graphics g(&probe);
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    // Same apostrophe rule the atlas draws by (AtlasCharFor) — this single-
-    // char path measured the straight quote while the batch path measured
-    // U+2019, disagreeing with the ink whenever a style named a font
-    // lacking the curly glyph.
-    const wchar_t ch = AtlasCharFor(family, bold, codepoint);
-    Gdiplus::RectF bounds;
-    g.MeasureString(&ch, 1, font.get(), Gdiplus::PointF(0, 0), &TightFormat(), &bounds);
-    return bounds.Width;
-}
-
-std::vector<float> FontManager::SystemCharAdvances(const std::string& family, float sizePx,
-                                                    bool bold, bool italic,
-                                                    const std::string& text) const {
-    std::lock_guard<std::mutex> lock(GdiplusMutex());
-    auto font = MakeGdiplusFont(family, sizePx, bold, italic);
-    if (!font) return {};
-    Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
-    Gdiplus::Graphics g(&probe);
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    std::vector<float> out;
-    out.reserve(text.size());
-    // Folded apostrophes measure as the TYPOGRAPHIC glyph they'll draw as
-    // (AtlasCharFor) so wrapped line widths match the rasterized output byte
-    // for byte — and a font without U+2019 measures the ASCII quote it will
-    // actually render, never a blank .notdef advance.
-    const wchar_t quote = AtlasCharFor(family, bold, 0x27);
-    for (unsigned char c : text) {
-        const wchar_t ch = c == 0x27 ? quote : static_cast<wchar_t>(c);
-        Gdiplus::RectF bounds;
-        g.MeasureString(&ch, 1, font.get(), Gdiplus::PointF(0, 0), &TightFormat(), &bounds);
-        out.push_back(std::max(1.0f, bounds.Width));
-    }
-    return out;
-}
-
-bool FontManager::SystemLineMetrics(const std::string& family, float sizePx, bool bold,
-                                    bool italic, LineMetrics& out) const {
-    std::lock_guard<std::mutex> lock(GdiplusMutex());
-    auto font = MakeGdiplusFont(family, sizePx, bold, italic);   // resolves the family
-    if (!font) return false;
-    Gdiplus::FontFamily ff;
-    if (font->GetFamily(&ff) != Gdiplus::Ok) return false;
-    const int fstyle = font->GetStyle();
-    if (ff.GetLastStatus() != Gdiplus::Ok || ff.GetEmHeight(fstyle) <= 0) return false;
-    // Font design units -> pixels at THIS raster size (the design metrics are
-    // the same font data at every size; the em height in units is not). The
-    // metrics are queried for the font's own style — a synthesized bold/italic
-    // leaves the family's vertical metrics alone, but querying with the real
-    // style keeps the call honest for families that ship per-style metrics.
-    const float scale = sizePx / static_cast<float>(ff.GetEmHeight(fstyle));
-    const float step = static_cast<float>(ff.GetLineSpacing(fstyle)) * scale;
-    const float ink = (static_cast<float>(ff.GetCellAscent(fstyle))
-                       + static_cast<float>(ff.GetCellDescent(fstyle))) * scale;
-    if (step <= 0.0f || ink <= 0.0f) return false;
-    out.baselineStep = step;
-    out.inkHeight = ink;
-    return true;
-}
-
 RgbaImage FontManager::BuildSystemAtlas(const std::string& family, float sizePx, bool bold,
-                                        bool italic, std::map<uint8_t, FontGlyph>& outGlyphs) const {
-    std::lock_guard<std::mutex> lock(GdiplusMutex());
-    auto font = MakeGdiplusFont(family, sizePx, bold, italic);
-    if (!font) return {};
-
-    // Pass 1: measure every glyph's real advance + a shared cell size (the
-    // tallest/widest glyph at this size+weight) so the atlas grid is sized
-    // once, like BuildAtlas's own two-pass shape (measure via scale, draw
-    // via cells) — a per-glyph-sized packer would draw correctly but is
-    // more atlas-management complexity than this ASCII-only, 96-glyph atlas
-    // needs.
-    Gdiplus::Bitmap probe(1, 1, PixelFormat32bppARGB);
-    Gdiplus::Graphics measureG(&probe);
-    measureG.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+                                        bool italic, std::map<uint8_t, FontGlyph>& outGlyphs,
+                                        QFont::Weight fontWeight, bool underline, bool strikeout) const {
+    if (!HasSystemFont(family) || !std::isfinite(sizePx) || sizePx <= 0.0f)
+        return {};
+    const QFont font = MakeQtFont(family, sizePx, bold, italic, fontWeight, underline, strikeout);
+    const QFontMetricsF metrics(font);
+    std::map<uint8_t, QString> glyphs;
     std::map<uint8_t, float> advances;
-    float cellW = 1.0f, cellH = sizePx * 1.4f;   // line-height-ish floor for descenders
-    const wchar_t quote = AtlasCharFor(family, bold, 0x27);
+    qreal leftExtent = 0.0;
+    qreal rightExtent = 0.0;
+    qreal bottomExtent = metrics.height();
     for (int cp = 32; cp <= 126; ++cp) {
-        const wchar_t ch = cp == 0x27 ? quote : static_cast<wchar_t>(cp);
-        Gdiplus::RectF bounds;
-        measureG.MeasureString(&ch, 1, font.get(), Gdiplus::PointF(0, 0), &TightFormat(), &bounds);
-        const float adv = std::max(1.0f, bounds.Width);
+        const QString glyph = QtGlyphFor(static_cast<uint8_t>(cp));
+        const QRectF bounds = metrics.tightBoundingRect(glyph);
+        const float adv = std::max(1.0f, static_cast<float>(metrics.horizontalAdvance(glyph)));
+        glyphs[static_cast<uint8_t>(cp)] = glyph;
         advances[static_cast<uint8_t>(cp)] = adv;
-        cellW = std::max(cellW, adv);
-        cellH = std::max(cellH, bounds.Height);
+        leftExtent = std::min(leftExtent, bounds.left());
+        rightExtent = std::max({rightExtent, static_cast<qreal>(adv), bounds.right()});
+        bottomExtent = std::max(bottomExtent, metrics.ascent() + bounds.bottom());
     }
-    const int scW = static_cast<int>(cellW + 1.5f);
-    const int scH = static_cast<int>(cellH + 1.5f);
-    // The MEASURE gives the advance box (GDI+'s typographic format reports
-    // X=0/Y=0 with Width = the real advance — verified against GDI's own
-    // GetCharWidth32), but some ink lands OUTSIDE it: round letters overshoot
-    // their side bearings, and display faces can run their ink PAST the
-    // advance ("TT Nooks Trial"'s 'W' rasterizes 98px wide at size 90 while
-    // its advance is 95.85). A cell equal to the advance box therefore cut
-    // that ink off — the glyph looked clipped/narrow on the engine-rendered
-    // outputs (NDI/HDMI read the engine's frames), which is why they read
-    // differently from the QML preview drawn by Qt's own text stack. The cell
-    // is the advance box PLUS this pad, and the pad offset is published as
-    // the glyph's bearing so the painter puts the advance origin back on the
-    // pen (see RenderEngine::DrawTextObject) — painted position unchanged,
-    // only what the cell was allowed to keep.
     constexpr int kCellPad = 3;
-    const int cellPx = scW + kCellPad * 2;   // sampled cell size (advance + pad)
-    const int cellPy = scH + kCellPad * 2;
+    const int penX = kCellPad - static_cast<int>(std::floor(leftExtent));
+    const int cellPx = static_cast<int>(std::ceil(rightExtent - leftExtent)) + kCellPad * 2;
+    const int cellPy = static_cast<int>(std::ceil(bottomExtent)) + kCellPad * 2;
+    const qreal baselineY = kCellPad + metrics.ascent();
     const int cols = 16;
-    const int rows = 6;   // covers 96 glyphs (32..126), same layout as BuildAtlas
-    // Cell gap: GDI+ glyph ink spills past its measured advance/height
-    // (antialiasing + overshoot), and a few glyphs poke LEFT of their own
-    // origin — 'j'/'f' swing their descender/hook back under the previous
-    // character (measured: 9px left of the origin at size 90, i.e. ~0.10em).
-    // The old 1px packing let that spill cross into the NEIGHBOR cell's blit
-    // region — every glyph that followed such a character carried a small
-    // foreign tick (the stray "apostrophe" marks under ti/nt/ro in live text).
-    // The gap therefore has to SCALE with the raster size: a fixed 8px absorbs
-    // it at 90px and is crossed again at 200px, where the same poke is 20px.
-    // 0.12em covers the measured poke with margin.
-    constexpr int kMinCellGap = 8;
-    const int kCellGap = std::max(kMinCellGap, static_cast<int>(sizePx * 0.12f));
-
-    Gdiplus::Bitmap sheet(cols * (cellPx + kCellGap), rows * (cellPy + kCellGap), PixelFormat32bppARGB);
-    Gdiplus::Graphics draw(&sheet);
-    draw.Clear(Gdiplus::Color(0, 0, 0, 0));
-    draw.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    draw.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
-    Gdiplus::SolidBrush white(Gdiplus::Color(255, 255, 255, 255));
+    constexpr int rows = 6;
+    constexpr int cellGap = 2;
+    QImage sheet(cols * (cellPx + cellGap), rows * (cellPy + cellGap),
+                 QImage::Format_ARGB32);
+    if (sheet.isNull())
+        return {};
+    sheet.fill(Qt::transparent);
+    QPainter painter(&sheet);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+    painter.setFont(font);
+    painter.setPen(Qt::white);
 
     int cell = 0;
     for (int cp = 32; cp <= 126 && cell < cols * rows; ++cp, ++cell) {
-        const int cx = (cell % cols) * (cellPx + kCellGap);
-        const int cy = (cell / cols) * (cellPy + kCellGap);
-        // The apostrophe cell draws the TYPOGRAPHIC U+2019 glyph, not the
-        // ASCII straight quote. FoldToAtlasAscii maps every ’ the transcripts
-        // use onto 0x27 so the byte-wise draw loop always hits the atlas — but
-        // rasterizing the straight quote made every one of them read as a big
-        // harsh tick (the live "the ' is too much" report) next to the QML
-        // tiles, which render the real curly glyph via Qt. Same key, prettier
-        // ink — WHEN the font owns it: a display font without U+2019 drew
-        // .notdef (blank) here and the apostrophe vanished entirely;
-        // AtlasCharFor falls back to the ASCII quote so every font shows
-        // SOMETHING for the folded apostrophe, and the measure pass above
-        // made the identical choice.
-        const wchar_t ch = cp == 0x27 ? quote : static_cast<wchar_t>(cp);
-        // The glyph is drawn at the ADVANCE origin (cell + pad) and the whole
-        // cell — pad included — is sampled, so ink that overshoots the advance
-        // is kept.
-        draw.DrawString(&ch, 1, font.get(),
-                        Gdiplus::PointF(static_cast<float>(cx + kCellPad),
-                                        static_cast<float>(cy + kCellPad)),
-                        &TightFormat(), &white);
+        const int cx = (cell % cols) * (cellPx + cellGap);
+        const int cy = (cell / cols) * (cellPy + cellGap);
+        painter.drawText(QPointF(cx + penX, cy + baselineY),
+                         glyphs[static_cast<uint8_t>(cp)]);
         FontGlyph g;
         g.codepoint = static_cast<uint8_t>(cp);
         g.x = cx;
         g.y = cy;
         g.width = cellPx;
         g.height = cellPy;
-        // Cell origin relative to the pen: negative = the cell starts LEFT/ABOVE
-        // the advance origin (the pad), so the painter re-anchors by this.
-        g.bearingX = -kCellPad;
+        g.bearingX = -penX;
         g.bearingY = -kCellPad;
-        g.advance = static_cast<int>(advances[static_cast<uint8_t>(cp)] + 0.5f);
+        g.advance = advances[static_cast<uint8_t>(cp)];
         outGlyphs[static_cast<uint8_t>(cp)] = g;
     }
 
-    // Read the bitmap back as the engine's own RGBA8 (0xAABBGGRR) format —
-    // GDI+'s 32bppARGB scan0 is BGRA byte order in memory (little-endian),
-    // so R and B swap on the way out (see Color::Pack's own comment for the
-    // engine's convention; ARGB32 vs RGBA8888 mixed up the same two channels
-    // the LivePreviewProvider comment already flags as an easy mistake here).
-    Gdiplus::BitmapData data;
-    Gdiplus::Rect full(0, 0, sheet.GetWidth(), sheet.GetHeight());
-    if (sheet.LockBits(&full, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &data) != Gdiplus::Ok)
-        return {};
+    // Convert Qt's ARGB pixels to the engine's 0xAABBGGRR texture format.
+    painter.end();
     RgbaImage atlas;
-    atlas.width = static_cast<int>(sheet.GetWidth());
-    atlas.height = static_cast<int>(sheet.GetHeight());
+    atlas.width = sheet.width();
+    atlas.height = sheet.height();
     atlas.pixels.resize(static_cast<size_t>(atlas.width) * atlas.height);
-    const auto* src = static_cast<const uint8_t*>(data.Scan0);
     for (int y = 0; y < atlas.height; ++y) {
-        const uint8_t* row = src + static_cast<size_t>(y) * data.Stride;
         for (int x = 0; x < atlas.width; ++x) {
-            const uint8_t b = row[x * 4 + 0], gCh = row[x * 4 + 1],
-                          r = row[x * 4 + 2], a = row[x * 4 + 3];
+            const QRgb pixel = sheet.pixel(x, y);
             atlas.pixels[static_cast<size_t>(y) * atlas.width + x] =
-                (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(b) << 16)
-                | (static_cast<uint32_t>(gCh) << 8) | static_cast<uint32_t>(r);
+                (static_cast<uint32_t>(qAlpha(pixel)) << 24)
+                | (static_cast<uint32_t>(qBlue(pixel)) << 16)
+                | (static_cast<uint32_t>(qGreen(pixel)) << 8)
+                | static_cast<uint32_t>(qRed(pixel));
         }
     }
-    sheet.UnlockBits(&data);
     return atlas;
 }
-#else
-bool FontManager::HasSystemFont(const std::string&) const { return false; }
-float FontManager::SystemCharAdvance(const std::string&, float, bool, bool, uint8_t) const { return 0.0f; }
-std::vector<float> FontManager::SystemCharAdvances(const std::string&, float, bool, bool,
-                                                    const std::string&) const { return {}; }
-bool FontManager::SystemLineMetrics(const std::string&, float, bool, bool, LineMetrics&) const {
-    return false;
+bool FontManager::HasSystemFont(const std::string& family) const {
+    if (!QGuiApplication::instance() || family.empty())
+        return false;
+    const QString requested = QString::fromUtf8(family.data(), static_cast<qsizetype>(family.size()));
+    const auto families = QFontDatabase::families();
+    return std::any_of(families.begin(), families.end(), [&requested](const QString& installed) {
+        return installed.compare(requested, Qt::CaseInsensitive) == 0;
+    });
 }
-RgbaImage FontManager::BuildSystemAtlas(const std::string&, float, bool, bool,
-                                        std::map<uint8_t, FontGlyph>&) const { return {}; }
-#endif
+
+float FontManager::SystemCharAdvance(const std::string& family, float sizePx, bool bold,
+                                     bool italic, uint8_t codepoint, QFont::Weight fontWeight) const {
+    const auto advances = SystemCharAdvances(
+        family, sizePx, bold, italic, std::string(1, static_cast<char>(codepoint)), fontWeight);
+    return advances.empty() ? 0.0f : advances.front();
+}
+
+std::vector<float> FontManager::SystemCharAdvances(const std::string& family, float sizePx,
+                                                    bool bold, bool italic,
+                                                    const std::string& text,
+                                                    QFont::Weight fontWeight) const {
+    if (!HasSystemFont(family) || !std::isfinite(sizePx) || sizePx <= 0.0f)
+        return {};
+    const QFont font = MakeQtFont(family, sizePx, bold, italic, fontWeight);
+    const QFontMetricsF metrics(font);
+    std::vector<float> out;
+    out.reserve(text.size());
+    for (unsigned char c : text) {
+        const QString glyph = QtGlyphFor(c);
+        out.push_back(std::max(1.0f, static_cast<float>(metrics.horizontalAdvance(glyph))));
+    }
+    return out;
+}
+
+bool FontManager::SystemLineMetrics(const std::string& family, float sizePx, bool bold,
+                                    bool italic, LineMetrics& out,
+                                    QFont::Weight fontWeight) const {
+    if (!HasSystemFont(family) || !QGuiApplication::instance()
+        || !std::isfinite(sizePx) || sizePx <= 0.0f)
+        return false;
+
+    const QFont font = MakeQtFont(family, sizePx, bold, italic, fontWeight);
+    const QFontMetricsF metrics(font);
+    const qreal height = metrics.height();
+    const qreal lineSpacing = metrics.lineSpacing();
+    if (!(height > 0.0) || !(lineSpacing > 0.0))
+        return false;
+
+    out.baselineStep = static_cast<float>(lineSpacing);
+    out.inkHeight = static_cast<float>(height);
+    return true;
+}
 
 std::string FontManager::SubstituteFamily(std::string_view family) const {
     const std::string name(family);
@@ -619,10 +405,8 @@ std::string FontManager::SubstituteFamily(std::string_view family) const {
         const auto it = substitutes_.find(name);
         if (it != substitutes_.end()) return it->second;
     }
-#ifdef _WIN32
-    // The resolve itself is GDI+ work (its own lock, its own font cache) and the
-    // logger is another engine singleton — both run OUTSIDE the cache lock, which
-    // only ever guards the map lookup/insert above and below.
+    // Font resolution uses the same Qt font database as the previews. Logging
+    // stays outside the cache lock.
     std::string resolved = name;
     if (!HasSystemFont(name)) {
         // THE HOST'S OWN UI FACE, not a literal. Nothing in this renderer needs to
@@ -640,12 +424,6 @@ std::string FontManager::SubstituteFamily(std::string_view family) const {
                         name, resolved.empty() ? "the builtin bitmap font" : resolved),
             "TextEngine");
     }
-#else
-    // No system-font backend on this platform, so there is nothing to substitute
-    // WITH: keep the requested name and let the callers' own HasSystemFont gate
-    // keep them on the builtin font, exactly as before.
-    const std::string resolved = name;
-#endif
     {
         std::lock_guard<std::mutex> lock(substituteMutex_);
         substitutes_[name] = resolved;
@@ -661,18 +439,9 @@ std::string FontManager::SystemUiFamily() const {
     // Asked OUTSIDE the cache lock: it is a system query (and a font-set probe),
     // not map work.
     std::string family;
-#ifdef _WIN32
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof(ncm);
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0) &&
-        ncm.lfMessageFont.lfFaceName[0] != L'\0') {
-        family = WideToUtf8(ncm.lfMessageFont.lfFaceName);
-    }
-    // The shell's font is a NAME, not a promise: it has to be drawable through
-    // this backend too, or the callers keep the builtin bitmap rather than
-    // handing GDI+ a family it cannot open.
+    if (QGuiApplication::instance())
+        family = QGuiApplication::font().family().toUtf8().toStdString();
     if (!family.empty() && !HasSystemFont(family)) family.clear();
-#endif
     {
         std::lock_guard<std::mutex> lock(substituteMutex_);
         systemUiFamily_ = family;
@@ -741,8 +510,7 @@ namespace {
 // the same characters the atlas draw loop will later step through, and
 // keeps layout cache keys (raw text) deduplicating lines that differ only
 // in punctuation flavor. Runs are scanned with a hand-rolled decoder
-// rather than std::codecvt (deprecated in C++17) or MultiByteToWideChar
-// (Windows-only; this TU also builds for the test host).
+// rather than std::codecvt (deprecated in C++17).
 std::string FoldToAtlasAscii(const std::string& text) {
     bool asciiOnly = true;
     for (unsigned char c : text)
@@ -840,7 +608,8 @@ std::vector<float> RealAdvances(const std::string& text, const TextStyle& style,
     // estimate while painting a real font is its own mis-wrap).
     const std::string family = fonts.SubstituteFamily(style.fontId);
     if (family.empty() || !fonts.HasSystemFont(family)) return {};
-    return fonts.SystemCharAdvances(family, style.size, style.bold, style.italic, text);
+    return fonts.SystemCharAdvances(family, style.size, style.bold, style.italic, text,
+                                    style.fontWeight);
 }
 } // namespace
 
@@ -902,7 +671,7 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     const std::string family = fonts.SubstituteFamily(style.fontId);
     const bool haveReal = !family.empty() && fonts.HasSystemFont(family)
                           && fonts.SystemLineMetrics(family, style.size, style.bold,
-                                                     style.italic, fm);
+                                                     style.italic, fm, style.fontWeight);
     // BUILTIN FALLBACK: one line box, NOT lineHeight — lineHeight now includes
     // lineGap, and a gap is air BETWEEN line boxes: letting the last line's ink
     // carry it measured a taller block than the frames paint (and the fit solver
@@ -953,10 +722,10 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
         // than the wrap width is hard-broken per character as a last resort.
         std::string current;
         float currentWidth = 0.0f;
-        auto flush = [&](const std::string& line, float width) {
+        auto flush = [&](const std::string& line, float width, bool paragraphEnd) {
             result.totalWidth = std::max(result.totalWidth, width);
             result.totalHeight += lineHeight;
-            result.lines.push_back({line, width});
+            result.lines.push_back({line, width, paragraphEnd});
         };
         size_t i = 0;
         while (i < rawLine.size()) {
@@ -969,7 +738,7 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
                                    + style.wordSpacing;
             if (!current.empty()) {
                 if (currentWidth + spaceWidth + wordWidth > style.wrapWidth) {
-                    flush(current, currentWidth);
+                    flush(current, currentWidth, false);
                     current = word;
                     currentWidth = wordWidth;
                 } else {
@@ -982,7 +751,7 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
                 for (size_t k = i; k < j; ++k) {
                     const float chW = charAdvance(k);
                     if (currentWidth + chW > style.wrapWidth && !current.empty()) {
-                        flush(current, currentWidth);
+                        flush(current, currentWidth, false);
                         current.clear();
                         currentWidth = 0.0f;
                     }
@@ -996,7 +765,7 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
             i = (j < rawLine.size()) ? j + 1 : j;   // skip the breaking space
         }
         if (!current.empty())
-            flush(current, currentWidth);
+            flush(current, currentWidth, true);
     }
     // Baseline-grid correction: every line pushed a full `lineHeight` step,
     // but the LAST line contributes only its ink (ascent+descent for real

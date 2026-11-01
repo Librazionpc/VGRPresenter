@@ -1,4 +1,6 @@
 #include "modules/presentation/SceneBuilder.hpp"
+#include "modules/presentation/TextFormat.hpp"
+#include "modules/presentation/TemplateTextMetrics.hpp"
 
 #include "core/logging/Logger.hpp"
 #include "core/config/Json.hpp"
@@ -26,6 +28,9 @@
 #include <format>
 #include <map>
 #include <mutex>
+#include <QFont>
+#include <QTextBoundaryFinder>
+#include <QString>
 #include <set>
 #include <string_view>
 
@@ -72,6 +77,36 @@ std::string MetaString(std::string_view json, std::string_view key) {
     const size_t end = json.find('"', start);
     if (end == std::string_view::npos) return {};
     return std::string(json.substr(start, end - start));
+}
+
+std::string ApplyTextCase(std::string_view text, std::string_view textCase) {
+    const QString input = QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+    QString output = input;
+    if (textCase == "upper") {
+        output = input.toUpper();
+    } else if (textCase == "lower") {
+        output = input.toLower();
+    } else if (textCase == "capitalize") {
+        output = input.toLower();
+        QTextBoundaryFinder finder(QTextBoundaryFinder::Word, output);
+        qsizetype start = 0;
+        while (true) {
+            const qsizetype end = finder.toNextBoundary();
+            if (end < 0)
+                break;
+            for (qsizetype i = start; i < end; ++i) {
+                if (output.at(i).isLetterOrNumber()) {
+                    output[i] = output.at(i).toTitleCase();
+                    break;
+                }
+            }
+            start = end;
+        }
+    } else {
+        return std::string(text);
+    }
+    const QByteArray utf8 = output.toUtf8();
+    return std::string(utf8.constData(), static_cast<size_t>(utf8.size()));
 }
 // Does the meta NAME this key at all? MetaString cannot tell an empty value from
 // a missing key, and one caller must: the fill writes `refLast` as "" on every
@@ -122,6 +157,7 @@ std::string MetaBoolToken(std::string_view json, std::string_view key) {
 rendering::TextAlign ParseAlign(std::string_view a) {
     if (a == "left") return rendering::TextAlign::Left;
     if (a == "right") return rendering::TextAlign::Right;
+    if (a == "justify") return rendering::TextAlign::Justify;
     return rendering::TextAlign::Center;   // canvas default (see the call site)
 }
 rendering::TextVAlign ParseVAlign(std::string_view a) {
@@ -905,7 +941,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
     // one value, mirrored by qml/settings/MetadataFields.qml's
     // naturalLineHeight (the panel, the canvas and the tiles all read it there);
     // the derivation below is where it becomes an additive lineSpacing.
-    constexpr double kNaturalLineHeight = 1.0;
+    constexpr double kNaturalLineHeight = template_text_metrics::kNaturalLineHeight;
     // THE SPLIT COMES FROM ITS ONE HOME — the same call the UI's live preview
     // makes, so the tile and every real output read one design the same way.
     // `demoted`/`stageCovered` below are this build's report of it.
@@ -1004,8 +1040,26 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 for (char& ch : textBody)
                     if (ch == '\n' || ch == '\r') ch = ' ';
             }
+            const bool isFlowBlock =
+                !flowText.empty() && !textBody.empty() && flowText.rfind(textBody, 0) == 0;
+            if (!isFlowBlock) {
+                textBody = ApplyTextCase(
+                    bps::presentation::ApplyList(textBody, MetaString(block.metaJson, "list")),
+                    MetaString(block.metaJson, "textCase"));
+            }
+            const float horizontalPaddingPx = static_cast<float>(
+                std::max(0.0, block.style.padding) * size.width / kBlockStageW);
+            const float verticalPaddingPx = static_cast<float>(
+                std::max(0.0, block.style.padding) * size.height / kBlockStageH);
+            const float horizontalPadding = std::min(horizontalPaddingPx, rect.width * 0.5f);
+            const float verticalPadding = isFlowBlock
+                ? std::min(verticalPaddingPx, rect.height * 0.5f) : 0.0f;
+            const rendering::Rect textBounds(
+                rect.x + horizontalPadding, rect.y + verticalPadding,
+                rect.width - horizontalPadding * 2.0f,
+                rect.height - verticalPadding * 2.0f);
             auto text = std::make_shared<rendering::TextObject>(objId, objId, textBody);
-            text->SetBounds(rect);
+            text->SetBounds(textBounds);
             auto styleComp = std::make_shared<rendering::TextStyleComponent>();
             styleComp->style.size = static_cast<float>(
                 MetaNumber(block.metaJson, "fontSize", kDefaultTextFontSize) * size.height / kBlockStageH);
@@ -1015,6 +1069,15 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             styleComp->style.align = ParseAlign(MetaString(block.metaJson, "align"));
             styleComp->style.valign = ParseVAlign(MetaString(block.metaJson, "verticalAlign"));
             styleComp->style.bold = MetaBool(block.metaJson, "bold");
+            {
+                const std::string weight = MetaString(block.metaJson, "fontWeight");
+                styleComp->style.fontWeight = weight == "Regular" ? QFont::Normal
+                    : weight == "SemiBold" ? QFont::DemiBold
+                    : weight == "Bold" ? QFont::Bold
+                    : QFont::Medium;
+            }
+            styleComp->style.underline = MetaBool(block.metaJson, "underline");
+            styleComp->style.strikeout = MetaBool(block.metaJson, "strikethrough");
             // CANVAS-DEFAULT ALIGNMENT MISMATCH: EditableCanvasLabel centers
             // BOTH axes when a meta field is absent (TextItemPanel:
             // align ?? "center", verticalAlign ?? "center"), but ParseAlign
@@ -1025,7 +1088,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // showed the same box centered (part of the NDI "text not fit"
             // report). Missing values now read as Center/Middle, matching
             // the canvas; an explicit "left"/"top" still wins.
-            // fontId: the real system font TextEngine's GDI+ backend tries
+            // fontId: the real system font TextEngine's Qt backend tries
             // first (RenderEngine::DrawTextObject / GlyphAtlas), degrading
             // to the builtin bitmap font only when it can't resolve — the
             // block's own fontFamily when the canvas set one, else the
@@ -1058,7 +1121,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             }
             styleComp->style.italic = MetaBool(block.metaJson, "italic");
             styleComp->style.wrap = !oneLine;
-            styleComp->style.wrapWidth = oneLine ? 0.0f : text->Bounds().width;
+            styleComp->style.wrapWidth = oneLine ? 0.0f : textBounds.width;
             // The typography knobs the canvas/DesignPreview honor and the
             // engine silently dropped — lineHeight (no added spacing: the
             // font's own line height, an empty line of black serif made a
@@ -1066,57 +1129,33 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // letter-spacing is PER GAP (n-1 gaps for n glyphs), the same
             // convention TextLayout's width math uses.
             //
-            // lineHeight → lineSpacing: Qt renders Text.lineHeight as a
-            // PROPORTIONAL multiplier of the font's OWN natural line height
-            // (a per-font number — its ascent/descent/lineGap), so the
-            // engine's additive lineSpacing must come from the font's real
-            // metrics too: lineStep = lineHeight · naturalStep, lineSpacing
-            // = lineStep − fontSize. The old (lineHeight−1)·fontSize formula
-            // forced every font onto the SAME line grid; a font with taller
-            // natural metrics (most display serifs vs Segoe UI) drew lines
-            // FARTHER apart than the fit solver measured — block taller than
-            // the box, last verse line clipped at the frame bottom with one
-            // font and fine with another (the "auto size/grow breaks when I
-            // change the font" report; the screenshots pair: same verse,
-            // same box, one font fits, one clips). Unresolvable metrics
-            // (builtin font, off-Windows) keep the legacy formula.
+            // TemplateTextMetrics owns the line-height defaults and conversion
+            // used by the QML preview, live fit solver, and this renderer.
+            // Each renderer still supplies its own natural font measurement;
+            // the shared helper applies the same multiplier and spacing rule.
             {
-                // THE ONE LINE-HEIGHT RULE, shared with every QML surface:
-                // `lineHeight` is a PROPORTIONAL multiplier of the font's own
-                // natural line height (Qt's Text.lineHeight model), and a
-                // non-positive value — 0, or a template that never named it —
-                // means THE FONT'S OWN spacing, nothing added. Its QML twin is
-                // MetadataFields.naturalLineHeight / lineHeight(meta); the two
-                // must stay equal, because three surfaces draw the same block.
-                //
-                // What this replaces: the engine defaulted a missing field to
-                // 1.2 — while the Text panel showed 0 for the very same item
-                // and the canvas/previews drew their own 1.2 — so a template
-                // that said "0" (or said nothing) got ~1.2x the natural
-                // spacing on air with no visible value that produced it. A
-                // stored 0 now reads as natural, exactly as the panel shows it;
-                // the old formula made it `baselineStep * 0 - size`, a ZERO
-                // line step that stacked every line on one baseline.
-                double lh = MetaNumber(block.metaJson, "lineHeight", kNaturalLineHeight);
-                if (!(lh > 0.0)) lh = kNaturalLineHeight;
+                const double lh = template_text_metrics::lineHeightMultiplier(
+                    MetaNumber(block.metaJson, "lineHeight", kNaturalLineHeight));
                 const float sizePx = styleComp->style.size;   // the output-scaled font size
                 // THE FACE IT WILL ACTUALLY BE DRAWN WITH, not the raw name: a
                 // design that names a font this machine does not have is painted
                 // with the substitute (FontManager::SubstituteFamily), so the
                 // spacing must come from THAT font — measuring the missing name
-                // returns no metrics and fell back to the legacy formula, which
-                // is a line-height the real face does not have.
+                // returns no metrics and falls back to the authored-size estimate.
                 const auto& fonts = rendering::RenderEngine::Instance().Fonts();
                 const std::string family = fonts.SubstituteFamily(styleComp->style.fontId);
                 rendering::FontManager::LineMetrics lm{};
                 if (!family.empty() && fonts.SystemLineMetrics(
                         family, sizePx, styleComp->style.bold,
-                        styleComp->style.italic, lm)) {
-                    styleComp->style.lineSpacing = lm.baselineStep * static_cast<float>(lh) - sizePx;
-                } else {
+                        styleComp->style.italic, lm, styleComp->style.fontWeight)) {
                     styleComp->style.lineSpacing = static_cast<float>(
-                        (lh - 1.0) * MetaNumber(block.metaJson, "fontSize", kDefaultTextFontSize)
-                        * size.height / kBlockStageH);
+                        template_text_metrics::engineLineSpacing(sizePx, lm.inkHeight, lh));
+                } else {
+                    const double naturalHeight = MetaNumber(
+                        block.metaJson, "fontSize", kDefaultTextFontSize)
+                        * size.height / kBlockStageH;
+                    styleComp->style.lineSpacing = static_cast<float>(
+                        template_text_metrics::engineLineSpacing(sizePx, naturalHeight, lh));
                 }
             }
             {
@@ -1132,12 +1171,11 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             }
             // LINE SPACING — blank air BETWEEN line boxes, on top of the line
             // height above (FreeShow's own split: line-height sizes the line,
-            // line spacing opens the gap). Stage px like letter/word spacing, so
-            // the canvas value and the output value are the same number scaled
-            // once.
+            // line spacing opens the gap). This is a vertical stage length, so
+            // map it by the output height.
             {
                 const double gap = MetaNumber(block.metaJson, "lineSpacing", 0.0);
-                styleComp->style.lineGap = static_cast<float>(gap * size.width / kBlockStageW);
+                styleComp->style.lineGap = static_cast<float>(gap * size.height / kBlockStageH);
             }
             // LINE BACKGROUND — a band behind EACH line (TextStyle::lineBg),
             // not behind the block: the block's own fill is the box above.
@@ -1171,36 +1209,26 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             // at the set size instead, so a none-mode block that fit on the
             // canvas overflowed on the outputs — the reported "NDI output
             // renders the verse bigger than the canvas and clips the last
-            // line" (GDI+ serif runs wider than the same string in the QML
-            // renderer, so a size that fit 754×428 left the 1920×1080
+            // line" (the old renderer used different font advances than the
+            // QML renderer, so a size that fit 754×428 left the 1920×1080
             // re-layout wrapping more lines and pushing the tail off the
-            // frame). ALWAYS solving (with the set size as the ceiling) makes
+            // frame). Shared Qt metrics make the solve consistent.
+            // ALWAYS solving (with the set size as the ceiling) makes
             // the engine agree with both QML surfaces by construction.
-            // THE READING BLOCK IS THE ONE EXCEPTION: everything above assumes
-            // the box must hold the WHOLE text at once, which is exactly backwards
-            // for the passage ApplyReadingFlow is about to scroll through it. Fit
-            // bisected against THIS PAGE's own text (block.text/textBody) sizes
-            // the type for whichever page happens to open the walk — a longer
-            // opening page bisects smaller, and ApplyReadingFlow then draws every
-            // later, shorter page at that same already-decided size: smaller than
-            // the template's own declared size for the whole walk (reported: the
-            // output tile reading noticeably smaller than the template's own
-            // natural size, confirmed against the Reference Pane's un-scrolled
-            // preview of the identical style). The identity test is the same one
-            // ApplyReadingFlow uses below (a prefix of the full passage), run
-            // here before the block's size commits to a page-specific bisection
-            // at all — the declared size (already in styleComp->style.size from
-            // the per-block default above) is left standing, same as "none" mode
-            // with nothing to squeeze, because a scrolling column never needs to.
-            const bool isFlowBlock = !flowText.empty() && flowText.rfind(textBody, 0) == 0;
+            // A scrolling reading block normally keeps its declared size: fitting
+            // each page independently would make the type jump as the passage
+            // advances. An explicit growToFit is different — it is the design's
+            // instruction to fill this box, and the QML preview applies that fit
+            // even when the block is the reading column. Honor it here too.
             const std::string autoSize = MetaString(block.metaJson, "autoSize");
+            const bool growToFit = autoSize == "grow" || autoSize == "growToFit";
             const float minPx =
                 static_cast<float>(3.0 * size.height / kBlockStageH);   // the canvas solver's own 3px floor, output-scaled
-            if (isFlowBlock) {
+            if (isFlowBlock && !growToFit) {
                 // Left exactly as the per-block default set it above
                 // (MetaNumber(..., "fontSize", ...) * size.height / kBlockStageH):
                 // the template's own declared size, not a page-specific bisection.
-            } else if (autoSize == "grow" || autoSize == "growToFit") {
+            } else if (growToFit) {
                 // GROW: the LARGEST size that fits — full stop (the canvas
                 // solver's `lo`, bracketed up to 400 stage px like its [3, 400]).
                 // The set size is neither floor nor ceiling: a short verse
@@ -1851,7 +1879,7 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
         signature += ov.id + (ov.placeUnderSlide ? "u," : "o,");
 
     // THE CACHE LOCK GUARDS THE BOOKKEEPING, NEVER THE BUILD. It used to be
-    // held across AddStageBlocks, which reaches RenderEngine::Fonts() (GDI+ line
+    // held across AddStageBlocks, which reaches RenderEngine::Fonts() (Qt font
     // metrics) and the scene graph — so one slow overlay build parked every
     // other scene's overlay pass (the exact lock pile-up the lock-scope guard
     // exists to stop). The atomicity that mattered is kept: ids are claimed
@@ -2004,6 +2032,49 @@ SceneBuilder::BlockLayerPlan SceneBuilder::PlanBlockLayers(const std::vector<Con
 // (Title, Body). Both preset paths — a family riding a preset key, and the
 // style's own key with no baked blocks — draw exactly these, so they draw them
 // through one function rather than two copies of the same eight lines.
+// ---------------------------------------------------------------------------
+// THE STYLE'S OWN CHAR -> LINE TABLE for a passage (see ApplyReadingFlow).
+//
+// The offset the surfaces share is a CHARACTER of the passage; which LINE that
+// character sits on depends on the style's type size and wrap, and this output
+// is the only place that answer exists for THIS style. Built by locating each
+// laid-out line inside the passage (a line's text is a slice of it), once per
+// scene build — the per-frame read is then a binary search
+// (TextObject::FlowLineForChar), because a scroll in flight maps the position
+// sixty times a second.
+//
+// A line the wrapper TRUNCATED or rewrote (no exact slice at or after the
+// cursor) keeps the previous line's start: the table stays monotonic, and the
+// mapping degrades to "the line before it", which is the ordering the old
+// line-number path assumed anyway.
+//
+// A free function rather than a lambda in the two callers that need it: a scene
+// BUILD attaches the flow (ApplyReadingFlow) and so does a WINDOW that moved
+// under an already-built scene (RefreshReadingFlow), and the table has to be the
+// same table in both or the position means two different things.
+static std::vector<int> FlowCharStartsFor(const std::string& flowText,
+                                          const rendering::TextStyle& style,
+                                          const rendering::FontManager& fonts)
+{
+    const auto flowLayout = rendering::TextLayout::Measure(flowText, style, fonts);
+    std::vector<int> starts;
+    starts.reserve(flowLayout.lines.size());
+    int cursor = 0;
+    for (const auto& line : flowLayout.lines) {
+        int at = -1;
+        if (!line.text.empty()) {
+            const size_t found = flowText.find(line.text, static_cast<size_t>(cursor));
+            if (found != std::string::npos)
+                at = static_cast<int>(found);
+        }
+        if (at < 0)
+            at = starts.empty() ? cursor : starts.back();
+        starts.push_back(at);
+        cursor = at + static_cast<int>(line.text.size());
+    }
+    return starts;
+}
+
 // THE READING FLOW (Alt+Down / Alt+Up — see Slide::flowText): hand the passage
 // to the ONE text object that draws this slide's reading text, so the outputs
 // scroll it under the block's own box instead of the step replacing the whole
@@ -2089,37 +2160,8 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
     // the passage becomes what is drawn: one layout, one size, one offset into it
     // (RenderOptions::contentScrollLines, resting at Slide::flowScroll).
     // ...AND THIS STYLE'S OWN LINE TABLE, so the position can be a CHARACTER
-    // OFFSET rather than a line number. The offset the surfaces share is a
-    // character of the passage; which LINE that character sits on depends on the
-    // style's type size and wrap, and this output is the only place that answer
-    // exists for THIS style. Built by locating each laid-out line inside the
-    // passage (a line's text is a slice of it), once per scene build — the
-    // per-frame read is then a binary search (TextObject::FlowLineForChar),
-    // because a scroll in flight maps the position sixty times a second.
-    //
-    // A line the wrapper TRUNCATED or rewrote (no exact slice at or after the
-    // cursor) keeps the previous line's start: the table stays monotonic, and the
-    // mapping degrades to "the line before it", which is the ordering the old
-    // line-number path assumed anyway.
-    {
-        const auto flowLayout = rendering::TextLayout::Measure(slide.flowText, style, engine.Fonts());
-        std::vector<int> starts;
-        starts.reserve(flowLayout.lines.size());
-        int cursor = 0;
-        for (const auto &line : flowLayout.lines) {
-            int at = -1;
-            if (!line.text.empty()) {
-                const size_t found = slide.flowText.find(line.text, static_cast<size_t>(cursor));
-                if (found != std::string::npos)
-                    at = static_cast<int>(found);
-            }
-            if (at < 0)
-                at = starts.empty() ? cursor : starts.back();
-            starts.push_back(at);
-            cursor = at + static_cast<int>(line.text.size());
-        }
-        reading->SetFlowCharTable(std::move(starts));
-    }
+    // OFFSET rather than a line number (see FlowCharStartsFor).
+    reading->SetFlowCharTable(FlowCharStartsFor(slide.flowText, style, engine.Fonts()));
     reading->SetReadingFlow(pageLines, slide.flowChar < 0.0f ? 0.0f : slide.flowChar);
     reading->SetText(slide.flowText);
     // ONE LINE PER SCENE (the live loop rebuilds on every fingerprint move): the
@@ -2136,6 +2178,56 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
     }
 }
 
+// RE-ATTACH A MOVED READING WINDOW (see SceneBuilder.hpp). The scene is the one
+// that is already on screen: its reading block keeps its box, its type size and
+// its page, and only the passage beneath the page and the position in it change
+// — which is exactly what a page commit inside one passage does.
+bool SceneBuilder::RefreshReadingFlow(rendering::RenderEngine& engine,
+                                      const std::string& sceneId, const Slide& slide) {
+    // THE OBJECT THAT ALREADY DRAWS THE FLOW — its HasReadingFlow() is the mark
+    // ApplyReadingFlow leaves, so this is the one case where the longest-text
+    // rule above must NOT be re-run: the reading object's text is now the whole
+    // passage, and it would win against itself only by accident.
+    rendering::TextObject* reading = nullptr;
+    for (auto* obj : engine.CollectObjects(sceneId)) {
+        auto* text = dynamic_cast<rendering::TextObject*>(obj);
+        if (text && text->HasReadingFlow()) {
+            reading = text;
+            break;
+        }
+    }
+    if (slide.flowText.empty()) {
+        if (!reading)
+            return false;
+        reading->ClearReadingFlow();
+        return true;
+    }
+    if (!reading) {
+        // A previous mode change may have detached the flow from this existing
+        // scene. Re-attach it to the original page object instead of leaving NDI
+        // static while the QML preview has resumed Scroll mode.
+        ApplyReadingFlow(engine, sceneId, slide);
+        for (auto* obj : engine.CollectObjects(sceneId)) {
+            auto* text = dynamic_cast<rendering::TextObject*>(obj);
+            if (text && text->HasReadingFlow()) {
+                reading = text;
+                break;
+            }
+        }
+        if (!reading)
+            return false;   // this scene draws no flow (a refused family, a bus feed)
+    }
+    const auto* styleComp = reading->FindComponent<rendering::TextStyleComponent>();
+    const rendering::TextStyle style = styleComp ? styleComp->style : rendering::TextStyle{};
+    reading->SetFlowCharTable(FlowCharStartsFor(slide.flowText, style, engine.Fonts()));
+    // THE PAGE'S LINE COUNT IS KEPT, not re-measured: it is the measure of the
+    // page the box was fitted to (see ApplyReadingFlow), and the page is the same
+    // one — the window only moved which words follow it.
+    reading->SetReadingFlow(reading->FlowPageLines(), slide.flowChar < 0.0f ? 0.0f : slide.flowChar);
+    reading->SetText(slide.flowText);
+    return true;
+}
+
 void AddPresetTextObjects(rendering::RenderEngine& engine, const std::string& sceneId,
                           const rendering::Size& size, const StyleBuilder::Layout& layout,
                           const Slide& slide) {
@@ -2148,6 +2240,20 @@ void AddPresetTextObjects(rendering::RenderEngine& engine, const std::string& sc
         (void)engine.AddObject(sceneId, title, "text");
     }
     if (!slide.text.empty()) {
+        if (SlideRules::ContentType(slide) == "table") {
+            constexpr double stageWidth = bps::library::kStageWidth;
+            constexpr double stageHeight = bps::library::kStageHeight;
+            ContentBlock body;
+            body.kind = "text";
+            body.x = layout.body.x * stageWidth;
+            body.y = layout.body.y * stageHeight;
+            body.width = layout.body.w * stageWidth;
+            body.height = layout.body.h * stageHeight;
+            body.text = slide.text;
+            body.metaJson = R"({"fontSize":16,"autoSize":"shrink"})";
+            AddStageBlocks(engine, sceneId, {body}, size, "preset-body");
+            return;
+        }
         auto body = std::make_shared<rendering::TextObject>("body", "Body", slide.text);
         body->SetBounds(bodyRect);
         body->SetLayer("text");

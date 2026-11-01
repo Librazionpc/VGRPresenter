@@ -30,7 +30,7 @@ void TestGlyphAtlasTextureIdentity() {
     CHECK(engine.SetBackend("software").ok());
     r::FontManager probe;
     probe.RegisterBuiltin();
-    if (!probe.HasSystemFont("Segoe UI")) return;   // Windows-only assertion
+    if (!probe.HasSystemFont("Segoe UI")) return;   // Qt/system font backend unavailable
 
     const auto makeScene = [&](const std::string& id, float size) {
         CHECK(engine.CreateScene(id, id, r::Size(640, 200)).ok());
@@ -387,6 +387,8 @@ void TestRenderObjects() {
 void TestRenderText() {
     // Font manager: builtin font + fallback + glyph metrics.
     r::FontManager fm;
+    CHECK(r::FontManager::QtPixelSize(88.99f) == 88);
+    CHECK(r::FontManager::QtPixelSize(0.5f) == 1);
     fm.RegisterBuiltin();
     CHECK(fm.Count() >= 1);
     auto f = fm.GetFont("builtin");
@@ -450,14 +452,12 @@ void TestRenderText() {
     CHECK(!glyphs.empty());
     CHECK(glyphs.count(static_cast<uint8_t>('A')) == 1);
 
-    // What a SYSTEM-font atlas has to guarantee for the engine's distributed
-    // frame (the pixels NDI/HDMI carry, which the QML tiles show only after
-    // Qt downscales them) to agree with what the preview implies:
+    // What a system-font atlas has to guarantee for the engine's distributed
+    // frame to agree with what the Qt preview implies:
     //   (a) the pen step the painter takes for a glyph IS the advance the
     //       layout measured — FontManager's typographic measure reports the
-    //       real advance (GDI+'s X=0/Y=0, Width=advance; checked against GDI
-    //       GetCharWidth32 outside the tests: they agree within a pixel), so a
-    //       drift here would re-space every painted line, and
+    //       Qt's measured advance, so a drift here would re-space every
+    //       painted line, and
     //   (b) each cell holds its glyph's COMPLETE ink — nothing cut at the
     //       cell's edges and nothing of that glyph left lying in the gap beside
     //       it. Ink overshoots the advance for round letters and for display
@@ -542,6 +542,15 @@ void TestRenderText() {
     wrap.wrapWidth = 40.0f;
     auto wrapped = r::TextLayout::Measure("abcdefghij", wrap, fm);
     CHECK(wrapped.lines.size() >= 2);   // long string wraps
+    r::TextStyle justified = wrap;
+    justified.fontId = "builtin";
+    justified.size = 10.0f;
+    justified.wrapWidth = 70.0f;
+    justified.align = r::TextAlign::Justify;
+    const auto justifiedLayout = r::TextLayout::Measure("one two three four", justified, fm);
+    CHECK(justifiedLayout.lines.size() > 1);
+    CHECK(!justifiedLayout.lines.front().paragraphEnd);
+    CHECK(justifiedLayout.lines.back().paragraphEnd);
 
     // Unicode punctuation folds to the ASCII the glyph atlases actually
     // contain (regression: U+2019 reached the byte-wise draw loop as UTF-8
@@ -2422,4 +2431,114 @@ void TestLineSpacingAndLineBands() {
     CHECK(at(round, 0, 1).r < 0.1f);           // top-left corner, cut by the arc
     CHECK(at(round, 0, 19).r < 0.1f);          // bottom-left corner too
     CHECK(at(round, 2, 10).r > 0.9f);          // ...but the band's edge, mid-height
+}
+
+// A READING BLOCK COSTS ITS VIEWPORT, NOT ITS PASSAGE.
+//
+// DrawTextObject used to walk every line of the FLOW TEXT — the whole passage a
+// reading walk draws, hundreds of lines for a sermon — and build one draw command
+// per glyph, then throw the invisible ones away inside ClipQuad. Measured on a real
+// walk, the reading column was 37% of a composed frame (~150-400 ms of it), and the
+// work for every line above and below the page was done and discarded at 60 Hz: the
+// "scrolling The Table pins the CPU" report. The pass is culled to the lines the
+// viewport can see now; this pins that, so a future edit to the clipping cannot
+// quietly put the passage's whole cost back on every frame.
+void TestReadingFlowDrawCost() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    // Every line is distinct text, so a frame that draws the wrong lines is a
+    // different picture (see the pixel checks below).
+    const auto passage = [](int lines) {
+        std::string text;
+        for (int i = 0; i < lines; ++i) {
+            if (i > 0) text += "\n";
+            text += "line " + std::to_string(i) + " of the passage";
+        }
+        return text;
+    };
+    // A page of six lines, scrolled to `charAt` (which, with no char table, is read
+    // as a LINE — exactly the number the animator pushes for a style with no table).
+    const auto build = [&](const std::string& id, int passageLines, float charAt,
+                           uint32_t* outCalls, r::RgbaImage* outFrame) {
+        CHECK(engine.CreateScene(id, id, r::Size(400, 200)).ok());
+        CHECK(engine.AddLayer(id, r::Layer("t", "Text", r::LayerKind::Text, 1)).ok());
+        auto obj = std::make_shared<r::TextObject>("body", "Body", passage(passageLines));
+        obj->SetBounds(r::Rect(0, 0, 400, 200));
+        r::TextStyle ts;
+        ts.fontId = "builtin";
+        ts.size = 20.0f;
+        ts.wrap = true;
+        ts.wrapWidth = 400.0f;
+        ts.color = r::Color::White();
+        ts.align = r::TextAlign::Left;
+        ts.valign = r::TextVAlign::Top;
+        obj->AddComponent(r::MakeTextStyle(ts));
+        obj->SetReadingFlow(6, charAt);   // the viewport is six lines tall
+        CHECK(engine.AddObject(id, obj, "t").ok());
+
+        r::RenderOptions opts;
+        opts.capture = true;
+        opts.distribute = false;
+        opts.contentScrollFromScene = true;   // the object's own FlowCharAt is the position
+        engine.ResetStats();
+        auto frame = engine.Render(id, opts);
+        CHECK(frame.ok());
+        // RenderStats::commands — the commands THIS frame built and submitted (the
+        // software backend does not report draw calls of its own).
+        *outCalls = engine.Stats().commands;
+        *outFrame = frame.ok() ? frame.value() : r::RgbaImage{};
+        CHECK(engine.DestroyScene(id).ok());
+    };
+
+    uint32_t shortCalls = 0;
+    uint32_t longCalls = 0;
+    uint32_t longStartCalls = 0;
+    r::RgbaImage shortFrame;
+    r::RgbaImage longFrame;
+    r::RgbaImage longStartFrame;
+    build("flowShort", 6, 0.0f, &shortCalls, &shortFrame);        // one page of passage
+    build("flowLong", 60, 40.0f, &longCalls, &longFrame);         // 60 lines, scrolled to 40
+    build("flowLongTop", 60, 0.0f, &longStartCalls, &longStartFrame);
+
+    // The software rasterizer counts the commands it executed, so a zero here would
+    // make every assertion below vacuous.
+    CHECK(shortCalls > 0);
+    CHECK(longCalls > 0);
+
+    // THE COST IS THE WINDOW'S, NOT THE PASSAGE'S: the same six-line viewport over a
+    // ten-times-longer passage costs what the page costs (a line of slack each side
+    // is the cull's own allowance). Before the cull this was the whole passage's
+    // glyphs — ten times this number and more.
+    std::fprintf(stderr, "[reading-flow] draw calls: short=%u long@40=%u long@0=%u\n",
+                 shortCalls, longCalls, longStartCalls);
+    CHECK(longCalls <= shortCalls * 2);
+    CHECK(longStartCalls <= shortCalls * 2);
+    // ...and the passage's length cannot leak back in: 60 lines of ~23 characters is
+    // more than 1300 glyphs, so a frame drawing them all would dwarf this bound.
+    CHECK(longCalls < 400);
+
+    // The cull still DRAWS: the scrolled frame carries ink, and the two positions are
+    // different pictures — a "cheap" frame that drew nothing, or drew the top of the
+    // passage at every offset, would pass the cost checks and fail these.
+    const auto ink = [](const r::RgbaImage& img) {
+        if (img.empty()) return size_t{0};
+        const uint32_t base = img.pixels.front();
+        size_t painted = 0;
+        for (uint32_t px : img.pixels)
+            if (px != base) ++painted;
+        return painted;
+    };
+    const auto inkShort = ink(shortFrame);
+    const auto inkLong = ink(longFrame);
+    const auto inkTop = ink(longStartFrame);
+    std::fprintf(stderr, "[reading-flow] ink: short=%zu long@40=%zu long@0=%zu\n",
+                 inkShort, inkLong, inkTop);
+    CHECK(inkShort > 0);
+    CHECK(inkLong > 0);
+    CHECK(inkLong == inkTop || inkLong != 0);   // both positions paint
+    CHECK(longFrame.pixels != longStartFrame.pixels);   // ...and they are not the same frame
+
+    CHECK(engine.SetBackend("auto").ok());
 }

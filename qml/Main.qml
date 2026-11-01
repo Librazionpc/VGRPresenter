@@ -1353,13 +1353,47 @@ ApplicationWindow {
         }
     }
 
+    // ---- SCROLL MODE / SLIDE MODE: the switch every reading walk lives behind --
+    // The reading walk is no longer its own chord. Alt+Down / Alt+Up are gone; the
+    // walk is the wall's ‹ › and WHAT THOSE ARROWS DO is MonitorWall's transport
+    // switch: Scroll mode walks the passage a line at a time
+    // (LiveOutputService.lineStep), Slide mode changes slides. The mode is not a
+    // cosmetic tint — only Scroll attaches a passage to the slide at all
+    // (LiveOutputService::setSlideReadingFlow, and stageSlideSet's first-page copy,
+    // are both gated on scrollMode_), so a walk that starts in Slide mode measures
+    // a slide change and every number the scenarios below report is meaningless.
+    // Each one therefore turns Scroll ON first, through the wall's own button — the
+    // control the operator presses — and prints which way it ran: `by=button` when
+    // the synthetic press landed, `by=service` when it did not (the driver's clicks
+    // need window-foreground luck, so a miss must not read as a broken switch).
+    function setReadingScrollMode(want, scenario) {
+        const on = !!want
+        let by = "already"
+        if (LiveOutputService.scrollMode !== on) {
+            by = "service"
+            if (SelfTest.itemVisible("selfTestWallScrollMode")) {
+                SelfTest.activate()
+                SelfTest.clickItem("selfTestWallScrollMode")
+                if (LiveOutputService.scrollMode === on)
+                    by = "button"
+            }
+            if (by !== "button")
+                LiveOutputService.scrollMode = on
+        }
+        console.log("[SELFTEST-READING] scenario=" + scenario
+                    + " mode=" + (on ? "scroll" : "slide") + " by=" + by
+                    + " now=" + (LiveOutputService.scrollMode ? "scroll" : "slide"))
+        return LiveOutputService.scrollMode === on
+    }
+
     // ---- Reading-step self-test (VGR_LINESTEP_TEST=1 only) --------------------
     // The numbers every "it blinks / it jumps back" report comes down to: what do
     // the stepper's own counters do when it walks a multi-page pick? The scenario
     // stages a synthetic pick through the REAL stageSlideSet, then presses the
-    // ordinary reading step (the same LiveOutputService.lineStep the arrows and
-    // wheel call), logging the run's offset, the passage length, the page's block
-    // count and its position in the pick each time.
+    // ordinary reading step (the same LiveOutputService.lineStep the wall's › calls
+    // in Scroll mode, which this scenario switches ON first — see
+    // setReadingScrollMode), logging the run's offset, the passage length, the
+    // mode, the page's block count and its position in the pick each time.
     //
     // WHAT IT MUST SHOW
     //  1. the position in the PICK (`abs`, see readingAbsoluteLine) grows by
@@ -1466,9 +1500,18 @@ ApplicationWindow {
                 continue
             }
             const text = window.lsTileText(tile)
+            // `flow` is "this tile's own words are part of the passage the service is
+            // drawing". tileLen/flowLen/flowHead are the evidence for that verdict:
+            // the two strings' lengths and where the passage it was compared
+            // against begins, so a false is readable instead of inferred (a window
+            // that slid one page and a tile that kept the old words look identical
+            // in a bare boolean).
             lines.push("[SELFTEST-LINESTEP] press=" + press + " tile=" + i
                        + " shows=" + window.lsTileShowsPage(tile)
                        + " flow=" + (text !== "" && flow.indexOf(text) >= 0)
+                       + " tileLen=" + text.length
+                       + " flowLen=" + flow.length
+                       + " flowHead=" + JSON.stringify(flow.slice(0, 24))
                        + " text=" + JSON.stringify(text.slice(0, 20)))
         }
         return lines
@@ -1478,6 +1521,12 @@ ApplicationWindow {
         running: typeof SelfTestLineStep !== "undefined" && SelfTestLineStep
         interval: 2600          // let the first frame land
         onTriggered: {
+            // SCROLL MODE FIRST: the walk below is `lineStep`, which is what the
+            // wall's › does in Scroll mode. In Slide mode the slide carries no
+            // passage for the outputs to scroll, so a walk started here would
+            // measure a picture that is not supposed to move.
+            if (!window.setReadingScrollMode(true, "linestep"))
+                console.log("[SELFTEST-LINESTEP] FAIL not-scroll — the walk needs Scroll mode")
             const words = ["alpha", "bravo", "charlie", "delta", "echo",
                            "foxtrot", "golf", "hotel", "india", "juliet"]
             const slides = []
@@ -1497,7 +1546,8 @@ ApplicationWindow {
             }
             selfTestLineStepSlides = slides
             LiveOutputService.stageSlideSet("LineStep probe", slides, 0)
-            console.log("[SELFTEST-LINESTEP] staged " + slides.length + " page(s)")
+            console.log("[SELFTEST-LINESTEP] staged " + slides.length + " page(s)"
+                        + " mode=" + (LiveOutputService.scrollMode ? "scroll" : "slide"))
             selfTestLineStepTick.restart()
             selfTestLineStepSample.restart()
         }
@@ -1567,6 +1617,7 @@ ApplicationWindow {
             // follows it: worst single-frame move and how many frames skipped.
             console.log("[SELFTEST-LINESTEP] press=" + selfTestLineStepPress
                         + " dir=" + dir
+                        + " mode=" + (LiveOutputService.scrollMode ? "scroll" : "slide")
                         + " moved=" + moved
                         + " from=" + before.toFixed(2)
                         + " to=" + after.toFixed(2)
@@ -1613,8 +1664,12 @@ ApplicationWindow {
     // THING THE OPERATOR WAS LOOKING AT. It drives the app's own app-wide search to
     // a real sermon passage (VGR_TABLEWALK_QUERY, default the reported
     // "47-1100X"), takes it the way the pane's own Enter does (playPicked), then
-    // walks it with the ordinary reading step — the same call the Alt+Down
-    // Shortcut makes — over several PARAGRAPH boundaries, printing per press:
+    // puts the wall in SCROLL mode and walks it with the ordinary reading step —
+    // the same call the wall's › makes in that mode — over several PARAGRAPH
+    // boundaries, printing per press. The pass ENDS by flipping the wall's switch
+    // back to Slide mode and then to Scroll again, so the mode's own contract is
+    // measured too: the passage leaves the slide in Slide mode and comes back in
+    // Scroll (see selfTestTableWalkMode).
     //   * the wall: each tile's own composition against one composed NOW (stale=),
     //     and whether it is still drawing the live passage (flow=);
     //   * the pane: its own reference text and selected rows — the "para values"
@@ -1714,6 +1769,12 @@ ApplicationWindow {
                 SelfTest.quit()
                 return
             }
+            // SCROLL MODE BEFORE THE WALK: playPicked stages the passage, and the
+            // passage only reaches the slide in Scroll mode (setSlideReadingFlow).
+            // A pick staged in Slide mode is a page the outputs draw whole, which
+            // is what the walk would then be pressing at.
+            if (!window.setReadingScrollMode(true, "tablewalk"))
+                console.log("[SELFTEST-TABLEWALK] FAIL not-scroll — the walk needs Scroll mode")
             pane.playPicked()
             // REWIND TO THE PICK'S FIRST LINE FIRST, so the walk always crosses the
             // same boundary sequence whatever this machine's stored pane selection
@@ -1767,6 +1828,7 @@ ApplicationWindow {
                 const page = LiveOutputService.readingPage
                 console.log("[SELFTEST-TABLEWALK] press=" + press
                             + " moved=" + moved
+                            + " mode=" + (LiveOutputService.scrollMode ? "scroll" : "slide")
                             + " abs=" + abs.toFixed(2)
                             + " absFrom=" + absFrom.toFixed(2)
                             + " page=" + page
@@ -1843,8 +1905,61 @@ ApplicationWindow {
                     pane.stepAndPlay(1)      // the ‹ › arrow's own body
             } else {
                 selfTestTableWalkJump.stop()
-                selfTestTableWalkDone.restart()
+                selfTestTableWalkMode.restart()
             }
+        }
+    }
+    // THE SWITCH'S OWN CONTRACT, after the walk. Turning Scroll OFF must take the
+    // passage off the slide the outputs are drawing — that is what makes the arrows
+    // change slides over the page as authored — and turning it back ON must put the
+    // passage back, at the position the walk left. Read off the slide the outputs
+    // draw (`flowText` is the field the engine raster and the QML previews scroll,
+    // see LiveOutputService::setSlideReadingFlow), never off the button's tint: a
+    // switch whose only effect is its own highlight is the report this covers.
+    //
+    // ONE MODE PER BEAT: the restage a mode change triggers lands on the next tick,
+    // so each reading is taken a beat AFTER the switch it belongs to.
+    Timer {
+        id: selfTestTableWalkMode
+        interval: 2000
+        repeat: true
+        property int step: 0
+        onTriggered: {
+            const raw = (function () {
+                const staged = LiveOutputService.stagedSlideRaw
+                if (staged && Object.keys(staged).length > 0)
+                    return staged
+                return LiveOutputService.onAirSlideRaw || {}
+            })()
+            const flow = (raw && raw.flowText !== undefined) ? String(raw.flowText) : ""
+            const step = selfTestTableWalkMode.step
+            // 0 -> Slide mode, 1 -> photograph Slide, 2 -> Scroll again,
+            // 3 -> photograph Scroll, then done. Each photograph is taken a beat
+            // after its own switch, never in the same tick as the write.
+            if (step === 1 || step === 3) {
+                console.log("[SELFTEST-TABLEWALK] mode="
+                            + (LiveOutputService.scrollMode ? "scroll" : "slide")
+                            + " step=" + step
+                            + " slideFlow=" + flow.length
+                            + " readingFlow=" + String(LiveOutputService.readingFlowText ?? "").length)
+            }
+            if (step === 0) {
+                window.setReadingScrollMode(false, "tablewalk-mode")
+                selfTestTableWalkMode.step = 1
+                return
+            }
+            if (step === 1) {
+                window.setReadingScrollMode(true, "tablewalk-mode")
+                selfTestTableWalkMode.step = 2
+                return
+            }
+            if (step === 2) {
+                // The Scroll photograph is step 3's, one beat after the restage.
+                selfTestTableWalkMode.step = 3
+                return
+            }
+            selfTestTableWalkMode.stop()
+            selfTestTableWalkDone.restart()
         }
     }
     Timer {

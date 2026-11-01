@@ -193,10 +193,13 @@ Rectangle {
             : ""
         const memo = root.slideMemo
         if (key !== "" && key === memo.key) {
-            EngineBridge.log("info", "RefreshOnAirSlide",
-                "tile=" + root.objectName + " cacheHit key=" + key.slice(0, 60)
-                + " blocks0Text=" + String((memo.value.blocks && memo.value.blocks[0]
-                    && memo.value.blocks[0].text) ?? "").slice(0, 24))
+            // NO LOG ON A HIT. This is the path a live binding takes on EVERY
+            // re-evaluation, and while a reading walk runs that is several times a
+            // second per tile — measured, `RefreshOnAirSlide` was 149k of the
+            // interface thread's log records in one session, a formatted string and
+            // a queue push per tile per frame for an answer that had NOT changed.
+            // The line below (a RECOMPOSE) is the event worth a record: it names
+            // the tile, the key and the text it now draws.
             root.onAirSlide = memo.value
             return
         }
@@ -854,11 +857,9 @@ Rectangle {
             objectName: "selfTestTileDesignPreview"
             anchors.fill: parent
             visible: !root.blacked && root.hasSlidePreview && !root.framePriority
-            // THE READING STEP SLIDES HERE: this IS the picture of what Alt+Down
-            // just re-staged (a text slide draws block-true, on air as well as
-            // staged), so the words travel one line and settle instead of the
-            // tile cutting to the next line on the key press.
-            animateLineSteps: true
+            // Only Scroll mode draws the passage flow. In Slide mode the selected
+            // page stays intact even if an earlier scroll left flow data on it.
+            animateLineSteps: LiveOutputService.scrollMode
             // ...AT THIS OUTPUT'S OWN STYLE: the step's position is shared as a
             // character offset, and this tile converts it into the lines THIS
             // style draws (see DesignPreview.stepLine). Naming the style here is

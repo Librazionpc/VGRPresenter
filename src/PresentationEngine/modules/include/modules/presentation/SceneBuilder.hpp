@@ -76,6 +76,27 @@ public:
                                              rendering::RenderEngine& engine,
                                              rendering::Size size = rendering::Size(1920, 1080));
 
+    // RE-ATTACH A MOVED READING WINDOW TO A SCENE THAT ALREADY EXISTS — the
+    // page commit's cheap half (docs/scroll_mode_thread_audit.md, F3).
+    //
+    // `slide.flowText` is the passage an already-built scene's reading block
+    // scrolls, and the scene id cannot say when it changed: the id is
+    // (presentation, slide, style, size), and the flow is not part of any of
+    // them (it is deliberately absent from HashSlideContent too, so a genuine
+    // re-pick of the same passage keeps its cached scene). So a window that slid
+    // forward was only ever picked up by rebuilding the scene — which, through
+    // the live path, meant re-committing the whole pick to the render worker.
+    //
+    // This is the targeted answer: hand the new window and offset to the ONE
+    // text object that draws the flow, in the scene that is already on screen.
+    // The page's own line count is NOT re-measured — it is the measure of the
+    // page the box was fitted to, and that page has not changed; only the words
+    // below it have. An empty flow detaches scrolling and restores the original
+    // page text; a later non-empty flow can attach again to the existing scene.
+    // False means the scene has no eligible reading text object.
+    bool RefreshReadingFlow(rendering::RenderEngine& engine, const std::string& sceneId,
+                            const Slide& slide);
+
     // THE BUS FEED SCENE — what an output whose VIDEO WIRE is drawn shows.
     //
     // One full-frame video layer carrying that bus's current picture, read from

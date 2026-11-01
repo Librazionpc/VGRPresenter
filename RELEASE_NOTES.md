@@ -9,6 +9,9 @@
 - **Your setup comes with the installer.** Fresh installs can start with your current preferences, output routing, styles, templates, and content libraries.
 - **Smoother Scripture controls and previews.** Bible scroll buttons respond while passage layout loads, and selected slides appear sooner in monitor previews.
 - **FreeShow imports preserve slide layouts.** Text boxes stay separate, and supported background images come along with each slide.
+- **Choose Shows templates per category and output style.** In Settings · Styles, assign a template to each Shows category and turn on its Override pill to use that layout on outputs wearing that style. Each output keeps its own choice.
+- **Show templates use the slide's text items.** Template text boxes now receive the authored slide text instead of accidentally displaying labels such as “Verse 2.”
+- **NDI respects template text layout.** Text alignment, line spacing, and block padding now carry through to the Lower Third output.
 
 # VGRPresenter 0.1.2
 

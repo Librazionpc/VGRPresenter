@@ -192,8 +192,18 @@ public:
     // report. A character offset means the same words everywhere; each style turns
     // it into its own line with FlowLineForChar below.
     void SetReadingFlow(int pageLines, float charAt) {
+        if (pageLines > 0 && flowPageLines_ == 0)
+            pageText_ = text_;
         flowPageLines_ = pageLines > 0 ? pageLines : 0;
         flowCharAt_ = charAt;
+    }
+    void ClearReadingFlow() {
+        if (flowPageLines_ > 0)
+            text_ = std::move(pageText_);
+        pageText_.clear();
+        flowPageLines_ = 0;
+        flowCharAt_ = 0.0f;
+        flowCharStarts_.clear();
     }
     bool HasReadingFlow() const { return flowPageLines_ > 0; }
     int FlowPageLines() const { return flowPageLines_; }
@@ -225,6 +235,7 @@ public:
 
 private:
     std::string text_;
+    std::string pageText_;
     int flowPageLines_ = 0;
     float flowCharAt_ = 0.0f;
     std::vector<int> flowCharStarts_;

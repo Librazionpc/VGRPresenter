@@ -253,6 +253,12 @@ struct RenderStats {
     uint32_t shaderCount = 0;
     uint32_t frameDrops = 0;
     uint32_t renderQueueSize = 0;
+    // HOW MANY DRAW COMMANDS the last frame built and handed to the backend. The
+    // number that makes "a frame costs its viewport, not its passage" checkable
+    // (see RenderEngine::DrawTextObject's line cull and the
+    // rendering · reading-flow-draw-cost suite): a reading block must contribute the
+    // visible lines' glyphs, never the whole passage's.
+    uint32_t commands = 0;
     uint64_t frames = 0;
 };
 

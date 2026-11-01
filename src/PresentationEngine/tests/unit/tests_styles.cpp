@@ -10,6 +10,7 @@
 #include "modules/presentation/PresentationRuntime.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
 #include "modules/presentation/SlideRules.hpp"
+#include "modules/presentation/TemplateTextMetrics.hpp"
 #include "modules/project/OutputStore.hpp"
 #include "modules/project/ShippedConfig.hpp"
 #include "modules/project/StyleStore.hpp"
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 #include <cstdint>
@@ -1852,9 +1854,9 @@ void TestAutoSizeVocabulary() {
 // another". The fit solver must measure the SAME vertical extent the renderer
 // paints, and both must vary with the font the way real fonts vary:
 //   1. lineSpacing tracks the font: SceneBuilder derives it from the font's
-//      own natural line height (Qt's ProportionalHeight model), so two fonts
-//      at the same set size/lineHeight produce DIFFERENT additive spacing —
-//      a font-blind constant was the clip-with-one-font bug.
+//      ink height (the monitor preview's QFontMetricsF::height equivalent),
+//      so two fonts at the same set size/lineHeight produce DIFFERENT additive
+//      spacing — a font-blind constant was the clip-with-one-font bug.
 //   2. measured height fits where it solved: laying the fitted size out
 //      through TextLayout::Measure must fit a box the solver fitted. The
 //      old model counted a full line box for the LAST line too, over-
@@ -1878,13 +1880,13 @@ void TestFontMetricsFitParity() {
     st.wrap = true;
     st.wrapWidth = 900.0f;
 
-    // (1) SceneBuilder's derivation: natural step × lineHeight − size, which
+    // (1) SceneBuilder's derivation: natural ink height × lineHeight − size, which
     // differs between families; the fallback formula ((lh−1)·size) is what a
     // font-blind engine used to apply to BOTH.
     const auto spacingFor = [&](const char* family) {
         r::FontManager::LineMetrics lm{};
         if (fonts.SystemLineMetrics(family, st.size, false, false, lm))
-            return lm.baselineStep * 1.2f - st.size;
+            return lm.inkHeight * 1.2f - st.size;
         return (1.2f - 1.0f) * st.size;
     };
     if (fonts.HasSystemFont(famA) && fonts.HasSystemFont(famB))
@@ -1954,13 +1956,20 @@ void TestFontMetricsFitParity() {
 // tile, this engine) and each used to supply its own default: the Text panel
 // showed 0 for the very item the canvas, the tiles and the engine all drew at
 // 1.2. The value the operator could see was never the value on air. This pins
-// the engine's half of the one rule (the QML half is
-// MetadataFields.lineHeight / naturalLineHeight):
+// the shared rule and its engine integration:
 //   1. absent and 0 render the SAME, natural step;
-//   2. that step is the font's own baseline step — NOT the old hidden 1.2;
+//   2. that step is the font's own ink height — NOT the old hidden 1.2;
 //   3. an explicit 2.0 still scales it, so the knob keeps working.
 // ---------------------------------------------------------------------------
 void TestLineHeightObeysTheTemplate() {
+    namespace metrics = bps::presentation::template_text_metrics;
+    CHECK(metrics::lineHeightMultiplier(0.0) == 1.0);
+    CHECK(metrics::lineHeightMultiplier(-1.0) == 1.0);
+    CHECK(metrics::lineHeightMultiplier(1.5) == 1.5);
+    CHECK(metrics::lineSpacing(std::numeric_limits<double>::quiet_NaN()) == 0.0);
+    CHECK(metrics::linePitch(20.0, 1.5, 4.0) == 34.0);
+    CHECK(std::abs(metrics::qmlLineHeight(20.0, 1.5, 4.0) - 1.7) < 0.0001);
+    CHECK(metrics::engineLineSpacing(20.0, 24.0, 1.5) == 16.0);
     p::Presentation pres;
     pres.id = "pres-lineheight";
     r::RenderEngine& engine = r::RenderEngine::Instance();
@@ -1994,13 +2003,13 @@ void TestLineHeightObeysTheTemplate() {
     };
 
     // A proportional lineHeight of `lh` on the engine side is a line STEP of
-    // lh x the font's own baseline step (SceneBuilder: baselineStep x lh - size,
+    // lh x the font's own ink height (SceneBuilder: inkHeight x lh - size,
     // then Measure adds the size back). The fallback formula, for a font
     // without metrics, lands on the same lh x size.
     const auto expectedStep = [&](float sizePx, double lh) {
         r::FontManager::LineMetrics lm{};
         if (engine.Fonts().SystemLineMetrics("Segoe UI", sizePx, false, false, lm))
-            return lm.baselineStep * static_cast<float>(lh);
+            return lm.inkHeight * static_cast<float>(lh);
         return static_cast<float>(lh) * sizePx;
     };
     const auto stepOf = [](const r::TextStyle& s) { return s.size + s.lineSpacing; };
@@ -2170,7 +2179,140 @@ void TestTemplateStyleScenes() {
     CHECK(eng.ActiveOutputStyle().templateBlocks.size() == 3);
     CHECK(eng.SetActiveOutputStyle(p::OutputStyleSpec{}).ok());   // leave unstyled
 
-    // 6. RESOLUTION: an output's scene is built AT that output's own size. The
+    // 6. A Table slide rendered through a Lower Third family preset uses the
+    //    slide body, wraps it, and shrinks long paragraphs to the preset bounds.
+    p::Slide tableSlide;
+    tableSlide.id = "tplstyle-table-lower-third";
+    tableSlide.title = "47-0412 - Faith Is The Substance";
+    tableSlide.metaJson = R"({"contentType":"table"})";
+    tableSlide.text =
+        "My, that was very fine, Brother Bosworth. We certainly appreciated that. "
+        "And I wonder what you think of it. I am sure we will enjoy hearing more.";
+    p::OutputStyleSpec tableLowerThird;
+    tableLowerThird.name = "Lower Third";
+    tableLowerThird.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("table")] = "lowerThird";
+    const auto tableScene = builder.BuildSlideScene(pres, tableSlide, tableLowerThird, engine);
+    CHECK(tableScene.ok());
+    if (tableScene.ok()) {
+        const r::TextObject* body = nullptr;
+        for (const r::RenderObject* object : engine.CollectObjects(tableScene.value()))
+            if (const auto* text = dynamic_cast<const r::TextObject*>(object);
+                text && text->Text() == tableSlide.text)
+                body = text;
+        CHECK(body != nullptr);
+        if (body) {
+            const auto* bodyStyle = body->FindComponent<r::TextStyleComponent>();
+            CHECK(bodyStyle != nullptr);
+            if (bodyStyle) {
+                CHECK(bodyStyle->style.wrap);
+                CHECK(bodyStyle->style.fontId == "Cambria");
+                CHECK(bodyStyle->style.size > 24.0f);
+                const auto measured = r::TextLayout::Measure(
+                    body->Text(), bodyStyle->style, engine.Fonts());
+                CHECK(measured.lines.size() > 1);
+                CHECK(measured.totalWidth <= body->Bounds().width + 0.1f);
+                CHECK(measured.totalHeight <= body->Bounds().height + 0.1f);
+            }
+        }
+        (void)engine.DestroyScene(tableScene.value());
+    }
+
+    // A Table family template can mark its reading block growToFit while leaving
+    // fontSize unset (as in the saved Table copy lower-third design). The output
+    // must fit that block like the monitor preview, not leave it at the 16-unit
+    // fallback just because the slide also carries a reading flow.
+    p::Slide tableFlow = tableSlide;
+    tableFlow.id = "tplstyle-table-family-flow";
+    tableFlow.flowText = tableFlow.text;
+    p::ContentBlock tableBody;
+    tableBody.id = "table-body";
+    tableBody.kind = "text";
+    tableBody.x = 0;
+    tableBody.y = 303.6428572;
+    tableBody.width = 754;
+    tableBody.height = 124.3571428;
+    tableBody.text = "{table_text}";
+    tableBody.bind = "text";
+    tableBody.metaJson =
+        R"({"autoSize":"growToFit","fontFamily":"Segoe UI",)"
+        R"("align":"justify","verticalAlign":"bottom",)"
+        R"("lineHeight":1.5,"lineSpacing":6})";
+    tableBody.style.padding = 12.0;
+    p::OutputStyleSpec tableFamilyStyle;
+    tableFamilyStyle.name = "Lower Third";
+    const std::size_t tableSlot = p::SlideRules::FamilyTemplateSlot("table");
+    tableFamilyStyle.templateKey = "lowerThird";
+    tableFamilyStyle.familyTemplateKeys[tableSlot] = "tpl-3";
+    tableFamilyStyle.familyTemplateBlocks[tableSlot] = {tableBody};
+    const auto tableFlowScene =
+        builder.BuildSlideScene(pres, tableFlow, tableFamilyStyle, engine, r::Size(1920, 1080));
+    CHECK(tableFlowScene.ok());
+    float longFlowSize = 0.0f;
+    if (tableFlowScene.ok()) {
+        const r::TextObject* body = nullptr;
+        for (const r::RenderObject* object : engine.CollectObjects(tableFlowScene.value()))
+            if (const auto* text = dynamic_cast<const r::TextObject*>(object);
+                text && text->Text() == tableFlow.text)
+                body = text;
+        CHECK(body != nullptr);
+        if (body) {
+            const auto* bodyStyle = body->FindComponent<r::TextStyleComponent>();
+            CHECK(bodyStyle != nullptr);
+            if (bodyStyle) {
+                longFlowSize = bodyStyle->style.size;
+                CHECK(bodyStyle->style.size > 16.0f * 1080.0f / 428.0f + 1.0f);
+                CHECK(bodyStyle->style.align == r::TextAlign::Justify);
+                CHECK(bodyStyle->style.valign == r::TextVAlign::Bottom);
+                CHECK(bodyStyle->style.lineSpacing > 0.0f);
+                CHECK(std::abs(bodyStyle->style.lineGap - 6.0f * 1080.0f / 428.0f) < 0.1f);
+                const float expectedTextWidth =
+                    static_cast<float>((tableBody.width - 2.0 * tableBody.style.padding)
+                                       * 1920.0 / 754.0);
+                CHECK(std::abs(body->Bounds().width - expectedTextWidth) < 0.1f);
+                const float expectedTextY =
+                    static_cast<float>((tableBody.y + tableBody.style.padding)
+                                       * 1080.0 / 428.0);
+                CHECK(std::abs(body->Bounds().y - expectedTextY) < 0.1f);
+                const auto measured = r::TextLayout::Measure(
+                    body->Text(), bodyStyle->style, engine.Fonts());
+                CHECK(measured.totalWidth <= body->Bounds().width + 0.1f);
+                CHECK(measured.totalHeight <= body->Bounds().height + 0.1f);
+            }
+        }
+        (void)engine.DestroyScene(tableFlowScene.value());
+    }
+    p::Slide shortTableFlow = tableFlow;
+    shortTableFlow.id = "tplstyle-table-family-short-flow";
+    shortTableFlow.text = "A short paragraph.";
+    shortTableFlow.flowText = shortTableFlow.text;
+    tableBody.text = "{table_text}";
+    tableFamilyStyle.familyTemplateBlocks[tableSlot] = {tableBody};
+    const auto shortTableFlowScene =
+        builder.BuildSlideScene(pres, shortTableFlow, tableFamilyStyle, engine,
+                                r::Size(1920, 1080));
+    CHECK(shortTableFlowScene.ok());
+    if (shortTableFlowScene.ok()) {
+        const r::TextObject* body = nullptr;
+        for (const r::RenderObject* object : engine.CollectObjects(shortTableFlowScene.value()))
+            if (const auto* text = dynamic_cast<const r::TextObject*>(object);
+                text && text->Text() == shortTableFlow.text)
+                body = text;
+        CHECK(body != nullptr);
+        if (body) {
+            const auto* bodyStyle = body->FindComponent<r::TextStyleComponent>();
+            CHECK(bodyStyle != nullptr);
+            if (bodyStyle) {
+                CHECK(bodyStyle->style.size > longFlowSize);
+                const auto measured = r::TextLayout::Measure(
+                    body->Text(), bodyStyle->style, engine.Fonts());
+                CHECK(measured.totalWidth <= body->Bounds().width + 0.1f);
+                CHECK(measured.totalHeight <= body->Bounds().height + 0.1f);
+            }
+        }
+        (void)engine.DestroyScene(shortTableFlowScene.value());
+    }
+
+    // 8. RESOLUTION: an output's scene is built AT that output's own size. The
     //    styled id carries a size tag for any non-default size, so two outputs
     //    at different resolutions never share one cached scene (a cache hit
     //    returns the scene at the size it was FIRST built with — so without the
@@ -3955,4 +4097,278 @@ void TestShippedConfig() {
 
     (void)fs.RemoveAll(root);
     CHECK(db.Open("").ok());   // leave the shared store in-memory for the next suite
+}
+
+// A READING WINDOW THAT MOVED UNDER A SCENE THAT ALREADY EXISTS — the page
+// commit's cheap half (SceneBuilder::RefreshReadingFlow).
+//
+// A page commit inside one passage changes nothing a scene is BUILT from: the
+// blocks, their boxes and the page are the same words; what moved is the
+// passage below the page and where in it the reader is. The scene id cannot say
+// so (the flow is in no fingerprint), so the only way the outputs ever saw the
+// new window was a REBUILD — and, through the live path, a whole content
+// replacement at the moment the reader crossed a paragraph
+// (docs/scroll_mode_thread_audit.md, F3). This pins the cheap path: the scene is
+// not rebuilt, its reading block re-reads the moved window, and the picture at
+// the page's top is unchanged while a position the old window could not reach
+// now draws.
+void TestReadingFlowWindowRefresh() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+
+    // Every line is distinct text, so a picture of the wrong window is a
+    // different picture.
+    const auto line = [](int i) { return "line " + std::to_string(i) + " of the passage"; };
+    const auto textFrom = [&](int from, int count) {
+        std::string text;
+        for (int i = from; i < from + count; ++i) {
+            if (i > from) text += "\n";
+            text += line(i);
+        }
+        return text;
+    };
+    // The character a line starts at inside a window that begins at `from`.
+    const auto lineStart = [&](int from, int upto) {
+        size_t at = 0;
+        for (int i = from; i < upto; ++i) at += line(i).size() + 1;
+        return static_cast<float>(at);
+    };
+
+    p::Presentation pres;
+    pres.id = "reading-window-refresh";
+    p::Slide slide;
+    slide.id = "reading-window-refresh-1";
+    slide.text = textFrom(0, 6);        // the PAGE (six lines)
+    slide.flowText = textFrom(0, 12);   // the passage window the block scrolls
+    slide.flowChar = 0.0f;
+
+    p::SceneBuilder builder;
+    const auto built = builder.BuildSlideScene(pres, slide, engine, r::Size(400, 240));
+    CHECK(built.ok());
+    if (!built.ok())
+        return;
+    const std::string sceneId = built.value();
+
+    const auto readingObject = [&]() -> r::TextObject* {
+        for (auto* object : engine.CollectObjects(sceneId))
+            if (auto* text = dynamic_cast<r::TextObject*>(object); text && text->HasReadingFlow())
+                return text;
+        return nullptr;
+    };
+    r::TextObject* reading = readingObject();
+    CHECK(reading != nullptr);
+    if (!reading)
+        return;
+    CHECK(reading->FlowPageLines() == 6);          // the page, not the window
+    CHECK(reading->Text() == slide.flowText);
+    // A position past the window's last line is clamped INTO the window: that is
+    // the old window's ceiling, and the reason a moved window needs the scene.
+    float pastWindow = lineStart(0, 15);
+    CHECK(reading->FlowLineForChar(pastWindow) < 12.0f);
+
+    const auto ink = [](const r::RgbaImage& img) {
+        if (img.empty()) return size_t{0};
+        const uint32_t base = img.pixels.front();
+        size_t painted = 0;
+        for (uint32_t px : img.pixels)
+            if (px != base) ++painted;
+        return painted;
+    };
+    const auto frameAt = [&](float charAt) {
+        r::RenderOptions opts;
+        opts.capture = true;
+        opts.distribute = false;
+        opts.contentScrollChars = charAt;
+        opts.contentScrollFromScene = false;
+        auto frame = engine.RenderOffscreen(sceneId, r::Size(400, 240), opts);
+        return frame.ok() ? frame.value() : r::RgbaImage{};
+    };
+    const auto topBefore = frameAt(0.0f);
+    const auto deepBefore = frameAt(pastWindow);
+    CHECK(ink(topBefore) > 0);
+    CHECK(ink(deepBefore) > 0);    // clamped to the old window's last line
+
+    // ---- the window MOVES under the same scene ------------------------------
+    p::Slide moved = slide;
+    moved.flowText = textFrom(0, 30);            // the same page, a longer passage
+    moved.flowChar = pastWindow;                 // resting where it could not reach
+    CHECK(builder.RefreshReadingFlow(engine, sceneId, moved));
+
+    // THE SCENE IS THE SAME ONE — not a rebuild (a rebuild would mint a new id
+    // and a second cached scene per page turn).
+    CHECK(engine.GetScene(sceneId).ok());
+    CHECK(builder.BuildSlideScene(pres, moved, engine, r::Size(400, 240)).value() == sceneId);
+    reading = readingObject();
+    CHECK(reading != nullptr);
+    if (!reading)
+        return;
+    CHECK(reading->Text() == moved.flowText);
+    CHECK(reading->FlowPageLines() == 6);        // the page did not change, only the window
+    // The position the old window clamped is a real line now.
+    CHECK(reading->FlowLineForChar(pastWindow) >= 14.0f);
+
+    // ...and the output follows: the page's top is the same picture (the words
+    // there did not move), while the deep position draws where it was blank.
+    const auto topAfter = frameAt(0.0f);
+    const auto deepAfter = frameAt(pastWindow);
+    CHECK(ink(topAfter) > 0);
+    CHECK(ink(deepAfter) > 0);
+    CHECK(topAfter.pixels == topBefore.pixels);
+    CHECK(!(deepAfter.pixels == deepBefore.pixels));
+
+    // Switching to Slide mode sends an empty flow to the already-built scene.
+    // It must restore the original page text instead of leaving the passage
+    // attached (which made the NDI renderer keep scrolling after the preview
+    // had switched back to the selected page).
+    p::Slide slideMode = moved;
+    slideMode.flowText.clear();
+    slideMode.flowChar = 0.0f;
+    CHECK(builder.RefreshReadingFlow(engine, sceneId, slideMode));
+    CHECK(!reading->HasReadingFlow());
+    CHECK(!reading->HasFlowCharTable());
+    CHECK(reading->Text() == slide.text);
+    const auto restoredPage = frameAt(0.0f);
+    // WHAT "THE PAGE IS BACK" IS MEASURED AGAINST: a scene built for the page
+    // alone, not the flow frame at rest. The two differ by one rendering-path
+    // detail and only that one: a flowing block CLIPS its glyphs to the page's
+    // rectangle (RenderEngine::DrawTextObject's `flowing` branch), a plain block
+    // draws byte-for-byte what it always drew — unclipped — so a line whose last
+    // glyph overhangs the box paints its fringe past the edge in one and not the
+    // other. What must hold is that this scene now draws the PAGE the way a page
+    // is drawn, and that it no longer scrolls.
+    p::Slide plainSlide = slide;             // the page, NO passage attached
+    plainSlide.id = "reading-window-refresh-plain";
+    plainSlide.flowText.clear();
+    plainSlide.flowChar = -1.0f;
+    const auto plainBuilt =
+        builder.BuildSlideScene(pres, plainSlide, engine, r::Size(400, 240));
+    CHECK(plainBuilt.ok());
+    if (!plainBuilt.ok())
+        return;
+    const auto plainFrame = [&] {
+        r::RenderOptions opts;
+        opts.capture = true;
+        opts.distribute = false;
+        auto frame = engine.RenderOffscreen(plainBuilt.value(), r::Size(400, 240), opts);
+        return frame.ok() ? frame.value() : r::RgbaImage{};
+    }();
+    CHECK(!plainFrame.empty());
+    CHECK(restoredPage.pixels == plainFrame.pixels);
+    // ...and it is STATIC again: the position that used to scroll the passage now
+    // draws the same page (the reported "the NDI output kept scrolling after the
+    // preview switched back to Slide mode").
+    const auto restoredDeep = frameAt(pastWindow);
+    CHECK(restoredDeep.pixels == restoredPage.pixels);
+
+    // Switching back to Scroll mode must re-attach the flow to this same scene.
+    CHECK(builder.RefreshReadingFlow(engine, sceneId, moved));
+    CHECK(reading->HasReadingFlow());
+    CHECK(reading->Text() == moved.flowText);
+
+    // A scene that draws no flow says so instead of guessing (a refused family /
+    // a bus feed reach this with no reading object at all).
+    CHECK(!builder.RefreshReadingFlow(engine, "reading-window-refresh-missing", moved));
+
+    (void)engine.DestroyScene(sceneId);
+}
+
+// A PAGE COMMIT IS AN OFFSET UPDATE, NOT A NEW PICK (the engine half of F3).
+//
+// The stepper re-stages the SAME slide at every page boundary of one passage:
+// same title, same blocks, same page — only flowText/flowChar moved. Committing
+// that through StartFromSlides meant a content replacement on the render worker
+// (recompile, runtime rebind, every output's scene rebuilt, composed frame
+// dropped) at the moment the reader crossed a paragraph. UpdateReadingSlide puts
+// the same slide on air as an in-place update instead, and refuses (queues a real
+// commit) when the picture itself changed.
+void TestReadingPageKeepsPick() {
+    auto& render = r::RenderEngine::Instance();
+    CHECK(render.Initialize().ok());
+    CHECK(render.Start().ok());
+    CHECK(render.SetBackend("software").ok());
+    auto& eng = p::PresentationEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    auto& live = l::LiveOutputController::Instance();
+    CHECK(live.Initialize().ok());
+    CHECK(live.Start().ok());
+
+    const auto line = [](int i) { return "line " + std::to_string(i) + " of the passage"; };
+    const auto textFrom = [&](int count) {
+        std::string text;
+        for (int i = 0; i < count; ++i) {
+            if (i > 0) text += "\n";
+            text += line(i);
+        }
+        return text;
+    };
+
+    p::Slide slide;
+    slide.title = "Read Through";
+    slide.text = textFrom(6);               // the page
+    slide.flowText = textFrom(12);          // the passage the reading block scrolls
+    slide.flowChar = 0.0f;
+
+    CHECK(live.StartFromSlides("Reading Pick", {slide}).ok());
+    CHECK(live.RenderOnce().ok());
+    const p::Presentation* onAir = eng.Runtime().ActivePresentation();
+    CHECK(onAir != nullptr && onAir->slides.size() == 1);
+    if (!onAir || onAir->slides.empty())
+        return;
+    CHECK(eng.Runtime().Compiled().slides.size() == 1);
+    const std::string sceneBefore = eng.Runtime().Compiled().slides[0].sceneId;
+    CHECK(!sceneBefore.empty());
+
+    // ---- the window moves, the pick does not -------------------------------
+    p::Slide moved = slide;
+    moved.flowText = textFrom(30);
+    moved.flowChar = 260.0f;
+    CHECK(live.UpdateReadingSlide("Reading Pick", moved).ok());
+    CHECK(live.RenderOnce().ok());
+
+    // THE PICK IS THE SAME ONE: the on-air slide carries the new window and the
+    // scene that was already built draws it — no recompile, no rebuild.
+    onAir = eng.Runtime().ActivePresentation();
+    CHECK(onAir != nullptr && onAir->slides.size() == 1);
+    if (onAir && !onAir->slides.empty()) {
+        CHECK(onAir->slides[0].flowText == moved.flowText);
+        CHECK(std::abs(onAir->slides[0].flowChar - moved.flowChar) < 0.01f);
+    }
+    CHECK(eng.Runtime().Compiled().slides.size() == 1);
+    CHECK(eng.Runtime().Compiled().slides[0].sceneId == sceneBefore);
+    CHECK(render.GetScene(sceneBefore).ok());
+    // ...and no content replacement was queued behind it.
+    CHECK(!live.IsLiveContentReplacementPending());
+    bool flowAttached = false;
+    for (auto* object : render.CollectObjects(sceneBefore))
+        if (auto* text = dynamic_cast<r::TextObject*>(object);
+            text && text->HasReadingFlow() && text->Text() == moved.flowText)
+            flowAttached = true;
+    CHECK(flowAttached);
+
+    // ---- a DIFFERENT picture is still a real commit ------------------------
+    p::Slide other = moved;
+    other.title = "A Different Page";       // the page's own words/reference moved
+    other.text = textFrom(4);
+    CHECK(live.UpdateReadingSlide("Reading Pick", other).ok());
+    CHECK(live.RenderOnce().ok());
+    // The refusal is a QUEUED replacement (the loop applies it, never this
+    // thread): wait for the picture itself, not for the transient flag.
+    bool committed = false;
+    for (int i = 0; i < 200 && !committed; ++i) {
+        const p::Presentation* now = eng.Runtime().ActivePresentation();
+        committed = now && !now->slides.empty() && now->slides[0].title == other.title;
+        if (!committed)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(committed);
+
+    // Nothing queued once the session ends (and no worker left behind it).
+    CHECK(live.StopLive().ok());
+    CHECK(!live.IsLive());
+    CHECK(!live.IsLiveContentReplacementPending());
+    // REGISTRY HYGIENE: StartFromSlides mirrors "temp:Reading Pick".
+    CHECK(eng.Delete("temp:Reading Pick").ok());
+    CHECK(live.Stop().ok());
+    (void)render.RemoveOutput(l::LiveOutputController::kPreviewName);
 }

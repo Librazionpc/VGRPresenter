@@ -777,8 +777,8 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     auto layoutRes = cache_.Layout(obj->Text(), style, fonts_);
     if (!layoutRes.ok() || layoutRes.value().lines.empty()) return;
 
-    // Real font when style.fontId names one the system can resolve (GDI+,
-    // Windows), else the builtin bitmap font — same "try real, degrade
+    // Real font when style.fontId names one Qt can resolve, else the builtin
+    // bitmap font — same "try real, degrade
     // gracefully" contract as the cache's own fallback inside this call.
     auto atlas = cache_.GlyphAtlas(style, fonts_);
     if (!atlas.ok()) return;
@@ -807,11 +807,17 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     // resolve to the same installed face, and naming the texture after the raw
     // request would upload the same atlas twice under two names.
     const std::string substitutedFamily = fonts_.SubstituteFamily(style.fontId);
-    const std::string atlasName = std::format("__font_atlas_{}_{}_{}_{}_{}x{}",
+    const bool useSystemFont = !substitutedFamily.empty()
+                               && fonts_.HasSystemFont(substitutedFamily);
+    const int atlasSizeKey = useSystemFont ? FontManager::QtPixelSize(style.size)
+                                           : static_cast<int>(style.size + 0.5f);
+    const QFont::Weight atlasFontWeight = style.bold ? QFont::Bold : style.fontWeight;
+    const std::string atlasName = std::format("__font_atlas_{}_{}_{}_{}_{}_{}_{}x{}",
                                               substitutedFamily.empty() ? style.fontId
                                                                         : substitutedFamily,
-                                              static_cast<int>(style.size + 0.5f),
-                                              style.bold, style.italic,
+                                              atlasSizeKey,
+                                              static_cast<int>(atlasFontWeight), style.italic,
+                                              style.underline, style.strikeout,
                                               entry.atlas.width, entry.atlas.height);
     auto tex = gpu_.GetTexture(atlasName);
     TextureId tid = tex.ok() ? tex.value() : TextureId{};
@@ -837,8 +843,8 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
 
     const auto& result = layoutRes.value();
     // Step lines by the MEASURED per-line advance, not a re-derived estimate:
-    // for real fonts Measure used the font's actual baseline step (which
-    // differs per font), and painted spacing that disagrees with measured
+    // for real fonts Measure used the font's actual line pitch (which
+    // matches the preview's natural line box), and painted spacing that disagrees with measured
     // spacing re-spreads the block — un-doing the fit solve (fit says it
     // fits; the paint overflows the box and clips the tail). Falls back to
     // the legacy formula only for a zero-value result (never produced by
@@ -894,8 +900,51 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
         ? Rect(bounds.x, pageTop, bounds.width, alignHeight)
         : bounds;
 
+    const auto justifiedExtraPerSpace = [&style](const LineLayout& line) {
+        if (style.align != TextAlign::Justify || line.paragraphEnd
+            || style.wrapWidth <= line.width)
+            return 0.0f;
+        const auto spaces = std::count(line.text.begin(), line.text.end(), ' ');
+        return spaces > 0
+            ? (style.wrapWidth - line.width) / static_cast<float>(spaces)
+            : 0.0f;
+    };
+    const auto paintedLineWidth = [&justifiedExtraPerSpace](const LineLayout& line) {
+        const auto spaces = std::count(line.text.begin(), line.text.end(), ' ');
+        return line.width + justifiedExtraPerSpace(line) * static_cast<float>(spaces);
+    };
+
     // Vertical alignment offset.
     const float startY = pageTop - scrollPx;
+
+    // WHICH LINES THE VIEWPORT CAN SEE — the cull that makes a scroll cost what
+    // the BOX costs instead of what the PASSAGE costs.
+    //
+    // The three passes below (bands, shadow, glyphs) used to walk `result.lines`
+    // — the layout of the FLOW TEXT, which is the whole run a reading walk is
+    // drawing, hundreds of lines for a sermon — and build one DrawCommand per
+    // line (and one per GLYPH for the text), then throw almost every command
+    // away inside ClipQuad because the line sat above or below the page. The
+    // work was done and discarded at 60 Hz: the reading column measured 37% of
+    // a composed frame (≈150–400 ms, Settings' own hotspot telemetry), which is
+    // exactly the "scrolling the passage saturates the CPU" report. A line the
+    // viewport cannot see now costs one index, not a line's glyphs.
+    //
+    // A line is visible when its own box [ly, ly + lineHeight) meets the clip
+    // rect; one line of slack either side keeps a half-covered line's clip
+    // exact (the fractional scroll offset means the edge line is usually cut).
+    // A block with no flow keeps the full range — it is one page by construction.
+    int firstLine = 0;
+    int lastLine = static_cast<int>(result.lines.size());
+    if (flowing && lineHeight > 0.0f) {
+        const float top = clipRect.y;
+        const float bottom = clipRect.Bottom();
+        firstLine = std::max(0, static_cast<int>(std::floor((top - startY) / lineHeight)) - 1);
+        lastLine = std::min(lastLine,
+                            static_cast<int>(std::ceil((bottom - startY) / lineHeight)) + 1);
+        if (lastLine <= firstLine)
+            return;   // the viewport holds none of the passage (an offset past its end)
+    }
 
     // PER-LINE BACKGROUND BANDS (FreeShow's lineBg) — drawn UNDER the glyphs,
     // one rectangle per visual line, each as wide as that line's own ink. This
@@ -913,13 +962,15 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     if (style.lineBg.a > 0.0f) {
         const float bandHeight = result.lineBox > 0.0f ? result.lineBox
                                                        : style.size + style.lineSpacing;
-        float by = startY;
-        for (const auto& line : result.lines) {
+        for (int lineIndex = firstLine; lineIndex < lastLine; ++lineIndex) {
+            const auto& line = result.lines[static_cast<size_t>(lineIndex)];
+            const float by = startY + static_cast<float>(lineIndex) * lineHeight;
             float lx = bounds.x;
+            const float lineWidth = paintedLineWidth(line);
             if (style.align == TextAlign::Center)
-                lx = bounds.x + (bounds.width - line.width) / 2.0f;
+                lx = bounds.x + (bounds.width - lineWidth) / 2.0f;
             else if (style.align == TextAlign::Right)
-                lx = bounds.x + (bounds.width - line.width);
+                lx = bounds.x + (bounds.width - lineWidth);
             DrawCommand c;
             // A RADIUS turns the band into a rounded shape; without one the plain
             // FillRect is both cheaper and byte-for-byte what earlier builds drew,
@@ -927,7 +978,7 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             c.type = style.lineRadius > 0.0f ? DrawCommand::Type::DrawShape
                                             : DrawCommand::Type::FillRect;
             c.blend = static_cast<int>(BlendMode::Alpha);
-            c.rect = Rect(lx, by, line.width, bandHeight);
+            c.rect = Rect(lx, by, lineWidth, bandHeight);
             // Past half the band's height a radius is a stadium and nothing else;
             // clamping here keeps the software and D3D11 rasterizers handed the
             // same number (each clamps too, but the command is what the GPU path
@@ -942,7 +993,6 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             Rect src;
             if (!flowing || ClipQuad(clipRect, c.rect, src))
                 cmds.push_back(c);
-            by += lineHeight;
         }
     }
 
@@ -951,34 +1001,41 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
         DrawCommand c;
         c.type = DrawCommand::Type::FillRect;
         c.blend = static_cast<int>(BlendMode::Alpha);
-        float sy = startY;
-        for (const auto& line : result.lines) {
+        for (int lineIndex = firstLine; lineIndex < lastLine; ++lineIndex) {
+            const auto& line = result.lines[static_cast<size_t>(lineIndex)];
+            const float sy = startY + static_cast<float>(lineIndex) * lineHeight;
             float lx = bounds.x + style.shadowOffset.x;
+            const float lineWidth = paintedLineWidth(line);
             if (style.align == TextAlign::Center)
-                lx = bounds.x + (bounds.width - line.width) / 2.0f + style.shadowOffset.x;
+                lx = bounds.x + (bounds.width - lineWidth) / 2.0f + style.shadowOffset.x;
             else if (style.align == TextAlign::Right)
-                lx = bounds.x + (bounds.width - line.width) + style.shadowOffset.x;
-            c.rect = Rect(lx, sy + style.shadowOffset.y, line.width, style.size);
+                lx = bounds.x + (bounds.width - lineWidth) + style.shadowOffset.x;
+            c.rect = Rect(lx, sy + style.shadowOffset.y, lineWidth, style.size);
             c.color = style.shadowColor;
             c.color.a *= obj->Opacity();
             Rect src;
             if (!flowing || ClipQuad(clipRect, c.rect, src))
                 cmds.push_back(c);
-            sy += lineHeight;
         }
     }
 
     // Glyph pass.
-    float ly = startY;
-    for (const auto& line : result.lines) {
+    for (int lineIndex = firstLine; lineIndex < lastLine; ++lineIndex) {
+        const auto& line = result.lines[static_cast<size_t>(lineIndex)];
+        const float ly = startY + static_cast<float>(lineIndex) * lineHeight;
         float lx = bounds.x;
+        const float lineWidth = paintedLineWidth(line);
         if (style.align == TextAlign::Center)
-            lx = bounds.x + (bounds.width - line.width) / 2.0f;
+            lx = bounds.x + (bounds.width - lineWidth) / 2.0f;
         else if (style.align == TextAlign::Right)
-            lx = bounds.x + (bounds.width - line.width);
-        // RTL: reverse visual order within the line.
-        std::string visual = style.rtl ? std::string(line.text.rbegin(), line.text.rend())
-                                       : line.text;
+            lx = bounds.x + (bounds.width - lineWidth);
+        // RTL: reverse visual order within the line. An LTR line is walked in
+        // place — a per-line std::string copy at 60 Hz was one more allocation
+        // per visible line, every frame, for a picture that never changes.
+        std::string reversed;
+        const std::string& visual = style.rtl
+            ? (reversed.assign(line.text.rbegin(), line.text.rend()), reversed)
+            : line.text;
         float cx = lx;
         for (char ch : visual) {
             const uint8_t cp = static_cast<uint8_t>(ch);
@@ -1024,10 +1081,10 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
             // A SPACE also carries the word spacing, exactly as TextLayout's
             // width math counts it — the drawn line and the measured line are
             // the same sum, so a wrapped block can never drift from its box.
-            cx += static_cast<float>(g.advance) + style.letterSpacing;
-            if (ch == ' ') cx += style.wordSpacing;
+            cx += g.advance + style.letterSpacing;
+            if (ch == ' ')
+                cx += style.wordSpacing + justifiedExtraPerSpace(line);
         }
-        ly += lineHeight;
     }
 }
 
@@ -1278,6 +1335,10 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // Custom graph passes run after the fixed pipeline (extensible effects).
     graph_.ExecutePasses();
 
+    // Published for the diagnostics and the draw-cost suite (RenderStats::commands):
+    // "how many commands this frame built" is the number a scrolling frame's cost is
+    // argued from, and it is only observable here.
+    lastCommandCount_.store(static_cast<uint32_t>(cmds.size()));
     if (auto r = backend_->Submit(cmds); !r.ok()) return r.error();
     if (auto r = backend_->EndFrame(); !r.ok()) return r.error();
 
@@ -1314,7 +1375,9 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
 
     // Diagnostics + frame budget (60 FPS target ⇒ 16.67 ms; drops logged).
     const auto frameEnd = std::chrono::steady_clock::now();
-    lastFrameMs_ = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
+    lastFrameMs_ = std::chrono::duration<double, std::milli>(
+                       frameEnd.time_since_epoch() - frameStart.time_since_epoch())
+                       .count();
     frameMs = lastFrameMs_;
 
     // The cost profile: the frame's work split between the elements that asked
@@ -1398,6 +1461,7 @@ RenderStats RenderEngine::Stats() const {
     s.textureCount = static_cast<uint32_t>(gpu_.TextureCount());
     s.shaderCount = static_cast<uint32_t>(gpu_.ShaderCount());
     s.renderQueueSize = static_cast<uint32_t>(uploader_.Pending());
+    s.commands = lastCommandCount_.load();
     const auto now = std::chrono::steady_clock::now();
     const double elapsed = std::chrono::duration<double>(now - lastFrameAt_).count();
     if (elapsed > 0 && s.frames > 0) s.fps = 1.0 / std::max(elapsed, 1e-9);
