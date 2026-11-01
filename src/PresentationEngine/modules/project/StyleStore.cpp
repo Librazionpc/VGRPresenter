@@ -133,6 +133,15 @@ json::Value StyleStore::StyleToJson(const StoredStyle& s) {
     famKeys["table"] = json::Value::String(s.templateKeys[3]);
     o["templateKeys"] = json::Value(std::move(famKeys));
     o["category"] = json::Value::String(s.category);
+    json::Value::Array categoryTemplates;
+    for (const StoredShowCategoryTemplate& entry : s.showCategoryTemplates) {
+        json::Value::Object item;
+        item["category"] = json::Value::String(entry.category);
+        item["templateKey"] = json::Value::String(entry.templateKey);
+        item["overrideEnabled"] = json::Value::Bool(entry.overrideEnabled);
+        categoryTemplates.emplace_back(json::Value(std::move(item)));
+    }
+    o["showCategoryTemplates"] = json::Value(std::move(categoryTemplates));
     // Routing-board membership (see StoredStyle::onBoard).
     o["onBoard"] = json::Value::Bool(s.onBoard);
     return json::Value(std::move(o));
@@ -191,6 +200,21 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
         s.templateKeys[3] = fkey("table");
     }
     s.category = str("category");
+    if (const json::Value* entries = v.Find("showCategoryTemplates"); entries && entries->asArray()) {
+        for (const json::Value& entry : *entries->asArray()) {
+            if (!entry.asObject())
+                continue;
+            StoredShowCategoryTemplate item;
+            if (const json::Value* field = entry.Find("category"))
+                item.category = std::string(field->asString());
+            if (const json::Value* field = entry.Find("templateKey"))
+                item.templateKey = std::string(field->asString());
+            if (const json::Value* field = entry.Find("overrideEnabled"))
+                item.overrideEnabled = field->asBool(false);
+            if (!item.category.empty())
+                s.showCategoryTemplates.push_back(std::move(item));
+        }
+    }
     // Absent on every roster saved before the Routing board had membership, and
     // absent must read as "not on the board" (see StoredStyle::onBoard).
     s.onBoard = flag("onBoard", false);

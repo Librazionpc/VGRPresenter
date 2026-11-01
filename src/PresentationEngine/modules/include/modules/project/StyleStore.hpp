@@ -25,6 +25,12 @@
 
 namespace bps::project {
 
+struct StoredShowCategoryTemplate {
+    std::string category;
+    std::string templateKey;
+    bool overrideEnabled = false;
+};
+
 struct StoredStyle {
     std::string id;                       // stable id ("s<n>", never reused)
     std::string name;
@@ -59,6 +65,9 @@ struct StoredStyle {
     std::string templateKeys[4];                        // shows | media | scripture | table
     // Shows-only category label (free text; FreeShow styles name a category).
     std::string category;
+    // Optional per-show-library-category template overrides. A row is retained
+    // while its override is off so the user can prepare the template first.
+    std::vector<StoredShowCategoryTemplate> showCategoryTemplates;
     // IS THIS STYLE ON THE ROUTING BOARD? The board is a patch bay: a style card
     // exists there only because the operator put it there, so a style made on the
     // Styles page stays off the board until it is added. Persisted here because

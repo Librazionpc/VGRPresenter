@@ -2363,9 +2363,21 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     const json::Value* templateOverride = slideMeta.ok()
         ? slideMeta.value().Find("templateOverride") : nullptr;
     const bool explicitSlideTemplate = templateOverride && templateOverride->asBool();
+    const std::string showCategory = MetaString(slide.metaJson, "showCategory");
+    const OutputStyleSpec::ShowCategoryTemplate* categoryTemplate = nullptr;
+    if (slideIsShowsContent && !showCategory.empty()) {
+        for (const auto& candidate : style.showCategoryTemplates) {
+            if (candidate.overrideEnabled && candidate.category == showCategory
+                && !candidate.blocks.empty()) {
+                categoryTemplate = &candidate;
+                break;
+            }
+        }
+    }
     const bool stylePickedShowsLayout =
-        !explicitSlideTemplate && comp.familyIdx < 4
-        && !style.familyTemplateKeys[comp.familyIdx].empty();
+        categoryTemplate != nullptr
+        || (!explicitSlideTemplate && comp.familyIdx < 4
+            && !style.familyTemplateKeys[comp.familyIdx].empty());
     if (slideIsShowsContent && !slide.blocks.empty() && !stylePickedShowsLayout) {
         comp.source = SlideComposition::Source::SlideBlocks;
         return comp;   // `blocks` stays empty: the caller draws the slide's own
@@ -2430,14 +2442,58 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
         comp.preset = StyleBuilder::Layout{};
     };
 
+    const std::vector<ContentBlock>& selectedFamilyTemplate = categoryTemplate
+        ? categoryTemplate->blocks
+        : (comp.familyIdx < 4 ? style.familyTemplateBlocks[comp.familyIdx]
+                              : style.familyTemplateBlocks[kFamilySlotShows]);
     if (slideHasContent && comp.familyIdx < 4
-        && !style.familyTemplateBlocks[comp.familyIdx].empty()) {
+        && !selectedFamilyTemplate.empty()) {
         comp.source = SlideComposition::Source::FamilyTemplate;
-        comp.blocks = BindTemplateBlocks(style.familyTemplateBlocks[comp.familyIdx], slide);
+        if (slideIsShowsContent && !slide.blocks.empty()) {
+            // A Shows template is a layout for the show's authored items.
+            // Match text items into its text boxes (id first, then document
+            // order) so a template's sample/title binding cannot replace the
+            // actual slide text with labels such as "Verse 2". This applies
+            // equally to a style's general Shows template and its category
+            // override: the style selects the layout, the show supplies text.
+            std::vector<ContentBlock> categoryBlocks = selectedFamilyTemplate;
+            std::vector<bool> used(slide.blocks.size(), false);
+            for (ContentBlock& box : categoryBlocks) {
+                if (box.kind != "text")
+                    continue;
+                auto source = slide.blocks.end();
+                if (!box.id.empty()) {
+                    source = std::find_if(slide.blocks.begin(), slide.blocks.end(),
+                        [&](const ContentBlock& candidate) {
+                            const size_t index = static_cast<size_t>(&candidate - slide.blocks.data());
+                            return !used[index] && candidate.kind == "text"
+                                && candidate.id == box.id
+                                && !candidate.text.empty();
+                        });
+                }
+                if (source == slide.blocks.end()) {
+                    source = std::find_if(slide.blocks.begin(), slide.blocks.end(),
+                        [&](const ContentBlock& candidate) {
+                            const size_t index = static_cast<size_t>(&candidate - slide.blocks.data());
+                            return !used[index] && candidate.kind == "text"
+                                && !candidate.text.empty();
+                        });
+                }
+                if (source == slide.blocks.end())
+                    continue;
+                used[static_cast<size_t>(std::distance(slide.blocks.begin(), source))] = true;
+                box.text = source->text;
+                box.bind.clear();
+            }
+            comp.blocks = BindTemplateBlocks(categoryBlocks, slide);
+        } else {
+            comp.blocks = BindTemplateBlocks(selectedFamilyTemplate, slide);
+        }
         fallBackToSlideBlocks(
             CompositionPaints(comp.blocks),
             std::format("family {} template '{}'", comp.familyIdx,
-                        style.familyTemplateKeys[comp.familyIdx]));
+                        categoryTemplate ? categoryTemplate->templateKey
+                                         : style.familyTemplateKeys[comp.familyIdx]));
         return comp;
     }
     if (slideHasContent && !style.templateBlocks.empty()

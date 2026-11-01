@@ -10,6 +10,7 @@
 #include <QGuiApplication>
 #include <QJSEngine>
 #include <QScreen>
+#include <QSet>
 #include <QDir>
 #include <QFile>
 #include <algorithm>
@@ -130,6 +131,13 @@ void StyleListModel::reloadFromStore()
         }
         item.showOverlay = s.showTemplates[StyleItem::kOverlaySlot];
         item.category = QString::fromStdString(s.category);
+        for (const auto &entry : s.showCategoryTemplates) {
+            item.showCategoryTemplates.append(QVariantMap{
+                { QStringLiteral("category"), QString::fromStdString(entry.category) },
+                { QStringLiteral("templateKey"), QString::fromStdString(entry.templateKey) },
+                { QStringLiteral("overrideEnabled"), entry.overrideEnabled },
+            });
+        }
         // Routing-board membership rides the roster (StoredStyle::onBoard).
         item.onBoard = s.onBoard;
         m_styles.append(item);
@@ -172,6 +180,7 @@ QVariant StyleListModel::data(const QModelIndex &index, int role) const
     case ShowTableRole: return item.showTable;
     case ShowOverlayRole: return item.showOverlay;
     case CategoryRole: return item.category;
+    case ShowCategoryTemplatesRole: return item.showCategoryTemplates;
     case OnBoardRole: return item.onBoard;
     default: return {};
     }
@@ -194,6 +203,7 @@ QHash<int, QByteArray> StyleListModel::roleNames() const
         { ShowTableRole, "showTable" },
         { ShowOverlayRole, "showOverlay" },
         { CategoryRole, "category" },
+        { ShowCategoryTemplatesRole, "showCategoryTemplates" },
         { OnBoardRole, "onBoard" },
     };
 }
@@ -235,6 +245,15 @@ void StyleListModel::save()
         }
         s.showTemplates[StyleItem::kOverlaySlot] = item.showOverlay;   // its own axis (see StyleItem)
         s.category = item.category.toStdString();
+        for (const QVariant &value : item.showCategoryTemplates) {
+            const QVariantMap entry = value.toMap();
+            bps::project::StoredShowCategoryTemplate storedEntry;
+            storedEntry.category = entry.value(QStringLiteral("category")).toString().trimmed().toStdString();
+            storedEntry.templateKey = entry.value(QStringLiteral("templateKey")).toString().trimmed().toStdString();
+            storedEntry.overrideEnabled = entry.value(QStringLiteral("overrideEnabled")).toBool();
+            if (!storedEntry.category.empty())
+                s.showCategoryTemplates.push_back(std::move(storedEntry));
+        }
         s.onBoard = item.onBoard;
         stored.append(s);
     }
@@ -484,6 +503,32 @@ void StyleListModel::setCategory(int index, const QString &category)
     save();
 }
 
+void StyleListModel::setShowCategoryTemplates(int index, const QVariantList &entries)
+{
+    if (index < 0 || index >= m_styles.size())
+        return;
+    QVariantList normalized;
+    QSet<QString> seen;
+    for (const QVariant &value : entries) {
+        const QVariantMap entry = value.toMap();
+        const QString category = entry.value(QStringLiteral("category")).toString().trimmed();
+        if (category.isEmpty() || seen.contains(category))
+            continue;
+        seen.insert(category);
+        normalized.append(QVariantMap{
+            { QStringLiteral("category"), category },
+            { QStringLiteral("templateKey"), entry.value(QStringLiteral("templateKey")).toString().trimmed() },
+            { QStringLiteral("overrideEnabled"), entry.value(QStringLiteral("overrideEnabled")).toBool() },
+        });
+    }
+    if (m_styles[index].showCategoryTemplates == normalized)
+        return;
+    m_styles[index].showCategoryTemplates = normalized;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { ShowCategoryTemplatesRole });
+    save();
+}
+
 QVariantMap StyleListModel::getStyle(int index) const
 {
     if (index < 0 || index >= m_styles.size())
@@ -504,6 +549,7 @@ QVariantMap StyleListModel::getStyle(int index) const
         { "clearBackgroundOnText", item.clearBackgroundOnText },
         { "showOverlay", item.showOverlay },   // its own axis, not a family slot
         { "category", item.category },
+        { "showCategoryTemplates", item.showCategoryTemplates },
         // Whether this style has a card on the Routing board.
         { "onBoard", item.onBoard },
     };

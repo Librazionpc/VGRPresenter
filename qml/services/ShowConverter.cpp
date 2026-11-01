@@ -297,6 +297,7 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
         { QStringLiteral("line2"), line2 },
         { QStringLiteral("ref"), s.value(QStringLiteral("ref")) },
         { QStringLiteral("contentType"), s.value(QStringLiteral("contentType")) },
+        { QStringLiteral("showCategory"), s.value(QStringLiteral("showCategory")) },
         { QStringLiteral("templateOverride"), s.value(QStringLiteral("templateOverride"), false) },
     };
     // A slide the FILL built carries its whole placeholder vocabulary under
@@ -405,6 +406,7 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
             { QStringLiteral("line1"), meta.value(QStringLiteral("line1")).toString() },
             { QStringLiteral("line2"), meta.value(QStringLiteral("line2")).toString() },
             { QStringLiteral("ref"), meta.value(QStringLiteral("ref")).toString() },
+            { QStringLiteral("showCategory"), meta.value(QStringLiteral("showCategory")).toString() },
             { QStringLiteral("templateOverride"), meta.value(QStringLiteral("templateOverride")).toBool() },
             { QStringLiteral("background"), qstr(s.background) },
             // The slide's filter set travels with it, for the Edit panel's rows

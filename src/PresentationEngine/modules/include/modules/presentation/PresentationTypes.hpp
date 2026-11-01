@@ -441,6 +441,16 @@ struct OutputStyleSpec {
     // family has no template — the legacy LayoutFor layout, or templateBlocks
     // for a slide matching the style's own contentType).
     std::vector<ContentBlock> familyTemplateBlocks[kFamilySlotCount];
+    struct ShowCategoryTemplate {
+        std::string category;
+        std::string templateKey;
+        bool overrideEnabled = false;
+        std::vector<ContentBlock> blocks;
+    };
+    // Per-show-library-category layouts for this output's style. A row only
+    // takes precedence when its override is enabled; otherwise the category's
+    // Shows template/global fallback remains in force.
+    std::vector<ShowCategoryTemplate> showCategoryTemplates;
     // Shows-only category label (diagnostic display for now).
     std::string category;
     // BAKED TEMPLATE LAYOUT (Settings · Styles ← the Template library): when

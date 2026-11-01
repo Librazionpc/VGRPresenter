@@ -5,6 +5,7 @@
 #include <QAbstractListModel>
 #include <QList>
 #include <QPointer>
+#include <QVariantList>
 #include <qqml.h>
 
 // One output style — the presentation "theme" an output renders with
@@ -112,6 +113,7 @@ struct StyleItem
     }
     // Shows-only category label (free text).
     QString category;
+    QVariantList showCategoryTemplates;
     // IS THIS STYLE ON THE ROUTING BOARD? Same rule as BusItem::onBoard: the
     // board shows only what the operator put there, so a style made on the Styles
     // page has no card until it is added. Persisted with the roster
@@ -150,6 +152,7 @@ public:
         ShowTableRole,
         ShowOverlayRole,
         CategoryRole,
+        ShowCategoryTemplatesRole,
         // Whether this style has a card on the Routing board (StyleItem::onBoard).
         OnBoardRole,
     };
@@ -205,6 +208,7 @@ public:
     Q_INVOKABLE void setFamilyTemplateKey(int index, const QString &contentType,
                                            const QString &templateKey);
     Q_INVOKABLE void setCategory(int index, const QString &category);
+    Q_INVOKABLE void setShowCategoryTemplates(int index, const QVariantList &entries);
 
     // Native image-file picker (png/jpg/webp/...) for the style background
     // image; "" when cancelled. Lives here (not QML) so the engine's dialog

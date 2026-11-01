@@ -405,6 +405,7 @@ public:
     // style row's property: the bake is what SceneBuilder lays the family out
     // through, fallbacks included.
     Q_INVOKABLE QString activeStyleTemplateId(const QString &contentType) const;
+    Q_INVOKABLE QString activeStyleShowCategoryTemplateId(const QString &category) const;
 
     // This output's style background AS THE MODEL ROLE sees it: { color, image,
     // hasImage, clearOnText }, resolved through the style roster for this

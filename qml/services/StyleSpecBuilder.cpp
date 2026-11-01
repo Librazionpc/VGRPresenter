@@ -205,6 +205,25 @@ bps::presentation::OutputStyleSpec specForStyleRow(int row, const StyleListModel
         spec.familyTemplateKeys[static_cast<std::size_t>(slot)] =
             style.value(QString::fromLatin1(fam.templateProperty)).toString().toStdString();
     }
+    const QVariantList categoryTemplates = style.value(QStringLiteral("showCategoryTemplates")).toList();
+    spec.showCategoryTemplates.reserve(static_cast<std::size_t>(categoryTemplates.size()));
+    for (const QVariant &value : categoryTemplates) {
+        const QVariantMap entry = value.toMap();
+        bps::presentation::OutputStyleSpec::ShowCategoryTemplate categoryTemplate;
+        categoryTemplate.category = entry.value(QStringLiteral("category")).toString().trimmed().toStdString();
+        categoryTemplate.templateKey = entry.value(QStringLiteral("templateKey")).toString().trimmed().toStdString();
+        categoryTemplate.overrideEnabled = entry.value(QStringLiteral("overrideEnabled")).toBool();
+        if (categoryTemplate.category.empty() || categoryTemplate.templateKey.empty())
+            continue;
+        const QVariantMap design = TemplateLibraryService::instance().design(
+            QString::fromStdString(categoryTemplate.templateKey));
+        const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
+        categoryTemplate.blocks.reserve(static_cast<std::size_t>(blocks.size()));
+        for (const QVariant &block : blocks)
+            categoryTemplate.blocks.push_back(ShowConverter::blockFromVariant(block.toMap()));
+        if (!categoryTemplate.blocks.empty())
+            spec.showCategoryTemplates.push_back(std::move(categoryTemplate));
+    }
     spec.showOverlay = style.value(QStringLiteral("showOverlay")).toBool();
     spec.category = style.value(QStringLiteral("category")).toString().toStdString();
     bakeWholeStyleTemplate(spec);

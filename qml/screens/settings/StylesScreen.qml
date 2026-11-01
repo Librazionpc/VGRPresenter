@@ -239,6 +239,8 @@ Item {
     property string editFamilyMedia: ""
     property string editFamilyScripture: ""
     property string editFamilyTable: ""
+    property var editShowCategoryTemplates: []
+    property string editCategoryTemplateTarget: ""
     // The family the Template row edits (chips switch it; defaults to the
     // style's whole-style family).
     property string editTemplateFamily: "shows"
@@ -272,6 +274,11 @@ Item {
         root.editFamilyMedia = data.familyTemplateMedia
         root.editFamilyScripture = data.familyTemplateScripture
         root.editFamilyTable = data.familyTemplateTable
+        root.editShowCategoryTemplates = (data.showCategoryTemplates ?? []).map((entry) => ({
+            category: String(entry.category ?? ""),
+            templateKey: String(entry.templateKey ?? ""),
+            overrideEnabled: !!entry.overrideEnabled
+        }))
         // A clicked card pill pre-targets ITS family in the dialog. MEDIA has no
         // template (its gate moved to Routing, and media never wore a family
         // template), so a media style opens on Shows rather than a family the
@@ -301,7 +308,32 @@ Item {
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "scripture", root.editFamilyScripture)
         StyleListModel.setFamilyTemplateKey(root.editStyleIndex, "table", root.editFamilyTable)
         StyleListModel.setCategory(root.editStyleIndex, root.editStyleCategory)
+        StyleListModel.setShowCategoryTemplates(root.editStyleIndex, root.editShowCategoryTemplates)
         root.editStyleIndex = -1
+    }
+
+    function showCategoryTemplate(category) {
+        return root.editShowCategoryTemplates.find((entry) => String(entry.category) === String(category))
+            ?? { category: String(category), templateKey: "", overrideEnabled: false }
+    }
+    function setShowCategoryTemplate(category, templateKey, overrideEnabled) {
+        const entries = root.editShowCategoryTemplates.filter((entry) => String(entry.category) !== String(category))
+        entries.push({ category: String(category), templateKey: String(templateKey ?? ""),
+                       overrideEnabled: !!overrideEnabled })
+        root.editShowCategoryTemplates = entries
+    }
+    function openShowCategoryTemplatePicker(category) {
+        const categoryNames = {}
+        for (const c of TemplateLibraryService.categories) categoryNames[c.id] = c.name
+        templatePicker.contentType = "shows"
+        templatePicker.contentTypeLabel = qsTr("Shows")
+        templatePicker.templates = TemplateLibraryService.designs().map((t) => ({
+            key: t.id, name: t.name, color: t.color, category: t.category,
+            categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
+        }))
+        root.editCategoryTemplateTarget = String(category)
+        templatePicker.selectedKey = root.showCategoryTemplate(category).templateKey
+        templatePicker.open = true
     }
 
     // Native file picker for the style background image (same engine dialogs
@@ -921,6 +953,59 @@ Item {
             onValuePicked: (v) => root.editStyleCategory = v
         }
 
+        Column {
+            width: parent.width
+            visible: root.editShowShows
+            spacing: Theme.space2
+
+            Text {
+                text: qsTr("Shows templates by category")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            Repeater {
+                model: ShowService.libraryCategories
+                delegate: Column {
+                    required property string modelData
+                    width: parent.width
+                    spacing: 4
+                    readonly property var entry: root.showCategoryTemplate(modelData)
+
+                    Text {
+                        text: modelData
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSm
+                    }
+                    ValueRow {
+                        width: parent.width
+                        text: entry.templateKey === "" ? qsTr("No category template")
+                                                         : root.templateNameFor(entry.templateKey)
+                        dim: entry.templateKey === ""
+                        PillButton {
+                            visible: entry.templateKey !== ""
+                            text: qsTr("Clear")
+                            tone: "muted"
+                            onClicked: root.setShowCategoryTemplate(modelData, "", false)
+                        }
+                        PillButton {
+                            text: entry.templateKey === "" ? qsTr("Choose") : qsTr("Change")
+                            onClicked: root.openShowCategoryTemplatePicker(modelData)
+                        }
+                    }
+                    PillButton {
+                        visible: entry.templateKey !== ""
+                        text: entry.overrideEnabled ? qsTr("Override on") : qsTr("Override")
+                        tone: entry.overrideEnabled ? "accent" : "muted"
+                        onClicked: root.setShowCategoryTemplate(modelData, entry.templateKey,
+                                                                !entry.overrideEnabled)
+                    }
+                }
+            }
+        }
+
         // TEMPLATE — PER CONTENT TYPE: the row edits the family picked by the
         // chips above and shows THAT family's own pick (None when it has
         // none). Picking sets the family's own template; the None chip
@@ -967,6 +1052,7 @@ Item {
                 PillButton {
                     text: qsTr("Change")
                     onClicked: {
+                        root.editCategoryTemplateTarget = ""
                         // The picker targets the PICKED FAMILY: its pick lands in that
                         // family's own slot (an override begins), not the whole-style key.
                         templatePicker.contentType = root.editTemplateFamily
@@ -1095,12 +1181,19 @@ Item {
     TemplatePickerModal {
         id: templatePicker
         onApplied: (tpl) => {
-            // The pick lands in the PICKED FAMILY's own slot — the only place
-            // a template choice lives (no inherit).
-            if (root.editTemplateFamily === "shows") root.editFamilyShows = tpl.key
-            else if (root.editTemplateFamily === "media") root.editFamilyMedia = tpl.key
-            else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = tpl.key
-            else root.editFamilyTable = tpl.key
+            if (root.editCategoryTemplateTarget !== "") {
+                const category = root.editCategoryTemplateTarget
+                const previous = root.showCategoryTemplate(category)
+                root.setShowCategoryTemplate(category, tpl.key, previous.overrideEnabled)
+                root.editCategoryTemplateTarget = ""
+            } else {
+                // The pick lands in the PICKED FAMILY's own slot — the only
+                // place a general family template choice lives.
+                if (root.editTemplateFamily === "shows") root.editFamilyShows = tpl.key
+                else if (root.editTemplateFamily === "media") root.editFamilyMedia = tpl.key
+                else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = tpl.key
+                else root.editFamilyTable = tpl.key
+            }
             templatePicker.open = false
         }
         onCancelled: templatePicker.open = false

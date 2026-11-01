@@ -1388,6 +1388,21 @@ QString OutputListModel::activeStyleTemplateId(const QString &contentType) const
     return QString::fromStdString(spec.familyTemplateKeys[slot]);
 }
 
+QString OutputListModel::activeStyleShowCategoryTemplateId(const QString &category) const
+{
+    const QString wanted = category.trimmed();
+    if (wanted.isEmpty())
+        return {};
+    const QString styleId = activeStyleId();
+    if (styleId.isEmpty() || styleRowForId(styleId) < 0)
+        return {};
+    const auto spec = StyleSpecBuilder::specForStyleId(styleId);
+    for (const auto& entry : spec.showCategoryTemplates)
+        if (entry.overrideEnabled && entry.category == wanted && !entry.blocks.empty())
+            return QString::fromStdString(entry.templateKey);
+    return {};
+}
+
 QVariantMap OutputListModel::styleBackground(int index) const
 {
     const int row = styleRowForId(index >= 0 && index < m_outputs.size()

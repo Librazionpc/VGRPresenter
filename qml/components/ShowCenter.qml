@@ -72,8 +72,14 @@ Item {
         if (categoryTemplate !== "") return categoryTemplate
         return String(SettingsService.values["shows.defaultTemplate"] ?? "")
     }
-    readonly property string showTemplateId: root.categoryTemplateOverrideId !== ""
-        ? root.categoryTemplateOverrideId : root.outputStyleTemplateId
+    readonly property string outputCategoryTemplateId: {
+        root.styleRevision
+        return root.item && root.type === "show"
+            ? OutputListModel.activeStyleShowCategoryTemplateId(String(root.item.category ?? "")) : ""
+    }
+    readonly property string showTemplateId: root.outputCategoryTemplateId !== ""
+        ? root.outputCategoryTemplateId
+        : (root.categoryTemplateOverrideId !== "" ? root.categoryTemplateOverrideId : root.outputStyleTemplateId)
     property int selectedSlide: -1
     property bool stageFirstPending: false
     property string templatePromptedFor: ""
@@ -147,7 +153,8 @@ Item {
         }
         return kind !== ""
     }
-    function templateComposition(slide, resolved) {
+    function templateComposition(slide, resolved, design) {
+        const templateDesign = design ?? root.categoryTemplateDesign
         const sources = (slide.blocks ?? []).slice()
         const hasTextItem = sources.some((block) => root.blockKind(block) === "text"
             && root.sourceHasContent(block))
@@ -155,7 +162,7 @@ Item {
             // Some imported shows keep their words in slide fields and let a
             // bound template slot supply the text item. Use that resolved
             // content when there is no authored text block to match.
-            for (const slot of (root.categoryTemplateDesign?.blocks ?? [])) {
+            for (const slot of (templateDesign?.blocks ?? [])) {
                 const bind = String(slot.bind ?? "")
                 // A Shows template may bind its body through a field other
                 // than `text` (for example a reading's first line). The
@@ -176,7 +183,7 @@ Item {
                 sources.push({ key: "@show-body", kind: "text", text: fallbackText, _templateSynthetic: true })
             }
         }
-        const slots = root.categoryTemplateDesign?.blocks ?? []
+        const slots = templateDesign?.blocks ?? []
         const used = ({})
         const blocks = []
         for (const slot of slots) {
@@ -320,25 +327,36 @@ Item {
         repeat: false
         onTriggered: root.offerTemplateForMissingText()
     }
-    function renderSlide(slide) {
-        if (!slide || !root.renderShow || !root.categoryTemplateDesign)
+    function renderSlide(slide, forStage) {
+        if (!slide || !root.show)
             return slide
-        const resolved = ShowService.resolveSlide(root.renderShow, String(slide.id ?? ""), "")
+        // Stage the authored show items and its library category. Each output's
+        // own style then resolves its category override, so one output's layout
+        // is never baked into a slide shared by every output.
+        if (forStage)
+            return Object.assign({}, slide, { showCategory: String(root.item?.category ?? "") })
+        const designId = root.showTemplateId
+        const design = designId === "" ? null : TemplateLibraryService.design(designId)
+        if (!design || !design.id)
+            return Object.assign({}, slide, { showCategory: String(root.item?.category ?? "") })
+        const resolvedShow = root.resolvedShow(design)
+        const resolved = ShowService.resolveSlide(resolvedShow, String(slide.id ?? ""), "")
         if (!resolved || resolved.visible === false)
             return slide
         let blocks = resolved.blocks ?? slide.blocks ?? []
         // Match by stable block id where possible, then by item type. Template
         // geometry and typography stay authoritative even if the slide uses a
         // different id for its content item.
-        blocks = root.templateComposition(slide, resolved).blocks
+        blocks = root.templateComposition(slide, resolved, design).blocks
         return Object.assign({}, slide, {
             blocks: blocks,
             background: resolved.background ?? slide.background ?? "",
-            templateOverride: true
+            showCategory: String(root.item?.category ?? ""),
+            templateOverride: !!design
         })
     }
     function renderedSlides() {
-        return root.slides.map((slide) => root.renderSlide(slide))
+        return root.slides.map((slide) => root.renderSlide(slide, true))
     }
 
     // Reuse the configurable Left/Right slide hotkeys for the centre preview's
@@ -515,7 +533,7 @@ Item {
         // mode nothing needs it: the wall's ‹ › stages the neighbouring slide itself
         // (see stepSlide), one slide at a time.
         const name = root.item ? root.item.name : ""
-        const picked = slide ? root.renderSlide(slide)
+        const picked = slide ? root.renderSlide(slide, true)
                              : ((index >= 0 && index < root.slides.length) ? root.slides[index] : null)
         if (picked)
             LiveOutputService.stageSlideSet(name, [picked], 0)
