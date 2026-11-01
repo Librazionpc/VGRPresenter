@@ -330,10 +330,10 @@ std::vector<SettingDef> BuildDefinitions() {
     // SAME contract as the audio key — declared here or every write/read
     // refuses with "there is no setting 'session.videoRoster'".
     d.push_back(Text("session.videoRoster", "session", "Video roster"));
-    // The Recording & Streaming screen's settings (platform, server URL,
-    // stream key, bitrates, container/encoder, screens-to-record), as one
-    // JSON object written by RecordingService — declared here or every
-    // write/read refuses with "there is no setting 'session.recordingConfig'".
+    // LEGACY: the old Recording & Streaming screen's one global settings blob.
+    // Nothing writes it any more — recording and streaming settings live in PRESETS
+    // now (PresetStore, Settings · Recording) — but it stays declared so a
+    // settings.json that still carries it loads without a refusal.
     d.push_back(Text("session.recordingConfig", "session", "Recording config"));
     // WHERE EACH LIBRARY TAB WAS LEFT (user call: "make the app remember its state
     // and position ... if I go to another page and come back it will go number one

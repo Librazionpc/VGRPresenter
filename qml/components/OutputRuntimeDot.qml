@@ -69,6 +69,7 @@ HoverDetail {
     // feeding or warming up asks for this; the wall's tiles stay still).
     property bool pulse: false
     property int dotSize: 7
+    property bool showDot: true
     // Say the STATE in words beside the dot — and nothing else. A surface where
     // the dot stands alone on the picture (the wall's tiles) needs the word; a
     // surface that already prints its own line (the Outputs row) leaves it off so
@@ -118,6 +119,7 @@ HoverDetail {
             color: root.dotColor
             border.width: 1
             border.color: "#66000000"
+            visible: root.showDot
 
             SequentialAnimation on opacity {
                 running: root.pulse && root.state !== "off"

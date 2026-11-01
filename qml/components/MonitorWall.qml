@@ -81,6 +81,8 @@ Item {
     // ...and one stroke weight, or a shipped 2-unit stroke reads heavier at
     // one size than the other even with equal boxes.
     readonly property real toolIconStroke: 1.6
+    // Keep the wall's icon actions compact and consistent with its text rows.
+    readonly property int actionButtonHeight: 26
 
     // External contract: hosts position content under the wall and drive
     // the page dots from these.
@@ -93,8 +95,8 @@ Item {
     // where they sat between the previews and the tab strip) turns them off and
     // keeps just the transport row — ‹ › and the play/lock/transition actions,
     // which apply to what the previews are showing wherever you are. The
-    // toolbar's own height is `transportRow.height + 12`, so dropping the rows
-    // shrinks the wall and everything hung below it follows.
+    // The toolbar height follows its compact controls, so dropping the rows
+    // shrinks the wall and everything below it follows.
     property bool showClearControls: true
     // SLIDE OR SCROLL — which way this wall's ‹ › move. Two features, one pair of
     // arrows: Slide steps the pick's slides (what a double-click stages); Scroll
@@ -139,9 +141,23 @@ Item {
     function goTo(page) {
         wall.goTo(page)
     }
+    function setOutputEnabled(index, enabled) {
+        if (OutputListModel.setEnabled(index, enabled))
+            return true
+        EventBus.notify(qsTr("At least one output card must remain enabled."),
+                        "warning", qsTr("Outputs"), "outputs.lastEnabled")
+        return false
+    }
 
-    height: wall.height + Math.max(wall.pageCount > 1 ? 12 : 0,
-        toolbar.visible ? (wall.pageCount > 1 ? 22 : 8) + toolbar.height : 0)
+    // The wall's total height: the paged tiles, then (when shown) the transport toolbar. One expression, used by the declarative height AND the re-assertion at the
+    // bottom of this file, so the two can never disagree.
+    readonly property real belowWallY: wall.height + (wall.pageCount > 1 ? 22 : 8)
+    readonly property real wallHeight: {
+        if (!toolbar.visible)
+            return wall.height + (wall.pageCount > 1 ? 12 : 0)
+        return root.belowWallY + toolbar.height
+    }
+    height: root.wallHeight
 
     // ---- Paged tile wall -----------------------------------------------------
     Flickable {
@@ -150,38 +166,67 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         y: 0
 
-        readonly property int count: root._wallRev >= 0 ? OutputListModel.rowCount() : 0
-        // Page capacity: previews are grouped four to a page.
+        readonly property int count: {
+            root._wallRev
+            let enabled = 0
+            for (let i = 0; i < OutputListModel.rowCount(); ++i)
+                if (OutputListModel.getOutput(i).isEnabled === true) ++enabled
+            return enabled
+        }
+        // Keep the same tile grid on every paged view; a sparse last page should
+        // not enlarge its tiles or shorten the wall.
         readonly property int perPage: count === 1 ? 1 : 4
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
         readonly property real pageW: root.width
         readonly property real columnGap: 0
-        // Each page uses a consistent two-column grid when it has multiple
-        // previews. A lone output fills its page.
+        // A single-output wall uses one full-width preview. Multi-output walls
+        // retain two columns, including on a sparse final page.
         function itemsOnPage(page) {
             return Math.max(0, Math.min(perPage, count - page * perPage))
         }
+        function enabledIndex(row) {
+            root._wallRev
+            const current = OutputListModel.getOutput(row)
+            if (!current || current.isEnabled !== true) return -1
+            let slot = 0
+            for (let i = 0; i < row; ++i)
+                if (OutputListModel.getOutput(i).isEnabled === true) ++slot
+            return slot
+        }
         function columnsForPage(page) {
-            const items = itemsOnPage(page)
-            if (items <= 1) return 1
-            return 2
+            return count === 1 ? 1 : 2
         }
         function slotWidthForPage(page) {
             const columns = columnsForPage(page)
             return (pageW - (columns - 1) * columnGap) / columns
         }
+        function slotXForPage(page, slot) {
+            const tileWidth = slotWidthForPage(page)
+            const items = itemsOnPage(page)
+            const loneLastTile = columnsForPage(page) === 2 && items % 2 === 1 && slot === items - 1
+            const column = loneLastTile ? (pageW - tileWidth) / 2 : (slot % columnsForPage(page)) * (tileWidth + columnGap)
+            return page * pageW + column
+        }
         function rowsForPage(page) {
+            if (pageCount > 1) return 2
             return Math.max(1, Math.ceil(itemsOnPage(page) / columnsForPage(page)))
         }
+        function slotYForPage(page, slot) {
+            const slotHeight = slotHeightForPage(page)
+            if (pageCount > 1 && itemsOnPage(page) === 1)
+                return (pageHeightForPage(page) - slotHeight) / 2
+            return Math.floor(slot / columnsForPage(page)) * slotHeight
+        }
+        // Every tile wears a NAME CARD above its picture.
+        readonly property int headerH: 20
         function slotHeightForPage(page) {
-            return 2 + (slotWidthForPage(page) - 2) * 9 / 16
+            return headerH + 2 + (slotWidthForPage(page) - 2) * 9 / 16
         }
         function pageHeightForPage(page) {
+            if (itemsOnPage(page) === 0) return 0
             const rows = rowsForPage(page)
             return rows * slotHeightForPage(page)
         }
-        readonly property int columns: columnsForPage(currentPage)
-
         width: root.width
         height: {
             let tallestPage = 0
@@ -196,16 +241,39 @@ Item {
         flickDeceleration: 2000
         interactive: pageCount > 1
 
+        // The page the wall has SETTLED on (what hosts read) ...
         property int currentPage: 0
-        // Page snap (Flickable has no snapMode): when a drag or a flick
-        // ends, settle on the nearest page with a short ease. contentX
-        // writes from these handlers are programmatic, not user drags, so
-        // no fighting occurs.
+        // ... and the page it is nearest to RIGHT NOW, which is what the dots show, so they follow a
+        // drag and the snap animation instead of waiting for it to finish.
+        readonly property int shownPage: Math.max(0, Math.min(pageCount - 1, Math.round(contentX / pageW)))
+        // Page snap (Flickable has no snapMode): when a drag or a flick ends, settle on the
+        // neighbouring page once the content has moved a sixth of a page (a short flick used to
+        // fall back to the page it started on), otherwise stay.
         function snapToPage() {
-            root.goTo(Math.round(contentX / pageW))
+            const delta = contentX - currentPage * pageW
+            let target = currentPage
+            if (Math.abs(delta) > pageW * 0.16)
+                target = currentPage + (delta > 0 ? 1 : -1)
+            root.goTo(target)
         }
         onDragEnded: snapToPage()
         onFlickEnded: snapToPage()
+
+        // The mouse wheel turns the page too (one page per notch, with a short cool-down so a fast
+        // wheel does not skip several).
+        WheelHandler {
+            enabled: wall.pageCount > 1
+            onWheel: (ev) => {
+                if (wheelCool.running)
+                    return
+                const d = ev.angleDelta.y !== 0 ? ev.angleDelta.y : ev.angleDelta.x
+                if (d === 0)
+                    return
+                root.goTo(wall.currentPage + (d < 0 ? 1 : -1))
+                wheelCool.restart()
+            }
+        }
+        Timer { id: wheelCool; interval: 280 }
 
         NumberAnimation {
             id: snapAnim
@@ -220,6 +288,11 @@ Item {
             snapAnim.to = currentPage * pageW
             snapAnim.restart()
         }
+        // Keep the selected page aligned if its viewport changes size.
+        onPageWChanged: {
+            snapAnim.stop()
+            contentX = currentPage * pageW
+        }
         onPageCountChanged: root.goTo(Math.min(currentPage, pageCount - 1))
 
         Repeater {
@@ -232,14 +305,135 @@ Item {
                 // image (run_style_bg_test.sh) — proof the tile repaints, not
                 // just that the model changed.
                 objectName: "selfTestMonitorTile" + index
-                readonly property int page: wall.count === 1 ? 0 : Math.floor(index / wall.perPage)
-                readonly property int slot: wall.count === 1 ? 0 : index % wall.perPage
-                readonly property int columns: wall.columnsForPage(page)
+                readonly property int displayIndex: wall.enabledIndex(index)
+                visible: displayIndex >= 0
+                readonly property int page: wall.count === 1 || displayIndex < 0 ? 0 : Math.floor(displayIndex / wall.perPage)
+                readonly property int slot: wall.count === 1 || displayIndex < 0 ? 0 : displayIndex % wall.perPage
                 readonly property real tileWidth: wall.slotWidthForPage(page)
 
-                x: page * wall.pageW + (slot % columns) * (tileWidth + wall.columnGap)
-                y: Math.floor(slot / columns) * wall.slotHeightForPage(page)
+                x: wall.slotXForPage(page, slot)
+                y: wall.slotYForPage(page, slot) + wall.headerH
                 width: tileWidth
+            }
+        }
+
+        // ---- NAME STRIPS ---------------------------------------------------------
+        // One slim label above each enabled tile. Click it or the picture to select the output;
+        // the small switch at the right stops or starts that output.
+        Repeater {
+            model: OutputListModel
+
+            delegate: Item {
+                id: nameCard
+                required property int index
+                required property string name
+                required property bool active
+                required property bool isEnabled
+                readonly property int displayIndex: wall.enabledIndex(index)
+                visible: displayIndex >= 0
+
+                readonly property int page: wall.count === 1 || displayIndex < 0 ? 0 : Math.floor(displayIndex / wall.perPage)
+                readonly property int slot: wall.count === 1 || displayIndex < 0 ? 0 : displayIndex % wall.perPage
+                readonly property real tileWidth: wall.slotWidthForPage(page)
+
+                x: wall.slotXForPage(page, slot)
+                y: wall.slotYForPage(page, slot)
+                width: tileWidth
+                height: wall.headerH
+
+                HoverHandler { id: stripHover }
+
+                // A darker ground than the tile beside it, so the name reads as its own strip.
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.bottomMargin: 1
+                    radius: 4
+                    color: Theme.windowBg
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade } }
+                }
+
+                // Select (strip).
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: OutputListModel.setActive(nameCard.index)
+                }
+
+                Rectangle {
+                    id: stateDot
+                    x: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 6; height: 6; radius: 3
+                    color: !nameCard.isEnabled ? Theme.border
+                         : root.live ? Theme.success : Theme.textMuted
+                    Behavior on color { ColorAnimation { duration: Theme.hoverFade } }
+                    SequentialAnimation on opacity {
+                        running: nameCard.isEnabled && root.live
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.35; duration: 800 }
+                        NumberAnimation { to: 1.0; duration: 800 }
+                    }
+                }
+
+                HoverDetail {
+                    anchors.left: stateDot.right
+                    anchors.leftMargin: 7
+                    anchors.right: powerBtn.left
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: parent.height
+                    title: nameCard.name
+                    detail: nameCard.active
+                            ? qsTr("Selected output. Click another output to switch the monitor.")
+                            : qsTr("Click to select this output for the monitor controls.")
+                    Text {
+                        anchors.fill: parent
+                        text: nameCard.name
+                        elide: Text.ElideRight
+                        verticalAlignment: Text.AlignVCenter
+                        color: nameCard.isEnabled ? (nameCard.active ? Theme.textPrimary : Theme.textSecondary)
+                                                  : Theme.textMuted
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 11
+                        font.weight: nameCard.active ? Font.DemiBold : Font.Medium
+                    }
+                }
+
+                // Stop / start this output. Dimmed glyph = the output is off.
+                Item {
+                    id: powerBtn
+                    anchors.right: parent.right
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 18; height: 18
+                    opacity: (stripHover.hovered || !nameCard.isEnabled) ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 120 } }
+
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: nameCard.isEnabled ? "eye" : "eyeOff"
+                        color: powerArea.containsMouse ? Theme.textPrimary
+                             : nameCard.isEnabled ? Theme.textSecondary : Theme.textMuted
+                        width: 12; height: 12; fit: true
+                        strokeWidth: root.toolIconStroke
+                    }
+                    MouseArea {
+                        id: powerArea
+                        anchors.fill: parent
+                        anchors.margins: -2
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.setOutputEnabled(nameCard.index, !nameCard.isEnabled)
+                    }
+                    HoverDetail {
+                        anchors.fill: parent
+                        title: nameCard.isEnabled ? qsTr("Stop this output") : qsTr("Start this output")
+                        detail: nameCard.isEnabled
+                                ? qsTr("Take this output off the wall and the screen")
+                                : qsTr("Bring this output back")
+                    }
+                }
+
             }
         }
     }
@@ -257,14 +451,16 @@ Item {
 
             delegate: Rectangle {
                 required property int index
+                readonly property bool here: index === wall.shownPage
 
-                width: 6; height: 6; radius: 3
-                color: index === wall.currentPage ? Theme.accent : Theme.border
+                width: here ? 18 : 6; height: 6; radius: 3
+                color: here ? Theme.accent : Theme.border
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
                 MouseArea {
                     anchors.fill: parent
-                    anchors.margins: -4
+                    anchors.margins: -6
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.goTo(parent.index)
                 }
@@ -295,9 +491,9 @@ Item {
         id: toolbar
         visible: root.anythingOnAir
         anchors.horizontalCenter: parent.horizontalCenter
-        y: wall.y + wall.height + (wall.pageCount > 1 ? 22 : 8)
+        y: wall.y + root.belowWallY
         width: root.width
-        height: transportRow.height + 12
+        height: transportRow.height + 10
         radius: 8
         color: Theme.panelBg
         border.color: Theme.border
@@ -352,7 +548,7 @@ Item {
             // sets this, so it just mirrors enabled2 — no change for them.
             property bool active: enabled2
             signal picked()
-            width: 36; height: 30
+            width: 36; height: root.actionButtonHeight
             Rectangle {
                 anchors.fill: parent; radius: 8
                 color: {
@@ -418,7 +614,7 @@ Item {
             property color tint: Theme.dangerLight
             property bool enabled2: true
             signal picked()
-            height: 28
+            height: root.actionButtonHeight
             Rectangle {
                 anchors.fill: parent; radius: 8
                 color: !rowBtn.enabled2 ? Theme.inset : Qt.alpha(Theme.accent, 0.11)
@@ -438,7 +634,7 @@ Item {
             }
             Row {
                 anchors.centerIn: parent
-                spacing: 6
+                spacing: 4
                 IconGlyph {
                     name: rowBtn.icon
                     color: rowBtn.enabled2 ? rowBtn.tint : Theme.textMuted
@@ -466,9 +662,9 @@ Item {
 
         Column {
             id: transportRow
-            x: 10; y: 8
-            width: parent.width - 20
-            spacing: 6
+            x: 8; y: 6
+            width: parent.width - 16
+            spacing: 4
 
             // ShowActions: [previous next play lock transition] — spread
             // across the full strip (FreeShow's buttons are flex-grow: 1, so
@@ -478,7 +674,7 @@ Item {
             // evenly-gapped buttons instead of one edge-to-edge strip.
             Row {
                 width: parent.width
-                spacing: 6
+                spacing: 4
                 readonly property real btnW: (width - spacing * 4) / 5
 
                 // ‹ › (FreeShow's OutputHelper.advanceOutputs): a step within
@@ -488,7 +684,7 @@ Item {
                 // output preview even on a single-verse pick (like the
                 // preview pane's own pills).
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "previous"
                     // Dead only mid-set with nowhere back (a multi-slide pick
                     // already on the first slide): a single-verse pick keeps
@@ -512,7 +708,7 @@ Item {
                                : qsTr("Step back to the previous slide or passage")
                 }
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "next"
                     enabled2: toolbar.canStep && (root.scrollMode || !(toolbar.multiSlide && toolbar.atEnd))
                     onPicked: {
@@ -537,7 +733,7 @@ Item {
                 // actually activates, not something only usable after it
                 // already has.
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "play"
                     enabled2: true
                     onPicked: {
@@ -554,7 +750,7 @@ Item {
                 // button shows the unlocked state and is inert (glyph dimmed,
                 // pill + hover intact).
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "unlocked"
                     enabled2: false
                     tipTitle: qsTr("Lock output")
@@ -567,7 +763,7 @@ Item {
                 // while Scroll is on, so the arrows' own tooltips and this button
                 // always agree about the mode.
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "textLines"
                     enabled2: toolbar.canStep
                     lit: root.scrollMode
@@ -598,9 +794,9 @@ Item {
             // so the two can't drift apart; the button no longer runs the four
             // clears itself.
             Row {
-                width: parent.width; height: visible ? 28 : 0
+                width: parent.width; height: visible ? root.actionButtonHeight : 0
                 visible: root.showClearControls
-                spacing: 6
+                spacing: 4
 
                 RowButton {
                     width: (parent.width - parent.spacing) / 2
@@ -640,7 +836,7 @@ Item {
             // going out, and LIVE stays the user's own GO LIVE/STOP decision.
             RowButton {
                 width: parent.width
-                height: visible ? 28 : 0
+                height: visible ? root.actionButtonHeight : 0
                 visible: root.showClearControls
                 icon: "ban"
                 caption: LiveOutputService.blackedOut ? qsTr("End blackout")
@@ -668,16 +864,16 @@ Item {
             // buttons above, not a fake lit state or a clear that's really
             // just Clear All in disguise.
             Row {
-                width: parent.width; height: visible ? 30 : 0
+                width: parent.width; height: visible ? root.actionButtonHeight : 0
                 visible: root.showClearControls
-                spacing: 6
+                spacing: 4
                 readonly property real btnW: (width - spacing * 4) / 5
 
                 // Background/media: video, image, OR a taken camera/screen
                 // input — whichever one the compositor's background layer
                 // is currently showing.
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "image"
                     danger: true
                     enabled2: (LiveOutputService.mediaOnAir && !LiveOutputService.mediaIsAudio) || root.inputTaken
@@ -702,7 +898,7 @@ Item {
                 // among the pack" (it also never touches GO LIVE/STOP,
                 // exactly like every other button in this row never does).
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "scripture"
                     danger: true
                     enabled2: root.hasRealOnAirContent || root.staged
@@ -717,7 +913,7 @@ Item {
                 // per-overlay button in this 5-slot row — LiveOutputService
                 // now genuinely tracks which overlays are live).
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "overlays"
                     danger: true
                     enabled2: LiveOutputService.activeOverlays.length > 0
@@ -735,7 +931,7 @@ Item {
                 // live (that broader reading used to include the program-mix
                 // meter, now removed with the engine-audio path).
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "audio"
                     danger: true
                     // Audio CONTENT the wall is playing: a taken audio file, or a
@@ -757,7 +953,7 @@ Item {
                     tipDetail: qsTr("Clear the on-air audio file or a taken input")
                 }
                 ToolButton {
-                    width: parent.btnW; height: 30
+                    width: parent.btnW; height: root.actionButtonHeight
                     icon: "timerFill"
                     danger: true
                     enabled2: false
@@ -777,7 +973,7 @@ Item {
                 id: audioBar
                 objectName: "selfTestWallAudioBar"
                 width: parent.width
-                height: visible ? 28 : 0
+                height: visible ? root.actionButtonHeight : 0
                 visible: root.showClearControls && LiveOutputService.mediaOnAir && LiveOutputService.mediaIsAudio
 
                 readonly property bool playing: LiveOutputService.mediaState === "playing"
@@ -802,10 +998,25 @@ Item {
                     width: 22; height: parent.height
                     IconGlyph {
                         anchors.centerIn: parent
-                        name: audioBar.playing ? "pause" : "play"
+                        name: "pause"
                         color: Theme.dangerLight
                         width: root.toolIconSize; height: root.toolIconSize; fit: true
                         strokeWidth: root.toolIconStroke
+                        opacity: audioBar.playing ? 1 : 0
+                        scale: audioBar.playing ? 1 : 0.6
+                        Behavior on opacity { NumberAnimation { duration: 140 } }
+                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                    }
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        name: "play"
+                        color: Theme.dangerLight
+                        width: root.toolIconSize; height: root.toolIconSize; fit: true
+                        strokeWidth: root.toolIconStroke
+                        opacity: audioBar.playing ? 0 : 1
+                        scale: audioBar.playing ? 0.6 : 1
+                        Behavior on opacity { NumberAnimation { duration: 140 } }
+                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
                     }
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: LiveOutputService.mediaTogglePlay() }
@@ -912,6 +1123,5 @@ Item {
     // same expression as a binding keeps the recompute-on-show intent without
     // killing the live dependency on toolbar.visible.
     onVisibleChanged: if (visible)
-        root.height = Qt.binding(() => wall.height + Math.max(wall.pageCount > 1 ? 12 : 0,
-            toolbar.visible ? (wall.pageCount > 1 ? 22 : 8) + toolbar.height : 0))
+        root.height = Qt.binding(() => root.wallHeight)
 }

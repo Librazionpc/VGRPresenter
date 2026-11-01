@@ -16,6 +16,8 @@
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTimer>
+#include <QDir>
+#include <QFileInfo>
 
 #include <cstdio>
 #include <atomic>
@@ -469,10 +471,72 @@ void timeExitStep(const char *name, const std::function<void()> &fn, bool engine
                             .arg(QString::fromLatin1(name)).arg(clock.elapsed()));
 }
 
+// A DEV BUILD KEEPS ITS OWN PROFILE, INSIDE THE PROJECT.
+//
+// The installed app and a build run from this checkout used to share two folders (the
+// user's %LOCALAPPDATA%\bps and %APPDATA%\VGR\VGRPresenter), so each rewrote the other's
+// settings, saved templates and styles — and every self-test run edited the operator's real
+// configuration. A build is a DEV build when it has no assets/settings.shipped.json beside
+// it (the installer puts one next to the installed exe; see SettingsService::load). It then
+// lives in <project>/dev-profile — "local" and "roaming" subfolders, read by the engine's
+// platform layer and by dataroot::appDataRoot() through VGR_PROFILE_DIR — and the first
+// run seeds it from <project>/installer/seed-data, the project's own copy of the operator's
+// configuration. VGR_PROFILE_DIR may be set to another folder, or to nothing to use the
+// real profile on purpose.
+void copyTree(const QString &from, const QString &to)
+{
+    QDir().mkpath(to);
+    const QDir source(from);
+    for (const QFileInfo &entry : source.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString target = to + QLatin1Char('/') + entry.fileName();
+        if (entry.isDir())
+            copyTree(entry.absoluteFilePath(), target);
+        else if (!QFileInfo::exists(target))
+            QFile::copy(entry.absoluteFilePath(), target);
+    }
+}
+
+void selectProfile()
+{
+#ifdef Q_OS_WIN
+    wchar_t exePath[MAX_PATH] = {0};
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+        return;
+    const QString exeDir = QFileInfo(QString::fromWCharArray(exePath)).absolutePath();
+    if (qEnvironmentVariableIsSet("VGR_PROFILE_DIR")) {
+        if (qEnvironmentVariableIsEmpty("VGR_PROFILE_DIR"))
+            qunsetenv("VGR_PROFILE_DIR");     // asked for the real profile
+        return;
+    }
+    if (QFileInfo::exists(exeDir + QStringLiteral("/assets/settings.shipped.json")))
+        return;                               // an installed app: its own profile
+    const QString root = QDir::cleanPath(exeDir + QStringLiteral("/../dev-profile"));
+    qputenv("VGR_PROFILE_DIR", QDir::toNativeSeparators(root).toLocal8Bit());
+    if (!QFileInfo::exists(root + QStringLiteral("/local/settings.json"))) {
+        const QString seed = QDir::cleanPath(exeDir + QStringLiteral("/../installer/seed-data"));
+        if (QFileInfo(seed).isDir()) {
+            copyTree(seed + QStringLiteral("/local"), root + QStringLiteral("/local"));
+            copyTree(seed + QStringLiteral("/roaming"), root + QStringLiteral("/roaming"));
+        }
+    }
+#endif
+}
+
 } // namespace
+
+// Run on the discrete GPU of a hybrid (Optimus / switchable-graphics) laptop. This is the
+// documented opt-in the NVIDIA and AMD drivers read from the executable. Without it the
+// process lands on the integrated GPU, and the NVIDIA hardware H.264 encoder (NVENC) then
+// refuses to start (E_UNEXPECTED), so a preset could never use it. A machine with one GPU
+// ignores both.
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
 
 int main(int argc, char *argv[])
 {
+    selectProfile();
     // VGR_SANDBOX=1 points every QStandardPaths location (engine data, logs, crash
     // records) at Qt's throwaway test area, so a diagnostic/CI run can never touch —
     // or fight over the database of — a real installation running at the same time.

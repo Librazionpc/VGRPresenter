@@ -124,11 +124,11 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
     report.recommendedProfile = RecommendProfile(hw);
     report.headline = "Recommended setup detected for this hardware";
     if (report.recommendedProfile == "powerSaver")
-        report.detail = "This machine is running on battery, so Power Saver keeps the show going longest.";
+        report.detail = "This computer is running on battery, so Power Saver will keep it going the longest.";
     else if (report.recommendedProfile == "balanced")
-        report.detail = "GPU, memory and cores are modest, so Balanced keeps rendering and encoding in step.";
+        report.detail = "This computer is a middle-of-the-road machine, so Balanced gives the smoothest results.";
     else
-        report.detail = "GPU, encoder, audio and display capabilities analyzed - this machine can run the Performance profile.";
+        report.detail = "We checked your graphics, video, sound and screens. This computer can run the Performance profile.";
 
     // ---- What that means for running the app (the config advice) ----
     // Written the way a helpful engineer would: name the finding, then say what
@@ -144,29 +144,29 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
     };
 
     if (hw.hasBattery && hw.onBattery)
-        warn("battery", "Running on battery. Power Saver keeps the show going longest, and plugging in restores the full profile.");
+        warn("battery", "Your laptop is running on battery. Plug it in for the best performance, or use Power Saver to make the battery last.");
     if (hw.hasBattery && !hw.onBattery && hw.batteryPercent >= 0 && hw.batteryPercent <= 20)
-        warn("battery", "Battery under 20%. Plug in - a service can outlast this charge.");
+        warn("battery", "Your battery is low. Plug in before you start, so a long service does not run out of power.");
     if (hw.totalRamBytes > 0 && hw.totalRamBytes < 8 * kGb)
-        warn("memory", "Under 8 GB of memory. The engine keeps its caches small here, so close other apps before going live.");
+        warn("memory", "This computer has little memory. Close other programs before you go live.");
     else if (hw.totalRamBytes >= 32 * kGb)
-        advise("memory", "info", "Plenty of memory - the engine can preload more of your library up front.");
+        advise("memory", "info", "Plenty of memory, so your songs and media can load ahead of time and open quickly.");
     if (!HasGpu(hw))
-        warn("gpu", "No graphics adapter detected. Everything renders on the CPU, so keep the preview off while live.");
+        warn("gpu", "No graphics card was found, so the main processor draws everything. Keep the preview turned off while you are live.");
     if (!hardwareEncode)
-        advise("encoder", "info", "No hardware encoder - recording and streaming use the CPU, which competes with rendering.");
+        advise("encoder", "info", "No video-encoding hardware was found. Recording and streaming will use the main processor, which can slow other things down.");
     if (hw.coreCount > 0 && hw.coreCount < 4)
-        warn("cpu", "Fewer than 4 cores. The engine limits background work to protect the live output.");
+        warn("cpu", "This computer has a slow processor. Background tasks are limited so your live output stays smooth.");
     else if (hw.coreCount >= 8)
-        advise("cpu", "info", "8 or more cores - encoding and the preview run alongside the live output comfortably.");
+        advise("cpu", "info", "Your processor is strong enough to run the show, the preview and recording at the same time.");
     if (StorageIsLow(hw))
-        warn("storage", "Under 5 GB of disk space free. Thumbnails and caches may fail to write.");
+        warn("storage", "Your disk is almost full. Free up some space so thumbnails and recordings can be saved.");
     if (hw.displayCount <= 0)
-        warn("displays", "No display detected. Check the output connection before going live.");
+        warn("displays", "No screen was found. Check the cable to your output screen before you go live.");
     if (hw.thermalCelsius >= 85.0)
-        warn("thermal", "The CPU is already warm. The engine will ease off background work to keep it cool.");
+        warn("thermal", "Your computer is running hot. Background work will slow down to help it cool off.");
     if (report.advice.empty())
-        advise("overall", "ok", "Everything the engine needs is present. Start with the recommended profile and only adjust if the meters run hot.");
+        advise("overall", "ok", "Everything looks good. Use the recommended profile, and change it only if the meters run hot.");
 
     report.adviceSummary = warnings == 0
         ? std::string("No problems detected for this machine.")

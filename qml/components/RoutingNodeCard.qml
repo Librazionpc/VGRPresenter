@@ -64,6 +64,8 @@ Rectangle {
     property bool gateChips: false
     property bool overlayOn: true
     property bool mediaOn: true
+    property bool enableToggle: false
+    property bool outputEnabled: true
 
     readonly property bool hovered: hover.hovered
 
@@ -84,6 +86,7 @@ Rectangle {
     // A gate chip was pressed. "overlay" or "media"; the canvas flips that row's
     // flag (OutputListModel) and the chip fades to its new state.
     signal gateToggled(string key, string gate)
+    signal outputEnabledToggled(string key)
 
     implicitHeight: 64
     radius: Theme.radiusLg
@@ -110,6 +113,7 @@ Rectangle {
         hovered: root.hovered
         edge: false
     }
+
 
     HoverHandler {
         id: hover
@@ -157,14 +161,30 @@ Rectangle {
             border.width: root.swatch.a > 0.001 ? 1 : 0
             border.color: Theme.border
 
-            IconGlyph {
-                anchors.centerIn: parent
-                width: 13
-                height: 13
-                fit: true
-                name: root.iconName
-                color: root.accent
-                visible: root.swatch.a <= 0.001
+            Item {
+                anchors.fill: parent
+                visible: root.swatch.a <= 0.001 && !root.enableToggle
+                IconGlyph {
+                    anchors.centerIn: parent
+                    width: 13
+                    height: 13
+                    fit: true
+                    name: root.iconName
+                    color: root.accent
+                }
+            }
+
+            StateIconButton {
+                anchors.fill: parent
+                visible: root.enableToggle
+                iconName: root.iconName
+                iconColor: root.accent
+                checked: root.outputEnabled
+                enabledTitle: qsTr("Disable output")
+                disabledTitle: qsTr("Enable output")
+                enabledDetail: qsTr("Click to stop this output")
+                disabledDetail: qsTr("Click to resume this output")
+                onClicked: root.outputEnabledToggled(root.nodeKey)
             }
         }
 

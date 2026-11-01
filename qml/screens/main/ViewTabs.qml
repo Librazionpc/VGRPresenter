@@ -179,9 +179,12 @@ Item {
             y: 32
             color: !tabRoot.available ? Theme.textMuted : Theme.controlInk
             font.family: Theme.fontFamily
-            font.pixelSize: 15
-            // One weight for every tab: mixing Bold and DemiBold shifts the glyphs by a pixel.
-            font.weight: Font.Bold
+            // The header's one caption style (same as Search / Settings / GO LIVE), so the
+            // whole row reads as one set. One weight for every tab: mixing weights shifts the
+            // glyphs by a pixel.
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+            font.letterSpacing: 0.2
             text: tabRoot.label
             textFormat: Text.PlainText
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }

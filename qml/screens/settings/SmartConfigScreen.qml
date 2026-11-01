@@ -68,10 +68,11 @@ Item {
 
     Flickable {
         id: flick
+        objectName: "selfTestSmartFlick"
         anchors.fill: parent
         anchors.rightMargin: Theme.space6 + Theme.space2
         contentWidth: width
-        contentHeight: layout.height + 24
+        contentHeight: layout.y + layout.height + Theme.space6   // the column's own top offset counts, or the last card sits on the window edge
         clip: true
         boundsBehavior: Flickable.StopAtBounds
 
@@ -370,8 +371,8 @@ Item {
                         text: SettingsService.hardwareAdviceSummary
                         color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSub
-                        bottomPadding: 10
+                        font.pixelSize: Theme.textSm
+                        bottomPadding: 14
                         wrapMode: Text.Wrap
                     }
 
@@ -381,7 +382,7 @@ Item {
                             id: adviceRow
                             required property var modelData
                             width: adviceCol.width
-                            height: adviceText.implicitHeight + 12
+                            height: adviceText.implicitHeight + 18
 
                             // A severity stripe: amber = act on it, accent =
                             // worth knowing, green = nothing to do.
@@ -397,12 +398,13 @@ Item {
                             Text {
                                 id: adviceText
                                 anchors.left: parent.left
-                                anchors.leftMargin: 12
-                                width: parent.width - 12
+                                anchors.leftMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - 14
                                 text: adviceRow.modelData.text
-                                color: Theme.textSecondary
+                                color: Theme.textPrimary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: Theme.textSm
+                                font.pixelSize: Theme.textMd
                                 wrapMode: Text.Wrap
                             }
                         }
@@ -493,7 +495,7 @@ Item {
                         width: parent.width
                         text: root.manual
                               ? qsTr("Manual mode: drag to set how much of the machine the engine may use. The meter follows what it is actually using.")
-                              : qsTr("Set by the %1 profile. The bright bar is what the engine is using right now; the pale band is the share this profile allows.").arg(root.profileLabel(root.values["resources.profile"]))
+                              : qsTr("The %1 profile sets these limits. The bright bar is what is being used now; the pale area is how much the profile allows.").arg(root.profileLabel(root.values["resources.profile"]))
                         color: Theme.textMuted
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.textSub

@@ -70,12 +70,125 @@ Item {
         }
         return ""
     }
+    // WHAT KIND OF LAYOUT A TEMPLATE IS — "full" or "lower" — from where its main text
+    // block sits on the stage: a block in the bottom half that is no taller than half the
+    // stage is a lower third; anything else fills the screen. (Measured on the shipped
+    // and saved designs: full-screen ones put their text at 0-8% from the top and 83-100%
+    // tall; lower thirds at 70%+ from the top and 10-29% tall, so nothing sits near the
+    // line.) A legacy preset key has no design to measure: "lowerThird" is a lower third,
+    // any other is unknown. "" = no layout to speak of.
+    function layoutClassOf(key) {
+        if (typeof key !== "string" || key === "")
+            return ""
+        if (key.indexOf("tpl-") !== 0)
+            return key === "lowerThird" ? "lower" : ""
+        const blocks = TemplateLibraryService.design(key).blocks ?? []
+        let best = null
+        let bestArea = 0
+        for (let i = 0; i < blocks.length; ++i) {
+            const b = blocks[i]
+            if (b.kind !== undefined && b.kind !== "text")
+                continue
+            const area = Number(b.width) * Number(b.height)
+            if (area > bestArea) {
+                bestArea = area
+                best = b
+            }
+        }
+        if (!best)
+            return ""
+        return (Number(best.y) >= StageGrid.h * 0.5 && Number(best.height) <= StageGrid.h * 0.5)
+               ? "lower" : "full"
+    }
+    // DELETE A STYLE: straight away when nothing wears it, after a confirmation when
+    // outputs do (they go back to "None"; the one on air is named, because deleting its
+    // style blanks what is on screen).
+    // The row the right-click menu was opened on.
+    property int contextStyleIndex: -1
+    property string contextStyleId: ""
+    property string contextStyleName: ""
+    MenuCatcher {
+        menu: styleContextMenu
+    }
+    DropdownPanel {
+        id: styleContextMenu
+        z: 50
+        visible: false
+        model: [
+            { label: qsTr("Edit") },
+            { label: qsTr("Duplicate") },
+            { divider: true },
+            { label: qsTr("Delete"), danger: true }
+        ]
+        onItemActivated: (label) => {
+            styleContextMenu.visible = false
+            if (root.contextStyleIndex < 0)
+                return
+            if (label === qsTr("Edit"))
+                root.openEditStyle(root.contextStyleIndex)
+            else if (label === qsTr("Duplicate"))
+                StyleListModel.duplicateStyle(root.contextStyleIndex)
+            else if (label === qsTr("Delete"))
+                root.requestDeleteStyle(root.contextStyleIndex, root.contextStyleId,
+                                        root.contextStyleName)
+        }
+    }
+
+    property int deleteStyleIndex: -1
+    property string deleteStyleName: ""
+    property int deleteStyleUsers: 0
+    property bool deleteStyleOnAir: false
+    function requestDeleteStyle(index, styleId, name) {
+        const users = root.styleUsage(styleId)
+        if (users === 0) {
+            StyleListModel.removeStyle(index)
+            return
+        }
+        root.deleteStyleIndex = index
+        root.deleteStyleName = name
+        root.deleteStyleUsers = users
+        root.deleteStyleOnAir = root.isOnAir(styleId)
+        deleteStyleConfirm.open()
+    }
+    ConfirmDialog {
+        id: deleteStyleConfirm
+        title: qsTr("Delete “%1”?").arg(root.deleteStyleName)
+        message: (root.deleteStyleUsers === 1
+                      ? qsTr("1 output uses this style and will be set to None.")
+                      : qsTr("%1 outputs use this style and will be set to None.").arg(root.deleteStyleUsers))
+                 + (root.deleteStyleOnAir
+                        ? "\n" + qsTr("It is ON AIR now — what is on screen will go blank.") : "")
+        confirmLabel: qsTr("Delete")
+        onConfirmed: {
+            if (root.deleteStyleIndex >= 0)
+                StyleListModel.removeStyle(root.deleteStyleIndex)
+            root.deleteStyleIndex = -1
+            deleteStyleConfirm.close()
+        }
+        onDismissed: {
+            root.deleteStyleIndex = -1
+            deleteStyleConfirm.close()
+        }
+    }
+
     // Is this style ON the active output right now? (engine state, not the
     // roster's opinion — OutputListModel is the one that pushed the spec.)
     function isOnAir(styleId) {
         void root.modelsRev
-        const ai = OutputListModel.activeIndex()
-        return ai >= 0 && styleId !== "" && OutputListModel.getOutput(ai).styleId === styleId
+        if (styleId === "" || !LiveOutputService.live)
+            return false
+        // EVERY ENABLED OUTPUT THAT WEARS THE STYLE, while the show is live — not only
+        // the one output the app has selected. It used to answer for the selected output
+        // alone, so two styles worn by two enabled outputs (the HDMI screen and the NDI
+        // lower third) read differently — one "ON AIR", the other not — and it said
+        // "ON AIR" for the selected output's style even when nothing was live.
+        const rows = OutputListModel.rowCount()
+        for (let i = 0; i < rows; ++i) {
+            const out = OutputListModel.getOutput(i)
+            if (out.styleId === styleId && out.isEnabled !== false)
+                return true
+        }
+        return false
     }
 
     // One shared FAMILY map — the style cards' content pills AND the Edit
@@ -222,10 +335,11 @@ Item {
 
     Flickable {
         id: flick
+        objectName: "selfTestStylesFlick"
         anchors.fill: parent
         anchors.rightMargin: Theme.space6 + Theme.space2
         contentWidth: width
-        contentHeight: layout.height + 24
+        contentHeight: layout.y + layout.height + Theme.space6   // the column's own top offset counts, or the last card sits on the window edge
         clip: true
         boundsBehavior: Flickable.StopAtBounds
 
@@ -309,6 +423,8 @@ Item {
                             height: Math.max(64, rowCol.implicitHeight + 16)
                             radius: Theme.radiusMd
                             color: Theme.inset
+                            border.width: 1
+                            border.color: Theme.borderSubtle
 
                             // Background preview swatch — the style's IMAGE
                             // when it has one (cover-cropped), else a checkerboard
@@ -363,7 +479,7 @@ Item {
                                 // commits on Enter / focus loss. Quick
                                 // renames stay inline; content type/template/
                                 // background need the full Edit Style dialog
-                                // (see editStyleBtn below).
+                                // (right-click the row, then Edit).
                                 TextInput {
                                     width: Math.max(implicitWidth + 2, 120)
                                     text: styleRow.name
@@ -378,42 +494,51 @@ Item {
                                 Row {
                                     spacing: 6
 
-                                    Rectangle {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        height: 18
-                                        width: contentTypeLabel.implicitWidth + 12
-                                        radius: 4
-                                        color: styleRow.contentTypeInfo.bg
-
-                                        Text {
-                                            id: contentTypeLabel
-                                            anchors.centerIn: parent
-                                            text: styleRow.contentTypeInfo.label
-                                            color: styleRow.contentTypeInfo.color
-                                            font.family: Theme.fontFamily
-                                            font.pixelSize: 10
-                                            font.weight: Font.Bold
-                                        }
-                                    }
-
+                                    // (No content-type chip any more: it repeated one of the
+                                    // family pills below under a different colour and showed a
+                                    // different family on every row — "The Table" here,
+                                    // "Shows" there. The pills already say, for every family,
+                                    // whether the style serves it and with which template.)
                                     // The template as a CHIP wearing the ENGINE
                                     // design's own accent (its category colour),
                                     // not a grey text label — the row now reads
                                     // "this exact engine design" at a glance.
+                                    // THE KIND OF LAYOUT THIS STYLE IS, not a template name: "Full Screen"
+                                    // when the templates it uses fill the screen (Big Bold, Scripture,
+                                    // Table), "Lower Third" when they sit in the bottom band, "Mixed"
+                                    // when they disagree, and no chip when it has none. Worked out from
+                                    // where each template puts its text (layoutClassOf), so it follows
+                                    // the templates instead of a stored preset name that no longer
+                                    // meant anything (every seeded style carried "Lower Third").
                                     Rectangle {
+                                        readonly property string layoutClass: {
+                                            root.modelsRev
+                                            root.templateCatalogRev
+                                            const d = StyleListModel.getStyle(styleRow.index)
+                                            const keys = [d.familyTemplateShows, d.familyTemplateMedia,
+                                                          d.familyTemplateScripture, d.familyTemplateTable]
+                                                         .filter(k => k !== "")
+                                            if (keys.length === 0)
+                                                keys.push(styleRow.templateKey)
+                                            const kinds = new Set(keys.map(root.layoutClassOf).filter(c => c !== ""))
+                                            return kinds.size === 0 ? "" : kinds.size > 1 ? "mixed" : Array.from(kinds)[0]
+                                        }
+                                        visible: layoutClass !== ""
                                         anchors.verticalCenter: parent.verticalCenter
                                         height: 18
                                         width: templateLabel.implicitWidth + 12
                                         radius: 4
-                                        color: root.templateColorFor(styleRow.templateKey) !== ""
-                                               ? root.templateColorFor(styleRow.templateKey) : "#262a3a"
+                                        color: "transparent"
+                                        border.width: 1
+                                        border.color: Theme.border
 
                                         Text {
                                             id: templateLabel
                                             anchors.centerIn: parent
-                                            text: root.templateNameFor(styleRow.templateKey)
-                                            color: root.templateColorFor(styleRow.templateKey) !== ""
-                                                   ? Theme.controlInk : Theme.textPrimary
+                                            text: parent.layoutClass === "lower" ? qsTr("Lower Third")
+                                                  : parent.layoutClass === "full" ? qsTr("Full Screen")
+                                                  : qsTr("Mixed")
+                                            color: Theme.textSecondary
                                             font.family: Theme.fontFamily
                                             font.pixelSize: 10
                                             font.weight: Font.Bold
@@ -456,7 +581,7 @@ Item {
                                     // the dialog pre-targeted to that family.
                                     Row {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        spacing: 4
+                                        spacing: 16
 
                                         Repeater {
                                             // Override names ride the model so a
@@ -483,38 +608,46 @@ Item {
                                                 required property var modelData
                                                 readonly property var info: root.familyInfoFor(modelData.key)
                                                 readonly property bool overridden: modelData.overrideName !== ""
+                                                // QUIET, not boxed: a coloured dot and the family's name, with its
+                                                // template in muted text. Four filled, bordered pills per row were the
+                                                // loudest thing on the page.
                                                 anchors.verticalCenter: parent.verticalCenter
-                                                height: 18
-                                                width: pillContent.implicitWidth + 12
-                                                radius: 4
-                                                color: modelData.on ? info.bg : "transparent"
-                                                border.color: pillHover.containsMouse && modelData.on ? "#5a6076"
-                                                    : (modelData.on ? "#4a5064" : "#2a2c38")
-                                                border.width: 1
-                                                opacity: modelData.on ? 1 : 0.45
+                                                height: 20
+                                                width: pillContent.implicitWidth
+                                                radius: 0
+                                                color: "transparent"
+                                                border.width: 0
+                                                opacity: modelData.on ? (pillHover.containsMouse ? 1 : 0.92) : 0.38
 
                                                 Row {
                                                     id: pillContent
                                                     anchors.centerIn: parent
-                                                    spacing: 4
+                                                    spacing: 6
 
+                                                    Rectangle {
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        width: 7
+                                                        height: 7
+                                                        radius: 3.5
+                                                        color: familyPill.modelData.on ? familyPill.info.color : Theme.textMuted
+                                                    }
                                                     Text {
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         text: familyPill.info.label
-                                                        color: familyPill.modelData.on ? familyPill.info.color : Theme.textMuted
+                                                        color: familyPill.modelData.on ? Theme.textPrimary : Theme.textMuted
                                                         font.family: Theme.fontFamily
-                                                        font.pixelSize: 10
-                                                        font.weight: Font.Bold
+                                                        font.pixelSize: 12
+                                                        font.weight: Font.Medium
                                                     }
                                                     Text {
                                                         visible: familyPill.overridden
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         width: Math.min(implicitWidth, 110)
                                                         elide: Text.ElideRight
-                                                        text: "·  " + familyPill.modelData.overrideName
-                                                        color: familyPill.modelData.on ? familyPill.info.color : Theme.textMuted
+                                                        text: familyPill.modelData.overrideName
+                                                        color: Theme.textMuted
                                                         font.family: Theme.fontFamily
-                                                        font.pixelSize: 9
+                                                        font.pixelSize: 11
                                                     }
                                                 }
                                                 MouseArea {
@@ -573,106 +706,18 @@ Item {
                                 }
                             }
 
-                            Rectangle {
-                                id: editStyleBtn
-                                anchors.right: duplicateStyleBtn.left
-                                anchors.rightMargin: 6
-                                anchors.verticalCenter: parent.verticalCenter
-                                height: 26
-                                width: editStyleLabel.implicitWidth + 18
-                                radius: 13
-                                color: editStyleArea.containsMouse ? Theme.chip : "transparent"
-                                border.color: Theme.border
-                                border.width: 1
-                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                                Text {
-                                    id: editStyleLabel
-                                    anchors.centerIn: parent
-                                    text: qsTr("Edit")
-                                    color: Theme.textSecondary
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: Theme.textXs
-                                    font.weight: Font.Medium
-                                }
-
-                                MouseArea {
-                                    id: editStyleArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.openEditStyle(styleRow.index)
-                                }
-                            }
-
-                            // Duplicate — copies the theme (new stable id, "(copy)"
-                            // name); the fastest way to spin a variant off one.
-                            Rectangle {
-                                id: duplicateStyleBtn
-                                anchors.right: deleteStyleBtn.visible ? deleteStyleBtn.left : deleteStyleBtn.right
-                                anchors.rightMargin: 6
-                                anchors.verticalCenter: parent.verticalCenter
-                                height: 26
-                                width: duplicateStyleLabel.implicitWidth + 18
-                                radius: 13
-                                color: duplicateStyleArea.containsMouse ? Theme.chip : "transparent"
-                                border.color: Theme.border
-                                border.width: 1
-                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                                Text {
-                                    id: duplicateStyleLabel
-                                    anchors.centerIn: parent
-                                    text: qsTr("Duplicate")
-                                    color: Theme.textSecondary
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: Theme.textXs
-                                    font.weight: Font.Medium
-                                }
-
-                                MouseArea {
-                                    id: duplicateStyleArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: StyleListModel.duplicateStyle(styleRow.index)
-                                }
-                            }
-
-                            // Delete — hidden while any output still points at the
-                            // style (the usage count above says the same thing): a
-                            // style an output wears can't go away silently. After
-                            // the last output is re-pointed to None, the row goes.
-                            Rectangle {
-                                id: deleteStyleBtn
-                                anchors.right: parent.right
-                                anchors.rightMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
-                                visible: root.styleUsage(styleRow.styleId) === 0
-                                height: 26
-                                width: deleteStyleLabel.implicitWidth + 18
-                                radius: 13
-                                color: deleteStyleArea.containsMouse ? Theme.chip : "transparent"
-                                border.color: Theme.border
-                                border.width: 1
-                                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                                Text {
-                                    id: deleteStyleLabel
-                                    anchors.centerIn: parent
-                                    text: qsTr("Delete")
-                                    color: Theme.dangerLight
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: Theme.textXs
-                                    font.weight: Font.Medium
-                                }
-
-                                MouseArea {
-                                    id: deleteStyleArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: StyleListModel.removeStyle(styleRow.index)
+                            // RIGHT-CLICK MENU (Edit / Duplicate / Delete) — the same drop-down
+                            // the Screens list and the slide rows use, so the row keeps the whole
+                            // width for its pills instead of sharing it with three buttons.
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.RightButton
+                                cursorShape: Qt.ArrowCursor
+                                onClicked: (mouse) => {
+                                    root.contextStyleIndex = styleRow.index
+                                    root.contextStyleId = styleRow.styleId
+                                    root.contextStyleName = styleRow.name
+                                    styleContextMenu.openAt(styleRow, mouse.x, mouse.y, root)
                                 }
                             }
                         }
@@ -897,120 +942,55 @@ Item {
                 font.pixelSize: Theme.textXs
             }
 
-            Rectangle {
+            ValueRow {
                 width: parent.width
-                height: 46
-                radius: Theme.radiusMd
-                color: Theme.inset
+                text: root.editActiveFamilyKey === ""
+                      ? qsTr("None") : root.templateNameFor(root.editActiveFamilyKey)
+                dim: root.editActiveFamilyKey === ""
 
-                Text {
-                    x: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - resetFamilyTemplate.width - changeTemplate.width - 60
-                    elide: Text.ElideRight
-                    text: root.editActiveFamilyKey === ""
-                          ? qsTr("None") : root.templateNameFor(root.editActiveFamilyKey)
-                    color: root.editActiveFamilyKey === "" ? Theme.textMuted : Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textSm
-                }
-
-                // NONE chip: visible when the picked family carries its own
-                // template; clicking clears it to no template. Picking via
-                // Change sets the family's own pick. Every styling choice is
-                // explicit — nothing is inherited.
-                Rectangle {
-                    id: resetFamilyTemplate
-                    anchors.right: changeTemplate.left
-                    anchors.rightMargin: 8
-                    anchors.verticalCenter: parent.verticalCenter
+                // Clear: visible when the picked family carries its own template;
+                // clicking drops it back to no template. Picking via Change sets the
+                // family's own pick. Every styling choice is explicit — nothing is
+                // inherited.
+                PillButton {
                     visible: root.editActiveFamilyKey !== ""
-                    height: 26
-                    width: resetFamilyTemplateLabel.implicitWidth + 22
-                    radius: 13
-                    color: resetFamilyTemplateArea.containsMouse ? Theme.chip : "transparent"
-                    border.color: Theme.border
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        id: resetFamilyTemplateLabel
-                        anchors.centerIn: parent
-                        text: qsTr("None")
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                    }
-
-                    MouseArea {
-                        id: resetFamilyTemplateArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (root.editTemplateFamily === "shows") root.editFamilyShows = ""
-                            else if (root.editTemplateFamily === "media") root.editFamilyMedia = ""
-                            else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = ""
-                            else root.editFamilyTable = ""
-                        }
+                    text: qsTr("Clear")
+                    tone: "muted"
+                    onClicked: {
+                        if (root.editTemplateFamily === "shows") root.editFamilyShows = ""
+                        else if (root.editTemplateFamily === "media") root.editFamilyMedia = ""
+                        else if (root.editTemplateFamily === "scripture") root.editFamilyScripture = ""
+                        else root.editFamilyTable = ""
                     }
                 }
 
-                Rectangle {
-                    id: changeTemplate   // referenced by the row's label width + the None chip's anchor
-                    anchors.right: parent.right
-                    anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 26
-                    width: changeTemplateLabel.implicitWidth + 22
-                    radius: 13
-                    color: changeTemplateArea.containsMouse ? Theme.chip : "transparent"
-                    border.color: Theme.border
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        id: changeTemplateLabel
-                        anchors.centerIn: parent
-                        text: qsTr("Change")
-                        color: Theme.accentLight
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                        font.weight: Font.Medium
-                    }
-
-                    MouseArea {
-                        id: changeTemplateArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            // The picker targets the PICKED FAMILY: its pick
-                            // lands in that family's own slot (an override
-                            // begins), not the whole-style key.
-                            templatePicker.contentType = root.editTemplateFamily
-                            templatePicker.contentTypeLabel = {
-                                "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture"),
-                                "table": qsTr("The Table")
-                            }[root.editTemplateFamily] ?? qsTr("Shows")
-                            // The ENGINE's template catalog — the same Template library the
-                            // Templates tab edits — for EVERY content type (ReferencePane's
-                            // mapping, category filter included). The style saves the design's
-                            // id as its templateKey, and the engine renders that design as the
-                            // style's layout (baked into the pushed spec). Legacy preset keys
-                            // from older rosters still resolve through the picker's
-                            // legacyPresetNames until re-picked here.
-                            const categoryNames = {}
-                            for (const c of TemplateLibraryService.categories)
-                                categoryNames[c.id] = c.name
-                            templatePicker.templates = TemplateLibraryService.designs().map((t) => ({
-                                key: t.id, name: t.name, color: t.color,
-                                category: t.category,
-                                categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
-                            }))
-                            templatePicker.selectedKey = root.editActiveFamilyKey
-                            templatePicker.open = true
-                        }
+                PillButton {
+                    text: qsTr("Change")
+                    onClicked: {
+                        // The picker targets the PICKED FAMILY: its pick lands in that
+                        // family's own slot (an override begins), not the whole-style key.
+                        templatePicker.contentType = root.editTemplateFamily
+                        templatePicker.contentTypeLabel = {
+                            "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture"),
+                            "table": qsTr("The Table")
+                        }[root.editTemplateFamily] ?? qsTr("Shows")
+                        // The ENGINE's template catalog — the same Template library the
+                        // Templates tab edits — for EVERY content type (ReferencePane's
+                        // mapping, category filter included). The style saves the design's
+                        // id as its templateKey, and the engine renders that design as the
+                        // style's layout (baked into the pushed spec). Legacy preset keys
+                        // from older rosters still resolve through the picker's
+                        // legacyPresetNames until re-picked here.
+                        const categoryNames = {}
+                        for (const c of TemplateLibraryService.categories)
+                            categoryNames[c.id] = c.name
+                        templatePicker.templates = TemplateLibraryService.designs().map((t) => ({
+                            key: t.id, name: t.name, color: t.color,
+                            category: t.category,
+                            categoryName: t.category ? (categoryNames[t.category] ?? t.category) : qsTr("Unlabeled")
+                        }))
+                        templatePicker.selectedKey = root.editActiveFamilyKey
+                        templatePicker.open = true
                     }
                 }
             }
@@ -1027,66 +1007,20 @@ Item {
                 font.pixelSize: Theme.textXs
             }
 
-            Rectangle {
+            ValueRow {
                 width: parent.width
-                height: 46
-                radius: Theme.radiusMd
-                color: Theme.inset
+                hasSwatch: true
+                swatchColor: root.editStyleBackgroundColor === "transparent"
+                             ? Theme.inset : root.editStyleBackgroundColor
+                text: root.editStyleBackgroundColor === "transparent"
+                      ? qsTr("Transparent") : root.editStyleBackgroundColor
+                dim: root.editStyleBackgroundColor === "transparent"
 
-                Row {
-                    x: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 10
-
-                    Rectangle {
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 22
-                        height: 22
-                        radius: 6
-                        color: root.editStyleBackgroundColor === "transparent" ? Theme.inset : root.editStyleBackgroundColor
-                        border.color: Theme.borderSubtle
-                        border.width: 1
-                    }
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.editStyleBackgroundColor === "transparent" ? qsTr("Transparent") : root.editStyleBackgroundColor
-                        color: Theme.textSecondary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
-                }
-
-                Rectangle {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 26
-                    width: changeBgLabel.implicitWidth + 22
-                    radius: 13
-                    color: changeBgArea.containsMouse ? Theme.chip : "transparent"
-                    border.color: Theme.border
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        id: changeBgLabel
-                        anchors.centerIn: parent
-                        text: qsTr("Change")
-                        color: Theme.accentLight
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                        font.weight: Font.Medium
-                    }
-
-                    MouseArea {
-                        id: changeBgArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        // Seeded with the style's CURRENT background — the
-                        // palette highlights it instead of a hardcoded default.
-                        onClicked: styleBgModal.openWith(root.editStyleBackgroundColor)
-                    }
+                // Seeded with the style's CURRENT background — the palette highlights
+                // it instead of a hardcoded default.
+                PillButton {
+                    text: qsTr("Change")
+                    onClicked: styleBgModal.openWith(root.editStyleBackgroundColor)
                 }
             }
 
@@ -1104,104 +1038,26 @@ Item {
                     font.pixelSize: Theme.textXs
                 }
 
-                Rectangle {
+                ValueRow {
                     width: parent.width
-                    height: 46
-                    radius: Theme.radiusMd
-                    color: Theme.inset
+                    hasSwatch: true
+                    swatchColor: Theme.card
+                    swatchImage: root.editStyleBackgroundImage === ""
+                                 ? "" : "file:///" + root.editStyleBackgroundImage
+                    text: root.editStyleBackgroundImage === ""
+                          ? qsTr("None")
+                          : root.editStyleBackgroundImage.split("/").pop()
+                    dim: root.editStyleBackgroundImage === ""
 
-                    Row {
-                        x: 14
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 10
-                        width: parent.width - 110
-
-                        Rectangle {
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: 22
-                            height: 22
-                            radius: 6
-                            clip: true
-                            color: root.editStyleBackgroundImage === "" ? Theme.inset : Theme.card
-                            border.color: Theme.borderSubtle
-                            border.width: 1
-
-                            Image {
-                                visible: root.editStyleBackgroundImage !== ""
-                                anchors.fill: parent
-                                source: root.editStyleBackgroundImage === "" ? "" : "file:///" + root.editStyleBackgroundImage
-                                fillMode: Image.PreserveAspectCrop
-                                asynchronous: true
-                            }
-                        }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - 32
-                            text: root.editStyleBackgroundImage === ""
-                                  ? qsTr("None")
-                                  : root.editStyleBackgroundImage.split("/").pop()
-                            color: Theme.textSecondary
-                            elide: Text.ElideRight
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textSm
-                        }
-                    }
-
-                    Rectangle {
-                        anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        height: 26
-                        width: pickImgLabel.implicitWidth + 22
-                        radius: 13
-                        color: pickImgArea.containsMouse ? Theme.chip : "transparent"
-                        border.color: Theme.border
-                        border.width: 1
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        Text {
-                            id: pickImgLabel
-                            anchors.centerIn: parent
-                            text: root.editStyleBackgroundImage === "" ? qsTr("Pick") : qsTr("Change")
-                            color: Theme.accentLight
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textXs
-                            font.weight: Font.Medium
-                        }
-
-                        MouseArea {
-                            id: pickImgArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.pickBackgroundImage()
-                        }
-                    }
-                }
-
-                Rectangle {
-                    visible: root.editStyleBackgroundImage !== ""
-                    anchors.right: parent.right
-                    width: removeImgLabel.implicitWidth + 18
-                    height: 22
-                    radius: 11
-                    color: "transparent"
-                    border.color: Theme.border
-                    border.width: 1
-
-                    Text {
-                        id: removeImgLabel
-                        anchors.centerIn: parent
-                        text: qsTr("Remove image")
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textXs
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
+                    PillButton {
+                        visible: root.editStyleBackgroundImage !== ""
+                        text: qsTr("Remove")
+                        tone: "muted"
                         onClicked: root.editStyleBackgroundImage = ""
+                    }
+                    PillButton {
+                        text: root.editStyleBackgroundImage === "" ? qsTr("Pick") : qsTr("Change")
+                        onClicked: root.pickBackgroundImage()
                     }
                 }
             }
@@ -1210,24 +1066,24 @@ Item {
             // background keep it when this style is on air; plain text slides
             // get the style's background. SettingsToggle is the pill only —
             // The dialog owns the state; the pill reports its value.
-            Row {
+            // FreeShow's clearStyleBackgroundOnText toggle: the dialog owns the state; the
+            // pill reports its value.
+            Item {
                 width: parent.width
-                spacing: Theme.space2
+                height: 34
 
-                Column {
-                    width: parent.width - clearOnTextToggle.width - parent.spacing
-                    spacing: 1
-
-                    Text {
-                        text: qsTr("Let slides keep their own background")
-                        color: Theme.textPrimary
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.textSm
-                    }
+                Text {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Let slides keep their own background")
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSm
                 }
 
                 SettingsToggle {
                     id: clearOnTextToggle
+                    anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     checked: root.editStyleClearOnText
                     onToggled: root.editStyleClearOnText = !root.editStyleClearOnText

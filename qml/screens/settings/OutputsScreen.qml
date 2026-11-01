@@ -655,7 +655,11 @@ Item {
                         SettingsToggle {
                             anchors.verticalCenter: parent.verticalCenter
                             checked: card.isEnabled
-                            onToggled: OutputListModel.setEnabled(card.index, !card.isEnabled)
+                            onToggled: {
+                                if (!OutputListModel.setEnabled(card.index, !card.isEnabled))
+                                    EventBus.notify(qsTr("At least one output card must remain enabled."),
+                                                    "warning", qsTr("Outputs"), "outputs.lastEnabled")
+                            }
                         }
                     }
 

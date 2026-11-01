@@ -238,6 +238,9 @@ Column {
     // nothing. Consistency of the rendering is the point; nothing pretends a
     // value was stored.
     property bool channelsEditable: true
+    // The per-channel check boxes and "Select All / None": hidden for a strip that only READS its
+    // channels (the Edit Bus dialog) — switches that cannot be flipped are just noise there.
+    property bool showChannelSwitches: true
 
     // (Declared as a Column child set below — see NameRow / SourceRow.)
 
@@ -601,6 +604,7 @@ Column {
                 // Checkbox — the reference's plain square check.
                 Rectangle {
                     id: box
+                    visible: root.showChannelSwitches
                     anchors.left: parent.left
                     anchors.leftMargin: 12
                     anchors.top: parent.top
@@ -918,7 +922,7 @@ Column {
         color: Theme.textSecondary
         font.family: Theme.fontFamily
         font.pixelSize: Theme.textXs
-        visible: root.showChannels
+        visible: root.showChannels && root.showChannelSwitches
 
         MouseArea {
             anchors.fill: parent

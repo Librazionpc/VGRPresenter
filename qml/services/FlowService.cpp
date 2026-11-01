@@ -142,7 +142,11 @@ void installDomainActions()
         struct A final : fa::IAction {
             const char *Type() const noexcept override { return "start_recording"; }
             Result<fa::ActionOutcome> Execute(fa::AutomationContext &) override {
-                RecordingService::instance().startRecording(RecordingService::instance().config());
+                // The take reads the output roster (a model), so it runs on the
+                // interface thread whichever thread the flow is stepping on.
+                QMetaObject::invokeMethod(&RecordingService::instance(), [] {
+                    RecordingService::instance().startPrimaryRecording();
+                }, Qt::QueuedConnection);
                 return fa::ActionOutcome{fa::ActionOutcome::Kind::Completed, {}, {}};
             }
         };

@@ -686,6 +686,9 @@ bool AudioMixer::MixSelected(const GraphSnapshot &snap, std::string_view nodeId,
 {
     const size_t total = static_cast<size_t>(frameCount) * channelCount;
     std::memset(dst, 0, sizeof(float) * total);
+    const auto target = snap.nodes.find(std::string(nodeId));
+    if (target != snap.nodes.end() && !target->second.enabled)
+        return false;
     bool any = false;
     // Render thread only: planes_ and planeCount_ belong to the current chunk's MixInto.
     // Compared in place: this runs once per tap per chunk, so it builds no string.

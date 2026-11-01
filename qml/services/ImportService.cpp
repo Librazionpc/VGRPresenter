@@ -1,4 +1,5 @@
 #include "services/ImportService.h"
+#include "services/DataRoot.h"
 
 #include "modules/import/ImportEngine.hpp"
 #include "modules/presentation/PresentationDocument.hpp"
@@ -162,7 +163,7 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
 // `folder` receives the folder to add; "" means the picture could not be saved.
 QString saveClipboardImage(const bps::platform::ClipboardImage &image, QString *folder)
 {
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString base = dataroot::appDataRoot();
     if (base.isEmpty())
         return {};
     const QString dir = base + QStringLiteral("/media/clipboard");
@@ -331,8 +332,7 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         // are added to the media library below on the interface thread: adding a
         // folder is how media comes into the app, so the deck's art turns up in
         // the Media dock as real files the operator can put on air.
-        const QString mediaRoot = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                                  + QStringLiteral("/media/imported");
+        const QString mediaRoot = dataroot::appDataRoot() + QStringLiteral("/media/imported");
         QStringList mediaFolders;
         int mediaCopied = 0;
         for (const bi::ImportedShow &show : result.value().shows) {

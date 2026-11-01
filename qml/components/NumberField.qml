@@ -31,11 +31,17 @@ Rectangle {
     // consumer (Padding, Corner Radius, Border Width…) keeps the header
     // comment's own reasoning — typed-or-nudged, no drag — unchanged.
     property bool showSlider: false
+    // A ROW, not a tile: for a settings list whose other rows are a label on the left and its
+    // control on the right (General · Appearance). No fill or border of its own, the label in
+    // the list's own type, and the track, the typed value and the stepper packed to the right
+    // edge — so the field reads as one more row of the list instead of a card dropped into it.
+    // Everywhere else keeps the tile (label above the value).
+    property bool compact: false
 
     signal moved(real v)
 
-    height: 52
-    radius: 10
+    height: num.compact ? 38 : 52
+    radius: num.compact ? 0 : 10
     // HoverHandler, not a PositionHoverArea overlay: the field holds an
     // editable TextInput, and a MouseArea declared on top of it would eat the
     // click that focuses the value.
@@ -44,12 +50,12 @@ Rectangle {
         enabled: num.enabled
         cursorShape: num.enabled ? Qt.IBeamCursor : Qt.ArrowCursor
     }
-    color: numHover.hovered || numInput.activeFocus ? Theme.hoverBg : Theme.inset
+    color: num.compact ? "transparent" : (numHover.hovered || numInput.activeFocus ? Theme.hoverBg : Theme.inset)
     // A FIXED border, not borderSubtle alone: two of these sit side by side in
     // one row, and a hairline that only appeared on hover made the pair's gap
     // read as one narrow divider box instead of two fields.
     border.color: numHover.hovered || numInput.activeFocus ? Theme.border : Theme.borderSubtle
-    border.width: 1
+    border.width: num.compact ? 0 : 1
     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
     // A disabled field greys as a whole (the Border card greys its stroke
     // controls for a kind that can show no fill) — the same 0.4 the sliders
@@ -76,31 +82,46 @@ Rectangle {
     }
 
     Text {
-        x: 12
-        y: 6
+        x: num.compact ? 0 : 12
+        y: num.compact ? (parent.height - height) / 2 : 6
         text: num.label
-        color: Theme.accent
+        color: num.compact ? Theme.textPrimary : Theme.accent
         font.family: Theme.fontFamily
-        font.pixelSize: 11
-        font.weight: Font.Medium
-        font.letterSpacing: 0.2
+        font.pixelSize: num.compact ? Theme.textSm : 11
+        font.weight: num.compact ? Font.Normal : Font.Medium
+        font.letterSpacing: num.compact ? 0 : 0.2
         elide: Text.ElideRight
-        width: parent.width - 24
+        width: num.compact ? Math.max(60, parent.width - 270) : parent.width - 24
+    }
+
+    // The typed value's own little well in the row layout, so it still reads as editable.
+    Rectangle {
+        visible: num.compact
+        x: numInput.x - 8
+        width: numInput.width + 16
+        height: 26
+        radius: 6
+        anchors.verticalCenter: parent.verticalCenter
+        color: numHover.hovered || numInput.activeFocus ? Theme.hoverBg : Theme.inset
+        border.width: 1
+        border.color: numInput.activeFocus ? Theme.accent : Theme.borderSubtle
     }
     TextInput {
         id: numInput
-        x: 12
-        anchors.bottom: parent.bottom
+        x: num.compact ? parent.width - 34 - 12 - width : 12
+        anchors.bottom: num.compact ? undefined : parent.bottom
         anchors.bottomMargin: 9
+        anchors.verticalCenter: num.compact ? parent.verticalCenter : undefined
+        horizontalAlignment: num.compact ? TextInput.AlignRight : TextInput.AlignLeft
         // With the slider on, the field only needs room for the typed
         // number itself — the track fills the rest of the strip up to the
         // stepper. Without it, unchanged: leaves the stepper its own strip
         // on the right (plus the field's inset), so a value never runs
         // under the chevrons.
-        width: num.showSlider ? 46 : parent.width - 52
+        width: num.compact ? 38 : (num.showSlider ? 46 : parent.width - 52)
         color: Theme.textPrimary
         font.family: Theme.fontFamily
-        font.pixelSize: 16
+        font.pixelSize: num.compact ? Theme.textSm : 16
         selectByMouse: true
         validator: DoubleValidator { bottom: num.minValue; top: num.maxValue; decimals: num.decimals }
         // The binding seeds the field; the onValueChanged handler above takes
@@ -124,11 +145,11 @@ Rectangle {
     Item {
         id: sliderWrap
         visible: num.showSlider
-        anchors.left: numInput.right
-        anchors.leftMargin: 10
-        anchors.right: stepperCol.left
-        anchors.rightMargin: 10
-        anchors.verticalCenter: numInput.verticalCenter
+        // The tile puts the track between the value and the stepper; the row puts it LEFT of the
+        // value, a fixed length, so every row's controls end on the same right edge.
+        x: num.compact ? numInput.x - 16 - width : numInput.x + numInput.width + 10
+        width: num.compact ? 150 : stepperCol.x - 10 - x
+        anchors.verticalCenter: parent.verticalCenter
         height: 14
 
         readonly property real pct: num.maxValue > num.minValue
@@ -205,7 +226,7 @@ Rectangle {
     Column {
         id: stepperCol
         anchors.right: parent.right
-        anchors.rightMargin: 7
+        anchors.rightMargin: num.compact ? 0 : 7
         anchors.verticalCenter: parent.verticalCenter
         spacing: 3
         Repeater {

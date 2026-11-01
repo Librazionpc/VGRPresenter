@@ -1,6 +1,7 @@
 #include "modules/recording/MediaFoundationMp4.hpp"
 
 #include "modules/audio/AudioEngine.hpp"
+#include "modules/recording/MediaFoundationEncode.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +22,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -32,7 +35,6 @@ constexpr const char *kModule = "MediaFoundationMp4";
 // H.264 Main profile (eAVEncH264VProfile_Main) and the AAC bitrate the container asks
 // for: 192 kbit/s is 24000 bytes per second.
 constexpr uint32_t kH264ProfileMain = 77;
-constexpr uint32_t kAacBytesPerSecond = 24000;
 
 // Media Foundation is started once per user of it. Each container holds a count
 // while it is open, so MFShutdown runs only when the last one closes.
@@ -269,6 +271,146 @@ struct MediaFoundationMp4::Impl {
     uint32_t audioRate = 0;
     std::vector<uint8_t> nv12;
     std::vector<int16_t> pcm;
+
+    // THE HARDWARE PATH. A picture is encoded by H264Encoder (NVENC, AMF or QuickSync) and
+    // the writer only stores the finished H.264 — so the writer's streams are added once the
+    // first keyframe is out and its parameter sets are known. Sound that arrives first waits.
+    std::unique_ptr<H264Encoder> hw;
+    bool wantAudio = false;
+    bool started = false;
+    uint32_t fpsNum = 0;
+    uint32_t bitrate = 0;
+    uint32_t audioBytesPerSecond = 24000;   // the profile's AAC bitrate
+    struct QueuedAudio { std::vector<int16_t> pcm; double timeMs; };
+    std::deque<QueuedAudio> queuedAudio;
+
+    // One block of 16-bit stereo PCM to the writer's audio stream.
+    Result<void> WritePcm(const int16_t *samples, size_t frames, double timeMs)
+    {
+        const size_t bytes = frames * 4;
+        ComRef<IMFMediaBuffer> buffer;
+        HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(bytes), buffer.Out());
+        if (FAILED(hr))
+            return HrError("allocating an audio buffer", hr);
+        BYTE *dst = nullptr;
+        hr = buffer->Lock(&dst, nullptr, nullptr);
+        if (FAILED(hr))
+            return HrError("locking an audio buffer", hr);
+        std::memcpy(dst, samples, bytes);
+        buffer->Unlock();
+        buffer->SetCurrentLength(static_cast<DWORD>(bytes));
+
+        ComRef<IMFSample> sample;
+        hr = MFCreateSample(sample.Out());
+        if (FAILED(hr))
+            return HrError("creating an audio sample", hr);
+        sample->AddBuffer(buffer.get());
+        sample->SetSampleTime(ToHundredNs(timeMs));
+        sample->SetSampleDuration(static_cast<LONGLONG>(frames) * 10000000LL / audioRate);
+        hr = writer->WriteSample(static_cast<DWORD>(audioStream), sample.get());
+        if (FAILED(hr))
+            return HrError("writing audio", hr);
+        return Ok();
+    }
+
+    // The hardware path's start: the first keyframe carries the SPS/PPS, which go into the
+    // video stream's header; then the audio stream is added and the writer begins.
+    Result<void> StartHardware(const EncodedVideo &key)
+    {
+        std::vector<uint8_t> header;
+        for (const auto &nal : SplitAnnexB(key.data.data(), key.data.size())) {
+            const int type = NalType(key.data.data() + nal.first);
+            if (type != 7 && type != 8)
+                continue;
+            header.insert(header.end(), {0, 0, 0, 1});
+            header.insert(header.end(), key.data.begin() + static_cast<std::ptrdiff_t>(nal.first),
+                          key.data.begin() + static_cast<std::ptrdiff_t>(nal.first + nal.second));
+        }
+        if (header.empty())
+            return Error::Make(Err::Recording_InvalidState, kModule,
+                               hw->Name() + " produced a keyframe without its parameter sets");
+
+        ComRef<IMFMediaType> videoType;
+        if (auto made = MakeVideoType(MFVideoFormat_H264, width, height, fpsNum, 1000, bitrate, videoType); !made.ok())
+            return made.error();
+        videoType->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER, header.data(), static_cast<UINT32>(header.size()));
+        DWORD videoIndex = 0;
+        HRESULT hr = writer->AddStream(videoType.get(), &videoIndex);
+        videoStream = static_cast<int>(videoIndex);
+        if (FAILED(hr))
+            return HrError("adding the video stream", hr);
+        // The input is the same compressed type: the writer stores what it is given.
+        hr = writer->SetInputMediaType(videoIndex, videoType.get(), nullptr);
+        if (FAILED(hr))
+            return HrError("setting the video input", hr);
+
+        if (wantAudio) {
+            const auto mix = audio::AudioEngine::Instance().MixFormat();
+            ComRef<IMFMediaType> audioOut, audioIn;
+            if (auto made = MakeAudioType(MFAudioFormat_AAC, mix.rateHz, 2, 16, audioBytesPerSecond, audioOut); !made.ok())
+                return made.error();
+            if (auto made = MakeAudioType(MFAudioFormat_PCM, mix.rateHz, 2, 16, mix.rateHz * 4, audioIn); !made.ok())
+                return made.error();
+            DWORD audioIndex = 0;
+            hr = writer->AddStream(audioOut.get(), &audioIndex);
+            audioStream = static_cast<int>(audioIndex);
+            if (FAILED(hr))
+                return HrError("adding the audio stream", hr);
+            hr = writer->SetInputMediaType(audioIndex, audioIn.get(), nullptr);
+            if (FAILED(hr))
+                return HrError("setting the audio input", hr);
+        }
+        hr = writer->BeginWriting();
+        if (FAILED(hr))
+            return HrError("starting the MP4 writer", hr);
+        started = true;
+
+        // Sound that came before the first keyframe.
+        while (!queuedAudio.empty()) {
+            if (audioStream >= 0)
+                if (auto w = WritePcm(queuedAudio.front().pcm.data(), queuedAudio.front().pcm.size() / 2,
+                                      queuedAudio.front().timeMs);
+                    !w.ok())
+                    return w;
+            queuedAudio.pop_front();
+        }
+        return Ok();
+    }
+
+    // One finished picture to the writer.
+    Result<void> WriteEncoded(const EncodedVideo &pic)
+    {
+        if (!started) {
+            if (!pic.keyframe)
+                return Ok();   // nothing can decode until a keyframe
+            if (auto begun = StartHardware(pic); !begun.ok())
+                return begun;
+        }
+        ComRef<IMFMediaBuffer> buffer;
+        HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(pic.data.size()), buffer.Out());
+        if (FAILED(hr))
+            return HrError("allocating a video buffer", hr);
+        BYTE *dst = nullptr;
+        hr = buffer->Lock(&dst, nullptr, nullptr);
+        if (FAILED(hr))
+            return HrError("locking a video buffer", hr);
+        std::memcpy(dst, pic.data.data(), pic.data.size());
+        buffer->Unlock();
+        buffer->SetCurrentLength(static_cast<DWORD>(pic.data.size()));
+        ComRef<IMFSample> sample;
+        hr = MFCreateSample(sample.Out());
+        if (FAILED(hr))
+            return HrError("creating a video sample", hr);
+        sample->AddBuffer(buffer.get());
+        sample->SetSampleTime(pic.timeHns);
+        sample->SetSampleDuration(pic.durationHns > 0 ? pic.durationHns : frameDuration);
+        if (pic.keyframe)
+            sample->SetUINT32(MFSampleExtension_CleanPoint, TRUE);
+        hr = writer->WriteSample(static_cast<DWORD>(videoStream), sample.get());
+        if (FAILED(hr))
+            return HrError("writing a video frame", hr);
+        return Ok();
+    }
 };
 
 MediaFoundationMp4::MediaFoundationMp4() : impl_(std::make_unique<Impl>()) {}
@@ -326,8 +468,34 @@ Result<std::string> MediaFoundationMp4::Open(const RecordingProfile &profile, st
         return HrError("opening the MP4 writer", hr);
     }
 
-    // Video: H.264 out, NV12 in.
     const uint32_t bitrate = static_cast<uint32_t>(std::max(1, profile.videoBitrateKbps)) * 1000u;
+
+    // HARDWARE ENCODER. A profile that names NVENC / AMF / QuickSync (or Auto on a
+    // machine that has one) is encoded by that hardware: H264Encoder makes the H.264 and
+    // the writer stores it as it is. The streams are added when the first keyframe is out
+    // (its parameter sets are part of the stream header), so nothing more is set up here.
+    // A named kind that cannot start is refused; Auto falls back to the software path.
+    const EncoderKind kind = ResolveEncoderKind(profile.encoderPreference);
+    if (kind != EncoderKind::Software) {
+        auto made = H264Encoder::Create(kind, width, height, fpsNum, profile.videoBitrateKbps, impl_->hw);
+        if (!made.ok() && profile.encoderPreference != EncoderKind::Auto) {
+            impl_->writer.Reset();
+            return made.error();
+        }
+    }
+    if (impl_->hw) {
+        impl_->width = width;
+        impl_->height = height;
+        impl_->frameDuration = static_cast<LONGLONG>(std::llround(10000000.0 / fps));
+        impl_->fpsNum = fpsNum;
+        impl_->bitrate = bitrate;
+        impl_->wantAudio = wantAudio;
+        impl_->audioBytesPerSecond = AacBytesPerSecond(profile.audioBitrateKbps);
+        impl_->audioRate = wantAudio ? mix.rateHz : 0;
+        return std::string(path);
+    }
+
+    // Video: H.264 out, NV12 in.
     ComRef<IMFMediaType> videoOut, videoIn;
     if (auto made = MakeVideoType(MFVideoFormat_H264, width, height, fpsNum, 1000, bitrate, videoOut); !made.ok())
         return made.error();
@@ -345,7 +513,7 @@ Result<std::string> MediaFoundationMp4::Open(const RecordingProfile &profile, st
     // Audio: AAC out, 16-bit PCM in, stereo.
     if (wantAudio) {
         ComRef<IMFMediaType> audioOut, audioIn;
-        if (auto made = MakeAudioType(MFAudioFormat_AAC, mix.rateHz, 2, 16, kAacBytesPerSecond, audioOut); !made.ok())
+        if (auto made = MakeAudioType(MFAudioFormat_AAC, mix.rateHz, 2, 16, AacBytesPerSecond(profile.audioBitrateKbps), audioOut); !made.ok())
             return made.error();
         if (auto made = MakeAudioType(MFAudioFormat_PCM, mix.rateHz, 2, 16, mix.rateHz * 4, audioIn); !made.ok())
             return made.error();
@@ -374,6 +542,29 @@ Result<void> MediaFoundationMp4::Close(bool /*finalized*/)
 {
     if (!impl_->writer)
         return Ok();
+    // The hardware encoder still holds the last pictures: they go into the file first.
+    std::string pending;
+    if (impl_->hw) {
+        std::vector<EncodedVideo> tail;
+        (void)impl_->hw->Drain(tail);
+        for (const EncodedVideo &pic : tail)
+            if (auto written = impl_->WriteEncoded(pic); !written.ok() && pending.empty())
+                pending = written.error().message;
+        if (!impl_->started && pending.empty())
+            pending = "no picture reached the MP4 file, so there is nothing to play";
+        impl_->hw.reset();
+    }
+    if (!impl_->started && !pending.empty() && impl_->videoStream < 0) {
+        // The writer never began (a hardware take with no keyframe): there is no index to write.
+        impl_->writer.Reset();
+        impl_->queuedAudio.clear();
+        impl_->audioRate = 0;
+        if (impl_->mfHeld) {
+            ReleaseMf();
+            impl_->mfHeld = false;
+        }
+        return Error::Make(Err::Recording_ValidationFailed, kModule, pending);
+    }
     // Finalize writes the MP4 index. Without it the file cannot be played, so a
     // segment boundary finalizes just as a stop does.
     const HRESULT hr = impl_->writer->Finalize();
@@ -381,18 +572,22 @@ Result<void> MediaFoundationMp4::Close(bool /*finalized*/)
     impl_->videoStream = -1;
     impl_->audioStream = -1;
     impl_->audioRate = 0;
+    impl_->started = false;
+    impl_->queuedAudio.clear();
     if (impl_->mfHeld) {
         ReleaseMf();
         impl_->mfHeld = false;
     }
     if (FAILED(hr))
         return HrError("finalizing the MP4", hr);
+    if (!pending.empty())
+        return Error::Make(Err::Recording_InvalidState, kModule, pending);
     return Ok();
 }
 
 Result<void> MediaFoundationMp4::WriteVideo(const VideoFrameIn &frame)
 {
-    if (!impl_->writer || impl_->videoStream < 0)
+    if (!impl_->writer || (impl_->videoStream < 0 && !impl_->hw))
         return Error::Make(Err::Recording_InvalidState, kModule, "container is not open");
     if (!frame.pixels || frame.width <= 0 || frame.height <= 0)
         return Ok();
@@ -401,6 +596,18 @@ Result<void> MediaFoundationMp4::WriteVideo(const VideoFrameIn &frame)
     impl_->nv12.resize(bytes);
     PackedToNv12(frame.pixels, frame.width, frame.height, impl_->nv12.data(),
                  impl_->width, impl_->height);
+
+    if (impl_->hw) {
+        std::vector<EncodedVideo> pictures;
+        if (auto encoded = impl_->hw->Encode(impl_->nv12.data(), bytes, ToHundredNs(frame.timestampMs),
+                                             impl_->frameDuration, pictures);
+            !encoded.ok())
+            return encoded;
+        for (const EncodedVideo &pic : pictures)
+            if (auto written = impl_->WriteEncoded(pic); !written.ok())
+                return written;
+        return Ok();
+    }
 
     ComRef<IMFMediaBuffer> buffer;
     HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(bytes), buffer.Out());
@@ -431,8 +638,10 @@ Result<void> MediaFoundationMp4::WriteAudio(const AudioBlockIn &block)
 {
     if (!impl_->writer)
         return Error::Make(Err::Recording_InvalidState, kModule, "container is not open");
+    // The hardware path adds its audio stream with the first keyframe: until then sound is held.
+    const bool waitingForKeyframe = impl_->hw && impl_->wantAudio && !impl_->started;
     // A file opened without audio (no mix was running) has no audio stream to fill.
-    if (impl_->audioStream < 0 || block.frames == 0 || block.channels == 0)
+    if ((impl_->audioStream < 0 && !waitingForKeyframe) || block.frames == 0 || block.channels == 0)
         return Ok();
     if (block.rateHz != impl_->audioRate)
         return Error::Make(Err::Recording_ValidationFailed, kModule,
@@ -447,31 +656,14 @@ Result<void> MediaFoundationMp4::WriteAudio(const AudioBlockIn &block)
         impl_->pcm[f * 2] = ToPcm16(left);
         impl_->pcm[f * 2 + 1] = ToPcm16(right);
     }
-
-    const size_t bytes = frames * 4;
-    ComRef<IMFMediaBuffer> buffer;
-    HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(bytes), buffer.Out());
-    if (FAILED(hr))
-        return HrError("allocating an audio buffer", hr);
-    BYTE *dst = nullptr;
-    hr = buffer->Lock(&dst, nullptr, nullptr);
-    if (FAILED(hr))
-        return HrError("locking an audio buffer", hr);
-    std::memcpy(dst, impl_->pcm.data(), bytes);
-    buffer->Unlock();
-    buffer->SetCurrentLength(static_cast<DWORD>(bytes));
-
-    ComRef<IMFSample> sample;
-    hr = MFCreateSample(sample.Out());
-    if (FAILED(hr))
-        return HrError("creating an audio sample", hr);
-    sample->AddBuffer(buffer.get());
-    sample->SetSampleTime(ToHundredNs(block.timestampMs));
-    sample->SetSampleDuration(static_cast<LONGLONG>(frames) * 10000000LL / impl_->audioRate);
-    hr = impl_->writer->WriteSample(static_cast<DWORD>(impl_->audioStream), sample.get());
-    if (FAILED(hr))
-        return HrError("writing audio", hr);
-    return Ok();
+    if (waitingForKeyframe) {
+        impl_->queuedAudio.push_back({impl_->pcm, block.timestampMs});
+        // A keyframe is two seconds away at most; keep a little more than that.
+        while (impl_->queuedAudio.size() > 400)
+            impl_->queuedAudio.pop_front();
+        return Ok();
+    }
+    return impl_->WritePcm(impl_->pcm.data(), frames, block.timestampMs);
 }
 
 Result<void> ProbeH264Encoder()

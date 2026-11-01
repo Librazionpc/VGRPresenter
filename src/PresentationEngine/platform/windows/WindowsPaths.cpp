@@ -16,6 +16,20 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id) {
     return out;
 }
 
+// A DEV BUILD'S OWN PROFILE (VGR_PROFILE_DIR, set by the app's main before anything asks):
+// the project's dev-profile folder, kept apart from the installed app's %LOCALAPPDATA%\bps
+// and %APPDATA% so the two never read or rewrite one set of settings and templates.
+// Empty when unset — an installed app, and every non-app tool, are unchanged.
+std::string ProfileRoot() {
+    wchar_t buf[MAX_PATH * 2] = {0};
+    DWORD n = GetEnvironmentVariableW(L"VGR_PROFILE_DIR", buf, static_cast<DWORD>(sizeof(buf) / sizeof(buf[0])));
+    if (n == 0 || n >= sizeof(buf) / sizeof(buf[0])) return {};
+    std::string p = win::Utf8(std::wstring(buf, n));
+    for (char& c : p) if (c == '/') c = '\\';
+    while (!p.empty() && p.back() == '\\') p.pop_back();
+    return p;
+}
+
 std::string Known(REFKNOWNFOLDERID id, const std::string& fallbackSuffix = "") {
     std::wstring w = KnownFolder(id);
     if (w.empty()) return {};
@@ -42,15 +56,28 @@ std::string WindowsPaths::CurrentWorkingDir() const {
 }
 
 std::string WindowsPaths::ConfigDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\roaming";
     std::string appdata = Known(FOLDERID_RoamingAppData);
     if (appdata.empty()) return {};
     return appdata + "\\bps";
 }
 
-std::string WindowsPaths::CacheDir() const { return Known(FOLDERID_LocalAppData, "bps\\cache"); }
-std::string WindowsPaths::PluginDir() const { return Known(FOLDERID_LocalAppData, "bps\\plugins"); }
-std::string WindowsPaths::AssetDir() const { return Known(FOLDERID_LocalAppData, "bps\\assets"); }
-std::string WindowsPaths::LogDir() const { return Known(FOLDERID_LocalAppData, "bps\\logs"); }
+std::string WindowsPaths::CacheDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\local\\cache";
+    return Known(FOLDERID_LocalAppData, "bps\\cache");
+}
+std::string WindowsPaths::PluginDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\local\\plugins";
+    return Known(FOLDERID_LocalAppData, "bps\\plugins");
+}
+std::string WindowsPaths::AssetDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\local\\assets";
+    return Known(FOLDERID_LocalAppData, "bps\\assets");
+}
+std::string WindowsPaths::LogDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\local\\logs";
+    return Known(FOLDERID_LocalAppData, "bps\\logs");
+}
 
 std::string WindowsPaths::TempDir() const {
     wchar_t buf[MAX_PATH] = {0};
@@ -63,7 +90,13 @@ std::string WindowsPaths::TempDir() const {
 std::string WindowsPaths::DownloadsDir() const { return Known(FOLDERID_Downloads); }
 std::string WindowsPaths::DocumentsDir() const { return Known(FOLDERID_Documents); }
 std::string WindowsPaths::DesktopDir() const { return Known(FOLDERID_Desktop); }
-std::string WindowsPaths::UserDataDir() const { return Known(FOLDERID_LocalAppData, "bps"); }
-std::string WindowsPaths::AppDataDir() const { return Known(FOLDERID_RoamingAppData, "bps"); }
+std::string WindowsPaths::UserDataDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\local";
+    return Known(FOLDERID_LocalAppData, "bps");
+}
+std::string WindowsPaths::AppDataDir() const {
+    if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\roaming";
+    return Known(FOLDERID_RoamingAppData, "bps");
+}
 
 } // namespace bps::platform

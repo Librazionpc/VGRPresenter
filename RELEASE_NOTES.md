@@ -1,8 +1,17 @@
-# VGRPresenter 0.1.1
+# VGRPresenter — Product update
+
+## New in the upcoming update
+
+- **Build the output setup you need.** Create reusable presets for video recording, audio-only recording, and streaming, then assign them to outputs in Routing.
+- **More control over your recordings.** Choose video formats and quality, or save audio as WAV, M4A, or MP3.
+- **Start fresh when installing.** An optional clean install resets settings and libraries while keeping your recordings.
+- **A clearer workspace.** Routing and settings have been refreshed to make connections and choices easier to follow.
+
+# VGRPresenter 0.1.2
 
 ## What's new
 
-- **Added The Table, Bible and Only Believe Songs** as content you can bring on screen.
+- **Added The Table, Bible and Shows** as content you can bring on screen.
 - **Continuous reading scroll for Scripture and The Table.** Alt+Down / Alt+Up now glides smoothly through a passage line by line, instead of cutting slide by slide — the words move the way a teleprompter does, across every output at once.
 - **A note when a new output goes on the wire, and a warning when it cannot.** An output added during a session gets a notice the first time it actually starts sending; a row that stays dark gets a warning that says why.
 - **Fill on Settings · Outputs is a real, saved setting** (Contain / Cover / Fill), applied from startup instead of silently falling back to a default.
@@ -26,10 +35,11 @@
 - The blackout no longer goes unmentioned on outputs that are not the NDI feed.
 - An NDI output added while live no longer holds its frames until the app is restarted.
 - A stalled output's recovery now resets that output's own sender correctly.
+- UI Fixes
 
 ## Windows downloads
 
-- **VGRPresenter-Setup-0.1.1.exe** (recommended installer).
+- **VGRPresenter-Setup-0.1.2.exe** (recommended installer).
 - **VGRPresenter-win64.zip** (portable version; unzip it and open the app).
 
 Requires Windows 10 or newer.

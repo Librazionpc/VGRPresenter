@@ -38,7 +38,8 @@ Item {
         id: btn
         property bool danger: false
         readonly property bool hovered: hoverArea.hovered
-        readonly property color glyphColor: btn.danger && btn.hovered ? Theme.controlInk : Theme.iconChrome
+        // Close turns solid red with a white glyph under the pointer, like a native caption.
+        readonly property color glyphColor: btn.danger && btn.hovered ? "#ffffff" : Theme.iconChrome
         default property alias glyph: glyphHolder.data
         signal activated()
 
@@ -47,12 +48,12 @@ Item {
 
         Rectangle {
             anchors.fill: parent
-            color: "transparent"
+            color: btn.danger && btn.hovered ? Theme.danger : "transparent"
+            Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             HoverGlow {
                 anchors.fill: parent
-                hovered: btn.hovered
-                glowColor: btn.danger ? Qt.alpha(Theme.danger, 0.2)
-                                      : Qt.alpha(Theme.textPrimary, 0.12)
+                hovered: btn.hovered && !btn.danger
+                glowColor: Qt.alpha(Theme.textPrimary, 0.12)
             }
         }
         Item {

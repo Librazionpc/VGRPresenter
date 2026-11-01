@@ -2,6 +2,7 @@
 
 #include "models/BusListModel.h"
 #include "models/OutputListModel.h"
+#include "models/PresetListModel.h"
 #include "services/EngineWorker.h"
 
 #include "modules/audio/AudioEngine.hpp"
@@ -29,10 +30,6 @@
 
 namespace {
 
-// RecordingService's own output node (its RTMP destination). It is rebuilt
-// whenever the stream target changes, so this service never creates, renames or
-// prunes it — it reads and assigns the node that already exists.
-constexpr const char *kStreamNodeId = "out:stream";
 // The engine's speaker endpoint — AudioMixer::kSpeakersOutputId, spelled here
 // because the routing canvas draws it as the AUDIO sink row. This service does
 // not create it (AudioEngine::EnsureSpeakersOutput owns that: it is made with
@@ -165,8 +162,10 @@ RoutingService::~RoutingService()
 
 QString RoutingService::nodeIdFor(const QString &stableId, const QString &kind)
 {
-    if (IsStreamKind(kind))
-        return QString::fromLatin1(kStreamNodeId);
+    // Every transport is "out:<stable id>", STREAM included: a stream row's target
+    // comes from its preset, so each row owns its own node (the old shared
+    // "out:stream" node is pruned as stale on the next refresh).
+    Q_UNUSED(kind)
     if (stableId.isEmpty())
         return {};
     return QStringLiteral("out:%1").arg(stableId);
@@ -231,12 +230,31 @@ QVector<RoutingService::RowSpec> RoutingService::rowSpecs() const
         spec.row = r;
         spec.kind = outputs->data(index, OutputListModel::KindRole).toString();
         spec.name = outputs->data(index, OutputListModel::NameRole).toString();
+        spec.enabled = outputs->data(index, OutputListModel::EnabledRole).toBool();
         spec.screen = IsScreenKind(spec.kind);
         // WHERE THIS ROW'S AUDIO PLAYS (Settings · Outputs' picker). Snapshotted
         // here because the worker must not read a QAbstractListModel.
         spec.audioDevice = outputs->data(index, OutputListModel::AudioDeviceRole).toString();
         spec.nodeId = nodeIdFor(outputs->data(index, OutputListModel::IdRole).toString(),
                                 spec.kind);
+        // A STREAM row's destination comes from its PRESET (url + "/" + key), read
+        // here from the kernel store because the worker must not read a model.
+        if (IsStreamKind(spec.kind) || spec.kind.compare(QLatin1String("REC"), Qt::CaseInsensitive) == 0)
+            spec.recordBuffer = outputs->frameBufferFor(r);
+        if (IsStreamKind(spec.kind)) {
+            const QVariantMap preset = PresetListModel::lookup(
+                outputs->data(index, OutputListModel::PresetIdRole).toString());
+            if (preset.value(QStringLiteral("kind")).toString() == QLatin1String("streaming")) {
+                const QVariantMap cfg = preset.value(QStringLiteral("config")).toMap();
+                const QString url = cfg.value(QStringLiteral("serverUrl")).toString().trimmed();
+                const QString key = cfg.value(QStringLiteral("streamKey")).toString().trimmed();
+                if (!url.isEmpty() && !key.isEmpty())
+                    spec.networkTarget = url.endsWith(QLatin1Char('/')) ? url + key
+                                                                         : url + QLatin1Char('/') + key;
+                spec.hardwareEncoder = cfg.value(QStringLiteral("encoder")).toString()
+                                       != QLatin1String("Software");
+            }
+        }
         specs.append(spec);
     }
     return specs;
@@ -295,6 +313,9 @@ void RoutingService::rebuildRows()
             entry.insert(QStringLiteral("name"),
                          outputs->data(index, OutputListModel::NameRole).toString());
             entry.insert(QStringLiteral("kind"), kind);
+            // The recording / streaming preset a REC / STREAM row uses ("" = none).
+            entry.insert(QStringLiteral("presetId"),
+                         outputs->data(index, OutputListModel::PresetIdRole).toString());
             entry.insert(QStringLiteral("res"), outputs->data(index, OutputListModel::ResRole).toString());
             entry.insert(QStringLiteral("styleId"),
                          outputs->data(index, OutputListModel::StyleIdRole).toString());
@@ -375,7 +396,7 @@ void RoutingService::rebuildRows()
     system.insert(QStringLiteral("kind"), QStringLiteral("SYSTEM"));
     system.insert(QStringLiteral("res"), QString());
     system.insert(QStringLiteral("styleId"), QString());
-    system.insert(QStringLiteral("enabled"), true);
+    system.insert(QStringLiteral("enabled"), speakersEnabled_);
     system.insert(QStringLiteral("screen"), false);
     system.insert(QStringLiteral("system"), true);
     system.insert(QStringLiteral("acceptsVideo"), false);
@@ -561,8 +582,9 @@ void RoutingService::refresh()
         return;
     }
     const QVector<RowSpec> specs = rowSpecs();   // the model is this thread's
+    const bool fallbackSpeakerEnabled = speakersEnabled_;
 
-    vgr::EngineWorker::instance().runOffThread([this, specs] {
+    vgr::EngineWorker::instance().runOffThread([this, specs, fallbackSpeakerEnabled] {
         using namespace bps::production;
         QHash<QString, QPair<QString, QString>> found;
         auto &graph = ProductionEngine::Instance().Graph();
@@ -581,8 +603,6 @@ void RoutingService::refresh()
             const QString node = QString::fromStdString(id);
             if (!node.startsWith(QLatin1String(kNodePrefix)))
                 continue;
-            if (node == QLatin1String(kStreamNodeId))
-                continue;   // RecordingService's node — never ours to remove
             if (node == QLatin1String(kSpeakersNodeId))
                 continue;   // AudioEngine's node — created with the caps the mixer needs
             if (!wanted.contains(node))
@@ -605,12 +625,9 @@ void RoutingService::refresh()
             if (spec.nodeId.isEmpty())
                 continue;
             const std::string nodeId = spec.nodeId.toStdString();
-            const bool stream = spec.nodeId == QLatin1String(kStreamNodeId);
+            const bool stream = IsStreamKind(spec.kind);
 
-            if (stream) {
-                // Nothing to create: without a stream target there is no node,
-                // and the row reads as unwired until RecordingService makes one.
-            } else if (!graph.HasNode(nodeId)) {
+            if (!graph.HasNode(nodeId)) {
                 if (!graph.AddOutput(nodeId, spec.name.toStdString(), SignalType::Video,
                                      CapsFor(spec.kind))
                          .ok())
@@ -619,6 +636,37 @@ void RoutingService::refresh()
                 auto node = graph.GetNode(nodeId);
                 if (node.ok() && QString::fromStdString(node.value().displayName) != spec.name)
                     (void)graph.RenameNode(nodeId, spec.name.toStdString());
+            }
+            if (const auto node = graph.GetNode(nodeId); node.ok()
+                && node.value().enabled != spec.enabled)
+                (void)graph.SetEnabled(nodeId, spec.enabled);
+
+            // A STREAM row pushes where ITS PRESET says: the row's node carries the
+            // preset's RTMP target and encoder, so several presets side by side are
+            // several destinations. The node itself is kept when the preset changes
+            // (only the target is rewritten), so the row's wires survive an edit.
+            if (stream) {
+                const bool hadTarget = [&] {
+                    const auto before = graph.GetOutputConfig(nodeId);
+                    return before.ok() && before.value().networkTarget == spec.networkTarget.toStdString();
+                }();
+                (void)graph.SetOutputNetworkTarget(nodeId, spec.networkTarget.toStdString());   // no-op when unchanged
+                if (!hadTarget) {
+                    // The server only — the key is the secret half of the target.
+                    const QString server = spec.networkTarget.left(
+                        spec.networkTarget.lastIndexOf(QLatin1Char('/')) > 0
+                            ? spec.networkTarget.lastIndexOf(QLatin1Char('/')) : 0);
+                    qInfo("RoutingService: STREAM '%s' now targets %s", qUtf8Printable(spec.name),
+                          server.isEmpty() ? "(nothing — no preset or no key yet)" : qUtf8Printable(server));
+                }
+                const std::string encoder = spec.hardwareEncoder ? "hardware" : "software";
+                if (auto current = graph.GetOutputConfig(nodeId); current.ok()) {
+                    // Only on a real change: each setter queues a save of the whole graph.
+                    if (current.value().encoder != encoder)
+                        (void)graph.SetOutputEncoder(nodeId, encoder);
+                    if (current.value().group != "broadcast")
+                        (void)graph.SetOutputGroup(nodeId, "broadcast");
+                }
             }
 
             // Which outputs PLAY through the app's own audio stream. A display
@@ -636,10 +684,20 @@ void RoutingService::refresh()
             // is then rendered by that device's own stream, and also summing it
             // into the program is the same sound twice, from two places.
             const std::string wantLocal =
-                (spec.screen && spec.nodeId != QLatin1String(kStreamNodeId)
-                 && spec.audioDevice.isEmpty()) ? "1" : "0";
+                (spec.screen && spec.audioDevice.isEmpty()) ? "1" : "0";
             auto nodeInfo = graph.GetNode(nodeId);
             if (nodeInfo.ok()) {
+                // WHAT A TAKE ON THIS NODE RECORDS: the row's own picture (see hasOwnPass), so the
+                // style, buses and gates wired to this output decide the file's content.
+                if (spec.kind.compare(QLatin1String("REC"), Qt::CaseInsensitive) == 0 || stream) {
+                    const auto bufferMeta = nodeInfo.value().meta.find("recordBuffer");
+                    const std::string want = spec.recordBuffer.toStdString();
+                    if (bufferMeta == nodeInfo.value().meta.end() || bufferMeta->second != want) {
+                        (void)graph.SetMeta(nodeId, "recordBuffer", want);
+                        qInfo("RoutingService: '%s' now records its own picture (%s)", qUtf8Printable(spec.name),
+                              want.empty() ? "none yet" : want.c_str());
+                    }
+                }
                 const auto flag = nodeInfo.value().meta.find("playsLocally");
                 if (flag == nodeInfo.value().meta.end() || flag->second != wantLocal)
                     (void)graph.SetMeta(nodeId, "playsLocally", wantLocal);
@@ -784,11 +842,16 @@ void RoutingService::refresh()
                 feeds.insert(spec.nodeId, from);
         }
 
-        vgr::EngineWorker::onInterfaceThread(this, [this, found, specs, wiredVideo, wiredAudio, feeds] {
+        bool speakerEnabled = fallbackSpeakerEnabled;
+        if (const auto speaker = graph.GetNode(kSpeakersNodeId); speaker.ok())
+            speakerEnabled = speaker.value().enabled;
+
+        vgr::EngineWorker::onInterfaceThread(this, [this, found, specs, wiredVideo, wiredAudio, feeds, speakerEnabled] {
             assignments_ = found;
             videoBuses_ = wiredVideo;
             audioBuses_ = wiredAudio;
             screenFeeds_ = feeds;
+            speakersEnabled_ = speakerEnabled;
             rebuildRows();
             // THE ENGINE → THE PICTURE: what each output's video wire names is
             // now published to the model that builds the live output specs, so
@@ -803,6 +866,41 @@ void RoutingService::refresh()
                       static_cast<int>(specs.size()));
             }
         });
+    });
+}
+
+void RoutingService::setSpeakersEnabled(bool enabled)
+{
+    if (speakersEnabled_ == enabled)
+        return;
+    speakersEnabled_ = enabled;
+    rebuildRows();
+    ++revision_;
+    emit routingChanged();
+
+    vgr::EngineWorker::instance().runOffThread([this, enabled] {
+        auto &graph = bps::production::ProductionEngine::Instance().Graph();
+        if (!graph.HasNode(kSpeakersNodeId)) {
+            reportRefused(QStringLiteral("the speaker output is not ready yet"));
+            vgr::EngineWorker::onInterfaceThread(this, [this, enabled] {
+                speakersEnabled_ = !enabled;
+                rebuildRows();
+                ++revision_;
+                emit routingChanged();
+            });
+            return;
+        }
+        const auto result = graph.SetEnabled(kSpeakersNodeId, enabled);
+        if (!result.ok()) {
+            reportRefused(QStringLiteral("could not change the speaker output state: %1")
+                              .arg(QString::fromStdString(result.error().message)));
+            vgr::EngineWorker::onInterfaceThread(this, [this, enabled] {
+                speakersEnabled_ = !enabled;
+                rebuildRows();
+                ++revision_;
+                emit routingChanged();
+            });
+        }
     });
 }
 
@@ -824,7 +922,8 @@ void RoutingService::bindOutputAudio(const QVector<RowSpec> &specs,
         if (spec.nodeId.isEmpty())
             continue;
         const uint32_t device = AudioDeviceNumber(spec.audioDevice);
-        const bool wanted = device != kNoAudioDevice && !wiredAudio.value(spec.nodeId).isEmpty();
+        const bool wanted = spec.enabled && device != kNoAudioDevice
+                            && !wiredAudio.value(spec.nodeId).isEmpty();
         const std::string node = spec.nodeId.toStdString();
         if (!wanted) {
             engine.StopOutputAudio(node);
@@ -893,8 +992,15 @@ bool RoutingService::assignBus(int outputRow, const QString &kind, int busRow)
         // thrown the previous one away. Unwiring names its bus (see unwireBus) —
         // "clear this side" has no meaning on a sink several buses feed.
         if (speakers) {
-            if (audio && !busNode.isEmpty())
-                (void)graph.Connect(busNode.toStdString(), kSpeakersNodeId, SignalType::Audio);
+            if (audio && !busNode.isEmpty()) {
+                // A refusal here used to vanish (the result was dropped), which read as "the
+                // speakers will not connect" with nothing to say why.
+                const auto joined = graph.Connect(busNode.toStdString(), kSpeakersNodeId,
+                                                  SignalType::Audio);
+                if (!joined.ok())
+                    reportRefused(QStringLiteral("cannot wire %1 into the speakers: %2")
+                                      .arg(busNode, QString::fromStdString(joined.error().message)));
+            }
             vgr::EngineWorker::onInterfaceThread(this, [this] {
                 ++revision_;
                 emit routingChanged();

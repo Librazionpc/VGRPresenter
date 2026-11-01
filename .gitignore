@@ -13,6 +13,7 @@ agent-notes/
 .claude/
 .vscode/
 *.log
+.cloud-attachments/
 AGENTS.md
 KNOWN_ISSUES.md
 RELEASING.md
@@ -53,3 +54,5 @@ src/download*
 # references the old pre-flatten path. Harmless; ignored rather than fought.
 /BelieversPresentationSoftware/
 *.log
+# A dev build's own profile (settings, templates, styles) — seeded from installer/seed-data.
+dev-profile/

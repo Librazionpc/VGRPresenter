@@ -1,5 +1,7 @@
 #include "services/RecordingService.h"
 
+#include "models/OutputListModel.h"
+#include "models/PresetListModel.h"
 #include "services/EngineBridge.h"
 #include "services/EngineWorker.h"
 #include "services/EventBus.h"
@@ -7,6 +9,7 @@
 
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/production/ProductionGraph.hpp"
+#include "modules/recording/MediaFoundationEncode.hpp"
 #include "modules/recording/RecordingEngine.hpp"
 #include "modules/recording/RecordingTypes.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -17,20 +20,14 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPointer>
+#include <QThreadPool>
 #include <QTimer>
 
 namespace rr = bps::recording;
 namespace bpr = bps::production;
 
 namespace {
-
-// The stream Output node this service owns (removed and re-added on each
-// apply/clear — one well-known id, like the kernel's own boot nodes).
-constexpr const char *kStreamNodeId = "out:stream";
-constexpr const char *kStreamNodeName = "Live Stream";
-
-// The session.recordingConfig blob key (declared in AppSettings).
-constexpr const char *kConfigKey = "session.recordingConfig";
 
 void toast(const QString &message, const QString &level = QStringLiteral("error"))
 {
@@ -51,12 +48,42 @@ QVariantMap storageToVariant(const rr::StorageInfo &info)
     };
 }
 
+// WHERE A TAKE LANDS when its preset names no folder: the app's own "recording" folder (a dev
+// build's profile, or the installed profile), in a "video" subfolder for a recording with
+// pictures and an "audio" one for an audio-only preset.
+std::string defaultRecordingDir(bool audioOnly = false)
+{
+    return bps::platform::PlatformAccessor::Get().Paths().UserDataDir() + "/recording/" +
+           (audioOnly ? "audio" : "video");
+}
+
 // Settings-map → engine profile. The screen's free-text fields (resolution,
 // frame rate) are parsed defensively — a malformed value keeps the default.
 rr::RecordingProfile profileFromSettings(const QVariantMap &settings)
 {
     rr::RecordingProfile p;
     p.name = QStringLiteral("service").toStdString();
+
+    // AN AUDIO PRESET carries a "format" instead of a container + picture settings: sound
+    // only, to a WAV, M4A (AAC) or MP3 file.
+    const QString audioFormat = settings.value(QStringLiteral("format")).toString().toUpper();
+    if (!audioFormat.isEmpty()) {
+        p.container = audioFormat == QLatin1String("WAV")   ? rr::ContainerKind::WAV
+                      : audioFormat == QLatin1String("MP3") ? rr::ContainerKind::MP3
+                                                            : rr::ContainerKind::M4A;
+        p.videoCodec = rr::VideoCodec::None;
+        p.audioCodec = p.container == rr::ContainerKind::WAV ? rr::AudioCodec::PCM
+                       : p.container == rr::ContainerKind::MP3 ? rr::AudioCodec::MP3
+                                                               : rr::AudioCodec::AAC;
+        const int bitrate = settings.value(QStringLiteral("audioBitrate")).toInt();
+        p.audioBitrateKbps = bitrate > 0 ? bitrate : 192;
+        p.audioChannels = 2;
+        p.encoderPreference = rr::EncoderKind::Software;   // no picture, so no picture encoder to pick
+        p.priority = rr::RecordingPriority::Critical;
+        const QString folder = settings.value(QStringLiteral("outputFolder")).toString().trimmed();
+        p.directory = folder.isEmpty() ? defaultRecordingDir(true) : folder.toStdString();
+        return p;
+    }
 
     const QString container = settings.value(QStringLiteral("container")).toString().toUpper();
     p.container = container == QLatin1String("MP4") ? rr::ContainerKind::MP4
@@ -83,34 +110,33 @@ rr::RecordingProfile profileFromSettings(const QVariantMap &settings)
 
     const int vKbps = settings.value(QStringLiteral("videoBitrate")).toInt();
     p.videoBitrateKbps = vKbps > 0 ? vKbps : 12000;
+    // The preset's audio bitrate is real: the AAC encoder gets it (rounded to 96/128/160/192).
+    const int aKbps = settings.value(QStringLiteral("audioBitrate")).toInt();
+    p.audioBitrateKbps = aKbps > 0 ? aKbps : 192;
     p.audioChannels = 2;
 
     const QString enc = settings.value(QStringLiteral("encoder")).toString();
+    // What the preset names is what the take gets: "Software" is the software encoder (not
+    // "whatever is best"), and only a preset with no encoder at all means Auto.
     p.encoderPreference = enc == QLatin1String("NVENC")   ? rr::EncoderKind::NVENC
                           : enc == QLatin1String("AMF")   ? rr::EncoderKind::AMF
-                          : enc == QLatin1String("QuickSync")
-                                                          ? rr::EncoderKind::QuickSync
-                                                          : rr::EncoderKind::Auto;
+                          : enc == QLatin1String("QuickSync") ? rr::EncoderKind::QuickSync
+                          : enc == QLatin1String("Software")  ? rr::EncoderKind::Software
+                                                              : rr::EncoderKind::Auto;
 
-    // The screens-to-record toggles: the program mix is the one signal that
-    // exists today (preview/audience/lowerThird need scene-per-output taps,
-    // which the display engine's per-output passes will back later). Recorded
-    // honestly as profile metadata so the choice is not silently lost.
-    const QVariantMap screens = settings.value(QStringLiteral("screensIn")).toMap();
     p.multitrack = false;
-    p.quality = screens.value(QStringLiteral("program"), true).toBool()
-                    ? rr::QualityPreset::Broadcast
-                    : rr::QualityPreset::High;
+    p.quality = rr::QualityPreset::Broadcast;
 
     p.segmentDurationMs = 0;       // single file per session (MKV recommended)
     p.priority = rr::RecordingPriority::Critical;   // protect the service
 
-    // Output directory: <user data>/recordings (created lazily by the engine
-    // — it ensures the directory exists on OpenSegment; see docs/specs/28 §18).
-    auto &paths = bps::platform::PlatformAccessor::Get().Paths();
-    QDir().mkpath(QString::fromStdString(paths.UserDataDir())
-                  + QStringLiteral("/recordings"));
-    p.directory = paths.UserDataDir() + "/recordings";
+    // Output directory: the preset's own folder, else <app data>/recording. Created
+    // by the take's worker (beginRecording), where a folder that cannot be made is
+    // refused with its own toast instead of being ignored here.
+    const QString folder = settings.value(QStringLiteral("outputFolder")).toString().trimmed();
+    p.directory = folder.isEmpty()
+        ? defaultRecordingDir()
+        : folder.toStdString();
 
     return p;
 }
@@ -124,11 +150,6 @@ RecordingService::RecordingService(QObject *parent)
 {
     s_instance = this;
 
-    // The settings store opens when the engine boots (SettingsService::load);
-    // until then the blob read is deferred, not skipped — whenReady runs
-    // loadConfig() the moment the store is open (immediately if it already is),
-    // and a screen opened pre-boot shows defaults until then.
-    SettingsService::instance().whenReady([this] { loadConfig(); });
     connect(&SettingsService::instance(), &SettingsService::changed,
             this, [this] {
                 // Every settings change may move where recordings land, so the
@@ -137,6 +158,63 @@ RecordingService::RecordingService(QObject *parent)
                 refreshStorage();
             });
     refreshStorage();
+    // The engine registers its encoders / containers while it boots, which is after
+    // this singleton exists: ask now, and again when boot completes.
+    connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this,
+            [this] { refreshCapabilities(); });
+    refreshCapabilities();
+}
+
+// What the engine can really write, from its registered providers. This is a fact about
+// the BUILD (only MP4 + the software encoder exist today), not a probe of the machine's
+// GPU, so a preset can be kept to choices that will not be refused at record time.
+void RecordingService::refreshCapabilities()
+{
+    // ITS OWN THREAD, not the engine worker: finding the hardware encoders wakes the GPU's
+    // encoder (about 19 s measured on a hybrid laptop), and the worker is the one queue every
+    // engine write waits behind. The result comes back by a queued call, dropped if the
+    // service is gone.
+    QPointer<RecordingService> guard(this);
+    QThreadPool::globalInstance()->start([this, guard] {
+        auto &rec = rr::RecordingEngine::Instance();
+        // The hardware encoders THIS machine has (NVENC, AMF, QuickSync) join the engine's list.
+        (void)rr::RegisterHardwareEncoders(rec);
+        QStringList encoders;
+        for (const rr::EncoderKind kind : rec.DetectEncoders()) {
+            switch (kind) {
+            case rr::EncoderKind::NVENC: encoders << QStringLiteral("NVENC"); break;
+            case rr::EncoderKind::AMF: encoders << QStringLiteral("AMF"); break;
+            case rr::EncoderKind::QuickSync: encoders << QStringLiteral("QuickSync"); break;
+            case rr::EncoderKind::Software: encoders << QStringLiteral("Software"); break;
+            default: break;
+            }
+        }
+        QStringList containers;
+        for (const std::string &name : rec.ContainerNames())
+            containers << QString::fromStdString(name).toUpper();
+        const QString folder = QDir::toNativeSeparators(
+            QDir::cleanPath(QString::fromStdString(defaultRecordingDir())));
+        const QString audioFolder = QDir::toNativeSeparators(
+            QDir::cleanPath(QString::fromStdString(defaultRecordingDir(true))));
+        // Both exist from the start, so the operator can find where takes will land.
+        QDir().mkpath(folder);
+        QDir().mkpath(audioFolder);
+        if (!guard)
+            return;
+        vgr::EngineWorker::onInterfaceThread(guard.data(), [this, encoders, containers, folder, audioFolder] {
+            if (encoders == availableEncoders_ && containers == availableContainers_
+                && folder == defaultFolder_ && audioFolder == defaultAudioFolder_)
+                return;
+            availableEncoders_ = encoders;
+            availableContainers_ = containers;
+            defaultFolder_ = folder;
+            defaultAudioFolder_ = audioFolder;
+            qInfo("RecordingService: this machine records with encoders [%s], containers [%s]",
+                  qUtf8Printable(encoders.join(QStringLiteral(", "))),
+                  qUtf8Printable(containers.join(QStringLiteral(", "))));
+            emit capabilitiesChanged();
+        });
+    });
 }
 
 RecordingService &RecordingService::instance()
@@ -159,61 +237,6 @@ RecordingService::~RecordingService()
 }
 
 // ---------------------------------------------------------------------------
-// Config persistence (session.recordingConfig)
-// ---------------------------------------------------------------------------
-
-void RecordingService::setConfig(const QVariantMap &cfg)
-{
-    if (cfg == config_)
-        return;
-    config_ = cfg;
-    saveConfig();
-    emit configChanged();
-}
-
-void RecordingService::loadConfig()
-{
-    SettingsService *store = SettingsService::instancePtr();
-    if (!store || !store->ready())
-        return;   // pre-boot: defaults stand; whenReady() re-reads once the store opens
-    const QVariant stored = store->value(QLatin1String(kConfigKey));
-    if (stored.isValid() && !stored.isNull()) {
-        // Deep-merge: the screen's defaults stand for keys a previous run
-        // never wrote (schema additions between versions).
-        const QVariantMap prev = stored.toMap();
-        for (auto it = prev.begin(); it != prev.end(); ++it)
-            config_.insert(it.key(), it.value());
-    }
-}
-
-void RecordingService::saveConfig()
-{
-    SettingsService *store = SettingsService::instancePtr();
-    if (!store || !store->ready())
-        return;   // pre-boot writes are dropped — nothing was loaded to change
-    (void)store->setValue(QLatin1String(kConfigKey), config_);
-}
-
-// ---------------------------------------------------------------------------
-// Graph seam — the master program bus
-// ---------------------------------------------------------------------------
-
-// The graph is the engine's, so this read belongs on the worker (startRecording
-// and applyStreamTarget both ask for it there — see their own workers). The
-// convention: bus plane nodes are "bus:<n>#a"/"#v" (BusListModel's), and the
-// audio plane of the FIRST bus is the program mix.
-QString RecordingService::masterBusNodeId() const
-{
-    bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
-    for (const auto &id : g.NodeIds()) {
-        const std::string s = id;
-        if (s.starts_with("bus:") && s.ends_with("#a"))
-            return QString::fromStdString(s);
-    }
-    return {};
-}
-
-// ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
@@ -223,9 +246,40 @@ QString RecordingService::masterBusNodeId() const
 // the file), and the QML-visible flags/status are published here when the
 // worker's answer arrives. True from these calls means ACCEPTED — the outcome
 // (a session on this screen, or the refusal toast) follows a moment later.
-bool RecordingService::startRecording(const QVariantMap &settings)
+// "Record" without naming an output (File > Record…, Ctrl+R, the automation action):
+// the FIRST Recording output on the Routing canvas, recording with ITS preset. There
+// is no program-wide recording any more — a take always belongs to one output and one
+// preset — so with no Recording output (or one with no preset yet) this says what to
+// set up instead of recording something nobody configured.
+bool RecordingService::startPrimaryRecording()
 {
-    return beginRecording(settings, QString());
+    auto *outputs = OutputListModel::instance();
+    QString unpicked;   // the first Recording output that still has no preset
+    for (int r = 0; outputs && r < outputs->rowCount(); ++r) {
+        const QModelIndex index = outputs->index(r);
+        if (outputs->data(index, OutputListModel::KindRole).toString().toUpper()
+            != QLatin1String("REC"))
+            continue;
+        const QString name = outputs->data(index, OutputListModel::NameRole).toString();
+        const QVariantMap preset = PresetListModel::lookup(
+            outputs->data(index, OutputListModel::PresetIdRole).toString());
+        const QString presetKind = preset.value(QStringLiteral("kind")).toString();
+        if (presetKind != QLatin1String("recording") && presetKind != QLatin1String("audio")) {
+            if (unpicked.isEmpty())
+                unpicked = name;
+            continue;
+        }
+        return startRecordingOn(
+            QStringLiteral("out:%1").arg(outputs->data(index, OutputListModel::IdRole).toString()),
+            preset.value(QStringLiteral("config")).toMap());
+    }
+    toast(unpicked.isEmpty()
+              ? QStringLiteral("There is no Recording output yet — add one in Settings · Routing "
+                               "(Outputs +), picking a recording preset made in Settings · Recording.")
+              : QStringLiteral("The Recording output “%1” has no preset — pick one in "
+                               "Settings · Routing (Configure output).").arg(unpicked),
+          QStringLiteral("warning"));
+    return false;
 }
 
 bool RecordingService::startRecordingOn(const QString &nodeId, const QVariantMap &settings)
@@ -266,18 +320,23 @@ bool RecordingService::beginRecording(const QVariantMap &settings, const QString
             return;
         }
 
-        // WHICH node this take listens to.
-        //
-        // Named (the Routing canvas's Recording card): the node the canvas wired.
-        // RecordingEngine attaches its audio tap to that node, and the mixer sums
-        // only the buses with an EDGE into it — so the take records exactly what
-        // the canvas shows wired to it. Refused when nothing is wired, because a
-        // take of silence is worse than a refusal: it looks like a recording.
-        //
-        // Unnamed (the Recording page / an automation action): the program's
-        // FIRST audio bus plane, which is what the page has always recorded.
+        // WHERE the take goes: its folder has to exist before the engine opens a
+        // segment in it. A preset's own folder that cannot be made is refused here,
+        // not silently swapped for another one.
+        const QString directory = QString::fromStdString(profile.directory);
+        if (!QDir().mkpath(directory)) {
+            refuse(QStringLiteral("the folder %1 cannot be created").arg(directory));
+            return;
+        }
+
+        // WHICH node this take listens to: the node the canvas wired (the Routing
+        // canvas's Recording card). RecordingEngine attaches its audio tap to that
+        // node, and the mixer sums only the buses with an EDGE into it — so the take
+        // records exactly what the canvas shows wired to it. Refused when nothing is
+        // wired, because a take of silence is worse than a refusal: it looks like a
+        // recording.
         QString bus;
-        if (!nodeId.isEmpty()) {
+        {
             auto &graph = bpr::ProductionEngine::Instance().Graph();
             if (!graph.HasNode(nodeId.toStdString())) {
                 vgr::EngineWorker::onInterfaceThread(this, [] {
@@ -301,20 +360,6 @@ bool RecordingService::beginRecording(const QVariantMap &settings, const QString
                 return;
             }
             bus = nodeId;
-        } else {
-            for (const auto &node : bpr::ProductionEngine::Instance().Graph().NodeIds()) {
-                const std::string s = node;
-                if (s.starts_with("bus:") && s.ends_with("#a")) {
-                    bus = QString::fromStdString(s);
-                    break;
-                }
-            }
-            if (bus.isEmpty()) {
-                vgr::EngineWorker::onInterfaceThread(this, [] {
-                    toast(QStringLiteral("No audio bus to record — create a bus on the Audio & Video board first."));
-                });
-                return;
-            }
         }
 
         auto started = rec.StartRecording(pid.toStdString(), bus.toStdString(),
@@ -420,79 +465,13 @@ void RecordingService::addMarker(const QString &label)
     });
 }
 
-// ---------------------------------------------------------------------------
-// Streaming — the RTMP destination node
-// ---------------------------------------------------------------------------
-
-bool RecordingService::applyStreamTarget(const QString &serverUrl, const QString &streamKey)
+QString RecordingService::pickFolder(const QString &title)
 {
-    // The two things a user gets an inline answer for — a URL that is not RTMP
-    // and an empty key — are pure string checks: still answered HERE, so the
-    // dialog can refuse them without a round trip. Everything after them needs
-    // the graph, and that is engine work: refused on the worker with its toast,
-    // exactly as the engine's own refusal was.
-    const QString url = serverUrl.trimmed();
-    const QString key = streamKey.trimmed();
-    if (!url.startsWith(QLatin1String("rtmp://")) && !url.startsWith(QLatin1String("rtmps://"))) {
-        toast(QStringLiteral("The server URL must start with rtmp:// (or rtmps://)."));
-        return false;
-    }
-    if (key.isEmpty()) {
-        toast(QStringLiteral("Paste your stream key first — the platform needs it to accept the feed."));
-        return false;
-    }
-
-    vgr::EngineWorker::instance().runOffThread([this, url, key] {
-        bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
-        const QString audioBus = masterBusNodeId();
-        if (audioBus.isEmpty()) {
-            vgr::EngineWorker::onInterfaceThread(this, [] {
-                toast(QStringLiteral("No audio bus to stream — create a bus on the Audio & Video board first."));
-            });
-            return;
-        }
-        const QString videoBus = QString(audioBus).replace(QStringLiteral("#a"), QStringLiteral("#v"));
-
-        bpr::OutputConfig cfg;
-        cfg.videoBusId = videoBus.toStdString();
-        cfg.audioBusId = audioBus.toStdString();
-        cfg.networkTarget = (url.endsWith(QLatin1Char('/')) ? url + key
-                                                            : url + QLatin1Char('/') + key)
-                                .toStdString();
-        cfg.group = "broadcast";
-        cfg.encoder = "software";
-
-        // Re-adding refreshes the target; removal keeps the session count sane.
-        if (g.HasNode(kStreamNodeId))
-            (void)g.RemoveNode(kStreamNodeId);
-        auto added = g.AddOutput(kStreamNodeId, kStreamNodeName, bpr::SignalType::Video, cfg);
-        vgr::EngineWorker::onInterfaceThread(this, [this, added, url] {
-            if (!added.ok()) {
-                toast(QStringLiteral("Stream refused: %1")
-                          .arg(QString::fromStdString(added.error().message)));
-                return;
-            }
-            streaming_ = true;
-            refreshStatus();
-            emit recordingChanged();
-            toast(QStringLiteral("Stream destination set — %1").arg(url), QStringLiteral("success"));
-        });
-    });
-    return true;
-}
-
-void RecordingService::clearStreamTarget()
-{
-    vgr::EngineWorker::instance().runOffThread([this] {
-        bps::production::ProductionGraph &g = bpr::ProductionEngine::Instance().Graph();
-        if (g.HasNode(kStreamNodeId))
-            (void)g.RemoveNode(kStreamNodeId);
-        vgr::EngineWorker::onInterfaceThread(this, [this] {
-            streaming_ = false;
-            refreshStatus();
-            emit recordingChanged();
-        });
-    });
+    auto picked = bps::platform::PlatformAccessor::Get().Dialogs().SelectFolderDialog(
+        title.toStdString());
+    if (!picked.ok() || !picked.value())
+        return {};
+    return QString::fromStdString(*picked.value());
 }
 
 // ---------------------------------------------------------------------------
@@ -563,8 +542,19 @@ void RecordingService::refreshStatus()
             }
         }
 
-        // Stream state from the graph (the node's existence IS the state).
-        const bool streaming = bpr::ProductionEngine::Instance().Graph().HasNode(kStreamNodeId);
+        // Stream state from the graph: some output node holds a destination (a STREAM
+        // row whose preset has a server + key — RoutingService writes it).
+        bool streaming = false;
+        {
+            auto &graph = bpr::ProductionEngine::Instance().Graph();
+            for (const std::string &outId : graph.OutputIds()) {
+                const auto cfg = graph.GetOutputConfig(outId);
+                if (cfg.ok() && !cfg.value().networkTarget.empty()) {
+                    streaming = true;
+                    break;
+                }
+            }
+        }
         if (streaming)
             next.insert(QStringLiteral("streaming"), true);
 

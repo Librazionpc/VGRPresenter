@@ -76,6 +76,10 @@ struct StoredOutput {
     // out of that monitor instead of the booth speakers. Settings · Outputs picks
     // it; RoutingService opens and closes the stream from the wires.
     std::string audioDevice;
+    // A REC / STREAM row's preset (Settings · Recording): the stable id of the
+    // recording or streaming PRESET this output records / streams with. Empty =
+    // none picked yet (the row exists but has nothing to record with).
+    std::string presetId;
     // On-air-only transport: this output carries ONLY its own feed (NDI etc.)
     // — no physical-screen window, no slot in the screen pipeline. The QML
     // model's transport mutual-exclusion switch (OutputListModel's

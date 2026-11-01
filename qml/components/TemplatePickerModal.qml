@@ -175,18 +175,6 @@ Item {
         onDismissed: root.cancelled()
     }
 
-    MenuCatcher { menu: categoryMenu }
-    DropdownPanel {
-        id: categoryMenu
-        visible: false
-        z: 25
-        maxHeight: 280
-        onItemActivated: (label) => {
-            categoryMenu.visible = false
-            const chosen = root.categoryOptions.find((c) => c.name === label)
-            if (chosen) root.categoryFilter = chosen.id
-        }
-    }
 
     // A soft drop shadow behind the card - stacked, growing, fading rectangles (this app's own stand-in for a real blur effect,
     // the same trick its other floating panels already use), so the card visibly lifts off the dimmed backdrop instead of just
@@ -259,31 +247,22 @@ Item {
                         text: qsTr("Choose template")
                         color: Theme.textPrimary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 21
+                        font.pixelSize: Theme.textXl
                         font.weight: Font.DemiBold
                     }
 
-                    Rectangle {
+                    IconGlyph {
                         id: closeBtn
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        width: 28
-                        height: 28
-                        radius: 7
-                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✕"
-                            color: Theme.textSecondary
-                            font.pixelSize: 14
-                        }
+                        name: "close"
+                        color: Theme.textMuted
+                        implicitWidth: 16
+                        implicitHeight: 16
 
                         MouseArea {
-                            id: closeArea
                             anchors.fill: parent
-                            hoverEnabled: true
+                            anchors.margins: -8
                             cursorShape: Qt.PointingHandCursor
                             onClicked: root.cancelled()
                         }
@@ -295,19 +274,20 @@ Item {
 
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
-                        height: 20
+                        height: 22
                         width: catLabel.implicitWidth + 16
-                        radius: 4
-                        color: "#2a1c24"
+                        radius: Theme.radiusSm
+                        color: Qt.alpha(Theme.accent, 0.16)
 
                         Text {
                             id: catLabel
                             anchors.centerIn: parent
                             text: root.contentTypeLabel.toUpperCase() + " · " + root.templates.length
-                            color: Theme.accent
+                            color: Theme.accentLight
                             font.family: Theme.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.Bold
+                            font.letterSpacing: 0.5
                         }
                     }
                     Text {
@@ -333,10 +313,9 @@ Item {
 
                     Text {
                         text: qsTr("Preview")
-                        color: Theme.textMuted
+                        color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.Bold
+                        font.pixelSize: Theme.textXs
                     }
 
                     Rectangle {
@@ -369,7 +348,7 @@ Item {
                             text: root.previewTemplate.name
                             color: root.previewTemplate.color || "#9b8ff5"
                             font.family: Theme.fontFamily
-                            font.pixelSize: 21
+                            font.pixelSize: Theme.textXl
                             font.weight: Font.DemiBold
                         }
                     }
@@ -399,229 +378,193 @@ Item {
                     spacing: 8
 
                     // Category, above Templates: which one is picked decides what Templates below even has to show.
-                    Text {
+                    // The shared select box (the same field and list as every other dropdown in the app); only for a
+                    // consumer whose templates carry more than one category. Defaults to "All categories".
+                    SelectField {
                         visible: root.hasCategoryFilter
-                        text: qsTr("Category")
-                        color: Theme.textMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.Bold
-                    }
-
-                    // The category filter - only for a consumer whose templates carry more than one category. Defaults to "All
-                    // categories" (nothing filtered out); picking one narrows the list to it. Click opens the dropdown.
-                    Rectangle {
-                        id: categoryBtn
-                        visible: root.hasCategoryFilter
-                        height: 32
                         width: parent.width
-                        radius: 8
-                        color: Theme.inset
-                        border.color: Theme.toggleOffTrack
-                        border.width: 1
-
-                        Text {
-                            id: categoryLabel
-                            anchors.left: parent.left
-                            anchors.leftMargin: 12
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: root.categoryFilterName
-                            color: Theme.navLabelMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: 14
-                        }
-                        Text {
-                            anchors.right: parent.right
-                            anchors.rightMargin: 12
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "▾"
-                            color: Theme.textMuted
-                            font.pixelSize: 10
-                        }
-
-                        MouseArea {
-                            id: categoryArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                categoryMenu.model = root.categoryOptions.map((c) => ({ label: c.name, trailing: c.id === root.categoryFilter ? "✓" : "" }))
-                                categoryMenu.openAt(categoryBtn, 0, categoryBtn.height + 4, root)
-                            }
-                        }
+                        label: qsTr("Category")
+                        value: root.categoryFilterName
+                        options: root.categoryOptions.map((c) => ({ label: c.name, value: c.id }))
+                        onValuePicked: (v) => root.categoryFilter = v
                     }
 
                     Text {
                         text: qsTr("Templates")
-                        color: Theme.textMuted
+                        color: Theme.textSecondary
                         font.family: Theme.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.Bold
+                        font.pixelSize: Theme.textXs
                     }
 
                     Rectangle {
                         width: parent.width
-                        height: 32
-                        radius: 8
+                        height: 36
+                        radius: Theme.radiusMd
                         color: Theme.inset
-                        border.color: Theme.toggleOffTrack
+                        border.color: searchInput.activeFocus ? Theme.accent : Theme.border
                         border.width: 1
+                        Behavior on border.color { ColorAnimation { duration: 100 } }
 
-                        Row {
-                            anchors.left: parent.left
-                            anchors.leftMargin: 12
-                            anchors.right: parent.right
-                            anchors.rightMargin: 12
+                        IconGlyph {
+                            x: 12
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 8
+                            name: "search"
+                            color: Theme.textMuted
+                            width: 13; height: 13
+                        }
 
-                            IconGlyph { anchors.verticalCenter: parent.verticalCenter; name: "search"; color: Theme.textMuted; width: 12; height: 12 }
+                        TextInput {
+                            id: searchInput
+                            x: 34
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - 34 - 12
+                            color: Theme.textPrimary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.textSm
+                            selectByMouse: true
+                            clip: true
+                            onTextChanged: root.searchQuery = text
 
-                            TextInput {
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: parent.width - 24
-                                color: Theme.navLabelMuted
+                            Text {
+                                visible: parent.text.length === 0
+                                text: qsTr("Search templates")
+                                color: Theme.textMuted
                                 font.family: Theme.fontFamily
-                                font.pixelSize: 14
-                                selectByMouse: true
-                                onTextChanged: root.searchQuery = text
-
-                                Text {
-                                    visible: parent.text.length === 0
-                                    text: qsTr("Search templates")
-                                    color: Theme.textMuted
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: 14
-                                }
+                                font.pixelSize: Theme.textSm
                             }
                         }
                     }
 
-                    Text {
+                    // Nothing to show yet: a quiet empty state, the same inset surface as the fields.
+                    Rectangle {
                         visible: !root.showResults
                         width: parent.width
-                        text: root.hasCategoryFilter
-                              ? qsTr("Type to search, or pick a category, to see templates here.")
-                              : qsTr("Type to search for a template.")
-                        color: Theme.textMuted
-                        wrapMode: Text.Wrap
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 14
-                    }
-
-                    Row {
-                        visible: root.showResults
-                        width: parent.width
-                        height: Math.min(7, root.filteredTemplates.length) * 58
-                        spacing: 6
-
-                    Flickable {
-                        id: listFlick
-                        width: parent.width - listScrollBar.width - 6
-                        height: parent.height
-                        contentWidth: width
-                        contentHeight: listCol.height
-                        clip: true
-                        boundsBehavior: Flickable.StopAtBounds
+                        height: 96
+                        radius: Theme.radiusMd
+                        color: Theme.inset
+                        border.width: 1
+                        border.color: Theme.borderSubtle
 
                         Column {
-                            id: listCol
-                            width: parent.width
-                            spacing: 6
-
-                            Repeater {
-                                model: root.filteredTemplates
-
-                                delegate: Rectangle {
-                                    id: tplRow
-                                    required property var modelData
-                                    readonly property bool selected: root.selectedKey === tplRow.modelData.key
-
-                                    width: listCol.width
-                                    height: 52
-                                    radius: 8
-                                    color: tplRow.selected ? "#1a2240" : (rowArea.containsMouse ? Theme.card : Theme.surface)
-                                    border.width: tplRow.selected ? 1.5 : 1
-                                    border.color: tplRow.selected ? Theme.accent : Theme.borderSubtle
-                                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                                    // A plain generic mark, not a redundant tiny render of the design - the actual preview is the
-                                    // big pane on the left; a 36px render of it here read as an unexplained blob of colour, not a
-                                    // thumbnail anyone could read.
-                                    Rectangle {
-                                        x: 10
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: 36
-                                        height: 36
-                                        radius: 5
-                                        color: Theme.windowBg
-                                        border.color: Theme.borderSubtle
-                                        border.width: 1
-
-                                        // layoutTemplate is a hand-sized (non-24-grid) glyph — its
-                                        // 9x9 native box has more empty margin than the grid24
-                                        // icons IconGlyph can scale with `fit`. Explicitly centering
-                                        // it in an Item exactly its own size (rather than leaving
-                                        // it inside a bigger 16x16 IconGlyph box) removes that
-                                        // extra margin so it reads centered instead of adrift in
-                                        // the corner of its own bounding box.
-                                        Item {
-                                            anchors.centerIn: parent
-                                            width: 18; height: 18
-                                            IconGlyph {
-                                                anchors.centerIn: parent
-                                                name: "layoutTemplate"
-                                                color: Theme.textSecondary
-                                                width: 18; height: 18
-                                            }
-                                        }
-                                    }
-
-                                    Text {
-                                        x: 58
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: parent.width - 58 - 36
-                                        text: tplRow.modelData.name
-                                        color: Theme.textPrimary
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: 15
-                                        font.weight: Font.Medium
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        anchors.right: parent.right
-                                        anchors.rightMargin: 12
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: root.isFavorite(tplRow.modelData.key) ? "★" : "☆"
-                                        color: root.isFavorite(tplRow.modelData.key) ? Theme.warning : Theme.textMuted
-                                        font.pixelSize: 15
-
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            anchors.margins: -6
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.toggleFavorite(tplRow.modelData.key)
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        id: rowArea
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.selectedKey = tplRow.modelData.key
-                                    }
-                                }
+                            anchors.centerIn: parent
+                            width: parent.width - 40
+                            spacing: 8
+                            IconGlyph {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                name: "search"
+                                color: Theme.textMuted
+                                width: 16; height: 16
+                            }
+                            Text {
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                text: root.hasCategoryFilter
+                                      ? qsTr("Search, or pick a category, to see templates here.")
+                                      : qsTr("Type to search for a template.")
+                                color: Theme.textMuted
+                                wrapMode: Text.Wrap
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textSm
                             }
                         }
                     }
 
-                    AppScrollBar {
-                        id: listScrollBar
-                        flickable: listFlick
-                        height: listFlick.height
-                    }
+                    // The list: rows run the full width of the field; the scrollbar floats in the right gutter and
+                    // only takes room when the list actually overflows.
+                    Item {
+                        visible: root.showResults
+                        width: parent.width
+                        height: Math.min(7, root.filteredTemplates.length) * 42 - 4
+
+                        Flickable {
+                            id: listFlick
+                            anchors.fill: parent
+                            contentWidth: width
+                            contentHeight: listCol.height
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+
+                            Column {
+                                id: listCol
+                                width: parent.width - (listScrollBar.visible ? 14 : 0)
+                                spacing: 4
+
+                                Repeater {
+                                    model: root.filteredTemplates
+
+                                    delegate: Rectangle {
+                                        id: tplRow
+                                        required property var modelData
+                                        readonly property bool selected: root.selectedKey === tplRow.modelData.key
+
+                                        width: listCol.width
+                                        height: 38
+                                        radius: Theme.radiusMd
+                                        color: tplRow.selected ? Qt.alpha(Theme.accent, 0.12)
+                                                               : (rowArea.containsMouse ? Theme.card : Theme.inset)
+                                        border.width: 1
+                                        border.color: tplRow.selected ? Theme.accent : Theme.borderSubtle
+                                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+                                        Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
+
+                                        // The Templates tab's own mark (the same icon the Media tab's Templates button wears),
+                                        // on the row's optical centre; the real preview is the pane on the left.
+                                        IconGlyph {
+                                            x: 12
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            anchors.verticalCenterOffset: 1
+                                            name: "template"
+                                            color: tplRow.selected ? Theme.accentLight : Theme.textMuted
+                                            width: 16; height: 16
+                                            fit: true
+                                        }
+
+                                        Text {
+                                            x: 38
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: parent.width - 38 - 38
+                                            text: tplRow.modelData.name
+                                            color: Theme.textPrimary
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.textSm
+                                            font.weight: tplRow.selected ? Font.DemiBold : Font.Medium
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: 12
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: root.isFavorite(tplRow.modelData.key) ? "★" : "☆"
+                                            color: root.isFavorite(tplRow.modelData.key) ? Theme.warning : Theme.textMuted
+                                            font.pixelSize: 14
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                anchors.margins: -8
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.toggleFavorite(tplRow.modelData.key)
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: rowArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.selectedKey = tplRow.modelData.key
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        AppScrollBar {
+                            id: listScrollBar
+                            flickable: listFlick
+                            anchors.right: parent.right
+                            height: parent.height
+                        }
                     }
                 }
             }
@@ -630,58 +573,17 @@ Item {
 
             Row {
                 anchors.right: parent.right
-                spacing: 10
+                spacing: Theme.space3
 
-                Rectangle {
-                    width: 90
-                    height: 34
-                    radius: 9
-                    color: cancelArea.containsMouse ? Theme.hoverBg : Theme.inset
-                    border.color: Theme.toggleOffTrack
-                    border.width: 1
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: qsTr("Cancel")
-                        color: Theme.navLabelMuted
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 14
-                        font.weight: Font.Medium
-                    }
-
-                    MouseArea {
-                        id: cancelArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.cancelled()
-                    }
+                AppButton {
+                    text: qsTr("Cancel")
+                    variant: "secondary"
+                    onClicked: root.cancelled()
                 }
-
-                Rectangle {
-                    width: 120
-                    height: 34
-                    radius: 9
-                    color: useArea.containsMouse ? Theme.accentLight : Theme.accent
-                    Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: qsTr("Use template")
-                        color: Theme.controlInk
-                        font.family: Theme.fontFamily
-                        font.pixelSize: 14
-                        font.weight: Font.DemiBold
-                    }
-
-                    MouseArea {
-                        id: useArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.accept()
-                    }
+                AppButton {
+                    text: qsTr("Use template")
+                    variant: "primary"
+                    onClicked: root.accept()
                 }
             }
         }

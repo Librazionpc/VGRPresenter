@@ -109,6 +109,9 @@ public:
     Result<void> SetOutputFailover(std::string_view outputId,
                                    const std::vector<std::string>& order);
     Result<void> SetOutputEncoder(std::string_view outputId, std::string_view encoder);
+    // The destination a network output pushes to (rtmp://..., srt://...). A STREAM
+    // row's preset decides it; changing it keeps the node, so its wires survive.
+    Result<void> SetOutputNetworkTarget(std::string_view outputId, std::string_view target);
 
     // --- Bus scenes (user brief §5, §6) ---
     Result<void> SaveBusScene(std::string_view busId, std::string_view sceneName);

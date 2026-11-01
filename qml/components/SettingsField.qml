@@ -18,6 +18,11 @@ Column {
     property alias echoMode: input.echoMode
     property string suffix: ""
     property string placeholder: ""
+    // Why the value was refused ("" = nothing to say). Printed in red directly UNDER
+    // the box, whose border turns red with it — the one look for "this field is the
+    // problem" in every dialog (empty or taken name, a bad URL...). The owner sets it
+    // when a Save is refused and clears it when the operator edits.
+    property string error: ""
 
     // User-driven edits only (not programmatic `text =` assignments) — the
     // dialog pattern: load once on open, write back through this.
@@ -50,7 +55,8 @@ Column {
         radius: Theme.radiusMd
         color: Theme.inset
         border.width: 1
-        border.color: input.activeFocus ? Theme.accent : Theme.border
+        border.color: root.error !== "" ? Theme.danger
+                    : input.activeFocus ? Theme.accent : Theme.border
         Behavior on border.color { ColorAnimation { duration: 100 } }
 
         // Placeholder — visible only while empty and unfocused.
@@ -92,5 +98,15 @@ Column {
             font.family: Theme.fontFamily
             font.pixelSize: Theme.textXs
         }
+    }
+
+    Text {
+        width: parent.width
+        visible: root.error !== ""
+        text: root.error
+        wrapMode: Text.WordWrap
+        color: Theme.dangerLight
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.textSm
     }
 }

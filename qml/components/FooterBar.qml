@@ -18,11 +18,11 @@ Rectangle {
     signal cancelRequested()
     signal saveRequested()
 
-    // Short enough to read as a footer strip, not a section of its own — the
-    // 34px buttons keep a 4px breathing margin top and bottom, and both hosts
+    // A footer strip with room to breathe — the
+    // 34px buttons keep a 15px margin top and bottom (they were squeezed at 4px), and both hosts
     // (ModalCard's flick reserve, ModalShell's row height) read THIS value, so
-    // the dialogs tighten with it automatically.
-    implicitHeight: 42
+    // the dialogs follow it automatically.
+    implicitHeight: 64
     color: Theme.surface
 
     Rectangle {
@@ -34,7 +34,7 @@ Rectangle {
 
     Row {
         anchors.right: parent.right
-        anchors.rightMargin: Theme.space5
+        anchors.rightMargin: Theme.space6
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.space3
 

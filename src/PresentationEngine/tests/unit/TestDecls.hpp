@@ -233,6 +233,7 @@ void TestProductionRoutingPolicy();
 void TestProductionGraphSavedToDisk();
 void TestRecordingEngine();
 void TestRecordingDispatchOutsideLock();
+void TestRecordingRealEncode();
 void TestTelemetry();
 void TestBroadcastEngine();
 void TestBroadcastSenders();

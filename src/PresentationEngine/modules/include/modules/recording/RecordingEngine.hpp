@@ -51,6 +51,9 @@ public:
 
     // --- Encoder selection (docs/specs/28 §Encoder selection) ---
     std::vector<EncoderKind> DetectEncoders() const;
+    // The containers a profile can name (the writers registered in this build, lowercase
+    // — "mp4"); a profile asking for any other is refused at StartRecording.
+    std::vector<std::string> ContainerNames() const;
     Result<EncoderKind> SelectEncoder(const RecordingProfile& profile) const;
     Result<void> SetPreferredEncoder(std::string_view profileId, EncoderKind kind);
 

@@ -183,6 +183,9 @@ public:
     Q_INVOKABLE int duplicateBus(int index);
     Q_INVOKABLE void renameBus(int index, const QString &name);
     Q_INVOKABLE void setType(int index, const QString &type);
+    // A TEMPLATE bus's design: re-point it at another Buses-category template. Ignored for any
+    // other kind of bus and for an empty id (a template bus with no template composes nothing).
+    Q_INVOKABLE void setTemplateId(int index, const QString &templateId);
     Q_INVOKABLE void setLevel(int index, qreal level);
     Q_INVOKABLE void setMuted(int index, bool muted);
     // One side of the bus's own output trim (0 = L, 1 = R), the bus-card

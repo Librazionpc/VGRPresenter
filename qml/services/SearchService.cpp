@@ -231,7 +231,7 @@ constexpr SettingEntry kSettings[] = {
     { "Video bitrate", "Recording", "recording" },
     { "Encoder", "Recording", "recording" },
     { "Screens to record", "Recording", "recording" },
-    { "Recording & Streaming", "Recording", "recording" },
+    { "Recording, Streaming & Audio", "Recording", "recording" },
     { "Installed plugins", "Plugins", "plugins" },
     { "Browse plugin store", "Plugins", "plugins" },
 };

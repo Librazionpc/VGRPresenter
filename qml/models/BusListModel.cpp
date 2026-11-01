@@ -1195,6 +1195,24 @@ void BusListModel::setType(int index, const QString &type)
     emit dataChanged(changed, changed, roles);
 }
 
+void BusListModel::setTemplateId(int index, const QString &templateId)
+{
+    if (index < 0 || index >= m_buses.size() || templateId.isEmpty())
+        return;
+    if (m_buses[index].type != QStringLiteral("template")
+        || m_buses[index].templateId == templateId)
+        return;
+
+    GraphEdit edit;
+    m_buses[index].templateId = templateId;
+    for (const QString &id : { m_buses[index].engineId, m_buses[index].engineIdVideo })
+        logIfFailed("SetMeta(templateId)",
+                    graph().SetMeta(id.toStdString(), "templateId", templateId.toStdString()));
+    pullRow(index);
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed);
+}
+
 void BusListModel::setLevel(int index, qreal level)
 {
     if (index < 0 || index >= m_buses.size())

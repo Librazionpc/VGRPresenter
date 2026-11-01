@@ -257,6 +257,7 @@ static const Suite kSuites[] = {
     // runtime that a bus dispatch runs with the engine lock released.
     {"production", "dispatch-scope", TestProductionDispatchOutsideLock},
     {"recording", "dispatch-scope", TestRecordingDispatchOutsideLock},
+    {"recording", "real-encode", TestRecordingRealEncode},
     {"core", "resource-dispatch-scope", TestResourceDispatchOutsideLock},
     {"core", "kernel-degrade", TestKernelDegrade},
 };
@@ -282,6 +283,16 @@ static void BootPhaseFixture() {
 static void TearDownPhaseFixture() {
     (void)ThreadPool::Instance().Shutdown();
     (void)TaskScheduler::Instance().Shutdown();
+}
+
+// Run on the discrete GPU of a hybrid (Optimus / switchable-graphics) laptop. This is the
+// documented opt-in the NVIDIA and AMD drivers read from the executable. Without it the
+// process lands on the integrated GPU, and the NVIDIA hardware H.264 encoder (NVENC) then
+// refuses to start (E_UNEXPECTED), so a preset could never use it. A machine with one GPU
+// ignores both.
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
 int main(int argc, char** argv) {

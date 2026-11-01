@@ -961,6 +961,7 @@ Item {
     property int editBusIndex: -1
     property string editBusName: ""
     property string editBusType: "audio"
+    property string editBusOriginalType: "audio"
     property real editBusLevel: 75
     property bool editBusMuted: false
 
@@ -969,10 +970,33 @@ Item {
         root.editBusIndex = index
         root.editBusName = data.name
         root.editBusType = data.type
+        root.editBusOriginalType = data.type
         root.editBusLevel = data.level
         root.editBusMuted = data.muted
+        root.editBusTemplateId = data.type === "template" ? String(data.templateId || "") : root.defaultBusTemplateId()
+        root.editBusTemplateLocked = false
         root.busDialogOpen = true
         root.busDialogIsAdd = false
+    }
+    // What is routed into the bus being edited: [{ kind, index, name }], audio inputs then video
+    // sources — the dialog's Sources list, each with its own Disconnect.
+    function editBusSources() {
+        root.modelsRev
+        if (root.editBusIndex < 0)
+            return []
+        const b = BusListModel.getBus(root.editBusIndex)
+        if (!b)
+            return []
+        const out = []
+        for (const i of b.routedAudioInputs) {
+            const d = AudioInputListModel.getInput(i)
+            if (d) out.push({ kind: "audio", index: i, name: String(d.name || "") })
+        }
+        for (const i of b.routedVideoSources) {
+            const d = VideoSourceListModel.getSource(i)
+            if (d) out.push({ kind: "video", index: i, name: String(d.name || "") })
+        }
+        return out
     }
     // The design a template bus is made from (the Buses category). "" = none.
     property string editBusTemplateId: ""
@@ -1013,6 +1037,7 @@ Item {
         root.editBusIndex = -1
         root.editBusName = ""
         root.editBusType = "audio"
+        root.editBusOriginalType = "audio"
         root.editBusTemplateId = root.defaultBusTemplateId()
         root.editBusLevel = 75
         root.editBusMuted = false
@@ -1053,6 +1078,11 @@ Item {
             root.createTemplateBus(root.editBusTemplateId)
             return
         }
+        if (!root.busDialogIsAdd && root.editBusType === "template"
+                && String(root.editBusTemplateId || "").trim() === "") {
+            root.editBusTemplateLocked = true
+            return
+        }
         if (root.busDialogIsAdd) {
             BusListModel.addBus(root.editBusName, root.editBusType)
             const idx = BusListModel.rowCount() - 1
@@ -1063,6 +1093,8 @@ Item {
                 return
             BusListModel.renameBus(root.editBusIndex, root.editBusName)
             BusListModel.setType(root.editBusIndex, root.editBusType)
+            if (root.editBusType === "template")
+                BusListModel.setTemplateId(root.editBusIndex, root.editBusTemplateId)
             BusListModel.setLevel(root.editBusIndex, root.editBusLevel)
             BusListModel.setMuted(root.editBusIndex, root.editBusMuted)
         }
@@ -1186,6 +1218,31 @@ Item {
         else if (root.deleteTargetType === "bus")
             BusListModel.deleteBus(root.deleteTargetIndex)   // the operator's delete: its notice offers the Undo
         root.deleteTargetIndex = -1
+    }
+
+    // ---- Which video rows are really delivering frames ----------------------
+    // Each video card reports here when its feed starts/stops (a live thumbnail, or a
+    // playing media row), and the board's wires read it: a video wire carries moving
+    // data only while the source behind it is actually delivering. A rev counter is
+    // the reactivity bridge, the same way rowsInView does it.
+    property var liveVideoRows: ({})
+    property int liveVideoRev: 0
+    function setVideoLive(index, on) {
+        if ((root.liveVideoRows[index] === true) === !!on)
+            return
+        const next = {}
+        for (const k in root.liveVideoRows)
+            next[k] = root.liveVideoRows[k]
+        if (on)
+            next[index] = true
+        else
+            delete next[index]
+        root.liveVideoRows = next
+        root.liveVideoRev++
+    }
+    function videoLive(index) {
+        void root.liveVideoRev
+        return root.liveVideoRows[index] === true
     }
 
     // ---- Drag-to-connect ----
@@ -1616,12 +1673,47 @@ Item {
                                 root.dragConnectHoverBus)
     }
 
+    Text {
+        id: pageHeader
+        x: Theme.space6
+        y: Theme.space6
+        text: qsTr("Audio & Video")
+        color: Theme.textPrimary
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.textXl
+        font.weight: Font.DemiBold
+    }
+
+    // The board sits on the same checkerboard canvas Settings · Routing uses, so the two wiring
+    // pages read as one family; the page scrolls inside it when the rosters grow long.
+    Rectangle {
+        id: canvas
+        anchors.left: parent.left
+        anchors.leftMargin: Theme.space6
+        anchors.right: parent.right
+        anchors.rightMargin: Theme.space6 + Theme.space2
+        anchors.top: pageHeader.bottom
+        anchors.topMargin: Theme.space3
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Theme.space6
+        radius: Theme.radiusLg
+        color: Theme.windowBg
+        border.color: Theme.border
+        border.width: 1
+        clip: true
+
+        Checkerboard {
+            anchors.fill: parent
+            tileSize: 13
+        }
+    }
+
     Flickable {
         id: flick
-        anchors.fill: parent
-        anchors.rightMargin: Theme.space6 + Theme.space2
+        anchors.fill: canvas
+        anchors.margins: 1
         contentWidth: width
-        contentHeight: layout.height + Theme.space6 * 2
+        contentHeight: layout.height + Theme.space4 * 2
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         // A connect-drag owns the gesture end-to-end: hard-freeze the page
@@ -1631,21 +1723,10 @@ Item {
 
         Column {
             id: layout
-            x: Theme.space6
-            y: Theme.space6
-            width: flick.width - Theme.space6
+            x: Theme.space5
+            y: Theme.space4
+            width: flick.width - Theme.space5 * 2
             spacing: Theme.space6
-
-            Column {
-                spacing: Theme.space1
-                Text {
-                    text: qsTr("Audio & Video")
-                    color: Theme.textPrimary
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.textXl
-                    font.weight: Font.DemiBold
-                }
-            }
 
             // ---- Routing board ----
             Item {
@@ -1661,7 +1742,8 @@ Item {
                 // Proportional column widths mean the board always fits
                 // whatever room it's actually given.
                 width: layout.width
-                readonly property real gutterW: 32
+                // Same gutter and card width cap as Settings · Routing, so the two wiring pages carry cards of one size.
+                readonly property real gutterW: 44
                 // The room the three columns really have once their two gutters
                 // are reserved (floored away from zero so a still-narrower pane
                 // degrades instead of producing negative widths).
@@ -1672,9 +1754,10 @@ Item {
                 // full-width name sit beside the thumb instead of eliding to
                 // "Audience C…". Audio/bus keep colW; the -36 keeps the three
                 // columns' combined width the same as before (video borrowed it).
-                readonly property real wantColW: Math.max(200, columnsRoom * 0.30)
-                readonly property real wantBusColW: Math.max(184, columnsRoom * 0.34 - 36)
-                readonly property real wantVidColW: Math.max(200, columnsRoom * 0.30) + 36
+                readonly property real wantColW: 240
+                readonly property real wantBusColW: 240
+                // The video column is the SAME width as the header chip above it (it used to run 36px wider, past the chip); its thumbnail shrinks instead.
+                readonly property real wantVidColW: 240
                 // ...and all three are scaled back TOGETHER when those minimums do
                 // not fit the room. The minimums used to win outright, which made
                 // the board WIDER than the Flickable holding it on a narrow
@@ -1700,8 +1783,11 @@ Item {
                 readonly property int rowGap: Theme.space3
                 readonly property int headerBoxH: 40
                 readonly property int headerH: headerBoxH + rowGap
-                readonly property real audioX: 0
-                readonly property real busX: board.colW + board.gutterW
+                // The three columns are centred as a group (as Routing centres its own), so a wide
+                // window grows the margins, not the cards.
+                readonly property real groupLeft: Math.max(0, (board.width - (board.colW + board.busColW + board.vidColW + board.gutterW * 2)) / 2)
+                readonly property real audioX: board.groupLeft
+                readonly property real busX: board.audioX + board.colW + board.gutterW
                 readonly property real videoX: board.busX + board.busColW + board.gutterW
 
                 // Per-kind port centers — each column stacks with its own
@@ -1776,6 +1862,34 @@ Item {
                         anchors.fill: parent
                         z: -1
                         preferredRendererType: Shape.CurveRenderer
+
+                        // DATA MOVING THROUGH THE LINE: while the source behind a wire is really
+                        // delivering, a lighter pattern travels along it toward the bus — beads for
+                        // audio (samples), dashes for video (frames). Measured, not assumed: an
+                        // audio wire moves while its input is above silence, a video wire while its
+                        // row is delivering frames; a muted bus carries nothing.
+                        readonly property bool isAudio: connector.modelData.kind === "audio"
+                        readonly property real srcLevel: {
+                            if (!connector.isAudio)
+                                return 0
+                            void root.audioMeterList
+                            void root.modelsRev
+                            const data = AudioInputListModel.getInput(connector.modelData.srcIndex)
+                            if (!data)
+                                return 0
+                            return root.inputMixLevel(connector.modelData.srcIndex, data.sublabel)
+                        }
+                        readonly property bool busMuted: {
+                            void root.modelsRev
+                            const b = BusListModel.getBus(connector.modelData.busIndex)
+                            return !!b && b.muted === true
+                        }
+                        readonly property bool flows: !connector.busMuted
+                            && (connector.isAudio ? connector.srcLevel > 0.01
+                                                  : root.videoLive(connector.modelData.srcIndex))
+                        readonly property real period: connector.isAudio ? 3.6 : 10
+                        readonly property int cycleMs: connector.isAudio ? 800 : 700
+
                         ShapePath {
                             strokeColor: connector.modelData.color
                             strokeWidth: 2
@@ -1793,6 +1907,32 @@ Item {
                             }
                         }
 
+                        ShapePath {
+                            strokeColor: connector.flows ? Qt.lighter(connector.modelData.color, 1.55) : "transparent"
+                            strokeWidth: connector.isAudio ? 3 : 2.2
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+                            strokeStyle: ShapePath.DashLine
+                            dashPattern: connector.isAudio ? [0.05, 3.55] : [6, 4]
+                            dashOffset: 0
+                            NumberAnimation on dashOffset {
+                                from: connector.period
+                                to: 0
+                                duration: connector.cycleMs
+                                loops: Animation.Infinite
+                                running: connector.flows
+                            }
+                            startX: connector.modelData.x1
+                            startY: connector.modelData.y1
+                            PathCubic {
+                                x: connector.modelData.x2
+                                y: connector.modelData.y2
+                                control1X: connector.modelData.x1 + (connector.modelData.x2 - connector.modelData.x1) * 0.5
+                                control1Y: connector.modelData.y1
+                                control2X: connector.modelData.x1 + (connector.modelData.x2 - connector.modelData.x1) * 0.5
+                                control2Y: connector.modelData.y2
+                            }
+                        }
                     }
                 }
 
@@ -1828,8 +1968,17 @@ Item {
                         width: board.colW
                         height: board.headerBoxH
 
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radiusMd
+                            color: Theme.inset
+                            border.width: 1
+                            border.color: Theme.border
+                        }
+
                         Column {
                             anchors.left: parent.left
+                            anchors.leftMargin: 14
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 2
                             Text {
@@ -1844,8 +1993,10 @@ Item {
                         AppButton {
                             objectName: "selfTestAvAddAudio"
                             anchors.right: parent.right
+                            anchors.rightMargin: 6
                             anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("+ Add")
+                            text: "+"
+                            fontSize: 20
                             variant: "ghost"
                             horizontalPadding: Theme.space3
                             onClicked: root.openAddSource("audio")
@@ -1928,16 +2079,20 @@ Item {
                                 elide: Text.ElideRight
                             }
 
-                            // Click-to-mute — the pill IS the mute toggle
-                            // for audio rows (any kind can be muted).
-                            MutePill {
-                                id: inMutePill
+                            // No LIVE pill: the dot, the meter and the wire already say it is live. Only the
+                            // exception is written — a muted input says so (mute itself is in Edit).
+                            Text {
                                 anchors.right: parent.right
+                                anchors.rightMargin: 12
                                 anchors.top: parent.top
-                                muted: inRow.muted
-                                accent: Theme.success
-                                accentLight: Theme.successLight
-                                onToggleRequested: AudioInputListModel.setMuted(inRow.index, !inRow.muted)
+                                anchors.topMargin: 10
+                                visible: inRow.muted
+                                text: qsTr("MUTED")
+                                color: Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textXs
+                                font.weight: Font.DemiBold
+                                font.letterSpacing: 0.6
                             }
 
                             Text {
@@ -2028,8 +2183,17 @@ Item {
                         width: board.busColW
                         height: board.headerBoxH
 
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radiusMd
+                            color: Theme.inset
+                            border.width: 1
+                            border.color: Theme.border
+                        }
+
                         Column {
                             anchors.left: parent.left
+                            anchors.leftMargin: 14
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 2
                             Text {
@@ -2044,8 +2208,10 @@ Item {
                         AppButton {
                             objectName: "selfTestAvAddBus"
                             anchors.right: parent.right
+                            anchors.rightMargin: 6
                             anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("+ Add")
+                            text: "+"
+                            fontSize: 20
                             variant: "ghost"
                             horizontalPadding: Theme.space3
                             onClicked: root.openAddBus()
@@ -2138,22 +2304,12 @@ Item {
                                 elide: Text.ElideRight
                             }
 
-                            // The pill IS the mute toggle — same shared
-                            // component as every other card. Muting a bus
-                            // silences its whole output mix.
-                            MutePill {
-                                id: busMutePill
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                muted: busRow.muted
-                                accent: busRow.typeColor
-                                accentLight: busRow.typeColor
-                                onToggleRequested: BusListModel.setMuted(busRow.index, !busRow.muted)
-                            }
-
+                            // No LIVE pill (the wires and the sources feeding the bus show it); a muted bus
+                            // says so, next to its source count.
                             Text {
-                                anchors.right: busMutePill.left
-                                anchors.rightMargin: 8
+                                id: busSrcCount
+                                anchors.right: parent.right
+                                anchors.rightMargin: 12
                                 anchors.top: parent.top
                                 anchors.topMargin: 10
                                 text: busRow.srcCount + qsTr(" src")
@@ -2161,32 +2317,22 @@ Item {
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.textXs
                             }
-
-                            // LIVE BUS METER — sum routed live input levels
-                            // after their source faders/channel gains, then
-                            // apply this bus's fader and mute.
-                            LevelTrack {
-                                x: 12; y: 48
-                                width: board.busColW - 90
-                                value: {
-                                    let mix = 0
-                                    const rows = busRow.routedAudioInputs
-                                    for (let i = 0; i < rows.length; i++) {
-                                        const r = rows[i]
-                                        const data = AudioInputListModel.getInput(r)
-                                        if (!data || data.muted)
-                                            continue
-                                        const raw = root.inputMixLevel(r, data.sublabel)
-                                        if (raw > mix) mix = raw   // loudest source wins (peak mix)
-                                    }
-                                    const post = mix * (busRow.level / 100)
-                                    return busRow.muted ? 0 : Math.min(100, post * 100)
-                                }
-                                // Continuous level gradient, same as every
-                                // other meter now — buses used to tint by
-                                // TYPE (a flat categorical color) instead of
-                                // showing real level.
+                            Text {
+                                anchors.right: busSrcCount.left
+                                anchors.rightMargin: 10
+                                anchors.top: parent.top
+                                anchors.topMargin: 10
+                                visible: busRow.muted
+                                text: qsTr("MUTED")
+                                color: Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textXs
+                                font.weight: Font.DemiBold
+                                font.letterSpacing: 0.6
                             }
+
+                            // (No level meter on a bus card: the sources feeding it and the wires into it
+                            // already move when there is signal, so a third bar said nothing new.)
 
                             Text {
                                 anchors.right: parent.right
@@ -2257,8 +2403,17 @@ Item {
                         width: board.colW
                         height: board.headerBoxH
 
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radiusMd
+                            color: Theme.inset
+                            border.width: 1
+                            border.color: Theme.border
+                        }
+
                         Column {
                             anchors.left: parent.left
+                            anchors.leftMargin: 14
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 2
                             Text {
@@ -2273,8 +2428,10 @@ Item {
                         AppButton {
                             objectName: "selfTestAvAddVideo"
                             anchors.right: parent.right
+                            anchors.rightMargin: 6
                             anchors.verticalCenter: parent.verticalCenter
-                            text: qsTr("+ Add")
+                            text: "+"
+                            fontSize: 20
                             variant: "ghost"
                             horizontalPadding: Theme.space3
                             onClicked: root.openAddSource("video")
@@ -2309,6 +2466,14 @@ Item {
                                 vidThumb.liveCam && vidThumb.activeTapLabel === vidRow.sublabel
                                 ? "image://videopreview/" + encodeURIComponent(vidRow.sublabel)
                                   + "?n=" + vidThumb.thumbNonce : ""
+
+                            // Delivering frames right now (a live thumbnail), or a media row that is not
+                            // paused — what the wire into the bus reads to decide whether to animate.
+                            readonly property bool feedLive: !vidRow.muted
+                                && (vidRow.kind === "media" || vidThumb.thumbLive)
+                            onFeedLiveChanged: root.setVideoLive(vidRow.index, vidRow.feedLive)
+                            Component.onCompleted: root.setVideoLive(vidRow.index, vidRow.feedLive)
+                            Component.onDestruction: root.setVideoLive(vidRow.index, false)
 
                             width: board.vidColW
                             height: board.vidRowH
@@ -2379,19 +2544,19 @@ Item {
                             // edge put it UNDER the thumb, invisible).
                             // Its audio LEVEL meter stays audio-only
                             // (camera/screen have no audio track to meter).
-                            MutePill {
-                                id: vidMutePill
+Text {
                                 anchors.right: vidThumb.left
+                                anchors.rightMargin: 14
                                 anchors.top: parent.top
                                 anchors.topMargin: 10
-                                muted: vidRow.muted
-                                // A camera/screen feed isn't "muted" when
-                                // off, it's paused — media and NDI carry
-                                // audio to mute.
-                                offLabel: vidRow.hasAudio ? qsTr("MUTE") : qsTr("PAUSED")
-                                accent: Theme.info
-                                accentLight: Theme.infoLight
-                                onToggleRequested: VideoSourceListModel.setMuted(vidRow.index, !vidRow.muted)
+                                // A paused camera/screen, or a muted media/NDI row — only the exception shows.
+                                visible: vidRow.muted
+                                text: vidRow.hasAudio ? qsTr("MUTED") : qsTr("PAUSED")
+                                color: Theme.textMuted
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textXs
+                                font.weight: Font.DemiBold
+                                font.letterSpacing: 0.6
                             }
 
                             LevelTrack {
@@ -2439,7 +2604,7 @@ Item {
                                 // The 96 cap keeps a taller row from growing
                                 // the thumb into the name's room: past it the
                                 // pane stops being 16:9 and letterboxes.
-                                width: Math.min(96, Math.round((height) * 16 / 9))
+                                width: Math.min(80, Math.round((height) * 16 / 9))
                                 radius: Theme.radiusSm
                                 color: Theme.windowBg
                                 border.width: 1
@@ -2729,6 +2894,7 @@ Item {
                             // the thumb like the pill above it.
                             Text {
                                 anchors.right: vidThumb.left
+                                anchors.rightMargin: 14
                                 anchors.bottom: parent.bottom
                                 anchors.bottomMargin: 10
                                 text: qsTr("Edit")
@@ -2815,8 +2981,8 @@ Item {
 
     AppScrollBar {
         x: parent.width - (Theme.space6 + Theme.space2 + width) / 2
-        y: Theme.space3
-        height: parent.height - Theme.space6
+        y: canvas.y
+        height: canvas.height
         flickable: flick
     }
 
@@ -3320,6 +3486,9 @@ Item {
         Column {
             width: parent.width
             spacing: Theme.space2
+            // A template bus keeps its kind; ordinary buses can be changed to
+            // Template and assigned a design below.
+            visible: root.busDialogIsAdd || root.editBusOriginalType !== "template"
             Text {
                 text: qsTr("Type")
                 color: Theme.textSecondary
@@ -3329,11 +3498,8 @@ Item {
             Row {
                 spacing: Theme.space2
                 Repeater {
-                    // A bus carries audio, video, or both. TEMPLATE is the fourth
-                    // kind: a bus whose windows come from a Buses-category design
-                    // (Edit · Templates), so one wire carries a whole layout. The
-                    // design itself is still made (and edited) in the template tab
-                    // — picking it here is picking it as this bus's body.
+                    // A template bus composes a Buses-category design; its
+                    // windows are assigned in Edit · Templates.
                     model: [
                         { key: "audio", label: qsTr("Audio") },
                         { key: "video", label: qsTr("Video") },
@@ -3363,10 +3529,10 @@ Item {
         Column {
             width: parent.width
             spacing: Theme.space2
-            visible: root.busDialogIsAdd && root.editBusType === "template"
+            visible: root.editBusType === "template"
 
             Text {
-                text: qsTr("Choose a bus template")
+                text: root.busDialogIsAdd ? qsTr("Choose a bus template") : qsTr("Bus template")
                 color: Theme.textSecondary
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textXs
@@ -3392,6 +3558,25 @@ Item {
                         root.editBusTemplateId = id
                     root.editBusTemplateLocked = false
                 }
+            }
+
+            // What the picked design is: its windows, so the choice says what the bus will compose.
+            Text {
+                width: parent.width
+                readonly property var design: {
+                    root.templateRev
+                    const all = root.busTemplates
+                    for (let i = 0; i < all.length; ++i)
+                        if (String(all[i].id) === root.editBusTemplateId)
+                            return all[i]
+                    return null
+                }
+                visible: design !== null
+                text: design ? qsTr("%n window(s) — each one shows the bus its item names.", "", root.busTemplateWindows(design)) : ""
+                color: Theme.textMuted
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+                wrapMode: Text.WordWrap
             }
 
             Text {
@@ -3425,7 +3610,9 @@ Item {
         // same simplification the Media pane's bus L/R buttons use.
         ProAudioForm {
             width: parent.width
-            visible: root.editBusType !== "video"
+            showNameSource: false
+            showDelay: false
+            showChannelSwitches: false
             nameLabel: qsTr("Master")
             sourceLabel: qsTr("Sources")
             sourceValue: qsTr("%1 routed").arg(root.busRoutedAudio().length)
@@ -3464,6 +3651,59 @@ Item {
             }
             onVolumeEdited: (v) => root.editBusLevel = v
             onMutedToggled: root.editBusMuted = !root.editBusMuted
+        }
+
+        // ---- SOURCES: what is wired into this bus right now, each with its own Disconnect — the
+        // dialog says what the bus is made of instead of leaving that to the board's wires.
+        Column {
+            width: parent.width
+            spacing: Theme.space2
+            visible: !root.busDialogIsAdd
+
+            Text {
+                text: qsTr("Sources")
+                color: Theme.textSecondary
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.textXs
+            }
+
+            Repeater {
+                id: busSourceRows
+                model: root.busDialogOpen ? root.editBusSources() : []
+
+                delegate: ValueRow {
+                    required property var modelData
+                    width: parent.width
+                    implicitHeight: 40
+                    hasSwatch: true
+                    swatchColor: modelData.kind === "audio" ? Qt.alpha(Theme.success, 0.25)
+                                                            : Qt.alpha(Theme.info, 0.25)
+                    text: modelData.name !== "" ? modelData.name : qsTr("Untitled")
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.kind === "audio" ? qsTr("AUDIO") : qsTr("VIDEO")
+                        color: modelData.kind === "audio" ? Theme.success : Theme.info
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textXs
+                        font.weight: Font.DemiBold
+                        font.letterSpacing: 0.6
+                    }
+                    PillButton {
+                        text: qsTr("Disconnect")
+                        tone: "muted"
+                        onClicked: root.disconnectRoute(modelData.kind, root.editBusIndex, modelData.index)
+                    }
+                }
+            }
+
+            ValueRow {
+                width: parent.width
+                implicitHeight: 40
+                visible: busSourceRows.count === 0
+                dim: true
+                text: qsTr("Nothing is routed into this bus yet — drag from a source's port to its card.")
+            }
         }
 
         Row {

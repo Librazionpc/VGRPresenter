@@ -1,5 +1,6 @@
 #include "services/CallTrace.h"
 #include "services/CrashHandler.h"
+#include "services/DataRoot.h"
 #include "services/EngineBridge.h"
 
 #include <QCoreApplication>
@@ -658,8 +659,7 @@ QString ConsumePendingCrashSummary()
 
 void InstallCrashHandler()
 {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                         + QStringLiteral("/crashes");
+    const QString dir = dataroot::appDataRoot() + QStringLiteral("/crashes");
     QDir().mkpath(dir);
     g_crashLogPath = (dir + QStringLiteral("/crash.log")).toStdString();
 

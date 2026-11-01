@@ -406,6 +406,5 @@ Item {
             cancelText: root.cancelText
             onCancelRequested: root.cancelled()
             onSaveRequested: root.accepted()
-        }
-    }
+        }    }
 }

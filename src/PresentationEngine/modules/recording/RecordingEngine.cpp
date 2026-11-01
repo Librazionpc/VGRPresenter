@@ -4,6 +4,8 @@
 #include "core/logging/Logger.hpp"
 #include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
+#include "modules/recording/AudioFileContainer.hpp"
+#include "modules/recording/MatroskaContainer.hpp"
 #include "modules/recording/MediaFoundationMp4.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
@@ -111,6 +113,8 @@ const char* ContainerName(ContainerKind c) {
         case ContainerKind::WebM: return "webm";
         case ContainerKind::WAV: return "wav";
         case ContainerKind::FLAC: return "flac";
+        case ContainerKind::M4A: return "m4a";
+        case ContainerKind::MP3: return "mp3";
     }
     return "mkv";
 }
@@ -163,13 +167,28 @@ Result<void> RecordingEngine::Initialize() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (initialized_.load()) return Ok();   // lost the race; other caller finished
 
-    // Default providers (docs/specs/28 §11-§13). MP4 is the container this build
-    // writes; the other formats are not registered, so a profile that asks for one
-    // is refused rather than silently written as something else.
+    // Default providers (docs/specs/28 §11-§13). MP4 (Media Foundation) and MKV (the
+    // Matroska writer) are the containers this build writes; any other format is not
+    // registered, so a profile that asks for one is refused rather than silently written
+    // as something else. The hardware encoders are registered by the host through
+    // RegisterHardwareEncoders — only the ones the machine really has.
     containers_.emplace(ContainerName(ContainerKind::MP4),
                         []() -> std::shared_ptr<IRecordingContainer> {
                             return std::make_shared<MediaFoundationMp4>();
                         });
+    containers_.emplace(ContainerName(ContainerKind::MKV),
+                        []() -> std::shared_ptr<IRecordingContainer> {
+                            return std::make_shared<MatroskaContainer>();
+                        });
+    // The audio-only formats an Audio preset records to. MP3 only where the machine has an
+    // MP3 encoder, so the list a preset can pick from is the list that works.
+    for (const ContainerKind audioKind : {ContainerKind::WAV, ContainerKind::M4A, ContainerKind::MP3}) {
+        if (audioKind == ContainerKind::MP3 && !Mp3EncoderAvailable()) continue;
+        containers_.emplace(ContainerName(audioKind),
+                            [audioKind]() -> std::shared_ptr<IRecordingContainer> {
+                                return std::make_shared<AudioFileContainer>(audioKind);
+                            });
+    }
     videoEncoders_.emplace(EncoderKindName(EncoderKind::Software),
                            []() -> std::shared_ptr<IVideoEncoder> {
                                return std::make_shared<MediaFoundationVideoEncoder>();
@@ -391,6 +410,13 @@ std::vector<std::string> RecordingEngine::TemplateNames() const {
 }
 
 // --- Encoder selection ---
+
+std::vector<std::string> RecordingEngine::ContainerNames() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::vector<std::string> out;
+    for (const auto& entry : containers_) out.push_back(entry.first);
+    return out;
+}
 
 std::vector<EncoderKind> RecordingEngine::DetectEncoders() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);

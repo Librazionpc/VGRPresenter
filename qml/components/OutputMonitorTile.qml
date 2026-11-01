@@ -1317,34 +1317,24 @@ Rectangle {
     // actually sending?" could only be answered in Settings · Outputs. It is now
     // a DOT (green = frames landing, amber = up but blacked out or stalled, grey =
     // off air / waiting / switched off) whose hover detail gives the numbers — the
-    // frames this output has received and how long ago the last one landed.
+    // frames this output has received and how long ago the last one landed. Keep
+    // only the dot on the preview; the status words belong in Outputs, not on tiles.
     //
     // The dot itself is the shared component (components/OutputRuntimeDot.qml,
     // built on HoverDetail), which the Outputs rows use too: the state, the
     // colour and the tip live in one place instead of being re-derived here.
     // `runtimeState` / `runtimeDot` are kept as read-throughs because the
     // self-tests and the tile-facts diagnostic read them off the tile.
-    // The dot AND its state word ("live", "off air", "blackout", "no feed", …)
-    // on a dark chip so the word stays readable over video — the numbers are the
-    // hover detail, never printed here.
-    Rectangle {
-        anchors.left: previewPane.left
-        anchors.leftMargin: 8           // clear of the left meter strip
-        anchors.bottom: previewPane.bottom
-        anchors.bottomMargin: 6
-        width: runtimeIndicator.implicitWidth + 12
-        height: runtimeIndicator.implicitHeight + 6
-        radius: 9
-        color: "#b3101219"
-
-        OutputRuntimeDot {
-            id: runtimeIndicator
-            objectName: "selfTestTileRuntime"
-            anchors.centerIn: parent
-            outputName: root.name
-            outputEnabled: root.isEnabled
-            showState: true
-        }
+    // Keep the runtime detail available on hover without drawing a status marker.
+    OutputRuntimeDot {
+        anchors.fill: previewPane
+        id: runtimeIndicator
+        objectName: "selfTestTileRuntime"
+        outputName: root.name
+        outputEnabled: root.isEnabled
+        showState: false
+        showDot: false
+        hoverPadding: 6
     }
     readonly property string runtimeState: runtimeIndicator.state
     readonly property color runtimeDot: runtimeIndicator.dotColor

@@ -105,6 +105,9 @@ struct OutputItem
     // own render stream, so an HDMI output's sound comes out of that monitor
     // rather than the booth speakers (see OutputStore::audioDevice).
     QString audioDevice;
+    // REC / STREAM rows: the stable id of the recording / streaming preset this
+    // output uses (PresetListModel). "" = none picked.
+    QString presetId;
     // NDI (and other network) outputs: carry ONLY their own transport — no
     // physical screen window, and no audience-facing window on this machine
     // (the receiver's monitor IS the audience screen). FreeShow's NDI output
@@ -190,6 +193,8 @@ public:
         // Outputs' picker, and what RoutingService reads to decide whether the
         // row plays on a stream of its own.
         AudioDeviceRole,
+        // The preset a REC / STREAM row records / streams with (PresetListModel id).
+        PresetIdRole,
         VideoModeRole,
         // This row's own Overlays / Media gates (see OutputItem::showOverlay).
         OverlayGateRole,
@@ -266,7 +271,8 @@ public:
     Q_INVOKABLE void removeOutput(int index);
     Q_INVOKABLE bool isMainOutput(int index) const;
     Q_INVOKABLE void setActive(int index);
-    Q_INVOKABLE void setEnabled(int index, bool on);
+    // Returns false when disabling this row would leave no enabled output.
+    Q_INVOKABLE bool setEnabled(int index, bool on);
     Q_INVOKABLE void duplicateOutput(int index);
     Q_INVOKABLE void renameOutput(int index, const QString &name);
     // One name per row. A name IS this roster's key everywhere else — the NDI
@@ -335,6 +341,14 @@ public:
     // Persisted and re-bound: the routing pass opens/closes the stream, because a
     // wire is what decides whether the row has anything to play there.
     Q_INVOKABLE void setAudioDevice(int index, const QString &deviceId);
+    // Wire a REC / STREAM row to a preset ("" = none). Persisted; re-asks Routing,
+    // because a stream preset's target is part of the row's output node.
+    Q_INVOKABLE void setPresetId(int index, const QString &presetId);
+    // Rows wired to this preset, and the model-side backstop when it is deleted.
+    int presetUsage(const QString &presetId) const;
+    void detachPresetEverywhere(const QString &presetId);
+    // A preset was edited: rows that wear it re-read.
+    void presetChanged(const QString &presetId);
     Q_INVOKABLE void setVideoMode(int index, const QString &mode);
     // THIS ROW's own gates, written by the two toggle chips on its Settings ·
     // Routing card. Both re-push the engine's per-output specs, so the picture

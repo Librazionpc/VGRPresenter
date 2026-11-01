@@ -80,6 +80,8 @@ json::Value OutputStore::OutputToJson(const StoredOutput& o) {
         obj["mediaFit"] = json::Value::String(o.mediaFit);   // absent = "contain"
     if (!o.audioDevice.empty())
         obj["audioDevice"] = json::Value::String(o.audioDevice);   // absent = program
+    if (!o.presetId.empty())
+        obj["presetId"] = json::Value::String(o.presetId);         // absent = no preset
     if (!o.videoMode.empty() && o.videoMode != "direct")
         obj["videoMode"] = json::Value::String(o.videoMode);       // absent = direct
     // The row's own gates ARE its allow-list wires (see StoredOutput::showOverlay).
@@ -131,6 +133,7 @@ Result<StoredOutput> OutputStore::OutputFromJson(const json::Value& v) {
     out.styleId = str("styleId");
     out.mediaFit = str("mediaFit");
     out.audioDevice = str("audioDevice");
+    out.presetId = str("presetId");
     out.videoMode = str("videoMode");
     if (out.videoMode != "compose")
         out.videoMode = "direct";

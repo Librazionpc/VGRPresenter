@@ -98,6 +98,15 @@ Item {
         function onModelReset() { root.rostersChanged() }
         function onRosterChanged() { root.rostersChanged() }
     }
+    // The recording / streaming presets (Settings · Recording): a card's subtitle
+    // and the picker's list both read them.
+    Connections {
+        target: PresetListModel
+        function onDataChanged() { root.rostersChanged() }
+        function onRowsInserted() { root.rostersChanged() }
+        function onRowsRemoved() { root.rostersChanged() }
+        function onModelReset() { root.rostersChanged() }
+    }
     // The assignments themselves. RoutingService republishes its rows after
     // every engine write, so a refused assignment (a dead bus, a signal the
     // output does not take) shows up as the wire simply not appearing.
@@ -350,7 +359,7 @@ Item {
     // points: this screen draws the ports (the cards do not), so a wire's
     // endpoint and the dot it leaves from are computed from the same numbers and
     // can never drift apart.
-    readonly property int colHeaderH: 40
+    readonly property int colHeaderH: 52
     readonly property int cardH: 56
     readonly property int rowGap: 10
     readonly property int gutter: 44
@@ -622,6 +631,11 @@ Item {
     // makes the row's mix leave on that device's stream, opened from the row's
     // audio wires — see RoutingService::bindOutputAudio.
     property string outAudioDevice: ""
+    // A Recording / Streaming output has no display, mode or test pattern: it is its
+    // name and the PRESET it records / streams with. `outPresetId` is that pick.
+    property string outPresetId: ""
+    readonly property bool outIsPreset:
+        root.outKind.toUpperCase() === "REC" || root.outKind.toUpperCase() === "STREAM"
     readonly property bool outIsHdmi: root.outKind.toUpperCase() === "HDMI"
     // The transports that sit on a real display. ScreenForm's own placement
     // section is gated the same way (HDMI/SDI), so these two are the rows where
@@ -641,6 +655,7 @@ Item {
         root.outLocked = false
         root.outStayOnTop = false
         root.outAudioDevice = ""
+        root.outPresetId = ""
         root.outputDialogShown = true
     }
     function openEditOutput(row) {
@@ -662,9 +677,20 @@ Item {
         root.outStayOnTop = o.stayOnTop === true
         root.outAudioDevice = o.audioDevice !== undefined && o.audioDevice !== null
             ? String(o.audioDevice) : ""
+        root.outPresetId = String(o.presetId || "")
         root.outputDialogShown = true
     }
     function submitOutput() {
+        // A Recording / Streaming output is only a name and its preset.
+        if (root.outIsPreset && root.editOutputRow >= 0) {
+            if (root.outName !== "")
+                OutputListModel.renameOutput(root.editOutputRow, root.outName)
+            OutputListModel.setPresetId(root.editOutputRow, root.outPresetId)
+            root.outputDialogShown = false
+            root.editOutputRow = -1
+            RoutingService.refresh()
+            return
+        }
         const row = root.editOutputRow >= 0 ? root.editOutputRow
                                             : OutputListModel.rowCount()
         if (root.editOutputRow < 0)
@@ -693,36 +719,73 @@ Item {
     // What an output can BE. HDMI is here because it is the physical screen's
     // transport — picking it makes a SCREEN (it appears in the Screens column);
     // the rest are sinks that live in this column.
-    readonly property var outputKinds: [
-        { kind: "HDMI",   group: qsTr("Physical"),  label: qsTr("HDMI"),      note: qsTr("A monitor or projector — pick its display next") },
-        { kind: "SDI",    group: qsTr("Physical"),  label: qsTr("SDI"),       note: qsTr("A capture card's output") },
-        { kind: "NDI",    group: qsTr("Network"),   label: qsTr("NDI"),       note: qsTr("Video + audio over the network — name the sender next") },
-        { kind: "REC",    group: qsTr("Recording"), label: qsTr("Recording"), note: qsTr("A file on this machine") },
-        { kind: "STREAM", group: qsTr("Streaming"), label: qsTr("Streaming"), note: qsTr("The RTMP target on the Recording page") }
-    ]
+    //
+    // RECORDING AND STREAMING ARE PICKED BY PRESET. A recording or a stream is not a
+    // transport with settings of its own: it is one of the presets made on Settings ·
+    // Recording, so the picker lists those presets (one entry each) and picking one
+    // puts an output on the canvas that records / streams with THAT preset. With no
+    // preset of a kind yet, the entry says so and opens the page that makes one.
+    readonly property var outputKinds: {
+        root.modelsRev
+        const out = [
+            { kind: "HDMI", label: qsTr("HDMI"), note: qsTr("A monitor or projector — pick its display next") },
+            { kind: "SDI",  label: qsTr("SDI"),  note: qsTr("A capture card's output") },
+            { kind: "NDI",  label: qsTr("NDI"),  note: qsTr("Video + audio over the network — name the sender next") }
+        ]
+        const kinds = [
+            { preset: "recording", kind: "REC", noun: qsTr("Recording"),
+              none: qsTr("No recording presets yet — make one in Settings · Recording") },
+            { preset: "audio", kind: "REC", noun: qsTr("Audio"),
+              none: qsTr("No audio presets yet — make one in Settings · Recording") },
+            { preset: "streaming", kind: "STREAM", noun: qsTr("Streaming"),
+              none: qsTr("No streaming presets yet — make one in Settings · Recording") }
+        ]
+        for (let k = 0; k < kinds.length; ++k) {
+            const list = PresetListModel.presetsOfKind(kinds[k].preset)
+            if (list.length === 0) {
+                out.push({ kind: "PRESETS", label: qsTr("%1 preset…").arg(kinds[k].noun),
+                           note: kinds[k].none })
+                continue
+            }
+            for (let i = 0; i < list.length; ++i)
+                out.push({ kind: kinds[k].kind, presetId: list[i].presetId,
+                           label: list[i].name,
+                           note: kinds[k].noun + " · " + list[i].summary })
+        }
+        return out
+    }
     function toggleAddMenu(which) {
         root.addMenu = root.addMenu === which ? "" : which
     }
-    function addOutput(kind) {
-        const k = String(kind || "").toUpperCase()
+    // `entry` is one of outputKinds' rows.
+    function addOutput(entry) {
+        const k = String(entry.kind || "").toUpperCase()
         if (k.length === 0) return
-        // EVERY transport is configured before it exists. The row's identity is
-        // its transport, and each transport is addressed differently — an HDMI
-        // display, an NDI sender's name and mode, an SDI card's output, a file,
-        // a stream target — so the picker opens the dialog with that transport
-        // preset instead of dropping a bare row the operator then has to go and
-        // fill in on another page. Cancel leaves nothing behind (the row is
-        // created by Save).
+        // No preset of that kind exists: the picker's own entry says so, and the
+        // place that makes one is Settings · Recording.
+        if (k === "PRESETS") {
+            root.addMenu = ""
+            root.sectionRequested("recording")
+            return
+        }
+        // A Recording / Streaming output is made straight from its preset: a name
+        // (the preset's own, kept unique by the model) and the preset it wears. Nothing
+        // else about it is configured here, so there is no dialog to cancel.
+        if (k === "REC" || k === "STREAM") {
+            root.addMenu = ""
+            const row = OutputListModel.rowCount()
+            OutputListModel.addScreen(String(entry.label || k), k, "", "")
+            OutputListModel.setPresetId(row, String(entry.presetId || ""))
+            RoutingService.refresh()
+            return
+        }
+        // The physical and network transports are configured before they exist: the
+        // row's identity is its transport, and each is addressed differently — an HDMI
+        // display, an NDI sender's name and mode, an SDI card's output — so the picker
+        // opens the dialog with that transport preset instead of dropping a bare row
+        // the operator then has to go and fill in on another page. Cancel leaves
+        // nothing behind (the row is created by Save).
         root.openAddOutput(k)
-        return
-        // The TRANSPORT is the thing being chosen, so it is written at creation:
-        // Settings · Screens deliberately has no kind picker any more. Naming a
-        // sink after its transport lets the model keep names unique from there
-        // ("NDI", "NDI 2", …) — a duplicated name is a duplicated key to every
-        // per-output reader.
-        root.addMenu = ""
-        OutputListModel.addScreen(k, k, "", "")
-        RoutingService.refresh()
     }
 
 
@@ -795,14 +858,13 @@ Item {
             return items
         }
         // A sink. It is configured HERE — the same dialog the canvas's picker
-        // opens — and the deeper settings (a recording profile, the RTMP target)
+        // opens — and the deeper settings (the recording or stream preset it wears)
         // stay one hop away on the Recording page. Its wires are cut here.
         const kind = String(o ? o.kind : "").toUpperCase()
         const items = [{ id: "edit", label: qsTr("Configure output") }]
-        if (kind === "REC")
-            items.push({ id: "editRecording", label: qsTr("Recording settings") })
-        if (kind === "STREAM")
-            items.push({ id: "editRecording", label: qsTr("Stream settings") })
+        // The preset it wears is edited on Settings · Recording.
+        if (kind === "REC" || kind === "STREAM")
+            items.push({ id: "editRecording", label: qsTr("Edit presets") })
         if (o && Number(o.videoBus) >= 0)
             items.push({ id: "unwireVideo", label: qsTr("Unwire video") })
         // The picture this output shows: its one routed feed, or the design with
@@ -1000,6 +1062,21 @@ Item {
             if (Number(rows[i].row) === row) return rows[i]
         return null
     }
+    function toggleOutputEnabled(row) {
+        const output = root.outputByRow(Number(row))
+        if (!output) return
+        if (output.system)
+            RoutingService.setSpeakersEnabled(output.enabled !== true)
+        else {
+            if (!OutputListModel.setEnabled(Number(output.row), output.enabled !== true)) {
+                EventBus.notify(qsTr("At least one output card must remain enabled."),
+                                "warning", qsTr("Outputs"), "outputs.lastEnabled")
+                return
+            }
+            if (output.enabled === true && root.takeNode === root.sinkNodeId(output))
+                RecordingService.stopRecording()
+        }
+    }
     function styleById(id) {
         if (!id) return -1
         for (let i = 0; i < root.styleRoster.length; ++i)
@@ -1124,6 +1201,14 @@ Item {
         }
         return Number(o.audioBus) >= 0 ? [Number(o.audioBus)] : []
     }
+    // THE AUDIO BUSES WIRED INTO A ROW THAT ARE ON THE BOARD. A bus can be wired in the
+    // graph (every audio bus is wired to the speaker endpoint when it is created, and the
+    // wiring is saved with the graph) without having a card on this canvas — then there is
+    // no wire to see. The row's "N buses in" and its L/R pair describe what the operator
+    // can see; counting the unseen ones read as "3 buses in" with nothing connected to it.
+    function visibleAudioBusesOf(o) {
+        return root.audioBusesOf(o).filter(row => root.busRoster[row] && root.busRoster[row].onBoard === true)
+    }
     // Every VIDEO bus wired into one row, same shape — and the set a click is
     // allowed to pick from (RoutingService.showBusOn refuses anything else). One
     // of them is on air: that is `o.videoBus`.
@@ -1167,6 +1252,114 @@ Item {
         // media layer), so it wears the style colour rather than a signal's.
         if (kind === "style" || kind === "gate") return Theme.wireStyle
         return Theme.wireVideo
+    }
+
+    // ---- IS DATA REALLY MOVING THROUGH THIS CARD? ---------------------------------------
+    // Every answer is a measured fact, never "it is wired":
+    //   bus      a routed video source that is DELIVERING frames (the camera is connected and
+    //            sending), or an audio level above silence on its stereo mix
+    //   overlays the overlay layer has something on air; media: a file is on air
+    //   style    the show is live, real text is on air, and an output wearing the style is
+    //            receiving frames
+    //   output   its render buffer presented a frame (a speaker endpoint: a wired bus has sound)
+    // 1 = live, 0 = idle (present but nothing moving), -1 = no opinion.
+    function cardLiveState(key) {
+        void root.modelsRev
+        void LiveOutputService.inputRev
+        void LiveOutputService.feedHealthRev
+        const k = String(key || "")
+        if (k.indexOf("bus:") === 0) {
+            const row = root.busRowOf(k)
+            if (root.busSourceCount(row) === 0 && root.busOutputCount(row) === 0)
+                return -1   // an empty bus has nothing to be idle about
+            const mix = root.busChannelMix(row)
+            const sound = Math.max(mix[0], mix[1]) > 0.01
+            const picture = root.busHasVideo(row) && root.busVideoValue(row) > 0
+            return (sound || picture) ? 1 : 0
+        }
+        if (k === "gate:overlay")
+            return (LiveOutputService.activeOverlays || []).length > 0 ? 1 : 0
+        if (k === "gate:media")
+            return LiveOutputService.mediaOnAir === true ? 1 : 0
+        if (k.indexOf("style:") === 0) {
+            const slide = LiveOutputService.onAirSlide || {}
+            const textOnAir = LiveOutputService.live === true && !!(slide.blocks && slide.blocks.length > 0)
+                              && LiveOutputService.blackedOut !== true
+            if (!textOnAir || root.styleScreenCount(root.styleRowOf(k)) === 0)
+                return 0
+            // An output wearing this style has to be receiving frames for the text to arrive.
+            const rows = root.outputRows
+            const style = root.styleRoster[root.styleRowOf(k)]
+            for (let i = 0; i < rows.length; ++i)
+                if (style && rows[i].styleId === style.styleId && rows[i].feedLive === true)
+                    return 1
+            return 0
+        }
+        if (k.indexOf("out:") === 0) {
+            const o = root.outputByRow(Number(k.substring(4)))
+            if (!o)
+                return -1
+            if (o.system) {
+                const buses = root.audioBusesOf(o)
+                if (buses.length === 0)
+                    return 0
+                for (let i = 0; i < buses.length; ++i) {
+                    const mix = root.busChannelMix(buses[i])
+                    if (Math.max(mix[0], mix[1]) > 0.01)
+                        return 1
+                }
+                return 0
+            }
+            return o.feedLive === true ? 1 : 0
+        }
+        return -1
+    }
+
+    // ---- How fast a wire's data moves ---------------------------------------------
+    // The speed of the travelling dashes says how much the wire carries:
+    //   video and style wires   the FRAME RATE of the output they land on
+    //   audio wires             the AUDIO BITRATE of the output they land on
+    // so a 24 fps output crawls beside a 60 fps one, and a 96 kbps recording beads along slower
+    // than uncompressed sound. The rate comes from where the wire ends: a screen's refresh
+    // ("60 Hz"), or the preset a Recording / Streaming output wears.
+    readonly property real kUncompressedKbps: 1536   // 48 kHz x 2 channels x 16 bit
+    function outputFps(row) {
+        if (row < 0 || row >= OutputListModel.rowCount()) return 60
+        const o = OutputListModel.getOutput(row)
+        const kind = String(o.kind || "").toUpperCase()
+        if ((kind === "REC" || kind === "STREAM") && String(o.presetId || "") !== "") {
+            const preset = PresetListModel.getPreset(PresetListModel.rowOfId(String(o.presetId)))
+            const rate = parseInt(String((preset.config || {}).frameRate || ""))
+            if (rate > 0) return rate
+        }
+        const hz = parseInt(String(o.refresh || ""))
+        return hz > 0 ? hz : 60
+    }
+    function outputAudioKbps(row) {
+        if (row < 0 || row >= OutputListModel.rowCount()) return root.kUncompressedKbps
+        const o = OutputListModel.getOutput(row)
+        if (String(o.presetId || "") !== "") {
+            const preset = PresetListModel.getPreset(PresetListModel.rowOfId(String(o.presetId)))
+            const cfg = preset.config || {}
+            if (preset.kind === "audio" && cfg.format === "WAV") return root.kUncompressedKbps
+            const kbps = parseInt(String(cfg.audioBitrate || ""))
+            if (kbps > 0) return kbps
+        }
+        return root.kUncompressedKbps   // a screen or sender gets the mix as it is
+    }
+    // One full travel of the dash pattern, in ms. 60 fps = 700 ms (what a style wire always did);
+    // audio is 900 ms at 192 kbps and speeds up with the log of the bitrate, so the range between
+    // 96 kbps and uncompressed stays readable instead of a blur.
+    function wireCycleMs(kind, toKey) {
+        const key = String(toKey || "")
+        const row = key.indexOf("out:") === 0 ? Number(key.substring(4)) : -1
+        if (kind === "audio") {
+            const kbps = root.outputAudioKbps(row)
+            const factor = Math.log(kbps / 32 + 1) / Math.log(192 / 32 + 1)
+            return Math.round(Math.max(300, Math.min(1800, 900 / Math.max(0.3, factor))))
+        }
+        const fps = root.outputFps(row)
+        return Math.round(Math.max(250, Math.min(2800, 700 * 60 / Math.max(1, fps))))
     }
 
     // ---- Wires, derived from the engine's assignments ------------------------
@@ -1672,6 +1865,13 @@ Item {
         root.dragKind = ""
         root.dropKey = ""
         root.dropKind = ""
+        // ONE LINE PER DROP, so a wire that "will not connect" says where it stopped:
+        // nothing under the pointer, a pair the canvas refuses, or a write that failed.
+        if (typeof EngineBridge !== "undefined")
+            EngineBridge.log("info", "RoutingWire",
+                             "drop from=" + key + " dot=" + kind + " over='" + over
+                             + "' resolved='" + wireKind + "'"
+                             + (wireKind.length > 0 ? "" : " (refused: no card under the pointer, or it cannot take this signal)"))
         if (wireKind.length > 0)
             root.toggleWire(key, over, wireKind)
     }
@@ -1884,6 +2084,13 @@ Item {
     function sinkSubtitle(o) {
         if (o.system) return qsTr("System audio")
         const kind = String(o.kind || "")
+        // A recording or a stream is its PRESET: the card says which settings it will
+        // use, or that it has none yet — never a bare transport name.
+        if (kind.toUpperCase() === "REC" || kind.toUpperCase() === "STREAM") {
+            void root.modelsRev
+            const summary = PresetListModel.summaryOf(String(o.presetId || ""))
+            return summary.length > 0 ? summary : qsTr("No preset — pick one in Configure output")
+        }
         const accepts = root.acceptsLabel(o)
         return kind.length > 0 ? kind + " · " + accepts : accepts
     }
@@ -1895,52 +2102,54 @@ Item {
         if (kind === "NDI") return "link"
         if (kind === "SDI") return "layers-intersect"
         if (kind === "HDMI") return "presentation"
-        if (kind === "REC") return "fileText"
+        if (kind === "REC") return PresetListModel.kindOf(String(o.presetId || "")) === "audio" ? "volume2" : "fileText"
         if (kind === "STREAM") return "activity"
         return "link"
     }
 
     // ---- A sink's own transport ---------------------------------------------
     // The graph node a sink row's transport IS: RoutingService names every output
-    // node "out:<stable row id>", and the RTMP row is the one exception
-    // (RecordingService's "out:stream", the node it creates when a destination is
-    // set). This is the node a take started from the card listens to.
+    // node "out:<stable row id>" (a STREAM row's included — its node carries its
+    // preset's target). This is the node a take started from the card listens to.
     function sinkNodeId(o) {
         if (!o || o.system) return ""
-        const kind = String(o.kind || "").toUpperCase()
-        if (kind === "STREAM") return "out:stream"
         return o.id ? "out:" + String(o.id) : ""
     }
-    // The node the LIVE take belongs to — "" while idle, and for a take started on
-    // the program from Settings · Recording, which no card owns.
+    // The node the LIVE take belongs to — "" while idle.
     readonly property string takeNode: RecordingService.recording
                                        && RecordingService.recordingNode.length > 0
                                        ? RecordingService.recordingNode : ""
-    // Which sinks carry a transport pill, and what it says. Recording and
-    // streaming are the two transports you START and STOP; every other card simply
-    // describes itself. A take is bound to the node it was started on, so only that
-    // card says Stop and the rest keep offering their own Start.
+    // Which sinks carry a transport pill, and what it says. A RECORDING card is the
+    // one transport you START and STOP here; every other card simply describes
+    // itself. A take is bound to the node it was started on, so only that card says
+    // Stop and the rest keep offering their own Start. A STREAM card has no pill:
+    // its preset's destination is written to its node (see RoutingService), but
+    // there is no RTMP sender in the engine yet to start or stop.
     function sinkActionLabel(o) {
         if (!o || o.system) return ""
         const kind = String(o.kind || "").toUpperCase()
-        if (kind !== "REC" && kind !== "STREAM") return ""
+        if (kind !== "REC") return ""
         const node = root.sinkNodeId(o)
         if (node.length === 0) return ""
         if (root.takeNode === node) return qsTr("Stop")
-        // The RTMP row has no node until a destination is set, and a take on a node
-        // the graph does not have is refused — so it offers nothing yet.
-        if (kind === "STREAM" && !RecordingService.streaming) return ""
         return qsTr("Record")
     }
-    // Start/stop a take ON THIS CARD'S NODE. The settings are the ones Settings ·
-    // Recording persists, so a take begun here is encoded exactly like one begun
-    // there; startRecordingOn refuses a node with nothing wired (its own toast
-    // names the reason, which is the honest answer for an empty card).
+    // Start/stop a take ON THIS CARD'S NODE, with THIS CARD'S PRESET: its container,
+    // encoder, bitrates, resolution and folder, not a global page of settings.
+    // startRecordingOn refuses a node with nothing wired (its own toast names the
+    // reason, which is the honest answer for an empty card).
     function transportSink(o) {
         const node = root.sinkNodeId(o)
         if (node.length === 0) return
         if (root.takeNode === node) {
             RecordingService.stopRecording()
+            return
+        }
+        const presetId = String(o.presetId || "")
+        const presetKind = PresetListModel.kindOf(presetId)
+        if (presetKind !== "recording" && presetKind !== "audio") {
+            EventBus.notify(qsTr("“%1” has no recording preset yet — pick one in Configure output (right-click the card).").arg(String(o.name || "")),
+                            "warning", qsTr("Routing"), "routing.transport.nopreset")
             return
         }
         if (RecordingService.recording) {
@@ -1950,7 +2159,7 @@ Item {
                             "warning", qsTr("Routing"), "routing.transport.busy")
             return
         }
-        RecordingService.startRecordingOn(node, RecordingService.config)
+        RecordingService.startRecordingOn(node, PresetListModel.configOf(presetId))
     }
 
     // ---- What each WIRED HALF is doing --------------------------------------
@@ -2157,7 +2366,7 @@ Item {
                 const o = list[i]
                 if (!o.acceptsAudio)
                     continue
-                const buses = root.audioBusesOf(o)
+                const buses = root.visibleAudioBusesOf(o)
                 if (buses.length === 0)
                     continue
                 const top = c === 3 ? root.sinkSlotTop(i) : root.rowTop(i)
@@ -2217,7 +2426,7 @@ Item {
         // A screen feeding this sink is video arriving, exactly like a video bus.
         const videoBuses = root.videoBusesOf(o)
         const video = videoBuses.length > 0 || root.screenFeedsOf(o).length > 0
-        const buses = root.audioBusesOf(o)
+        const buses = root.visibleAudioBusesOf(o)
         const audio = buses.length > 0
         if (o.acceptsVideo && !o.acceptsAudio) return video ? qsTr("video in") : qsTr("silent")
         // An audio-only sink can carry SEVERAL buses (the speaker endpoint sums
@@ -2231,9 +2440,45 @@ Item {
         if (audio) return qsTr("audio only")
         return qsTr("silent")
     }
+    // WHAT KIND OF LAYOUT A TEMPLATE IS — "full" or "lower" — from where its main text
+    // block sits on the stage. The same rule, and the same words, as the Styles screen's
+    // layout chip (StylesScreen.layoutClassOf): the node under STYLE TEMPLATES used to
+    // print the style's stored base-layout key verbatim ("lowerThird" on every style,
+    // whatever its templates were).
+    function layoutClassOf(key) {
+        if (typeof key !== "string" || key === "")
+            return ""
+        if (key.indexOf("tpl-") !== 0)
+            return key === "lowerThird" ? "lower" : ""
+        const blocks = TemplateLibraryService.design(key).blocks ?? []
+        let best = null
+        let bestArea = 0
+        for (let i = 0; i < blocks.length; ++i) {
+            const b = blocks[i]
+            if (b.kind !== undefined && b.kind !== "text")
+                continue
+            const area = Number(b.width) * Number(b.height)
+            if (area > bestArea) {
+                bestArea = area
+                best = b
+            }
+        }
+        if (!best)
+            return ""
+        return (Number(best.y) >= StageGrid.h * 0.5 && Number(best.height) <= StageGrid.h * 0.5)
+               ? "lower" : "full"
+    }
     function styleSubtitle(style) {
-        const template = String(style.templateKey || "")
-        if (template.length > 0) return template
+        const keys = [style.familyTemplateShows, style.familyTemplateMedia,
+                      style.familyTemplateScripture, style.familyTemplateTable]
+                     .filter(k => typeof k === "string" && k !== "")
+        if (keys.length === 0)
+            keys.push(String(style.templateKey || ""))
+        const kinds = new Set(keys.map(root.layoutClassOf).filter(c => c !== ""))
+        if (kinds.size > 1)
+            return qsTr("Mixed")
+        if (kinds.size === 1)
+            return kinds.has("lower") ? qsTr("Lower Third") : qsTr("Full Screen")
         const kind = String(style.contentType || "")
         return kind.length > 0 ? kind : qsTr("Style")
     }
@@ -2414,6 +2659,7 @@ Item {
             id: flick
             anchors.fill: parent
             anchors.margins: 1
+            anchors.topMargin: Theme.space4
             contentWidth: board.width
             contentHeight: board.height
             boundsBehavior: Flickable.StopAtBounds
@@ -2451,8 +2697,8 @@ Item {
                         x: root.columnX(modelData.column)
                         y: 0
                         width: root.colW
-                        height: 30
-                        radius: Theme.radiusSm
+                        height: 40
+                        radius: Theme.radiusMd
                         color: Theme.inset
                         border.width: 1
                         border.color: Theme.border
@@ -2546,6 +2792,8 @@ Item {
                         // drawn dashed and fainter, so "carried" and "on air" stop
                         // looking like the same line. Clicking one shows it.
                         readonly property bool offAir: modelData.onAir === false
+        // ms for the pattern to travel once: the output's frame rate (video, style) or audio bitrate.
+        readonly property int cycleMs: { root.modelsRev; return root.wireCycleMs(modelData.kind, modelData.to) }
 
                         opacity: dimmed ? 0.16 : (offAir ? 0.5 : 1)
 
@@ -2565,6 +2813,75 @@ Item {
                                          || wireShape.offAir
                                          ? ShapePath.DashLine : ShapePath.SolidLine
                             dashPattern: [4, 4]
+                            // DATA MOVING WHILE LIVE: a style wire's dashes travel from the
+                            // style toward the output while the show is on air, so the link
+                            // reads as carrying the look rather than sitting there. The
+                            // path is plotted from its left end, and a dash offset that
+                            // falls moves the dashes toward the far end; the pattern is
+                            // 4 + 4 stroke widths, so 8 -> 0 loops without a seam. Stopped,
+                            // the wire is the plain static dashed line it always was.
+                            dashOffset: 0
+                            NumberAnimation on dashOffset {
+                                from: 8
+                                to: 0
+                                duration: wireShape.cycleMs
+                                loops: Animation.Infinite
+                                // A STYLE WIRE MOVES THE MOMENT IT IS CONNECTED — it needs no GO LIVE.
+                                // Connecting a style restyles that output's own picture straight away
+                                // (its background, its template), so the link is carrying the look from
+                                // that instant; it only rests when the output itself is switched off.
+                                // A GATE wire (overlay / media) moves while that layer really has
+                                // something on air (cardLiveState reads the real overlay / media state).
+                                running: (wireShape.modelData.kind === "style"
+                                          && (root.outputByRow(Number(String(wireShape.modelData.to).substring(4))) || {}).enabled !== false)
+                                         || (wireShape.modelData.kind === "gate"
+                                             && root.cardLiveState(wireShape.modelData.from) === 1)
+                            }
+                            startX: wireShape.fromX
+                            startY: wireShape.fromY
+                            PathCubic {
+                                x: wireShape.toX
+                                y: wireShape.toY
+                                control1X: wireShape.fromX + wireShape.bend
+                                control1Y: wireShape.fromY
+                                control2X: wireShape.toX - wireShape.bend
+                                control2Y: wireShape.toY
+                            }
+                        }
+
+                        // THE MOVING DATA, for the two signal wires. The solid line stays as the wire;
+                        // on top of it, while the show is live, a lighter pattern travels toward the
+                        // output — each kind in its own shape so they never read alike:
+                        //   video  long dashes, like frames going by
+                        //   audio  small round beads, like samples
+                        // (a style wire is the dashed line itself, animated above). Speed is the
+                        // rate the output runs at: see wireCycleMs. A video wire that is not the one
+                        // on air carries no picture, so nothing travels on it.
+                        ShapePath {
+                            id: dataFlow
+                            readonly property bool isAudio: wireShape.modelData.kind === "audio"
+                            // Moves only while the bus it leaves is really carrying something (a source
+                            // delivering frames, or sound above silence) — measured, not assumed.
+                            readonly property bool flows: (isAudio || wireShape.modelData.kind === "video")
+                                                          && !wireShape.offAir
+                                                          && root.cardLiveState(wireShape.modelData.from) === 1
+                            // Stroke widths per pattern: dash + gap (video) or bead + gap (audio).
+                            readonly property real period: isAudio ? 3.6 : 10
+                            strokeColor: flows
+                                         ? Qt.lighter(root.wireColor(wireShape.modelData.kind), 1.55) : "transparent"
+                            strokeWidth: highlighted ? 3.4 : (isAudio ? 3 : 2.2)
+                            fillColor: "transparent"
+                            capStyle: ShapePath.RoundCap
+                            strokeStyle: ShapePath.DashLine
+                            dashPattern: isAudio ? [0.05, 3.55] : [6, 4]
+                            dashOffset: 0
+                            NumberAnimation on dashOffset {
+                                from: dataFlow.period
+                                to: 0
+                                duration: wireShape.cycleMs
+                                loops: Animation.Infinite
+                                running: dataFlow.flows
+                            }
                             startX: wireShape.fromX
                             startY: wireShape.fromY
                             PathCubic {
@@ -2743,6 +3060,9 @@ Item {
                                   + (modelData.res ? " · " + modelData.res : "")
                         iconName: "presentation"
                         accent: Theme.wireVideo
+                        enableToggle: true
+                        outputEnabled: modelData.enabled !== false
+                        onOutputEnabledToggled: (hoverKey) => root.toggleOutputEnabled(Number(hoverKey.substring(4)))
                         // THE GATES THEMSELVES, on the card (RoutingNodeCard::gateChips):
                         // one press flips this row's own overlay or media flag, so an
                         // operator does not have to open a menu to answer "why is this
@@ -2917,6 +3237,9 @@ Item {
                         // of grey like something that takes nothing.
                         accent: (modelData.acceptsAudio && modelData.acceptsVideo) ? Theme.accent
                               : modelData.acceptsAudio ? Theme.wireAudio : Theme.wireVideo
+                        enableToggle: true
+                        outputEnabled: modelData.enabled !== false
+                        onOutputEnabledToggled: (hoverKey) => root.toggleOutputEnabled(Number(hoverKey.substring(4)))
                         status: root.receivesLabel(modelData)
                         // ...and the same two chips, on every sink that is an output of
                         // ours. The speaker endpoint (system) is the engine's node, not
@@ -2962,7 +3285,12 @@ Item {
                 Rectangle {
                     id: addPicker
                     readonly property var entries: root.addMenu === "output" ? root.outputKinds : []
-                    readonly property bool showing: root.addMenu.length > 0
+                    // ONLY THE OUTPUT "+" USES THIS PANEL. It used to show for ANY open add
+                    // menu, but the Buses and Styles menus are their own DropdownPanels
+                    // (busAddMenu / styleAddMenu) and hand this one no entries — so
+                    // opening either "+" drew this panel too, empty, floating over the
+                    // Overlays card beside the real menu.
+                    readonly property bool showing: root.addMenu === "output"
 
                     visible: showing
                     z: 25
@@ -3034,7 +3362,7 @@ Item {
                                 PositionHoverArea {
                                     id: entryArea
                                     anchors.fill: parent
-                                    onClicked: root.addOutput(modelData.kind)
+                                    onClicked: root.addOutput(modelData)
                                 }
                             }
                         }
@@ -3252,7 +3580,13 @@ Item {
         model: []
         // `item` is the row's own entry, so the action is picked by ID, not by
         // comparing translated labels.
-        onItemActivated: (label, item) => root.actOnCard(item && item.id ? String(item.id) : "")
+        // The panel never closes itself — the caller does (the Screens list and Styles menus
+        // set visible = false first). Without it, a verb that leaves its card standing in
+        // place (Delete bus, with its Undo toast) left the menu hanging open over the canvas.
+        onItemActivated: (label, item) => {
+            cardMenu.visible = false
+            root.actOnCard(item && item.id ? String(item.id) : "")
+        }
     }
 
     // Deleting a sink is destructive and leaves nothing to undo (removing a bus
@@ -3335,6 +3669,51 @@ Item {
         // the real QScreens, which is the "external monitor" choice this dialog
         // exists for. `showType` is off: the transport was chosen in the picker
         // that opened this, and it is the row's identity from then on.
+        // A RECORDING or STREAMING output is its name and the PRESET it records /
+        // streams with — there is no display, mode or test pattern to set. The
+        // presets themselves are made and edited on Settings · Recording.
+        SettingsField {
+            width: parent.width
+            visible: root.outIsPreset
+            label: qsTr("Name")
+            text: root.outName
+            onTextEdited: (t) => root.outName = t
+        }
+        SelectField {
+            id: outPresetField
+            width: parent.width
+            visible: root.outIsPreset
+            label: root.outKind.toUpperCase() === "STREAM" ? qsTr("Streaming preset") : qsTr("Recording preset")
+            placeholder: qsTr("Pick a preset")
+            readonly property var presets: {
+                root.modelsRev
+                // A Recording output takes a recording preset or an audio one.
+                return root.outKind.toUpperCase() === "STREAM"
+                       ? PresetListModel.presetsOfKind("streaming")
+                       : PresetListModel.presetsOfKind("recording").concat(PresetListModel.presetsOfKind("audio"))
+            }
+            // The box shows the preset's NAME; the value that is kept is its id.
+            value: PresetListModel.nameOf(root.outPresetId)
+            options: outPresetField.presets.map((p) => ({ label: p.name, value: p.presetId }))
+            onValuePicked: (v) => {
+                // The panel reports the picked label; map it back to the id.
+                for (let i = 0; i < outPresetField.presets.length; ++i)
+                    if (outPresetField.presets[i].name === v || outPresetField.presets[i].presetId === v)
+                        root.outPresetId = outPresetField.presets[i].presetId
+            }
+        }
+        Text {
+            width: parent.width
+            visible: root.outIsPreset
+            text: outPresetField.presets.length === 0
+                  ? qsTr("There are no presets of this type yet. Make one in Settings · Recording, then pick it here.")
+                  : qsTr("This output uses that preset's settings; edit them in Settings · Recording.")
+            wrapMode: Text.WordWrap
+            color: Theme.textMuted
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.textXs
+        }
+
         ScreenForm {
             width: parent.width
             name: root.outName

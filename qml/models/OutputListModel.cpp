@@ -231,6 +231,7 @@ void OutputListModel::reloadFromStore()
                                             : QString::fromStdString(so.mediaFit);
         // "" = the program stream (the default, and what every older row is).
         item.audioDevice = QString::fromStdString(so.audioDevice);
+        item.presetId = QString::fromStdString(so.presetId);
         // Legacy rows (before onAirOnly was a thing): an NDI row never wears
         // a screen window — enforce the transport rule on hydrate so pre-
         // existing rosters get the fix without a settings round-trip.
@@ -379,6 +380,7 @@ void OutputListModel::saveRoster()
         so.showMedia = item.showMedia;
         so.mediaFit = item.mediaFit.toStdString();
         so.audioDevice = item.audioDevice.toStdString();
+        so.presetId = item.presetId.toStdString();
         so.onAirOnly = item.onAirOnly;
         for (int i = 0; i < item.content.size() && i < 6; ++i)
             so.contentToggles[i] = item.content.at(i).enabled;
@@ -541,6 +543,7 @@ QVariant OutputListModel::data(const QModelIndex &index, int role) const
     case StyleIdRole: return item.styleId;
     case MediaFitRole: return item.mediaFit;
     case AudioDeviceRole: return item.audioDevice;
+    case PresetIdRole: return item.presetId;
     case VideoModeRole: return item.videoMode;
     case OverlayGateRole: return item.showOverlay;
     case MediaGateRole: return item.showMedia;
@@ -593,6 +596,7 @@ QHash<int, QByteArray> OutputListModel::roleNames() const
         { StyleIdRole, "styleId" },
         { MediaFitRole, "mediaFit" },
         { AudioDeviceRole, "audioDevice" },
+        { PresetIdRole, "presetId" },
         { VideoModeRole, "videoMode" },
         { OverlayGateRole, "showOverlay" },
         { MediaGateRole, "showMedia" },
@@ -768,12 +772,21 @@ void OutputListModel::setActive(int index)
     emit activeStyleChanged();
 }
 
-void OutputListModel::setEnabled(int index, bool on)
+bool OutputListModel::setEnabled(int index, bool on)
 {
     if (index < 0 || index >= m_outputs.size())
-        return;
+        return false;
     if (m_outputs[index].isEnabled == on)
-        return;
+        return true;
+
+    if (!on) {
+        int enabledCount = 0;
+        for (const OutputItem &item : m_outputs)
+            if (item.isEnabled)
+                ++enabledCount;
+        if (enabledCount <= 1)
+            return false;
+    }
 
     m_outputs[index].isEnabled = on;
     saveRoster();
@@ -790,6 +803,7 @@ void OutputListModel::setEnabled(int index, bool on)
         const QModelIndex changed = this->index(index);
         emit dataChanged(changed, changed, { EnabledRole });
     }
+    return true;
 }
 
 void OutputListModel::renameOutput(int index, const QString &name)
@@ -1610,6 +1624,11 @@ bool OutputListModel::hasOwnPass(int row) const
         return true;
     if (item.videoMode == QStringLiteral("compose"))
         return true;
+    // A RECORDING or STREAMING output is a virtual output: it always renders its own picture
+    // (its wired style's text, its wired buses, its Media / Overlay gates), because that picture
+    // is what the take captures. Without its own pass it would fall back to the one on-air frame.
+    if (item.kind == QLatin1String("REC") || item.kind == QLatin1String("STREAM"))
+        return true;
     // A wired row with NO style is exactly the row an operator wires a camera
     // into, and the pass it gets composes that bus full-frame.
     return (row < routedVideoBuses_.size() ? routedVideoBuses_.at(row) : 0) > 0;
@@ -1670,6 +1689,65 @@ void OutputListModel::connectToTemplateLibrary()
     });
 }
 
+// WHICH PRESET THIS REC / STREAM ROW USES (Settings · Routing's "+" and its
+// Configure dialog). "" = none. The preset is read when the row records / is
+// mirrored into the graph, so this only stores the reference and asks the routing
+// pass to look again (a stream preset's target is part of its output node).
+void OutputListModel::setPresetId(int index, const QString &presetId)
+{
+    if (index < 0 || index >= m_outputs.size())
+        return;
+    if (m_outputs[index].presetId == presetId)
+        return;
+
+    m_outputs[index].presetId = presetId;
+    const QModelIndex changed = this->index(index);
+    emit dataChanged(changed, changed, { PresetIdRole });
+    saveRoster();
+    if (RoutingService *routing = RoutingService::instance())
+        routing->refresh();
+}
+
+int OutputListModel::presetUsage(const QString &presetId) const
+{
+    if (presetId.isEmpty())
+        return 0;
+    int n = 0;
+    for (const OutputItem &item : m_outputs)
+        if (item.presetId == presetId)
+            ++n;
+    return n;
+}
+
+void OutputListModel::detachPresetEverywhere(const QString &presetId)
+{
+    if (presetId.isEmpty())
+        return;
+    bool touched = false;
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        if (m_outputs[i].presetId != presetId)
+            continue;
+        m_outputs[i].presetId.clear();
+        const QModelIndex changed = index(i);
+        emit dataChanged(changed, changed, { PresetIdRole });
+        touched = true;
+    }
+    if (touched)
+        saveRoster();
+}
+
+void OutputListModel::presetChanged(const QString &presetId)
+{
+    if (presetId.isEmpty())
+        return;
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        if (m_outputs[i].presetId != presetId)
+            continue;
+        const QModelIndex changed = index(i);
+        emit dataChanged(changed, changed, { PresetIdRole });
+    }
+}
+
 void OutputListModel::detachStyleEverywhere(const QString &styleId)
 {
     if (styleId.isEmpty())
@@ -1727,6 +1805,7 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "showMedia", item.showMedia },
         { "mediaFit", item.mediaFit },
         { "audioDevice", item.audioDevice },
+        { "presetId", item.presetId },
         { "onAirOnly", item.onAirOnly },
         { "styleName", styleName },
         { "content", content },

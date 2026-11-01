@@ -369,6 +369,11 @@ Rectangle {
 
     // Matches Theme.space4 — see x/y note below.
     readonly property int insetPad: 16
+    // Menu text: one size down from the old 15 — a menu row is a label, not a
+    // headline, and 15px rows read as a big slab next to the 13px fields they drop from.
+    readonly property int rowFont: Theme.textSm
+    // The rows sit on a 6px gutter inside the panel as soft rounded pills.
+    readonly property int rowGutter: 6
 
     // Per-instance overrides for a tighter row (the font-family picker's own
     // ask: a long, font-sample-heavy list reads better packed closer than
@@ -416,7 +421,7 @@ Rectangle {
                     id: labelSizer
                     visible: false
                     font.family: Theme.fontFamily
-                    font.pixelSize: 15 // Theme.textMd
+                    font.pixelSize: root.rowFont
                     font.weight: Font.Medium
                     text: parent.isDivider || parent.modelData.label === undefined
                           ? "" : parent.modelData.label
@@ -469,7 +474,21 @@ Rectangle {
     readonly property real naturalWidth: {
         if (root.matchAnchorWidth && root.anchorItem && root.anchorItem.width > 0)
             return root.anchorItem.width
-        return root.fitContentWidth ? root.fittedWidth : 480
+        return (root.fitContentWidth || root.autoFit) ? root.fittedWidth : 480
+    }
+    // A menu hugs its widest row (a native menu's size) unless it is an autocomplete
+    // list or previews typefaces — those keep the roomy slab. Before this, an
+    // "Edit / Duplicate / Delete" context menu opened 480px wide.
+    readonly property bool autoFit: {
+        if (root.dismissOnOutsideClick)
+            return false
+        const m = root.model
+        if (!m)
+            return false
+        for (let i = 0; i < m.length; ++i)
+            if (m[i] && m[i].fontFamily)
+                return false
+        return true
     }
     width: root.widthCap > 0 ? Math.min(root.naturalWidth, root.widthCap) : root.naturalWidth
     // What the panel wants to be, and the cap actually in force: the room
@@ -495,7 +514,7 @@ Rectangle {
     // 0: a window so short that the header alone fills the cap must not
     // produce a negative Flickable height.
     readonly property real listViewport: Math.max(0, height - 16 - headerCol.height)
-    radius: 10 // Theme.radiusLg
+    radius: 12
     color: Theme.rowBg
     border.color: Theme.border
     border.width: 1
@@ -584,12 +603,12 @@ Rectangle {
                             id: dividerC
                             Item {
                                 width: itemList.width
-                                height: 12 // Theme.space3
+                                height: 11
                                 Rectangle {
                                     anchors.centerIn: parent
-                                    width: parent.width - 32 // Theme.space4 * 2
+                                    width: parent.width - root.rowGutter * 2 - 8
                                     height: 1
-                                    color: Theme.border
+                                    color: Theme.borderSubtle
                                 }
                             }
                         }
@@ -626,24 +645,37 @@ Rectangle {
                                 // with no hover wash and swallow activation.
                                 // Autocomplete mode draws the keyboard highlight (the row
                                 // Up/Down will accept) under the mouse hover, same wash.
-                                color: alive && !modelData.disabled && root.highlightedIndex === index
-                                       ? (modelData.danger ? Qt.alpha(Theme.danger, 0.14)
-                                                           : Theme.border)
-                                       : alive && modelData.accent === true
-                                           ? Qt.alpha(Theme.accent, 0.14)
-                                           : ListRows.stripeOverlay(index)
-                                Behavior on color {
-                                    ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing }
-                                }
+                                // The row itself is a transparent hit area; the visible
+                                // surface is the inset pill below (no zebra stripes: they
+                                // banded a 3-row context menu into dark/light slabs).
+                                color: "transparent"
 
-                                // The MOUSE wash is the app's shared hover layer;
-                                // the keyboard highlight above is state and stays
-                                // on the row itself.
-                                HoverGlow {
-                                    anchors.fill: parent
-                                    radius: parent.radius
-                                    hovered: alive && !modelData.disabled && itemArea.hovered
-                                    glowColor: modelData.danger ? Qt.alpha(Theme.danger, 0.14) : Theme.border
+                                Rectangle {
+                                    id: pill
+                                    x: root.rowGutter
+                                    y: 1
+                                    width: parent.width - root.rowGutter * 2
+                                    height: parent.height - 2
+                                    radius: Theme.radiusMd - 1
+                                    color: alive && !modelData.disabled && root.highlightedIndex === index
+                                           ? (modelData.danger ? Qt.alpha(Theme.danger, 0.14)
+                                                               : Theme.border)
+                                           : alive && modelData.accent === true
+                                               ? Qt.alpha(Theme.accent, 0.14)
+                                               : "transparent"
+                                    Behavior on color {
+                                        ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing }
+                                    }
+
+                                    // The MOUSE wash is the app's shared hover layer;
+                                    // the keyboard highlight above is state and stays
+                                    // on the pill itself.
+                                    HoverGlow {
+                                        anchors.fill: parent
+                                        radius: parent.radius
+                                        hovered: alive && !modelData.disabled && itemArea.hovered
+                                        glowColor: modelData.danger ? Qt.alpha(Theme.danger, 0.14) : Theme.border
+                                    }
                                 }
 
                                 Text {
@@ -679,8 +711,8 @@ Rectangle {
                                     // app font for every ordinary menu row.
                                     font.family: alive && modelData.fontFamily ? modelData.fontFamily
                                                                               : Theme.fontFamily
-                                    font.pixelSize: 15 // Theme.textMd
-                                    font.weight: Font.Medium
+                                    font.pixelSize: root.rowFont
+                                    font.weight: modelData && modelData.accent === true ? Font.DemiBold : Font.Medium
                                 }
 
                                 // Position truth, not containsMouse — hover-exit

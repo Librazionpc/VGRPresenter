@@ -10,8 +10,10 @@
 #include <pdhmsg.h>
 #include <tlhelp32.h>
 
+#include <map>
 #include <mutex>
 #include <set>
+#include <string>
 #include <sstream>
 #include <vector>
 
@@ -47,10 +49,10 @@ public:
         if (PdhCollectQueryData(query_) != ERROR_SUCCESS)
             return v;
         if (gpu_) {
-            // Several engine instances share one GPU; their sum can pass 100
-            // when engines run concurrently. Left at -1 when no instance
-            // reported (the honest "not measured").
-            const double gpu = Sum(gpu_);
+            // THIS process only: the counter lists every process on every adapter, and
+            // the machine-wide sum read as "the app uses 51%" while a browser or the
+            // desktop compositor was doing it. Left at -1 when nothing reported at all.
+            const double gpu = OwnGpu(gpu_);
             if (gpu >= 0.0)
                 v.gpuPct = Clamp(gpu, 0.0, 100.0);
         }
@@ -102,7 +104,7 @@ private:
     // A wildcard counter's instances (GPU Engine: one per active engine;
     // thermal zones: one per zone).
     template <typename Fn>
-    void ForEach(PDH_HCOUNTER counter, Fn fn)
+    void ForEach(PDH_HCOUNTER counter, Fn fn)   // fn(value, instanceName)
     {
         DWORD size = 0;
         DWORD type = 0;
@@ -116,22 +118,47 @@ private:
         const size_t count = size / sizeof(PDH_FMT_COUNTERVALUE_ITEM_W);
         for (size_t i = 0; i < count; ++i)
             if (items[i].FmtValue.CStatus == ERROR_SUCCESS)
-                fn(items[i].FmtValue.doubleValue);
+                fn(items[i].FmtValue.doubleValue, items[i].szName);
     }
 
     double Sum(PDH_HCOUNTER counter)
     {
         double total = 0.0;
         bool any = false;
-        ForEach(counter, [&](double x) { total += x; any = true; });
+        ForEach(counter, [&](double x, const wchar_t *) { total += x; any = true; });
         return any ? total : -1.0;
+    }
+
+    // GPU Engine instances are named "pid_<pid>_luid_..._phys_N_eng_N_engtype_<kind>".
+    // This process's load is, like Task Manager, its busiest engine type (3D, Copy,
+    // VideoEncode...) summed over its instances. A process that has touched no engine
+    // has no instance: that is 0 while the counter is alive, not "unmeasured".
+    double OwnGpu(PDH_HCOUNTER counter)
+    {
+        const std::wstring tag = L"pid_" + std::to_wstring(GetCurrentProcessId()) + L"_";
+        std::map<std::wstring, double> byType;
+        bool any = false;
+        ForEach(counter, [&](double x, const wchar_t *name) {
+            any = true;
+            if (!name || std::wstring(name).find(tag) == std::wstring::npos)
+                return;
+            const wchar_t *t = wcsstr(name, L"engtype_");
+            byType[t ? t : L""] += x;
+        });
+        if (!any)
+            return -1.0;
+        double best = 0.0;
+        for (const auto &kv : byType)
+            if (kv.second > best)
+                best = kv.second;
+        return best;
     }
 
     double Max(PDH_HCOUNTER counter)
     {
         double best = -1.0;
         bool any = false;
-        ForEach(counter, [&](double x) { if (!any || x > best) best = x; any = true; });
+        ForEach(counter, [&](double x, const wchar_t *) { if (!any || x > best) best = x; any = true; });
         return any ? best : -1.0;
     }
 

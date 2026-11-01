@@ -94,45 +94,27 @@ Rectangle {
     // directly.
     readonly property bool live: LiveOutputService.live
 
-    // The one on-air switch: red pill, GO LIVE / STOP (the transport arrows
-    // and Clear stay on the monitor wall — this is the global switch).
-    // Same icon-pill-above/caption-below layout as Search and Settings
-    // (below) — was icon-left/text-right, the odd one out in the row.
+    // THE ONE ON-AIR SWITCH: red pill, GO LIVE / STOP (the transport arrows and Clear stay on the
+    // monitor wall — this is the global switch). It owns the very end of the row, in the same
+    // right-hand column as the caption buttons above it.
+    // Same icon-pill-above/caption-below layout as Search and Settings.
     Item {
         id: goLiveButton
         objectName: "selfTestGoLive"
-        // The end of the row is the live switch's, and Settings chains off it
-        // (anchoring each to the other's left is a binding loop — neither would
-        // have a fixed edge to resolve from). It sits at the window's own right
-        // edge, in the same right-hand column as the caption buttons above it —
-        // that IS the design (user call: the tabs own the middle, GO LIVE owns
-        // the end).
-        //
-        // (It briefly reserved the caption column instead, to keep the two rows
-        // from reading as one stacked block at small window scales. That traded
-        // the wrong thing away: it moved the tiles off the right end they are
-        // supposed to hold. What actually stole input in that corner was never
-        // the tile position — it was the window's UNSCALED resize strips lying
-        // over the scaled buttons, which is fixed at the frame (see
-        // WindowResizeHandles and captionClusterWidth below), not here.)
         anchors.right: parent.right
+        anchors.rightMargin: 12
         y: root.titleRowHeight + (root.tabRowHeight - height) / 2
         width: Math.max(goLiveLabel.implicitWidth, pillGoLive.width) + 12
         height: 52
 
-        function baseColor() {
-            return root.live ? Theme.liveBgOnAir : Theme.liveBg
-        }
-
         Rectangle {
             id: pillGoLive
             anchors.horizontalCenter: parent.horizontalCenter
-            // Same vertical centring as pillSearch/pillGear below.
             y: 4
             width: 60
             height: 30
             radius: 8
-            color: goLiveButton.baseColor()
+            color: root.live ? Theme.liveBgOnAir : Theme.liveBg
             Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             HoverGlow {
                 anchors.fill: parent
@@ -141,16 +123,23 @@ Rectangle {
                 glowColor: Qt.alpha(Theme.controlInk, 0.16)
             }
 
+            // A ring with a dot; on air the dot pulses (a quiet "this is live" tell).
             Rectangle {
                 anchors.centerIn: parent
-                width: 8; height: 8; radius: 4
-                color: root.live ? Theme.dangerLight : Theme.controlInk
-                // On air: the dot pulses (a quiet "this is live" tell).
-                SequentialAnimation on opacity {
-                    running: root.live
-                    loops: Animation.Infinite
-                    NumberAnimation { to: 0.25; duration: 700 }
-                    NumberAnimation { to: 1.0; duration: 700 }
+                width: 18; height: 18; radius: 9
+                color: "transparent"
+                border.width: 2
+                border.color: root.live ? Theme.dangerLight : Theme.controlInk
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 6; height: 6; radius: 3
+                    color: root.live ? Theme.dangerLight : Theme.controlInk
+                    SequentialAnimation on opacity {
+                        running: root.live
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.25; duration: 700 }
+                        NumberAnimation { to: 1.0; duration: 700 }
+                    }
                 }
             }
 
@@ -175,9 +164,9 @@ Rectangle {
             text: root.live ? qsTr("STOP") : qsTr("GO LIVE")
             color: root.live ? Theme.dangerLight : Theme.controlInk
             font.family: Theme.fontFamily
-            font.pixelSize: 13
+            font.pixelSize: 14
             font.weight: Font.DemiBold
-            font.letterSpacing: 0.5
+            font.letterSpacing: 0.2
             textFormat: Text.PlainText
         }
     }
@@ -277,8 +266,9 @@ Rectangle {
             text: qsTr("Search")
             color: Theme.controlInk
             font.family: Theme.fontFamily
-            font.pixelSize: 15
-            font.bold: true
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+            font.letterSpacing: 0.2
             textFormat: Text.PlainText
         }
     }
@@ -396,8 +386,9 @@ Rectangle {
             text: qsTr("Settings")
             color: Theme.controlInk
             font.family: Theme.fontFamily
-            font.pixelSize: 15
-            font.bold: true
+            font.pixelSize: 14
+            font.weight: Font.DemiBold
+            font.letterSpacing: 0.2
             textFormat: Text.PlainText
         }
     }

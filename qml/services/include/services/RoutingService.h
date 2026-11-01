@@ -7,7 +7,7 @@
 // the engine's production graph knows a different thing: OUTPUT NODES, each
 // carrying an OutputConfig — one video bus + one audio bus (docs/specs/27
 // §Outputs). Nothing joined the two. Only the live-stream node was ever created
-// in the graph (RecordingService's "out:stream"), so every other output had no
+// in the graph (the old shared "out:stream"), so every other output had no
 // node, no bus pair, and no place for a routing wire to live. The Routing
 // canvas could therefore only draw wires it remembered in QML, which is exactly
 // what a wire must not be.
@@ -32,10 +32,10 @@
 // IDENTITY. A row's node id comes from its STABLE id (OutputListModel's
 // `outputId`), never its name or its position: renaming an output must not cut
 // its wires, and deleting one must not hand them to whatever takes its row.
-// Two nodes are not this service's to create. The STREAM row's is "out:stream",
-// owned by RecordingService (rebuilt when the RTMP target changes), and the
-// SPEAKER row's is "out:speakers", owned by AudioEngine (made with exactly the
-// caps the mixer needs). Both are read and assigned, never mirrored.
+// One node is not this service's to create: the SPEAKER row's "out:speakers", owned
+// by AudioEngine (made with exactly the caps the mixer needs) — read and assigned,
+// never mirrored. A STREAM row is mirrored like any other, and its node carries the
+// RTMP target of the preset the row is wired to (PresetListModel).
 //
 // AN OUTPUT HOLDS SEVERAL BUSES PER SIDE. A wire is an EDGE, and an output's
 // edges are a SET: drop three buses on one card and it carries three, on each
@@ -140,6 +140,10 @@ public:
     // assignBus (accepted here, applied by the engine worker).
     Q_INVOKABLE bool linkScreen(int screenRow, int sinkRow, bool linked);
 
+    // The program-speaker endpoint is not part of the output roster, so its
+    // enabled state is stored on its graph node rather than OutputListModel.
+    Q_INVOKABLE void setSpeakersEnabled(bool enabled);
+
     // Does this row carry that signal at all? A physical screen (HDMI) takes
     // video only — its window has no audio path — while NDI/SDI/REC/STREAM
     // carry both. The canvas asks before it offers a drop.
@@ -170,14 +174,22 @@ private:
     struct RowSpec
     {
         int row = -1;
-        QString nodeId;     // "out:<stableId>" / "out:stream"
+        QString nodeId;     // "out:<stableId>"
         QString name;       // engine display name
         QString kind;       // HDMI | NDI | SDI | REC | STREAM
         bool screen = false;
+        bool enabled = true;
         // The endpoint this row's audio plays on, as the audio roster's id
         // ("waveout:<n>"). Empty = the program stream. Read on the interface
         // thread, because the worker must never touch the roster model.
         QString audioDevice;
+        // STREAM rows: where the row's preset pushes (rtmp://server/key, "" =
+        // no preset / no key yet) and whether it asks for a hardware encoder.
+        QString networkTarget;
+        bool hardwareEncoder = true;
+        // REC / STREAM rows: the name of the row's OWN rendered picture, which the recording
+        // engine captures instead of the single on-air frame (node meta "recordBuffer").
+        QString recordBuffer;
     };
 
     // Build the specs here, on the interface thread, from the roster.
@@ -251,6 +263,7 @@ private:
     QVariantList rows_;
     int revision_ = 0;
     bool loggedFirstSync_ = false;
+    bool speakersEnabled_ = true;
     // One warning per process for a mirror that ran before the roster had been
     // read (see refresh): the condition is a boot race, not a user-visible state.
     bool warnedRosterNotReady_ = false;

@@ -1,4 +1,5 @@
 #include "services/EngineBridge.h"
+#include "services/DataRoot.h"
 #include "services/EventBus.h"
 
 #include "core/kernel/Kernel.hpp"
@@ -145,7 +146,7 @@ bool EngineBridge::boot()
         return true;
     deviceEnumerationStopping_ = false;
 
-    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString base = dataroot::appDataRoot();
     const QString logDir = base + QStringLiteral("/logs");
     const QString dataDir = base + QStringLiteral("/enginedata");
     QDir().mkpath(logDir);

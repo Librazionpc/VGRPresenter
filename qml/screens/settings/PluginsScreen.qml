@@ -122,7 +122,7 @@ Item {
         anchors.fill: parent
         anchors.rightMargin: Theme.space6 + Theme.space2
         contentWidth: width
-        contentHeight: layout.height + 24
+        contentHeight: layout.y + layout.height + Theme.space6   // the column's own top offset counts, or the last card sits on the window edge
         clip: true
         boundsBehavior: Flickable.StopAtBounds
 

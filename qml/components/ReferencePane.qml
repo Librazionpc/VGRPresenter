@@ -1569,17 +1569,33 @@ Item {
     function step(direction) {
         if (!root.book || root.mainRows.length === 0)
             return false
+        // A chapter still being read has no rows to walk yet: a press now would find no
+        // current row and (below) read as "past the edge".
+        if (root.chapterLoading)
+            return false
         const at = root.currentRowIndex(direction)
         const to = at + direction
         if (at >= 0 && to >= 0 && to < root.mainRows.length) {
             root.focusRow(root.mainRows[to])
             return true
         }
-        if (root.chapterVerses.length > 0 && at < 0 && direction > 0) {
-            // Nothing picked yet: forward starts at the top of the list.
-            root.focusRow(root.mainRows[0])
-            return true
+        if (at < 0) {
+            // NO CURRENT ROW IS NOT THE EDGE OF THE LIST. The pick's preview can be between
+            // two builds (a divided paragraph being re-cut, the scroll walk re-staging a
+            // page) or nothing is picked, and currentRowIndex then answers -1. That used to
+            // fall through to stepChapter: Up crossed into the PREVIOUS sermon and, from a
+            // book's first sermon, into the previous BOOK — the reported "the arrow jumps
+            // out of the book I'm reading to the one before it". Down already started at
+            // the top of the list; Up now starts at the bottom, and neither leaves the
+            // chapter on a press that did not know where it was.
+            if (root.chapterVerses.length > 0) {
+                root.focusRow(root.mainRows[direction > 0 ? 0 : root.mainRows.length - 1])
+                return true
+            }
+            return false
         }
+        // A REAL edge: the pick is the first (or last) row, so the next one is in the
+        // neighbouring sermon.
         root.stepChapter(direction)
         return false
     }

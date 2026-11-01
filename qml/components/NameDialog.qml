@@ -22,6 +22,12 @@ Item {
     // Whether an empty name may be accepted (a creation that has a default name allows it).
     property bool allowEmpty: false
 
+    // Optional rule a caller adds: function(text) returning "" when the name is fine, else
+    // the sentence that says why not (e.g. "There is already a folder called ...").
+    // The reason shows INSIDE the dialog, so Create never just does nothing.
+    property var validator: null
+    property string error: ""
+
     signal accepted(string text)
     signal dismissed()
 
@@ -29,6 +35,7 @@ Item {
     readonly property string text: field.text.trim()
 
     function open(initial) {
+        root.error = ""
         field.text = initial === undefined ? "" : initial
         shown = true
         field.focusInput()
@@ -54,8 +61,15 @@ Item {
     Behavior on opacity { NumberAnimation { duration: 130 } }
 
     function accept() {
-        if (root.text === "" && !root.allowEmpty)
+        if (root.text === "" && !root.allowEmpty) {
+            root.error = qsTr("Type a name first.")
             return
+        }
+        const why = root.validator ? String(root.validator(root.text) || "") : ""
+        if (why !== "") {
+            root.error = why
+            return
+        }
         const value = root.text
         close()
         accepted(value)
@@ -130,6 +144,8 @@ Item {
                 showLabel: false
                 placeholder: root.placeholder
                 onAccepted: root.accept()
+                error: root.error   // red border + the reason under the box
+                onTextEdited: root.error = ""
             }
 
             Row {

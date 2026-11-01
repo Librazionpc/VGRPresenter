@@ -203,7 +203,7 @@ Item {
         anchors.fill: parent
         anchors.rightMargin: Theme.space6 + Theme.space2
         contentWidth: width
-        contentHeight: layout.height + 24
+        contentHeight: layout.y + layout.height + Theme.space6   // the column's own top offset counts, or the last card sits on the window edge
         clip: true
         boundsBehavior: Flickable.StopAtBounds
 
@@ -230,7 +230,7 @@ Item {
             // ---- Smart Config banner ----
             Rectangle {
                 width: parent.width
-                height: 106
+                height: 92
                 radius: Theme.radiusLg
                 color: Theme.card
                 border.color: Theme.border
@@ -238,7 +238,9 @@ Item {
 
                 Column {
                     x: 20
-                    y: 16
+                    // Centred in the card: the badge and the headline sit as one block, with
+                    // the same air above and below instead of a tall empty strip under it.
+                    anchors.verticalCenter: parent.verticalCenter
                     width: parent.width - 180
                     spacing: 6
 
@@ -302,6 +304,9 @@ Item {
             Row {
                 width: parent.width
                 spacing: 16
+                // BOTH CARDS THE SAME HEIGHT: the taller one decides, so the pair ends on one line
+                // instead of a short card hanging under a tall neighbour.
+                readonly property real pairHeight: Math.max(appearanceCol.height, startupCol.height) + 40
 
                 // Appearance card — two "pick one" rows, one toggle row, the
                 // accent swatches. Built explicitly (not a Repeater)
@@ -309,7 +314,7 @@ Item {
                 Rectangle {
                     objectName: "selfTestCardAppearance"   // inset self-test grab target
                     width: (parent.width - 16) / 2
-                    height: appearanceCol.height + 40
+                    height: parent.pairHeight
                     radius: Theme.radiusLg
                     color: Theme.card
                     border.color: Theme.border
@@ -365,6 +370,7 @@ Item {
                         NumberField {
                             width: parent.width
                             label: qsTr("Text size (%)")
+                            compact: true
                             value: Number(root.values["appearance.textScale"] ?? 120)
                             step: 5
                             decimals: 0
@@ -457,7 +463,7 @@ Item {
                 Rectangle {
                     objectName: "selfTestCardStartup"   // inset self-test grab target
                     width: (parent.width - 16) / 2
-                    height: startupCol.height + 40
+                    height: parent.pairHeight
                     radius: Theme.radiusLg
                     color: Theme.card
                     border.color: Theme.border
@@ -637,60 +643,18 @@ Item {
                             id: profileActions
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 14
+                            spacing: 18
 
-                            // Which profile the engine recommends for this machine.
-                            // Dropped on a narrow card: the title needs that room
-                            // more than the badge does (Smart Config states the
-                            // same recommendation in full).
-                            Text {
+                            // ONE segmented control instead of three bordered buttons; the
+                            // engine's recommendation is the green dot on its segment (no
+                            // "RECOMMENDED · PERFORMANCE" line — Smart Config states it in full).
+                            SegmentedControl {
                                 anchors.verticalCenter: parent.verticalCenter
-                                visible: SettingsService.recommendedProfile !== "" && profileStrip.width > 700
-                                text: qsTr("RECOMMENDED · %1").arg(root.profileLabel(SettingsService.recommendedProfile).toUpperCase())
-                                color: Theme.accentLight
-                                font.family: Theme.fontFamily
-                                font.pixelSize: 9
-                                font.weight: Font.Bold
-                            }
-
-                            Row {
-                                id: manageRow
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 8
-
-                                Repeater {
-                                    model: root.definitions["resources.profile"].choices
-                                    delegate: Rectangle {
-                                        id: segRoot
-                                        required property var modelData
-                                        readonly property bool active: root.values["resources.profile"] === segRoot.modelData.value
-                                        width: segLabel.width + 28
-                                        height: 30
-                                        radius: Theme.radiusMd
-                                        color: segRoot.active ? Theme.accentSoft : (segArea.containsMouse ? Theme.chip : Theme.inset)
-                                        border.width: 1
-                                        border.color: segRoot.active ? Theme.accent : Theme.border
-                                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                                        Text {
-                                            id: segLabel
-                                            anchors.centerIn: parent
-                                            text: segRoot.modelData.label
-                                            color: segRoot.active ? Theme.accentLight : Theme.textSecondary
-                                            font.family: Theme.fontFamily
-                                            font.pixelSize: Theme.textSm
-                                            font.weight: segRoot.active ? Font.DemiBold : Font.Medium
-                                        }
-
-                                        MouseArea {
-                                            id: segArea
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: SettingsService.setValue("resources.profile", segRoot.modelData.value)
-                                        }
-                                    }
-                                }
+                                options: root.definitions["resources.profile"].choices
+                                             .map((c) => ({ key: c.value, label: c.label }))
+                                current: String(root.values["resources.profile"])
+                                marked: SettingsService.recommendedProfile
+                                onPicked: (key) => SettingsService.setValue("resources.profile", key)
                             }
 
                             Text {
@@ -712,21 +676,17 @@ Item {
                         }
                     }
 
-                    // The three LIVE usage meters — the engine's Telemetry module
-                    // (real frame times, encoder load, output presents), not the
-                    // profile's static budget. The allocation split stays visible
-                    // as the per-profile targets under the card title.
+                    // The three LIVE usage figures — the engine's Telemetry module (real frame
+                    // times, encoder load, output presents), not the profile's static budget —
+                    // as three stat tiles side by side.
                     Row {
                         width: parent.width
-                        topPadding: 14
-                        spacing: 24
+                        topPadding: 16
+                        spacing: 12
 
-                        // The shared meter component (see LabeledMeter.qml) —
-                        // the same one Smart Config's Resource budgets use, so
-                        // the two screens' meters can't drift apart.
-                        LabeledMeter { label: qsTr("Rendering"); pct: TelemetryService.utilization.rendering; width: (parent.width - 48) / 3 }
-                        LabeledMeter { label: qsTr("Encoding"); pct: TelemetryService.utilization.encoding; width: (parent.width - 48) / 3 }
-                        LabeledMeter { label: qsTr("Output"); pct: TelemetryService.utilization.output; width: (parent.width - 48) / 3 }
+                        StatTile { label: qsTr("Rendering"); pct: TelemetryService.utilization.rendering; width: (parent.width - 24) / 3 }
+                        StatTile { label: qsTr("Encoding"); pct: TelemetryService.utilization.encoding; width: (parent.width - 24) / 3 }
+                        StatTile { label: qsTr("Output"); pct: TelemetryService.utilization.output; width: (parent.width - 24) / 3 }
                     }
 
                     // The live loop's OWN rate over the last minute (see
@@ -798,7 +758,7 @@ Item {
 
                 Item {
                     width: prefRow.width
-                    height: prefRow.sub !== "" ? 52 : 40
+                    height: 40   // one line: the grey sub-lines under a setting are gone
 
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
@@ -820,7 +780,7 @@ Item {
                         }
                         Text {
                             objectName: prefRow.key !== "" ? "selfTestNote_" + prefRow.key : ""
-                            visible: prefRow.sub !== ""
+                            visible: false   // no sub-line under a setting (nobody read them)
                             text: prefRow.sub
                             color: Theme.textMuted
                             font.family: Theme.fontFamily
@@ -875,7 +835,9 @@ Item {
 
                 Item {
                     width: statusRow.width
-                    height: Math.max(52, detailText.implicitHeight + 24)
+                    // The explanation only appears when something is actually wrong; a healthy row is
+                    // one line like every other.
+                    height: Math.max(44, statusRow.fault ? detailText.implicitHeight + 24 : 0)
 
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
@@ -891,6 +853,7 @@ Item {
                         Text {
                             id: detailText
                             objectName: "selfTestCrashToolingDetail"
+                            visible: statusRow.fault && statusRow.detail !== ""
                             width: parent.width
                             text: statusRow.detail
                             color: statusRow.fault ? Theme.warningLight : Theme.textMuted
@@ -995,7 +958,7 @@ Item {
 
                 Item {
                     width: backupRow.width
-                    height: 52
+                    height: 44
 
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
@@ -1007,14 +970,6 @@ Item {
                             color: Theme.textPrimary
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.textSm
-                        }
-                        Text {
-                            text: backupRow.fileStem === "" ? qsTr("No show selected")
-                                : (backupRow.backups.length === 0 ? qsTr("None yet")
-                                                                  : qsTr("%n saved copy(s).", "", backupRow.backups.length))
-                            color: Theme.textMuted
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.textSub
                         }
                     }
 

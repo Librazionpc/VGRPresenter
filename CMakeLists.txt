@@ -251,6 +251,9 @@ set(BPS_CORE_SOURCES
     # Recording, Replay & Media Capture Engine (Phase 16, docs/specs/28)
     ${BPS_ROOT}/modules/recording/RecordingEngine.cpp
     ${BPS_ROOT}/modules/recording/MediaFoundationMp4.cpp
+    ${BPS_ROOT}/modules/recording/MediaFoundationEncode.cpp
+    ${BPS_ROOT}/modules/recording/MatroskaContainer.cpp
+    ${BPS_ROOT}/modules/recording/AudioFileContainer.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastEngine.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastProviders.cpp
     # Project & Data System (Phase 4, docs/specs/15)
@@ -260,6 +263,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/project/WorkspaceManager.cpp
     ${BPS_ROOT}/modules/project/StyleStore.cpp
     ${BPS_ROOT}/modules/project/GroupStore.cpp
+    ${BPS_ROOT}/modules/project/PresetStore.cpp
     ${BPS_ROOT}/modules/project/ActionStore.cpp
     ${BPS_ROOT}/modules/project/OutputStore.cpp
     ${BPS_ROOT}/modules/project/ShippedConfig.cpp
@@ -465,6 +469,7 @@ option(VGR_ENABLE_SELFTEST "Compile the VGR_SELFTEST UI self-test driver" ON)
 qt_add_executable(appVGRPresenterUI
     src/main.cpp
     qml/services/include/services/EventBus.h
+    qml/services/include/services/NameRules.h
     qml/services/EventBus.cpp
     qml/services/include/services/CursorService.h
     qml/services/CursorService.cpp
@@ -521,6 +526,8 @@ qt_add_executable(appVGRPresenterUI
     qml/models/OutputListModel.cpp
     qml/models/include/models/StyleListModel.h
     qml/models/StyleListModel.cpp
+    qml/models/include/models/PresetListModel.h
+    qml/models/PresetListModel.cpp
     qml/models/include/models/GroupListModel.h
     qml/models/GroupListModel.cpp
     qml/models/include/models/ActionListModel.h

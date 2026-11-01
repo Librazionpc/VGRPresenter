@@ -58,11 +58,12 @@ Item {
             // and nothing appeared" regression.
             objectName: root.objectName === "" ? "" : root.objectName + "_box"
             width: parent.width
-            height: 34
+            height: 36
             radius: Theme.radiusMd
             color: Theme.inset
             border.width: 1
-            border.color: menu.visible ? Theme.accent : Theme.border
+            border.color: menu.visible ? Theme.accent
+                        : boxArea.containsMouse ? Theme.textMuted : Theme.border
             Behavior on border.color { ColorAnimation { duration: 100 } }
 
             Text {
@@ -83,13 +84,15 @@ Item {
                 // Optical centering: the chevron glyph's mass sits ~2px high
                 // in its em box, so a geometric center reads as high.
                 anchors.verticalCenterOffset: 2
-                name: "chevronDown"
-                color: Theme.textMuted
+                name: menu.visible ? "chevronUp" : "chevronDown"
+                color: menu.visible || boxArea.containsMouse ? Theme.textSecondary : Theme.textMuted
                 width: 12; height: 12
-                }
+            }
 
             MouseArea {
+                id: boxArea
                 anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     if (menu.visible) {
@@ -114,8 +117,11 @@ Item {
                 // `disabled` rides along (info-only rows — e.g. the NDI
                 // "not enabled yet" notice — render dimmed and refuse
                 // activation inside DropdownPanel).
-                list.push({ label: o.label, value: o.value !== undefined ? o.value : o.label,
-                            disabled: o.disabled === true })
+                const v = o.value !== undefined ? o.value : o.label
+                // The chosen entry is tinted + accent-coloured in the list (the same
+                // "current" cue the font picker uses), so the list shows where you are.
+                list.push({ label: o.label, value: v, disabled: o.disabled === true,
+                            accent: root.value !== "" && (o.label === root.value || String(v) === root.value) })
             }
             return list
         }

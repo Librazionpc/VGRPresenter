@@ -26,10 +26,11 @@ enum class EncoderKind { Auto, NVENC, AMF, QuickSync, Software };
 // Video codecs (user brief §12).
 enum class VideoCodec { H264, HEVC, AV1, VP9, None };
 // Audio codecs (user brief §12).
-enum class AudioCodec { PCM, AAC, Opus, FLAC, None };
+enum class AudioCodec { PCM, AAC, Opus, FLAC, None, MP3 };
 
 // Container formats (user brief §11).
-enum class ContainerKind { MKV, MP4, MOV, WebM, WAV, FLAC };
+// M4A (AAC audio in an MPEG-4 file) and MP3 are the audio-only formats of an Audio preset, with WAV.
+enum class ContainerKind { MKV, MP4, MOV, WebM, WAV, FLAC, M4A, MP3 };
 
 // Smart quality presets (user brief §14).
 enum class QualityPreset { Proxy, Low, Standard, High, Broadcast, Master, Lossless, Custom };
@@ -55,6 +56,7 @@ struct RecordingProfile {
     int height = 1080;
     double fps = 60.0;
     int videoBitrateKbps = 12000;
+    int audioBitrateKbps = 192;       // AAC: 96, 128, 160 or 192 are what the encoder offers (nearest is used)
     int audioChannels = 2;
     EncoderKind encoderPreference = EncoderKind::Auto;   // Auto = best available
     QualityPreset quality = QualityPreset::Standard;
@@ -193,6 +195,7 @@ inline const char* ToString(AudioCodec c) {
         case AudioCodec::Opus: return "Opus";
         case AudioCodec::FLAC: return "FLAC";
         case AudioCodec::None: return "none";
+        case AudioCodec::MP3: return "MP3";
     }
     return "?";
 }
@@ -204,6 +207,8 @@ inline const char* ToString(ContainerKind c) {
         case ContainerKind::WebM: return "webm";
         case ContainerKind::WAV: return "wav";
         case ContainerKind::FLAC: return "flac";
+        case ContainerKind::M4A: return "m4a";
+        case ContainerKind::MP3: return "mp3";
     }
     return "?";
 }

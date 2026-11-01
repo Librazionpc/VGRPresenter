@@ -70,6 +70,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+; START FRESH (off by default): while the app's architecture is still moving, an old settings /
+; kernel / library folder left by an earlier build can produce behaviour nobody can explain.
+; Ticking this clears that old state first (see [Code]), so the new build starts from the
+; shipped baseline plus the seed data below — exactly what a brand-new machine gets. Recordings
+; are NEVER touched. Once the app is stable this box can simply stay unticked.
+Name: "freshstart"; Description: "Start fresh: delete my old VGRPresenter settings, libraries and caches first"; GroupDescription: "Clean install:"; Flags: unchecked
 
 ; ---- A CLEAN UPDATE: payload + derived state only -----------------------------
 ; Each build deploys a COMPLETE dist (tools/make_portable.sh removes the old
@@ -138,3 +144,63 @@ Filename: "{app}\appVGRPresenterUI.exe"; Description: "{cm:LaunchProgram,VGRPres
 [UninstallDelete]
 ; Nothing: the install dir is removed by the uninstaller; user data lives in
 ; %AppData%\VGR and %LocalAppData%\bps and is intentionally left alone.
+
+[Code]
+// ---- START FRESH --------------------------------------------------------------
+// What "fresh" removes: the app's data folders — %AppData%\VGR\VGRPresenter and %AppData%\bps
+// (settings and the kernel store) and everything under %LocalAppData%\bps (libraries, caches,
+// the media index) EXCEPT its "recording" folder, which holds the operator's own takes and is
+// never deleted. The seed data in [Files] then repopulates what a new install should have,
+// because those entries only copy files that do not exist. Runs before any file is extracted.
+
+const
+  FreshKeepFolder = 'recording';
+
+procedure DeleteAllExcept(const Dir, KeepName: String);
+var
+  FindRec: TFindRec;
+  Path: String;
+begin
+  if not DirExists(Dir) then
+    Exit;
+  if FindFirst(Dir + '\*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') and
+           (CompareText(FindRec.Name, KeepName) <> 0) then
+        begin
+          Path := Dir + '\' + FindRec.Name;
+          if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+            DelTree(Path, True, True, True)
+          else
+            DeleteFile(Path);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+// Ask once, on leaving the Tasks page, before anything is deleted. A silent install
+// (/SILENT /TASKS="freshstart") is an explicit choice already and is not asked again.
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpSelectTasks) and WizardIsTaskSelected('freshstart') and (not WizardSilent) then
+    Result := MsgBox('Start fresh will DELETE the existing VGRPresenter settings, libraries and ' +
+                     'caches on this computer before installing, so the new version starts clean.' + #13#10 + #13#10 +
+                     'Your recordings are kept.' + #13#10 + #13#10 +
+                     'Continue?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssInstall) and WizardIsTaskSelected('freshstart') then
+  begin
+    DelTree(ExpandConstant('{userappdata}\VGR\VGRPresenter'), True, True, True);
+    DelTree(ExpandConstant('{userappdata}\bps'), True, True, True);
+    DeleteAllExcept(ExpandConstant('{localappdata}\bps'), FreshKeepFolder);
+  end;
+end;

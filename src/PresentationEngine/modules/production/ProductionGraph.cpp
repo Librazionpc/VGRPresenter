@@ -726,6 +726,19 @@ Result<void> ProductionGraph::SetOutputEncoder(std::string_view outputId,
     return Ok();
 }
 
+Result<void> ProductionGraph::SetOutputNetworkTarget(std::string_view outputId,
+                                                     std::string_view target) {
+    auto it = outputs_.find(std::string(outputId));
+    if (it == outputs_.end())
+        return Error::Make(Err::Production_OutputNotFound, "ProductionGraph",
+                           "no output: " + std::string(outputId));
+    if (it->second.networkTarget == target)
+        return Ok();   // nothing changed — no persist
+    it->second.networkTarget = std::string(target);
+    QueuePersist();
+    return Ok();
+}
+
 // --- Bus scenes ---
 
 Result<void> ProductionGraph::SaveBusScene(std::string_view busId,

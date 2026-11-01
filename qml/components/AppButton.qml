@@ -9,6 +9,8 @@ Rectangle {
     property string variant: "primary"
     // `enabled` is inherited from Item — no need to redeclare it.
     property int horizontalPadding: Theme.space5
+    // The caption size; a glyph-only button ("+") sets it larger.
+    property int fontSize: Theme.textSm
 
     signal clicked()
 
@@ -50,7 +52,7 @@ Rectangle {
         anchors.centerIn: parent
         text: root.text
         font.family: Theme.fontFamily
-        font.pixelSize: Theme.textSm
+        font.pixelSize: root.fontSize
         font.weight: Font.Medium
         color: (root.variant === "primary" || root.variant === "danger") ? Theme.controlInk
              : (root.variant === "ghost") ? Theme.textSecondary

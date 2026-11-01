@@ -829,13 +829,13 @@ ApplicationWindow {
         onSaveShowRequested: editScreen.saveShow()
         onSaveShowAsRequested: editScreen.saveShowAs()
         onImportRequested: importDialog.open = true
-        // Record…: start/stop the real engine session with the settings
-        // screen's persisted config (the service reads its own blob).
+        // Record…: start/stop the real engine session — the first Recording output
+        // on Routing, with the preset it is wired to (Settings · Recording).
         onRecordToggled: {
             if (RecordingService.recording)
                 RecordingService.stopRecording()
             else
-                RecordingService.startRecording(RecordingService.config)
+                RecordingService.startPrimaryRecording()
         }
     }
 
@@ -857,7 +857,7 @@ ApplicationWindow {
             if (RecordingService.recording)
                 RecordingService.stopRecording()
             else
-                RecordingService.startRecording(RecordingService.config)
+                RecordingService.startPrimaryRecording()
         }
     }
 
