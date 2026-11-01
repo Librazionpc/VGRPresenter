@@ -14,6 +14,7 @@ Item {
     property var item: null
     property bool slideHotkeysEnabled: false
     signal editRequested(string path)
+    signal templateEditRequested(string id)
     signal closeRequested()
 
     readonly property string type: item ? (item.type ?? "") : ""
@@ -30,8 +31,315 @@ Item {
     }
     readonly property var show: loaded && loaded.ok ? loaded.show : null
     readonly property var slides: show ? show.slides : []
+    // A Shows category pick overrides the global Shows pick; when neither is
+    // set, use the active output style's Shows template (the same composition
+    // the output uses). This is the preview's effective layout template.
+    property int styleRevision: 0
+    property int templateCatalogRevision: 0
+    Connections {
+        target: OutputListModel
+        function onActiveStyleChanged() {
+            root.styleRevision++
+            templateNoticeTimer.restart()
+        }
+    }
+    Connections {
+        target: TemplateLibraryService
+        function onChanged() {
+            root.templateCatalogRevision++
+            templateNoticeTimer.restart()
+        }
+    }
+    readonly property string outputStyleTemplateId: {
+        root.styleRevision
+        return OutputListModel.activeStyleTemplateId("shows")
+    }
+    function categoryTemplatePick(category, picks) {
+        const exact = String(picks[category] ?? "")
+        if (exact !== "") return exact
+        const wanted = String(category).trim().toLowerCase()
+        for (const key in picks)
+            if (String(key).trim().toLowerCase() === wanted)
+                return String(picks[key] ?? "")
+        return ""
+    }
+    readonly property string categoryTemplateOverrideId: {
+        const category = String(root.item?.category ?? "")
+        const raw = SettingsService.values["session.showsCategoryTemplates"]
+        let picks = ({})
+        try { picks = raw ? JSON.parse(String(raw)) : ({}) } catch (e) {}
+        const categoryTemplate = category !== "" ? root.categoryTemplatePick(category, picks) : ""
+        if (categoryTemplate !== "") return categoryTemplate
+        return String(SettingsService.values["shows.defaultTemplate"] ?? "")
+    }
+    readonly property string showTemplateId: root.categoryTemplateOverrideId !== ""
+        ? root.categoryTemplateOverrideId : root.outputStyleTemplateId
     property int selectedSlide: -1
+    property bool stageFirstPending: false
+    property string templatePromptedFor: ""
     onItemChanged: { selectedSlide = -1; root.refreshWallStepper() }
+    onShowChanged: {
+        if (stageFirstPending && show) {
+            stageFirstPending = false
+            Qt.callLater(() => root.stageFirstSlide())
+        }
+        templateNoticeTimer.restart()
+    }
+
+    function resolvedShow(forTemplate) {
+        if (!root.show)
+            return null
+        if (!forTemplate || forTemplate.id === "")
+            return root.show
+
+        // The library design is an external category template. Adapt it to the
+        // show-document resolver without saving or changing the show on disk.
+        const copy = JSON.parse(JSON.stringify(root.show))
+        const templateId = String(forTemplate.id)
+        const templates = (copy.templates ?? []).filter((t) => String(t.id) !== templateId)
+        templates.push({
+            id: templateId,
+            name: String(forTemplate.name ?? ""),
+            contentType: String(forTemplate.contentType ?? "shows"),
+            background: String(forTemplate.background ?? "transparent"),
+            blocks: forTemplate.blocks ?? [],
+            meta: ({})
+        })
+        copy.templates = templates
+
+        let categories = copy.categories ?? []
+        if (categories.length === 0) {
+            categories = [{ id: "__show_center_template", name: "Show", contentType: "shows", templateId: templateId }]
+            copy.slides = (copy.slides ?? []).map((slide) => Object.assign({}, slide, {
+                categoryId: String(slide.categoryId ?? "") !== "" ? slide.categoryId : "__show_center_template" }))
+        } else {
+            categories = categories.map((category) => Object.assign({}, category, { templateId: templateId }))
+            const fallbackCategoryId = String(categories[0].id ?? "")
+            copy.slides = (copy.slides ?? []).map((slide) => Object.assign({}, slide, {
+                categoryId: String(slide.categoryId ?? "") !== "" ? slide.categoryId : fallbackCategoryId }))
+        }
+        copy.categories = categories
+        return copy
+    }
+    readonly property var categoryTemplateDesign: {
+        root.templateCatalogRevision
+        const id = root.showTemplateId
+        if (id === "") return null
+        try {
+            const design = TemplateLibraryService.design(id)
+            return design && design.id ? design : null
+        } catch (e) { return null }
+    }
+    // Resolve the effective template (category override or Styles fallback)
+    // through one path so a template text slot can consume either slide-level
+    // text or a typed block item from imported shows.
+    readonly property var renderShow: root.resolvedShow(root.categoryTemplateDesign)
+    function blockKind(block) {
+        return String(block?.kind ?? "text").toLowerCase()
+    }
+    function sourceHasContent(block) {
+        const kind = root.blockKind(block)
+        if (kind === "text") return String(block.text ?? "").trim() !== ""
+        if (["image", "video", "audio", "media"].indexOf(kind) >= 0) {
+            const meta = block.meta ?? ({})
+            const media = meta.media ?? ({})
+            return String(meta.src ?? meta.path ?? meta.url ?? media.src ?? "").trim() !== ""
+        }
+        return kind !== ""
+    }
+    function templateComposition(slide, resolved) {
+        const sources = (slide.blocks ?? []).slice()
+        const hasTextItem = sources.some((block) => root.blockKind(block) === "text"
+            && root.sourceHasContent(block))
+        if (!hasTextItem) {
+            // Some imported shows keep their words in slide fields and let a
+            // bound template slot supply the text item. Use that resolved
+            // content when there is no authored text block to match.
+            for (const slot of (root.categoryTemplateDesign?.blocks ?? [])) {
+                const bind = String(slot.bind ?? "")
+                // A Shows template may bind its body through a field other
+                // than `text` (for example a reading's first line). The
+                // resolver has already filled that slot from the show, so
+                // carry its resolved text into the selected layout. `title`
+                // is intentionally excluded: it is the slide label, not the
+                // reading/song body.
+                if (root.blockKind(slot) !== "text" || bind === "" || bind === "title") continue
+                const bound = (resolved?.blocks ?? []).find((block) =>
+                    String(block.key ?? block.id ?? "") === String(slot.key ?? slot.id ?? ""))
+                if (bound && root.sourceHasContent(bound))
+                    sources.push(Object.assign({}, bound, { _templateSynthetic: true }))
+            }
+            const fallbackText = [slide.body, slide.text, slide.line1, slide.line2]
+                .map((value) => String(value ?? "")).find((value) => value.trim() !== "") ?? ""
+            if (fallbackText.trim() !== ""
+                    && !sources.some((block) => root.blockKind(block) === "text" && root.sourceHasContent(block))) {
+                sources.push({ key: "@show-body", kind: "text", text: fallbackText, _templateSynthetic: true })
+            }
+        }
+        const slots = root.categoryTemplateDesign?.blocks ?? []
+        const used = ({})
+        const blocks = []
+        for (const slot of slots) {
+            const slotKey = String(slot.key ?? slot.id ?? "")
+            const kind = root.blockKind(slot)
+            let sourceIndex = sources.findIndex((candidate, index) => !used[index]
+                && root.sourceHasContent(candidate)
+                && root.blockKind(candidate) === kind
+                && String(candidate.key ?? candidate.id ?? "") === slotKey)
+            if (sourceIndex < 0)
+                sourceIndex = sources.findIndex((candidate, index) => !used[index]
+                    && root.sourceHasContent(candidate)
+                    && root.blockKind(candidate) === kind)
+            if (sourceIndex < 0) {
+                // Text labels and bindings are editor placeholders, not show
+                // content. A text slot without an authored item stays empty;
+                // template-owned visual blocks remain part of the design.
+                if (kind !== "text" && root.sourceHasContent(slot)) blocks.push(slot)
+                continue
+            }
+
+            used[sourceIndex] = true
+            const source = sources[sourceIndex]
+            const composed = Object.assign({}, slot)
+            if (kind === "text") {
+                composed.text = String(source.text ?? "")
+            } else {
+                // Keep the template's fit/opacity and geometry while taking
+                // the actual media source from the matching show item.
+                const templateMeta = slot.meta ?? ({})
+                const sourceMeta = source.meta ?? ({})
+                const meta = Object.assign({}, templateMeta, sourceMeta)
+                if (templateMeta.media || sourceMeta.media)
+                    meta.media = Object.assign({}, sourceMeta.media ?? ({}), templateMeta.media ?? ({}))
+                if (sourceMeta.src !== undefined) meta.src = sourceMeta.src
+                composed.meta = meta
+            }
+            composed.bind = ""
+            blocks.push(composed)
+        }
+        return {
+            blocks: blocks,
+            omitted: sources.filter((block, index) => !used[index]
+                && block._templateSynthetic !== true && root.sourceHasContent(block)).length
+        }
+    }
+    function unmatchedItemCount(slide) {
+        if (!slide) return 0
+        const resolved = ShowService.resolveSlide(root.renderShow, String(slide.id ?? ""), "")
+        if (!resolved || resolved.visible === false) return 0
+        return root.templateComposition(slide, resolved).omitted
+    }
+    readonly property int unmatchedTemplateItemCount: {
+        if (!root.renderShow || !root.categoryTemplateDesign) return 0
+        return root.slides.reduce((sum, slide) => sum + root.unmatchedItemCount(slide), 0)
+    }
+    readonly property bool hasUnmatchedTemplateItems: root.unmatchedTemplateItemCount > 0
+    function offerTemplateForMissingText() {
+        if (!root.visible || root.type !== "show" || !root.show || !root.hasUnmatchedTemplateItems)
+            return
+        // A selected template id can arrive before its library is ready. Wait
+        // for the service's changed signal instead of treating that as a
+        // genuinely missing category template.
+        if (root.showTemplateId !== "" && TemplateLibraryService.totalCount === 0)
+            return
+        const path = String(root.item?.ref ?? "")
+        const promptKey = path + "|" + root.showTemplateId
+        if (path === "" || promptKey === root.templatePromptedFor) return
+        root.templatePromptedFor = promptKey
+        const actionId = "show.createTemplateFromMissingItems." + promptKey
+        NotificationCenter.registerAction(actionId, function() {
+            if (String(root.item?.ref ?? "") === path)
+                root.createTemplateFromShow(path)
+        })
+        const templateName = root.categoryTemplateDesign
+            ? String(root.categoryTemplateDesign.name ?? qsTr("current Shows template"))
+            : qsTr("No Shows template")
+        EventBus.notify(
+            qsTr("Some text or media items were omitted because “%1” has no matching boxes for them. Add boxes to this template or create a category template for this show.").arg(templateName),
+            "warning", qsTr("Show items omitted"), "show.template.missingItems", templateName,
+            ({ id: actionId, label: qsTr("Create template") }))
+    }
+    function createTemplateFromShow(expectedPath) {
+        if (!root.show || !root.item || String(root.item.ref ?? "") !== expectedPath) return
+        const consumedSourceKeys = ({})
+        const outputKeys = ({})
+        const templateBlocks = []
+        const sources = []
+        for (const slide of root.slides)
+            for (const block of (slide.blocks ?? [])) sources.push(block)
+        const usedSources = ({})
+        for (const slot of (root.categoryTemplateDesign?.blocks ?? [])) {
+            const slotKey = String(slot.key ?? slot.id ?? "")
+            const kind = root.blockKind(slot)
+            let sourceIndex = sources.findIndex((source, index) => !usedSources[index]
+                && root.sourceHasContent(source)
+                && root.blockKind(source) === kind
+                && String(source.key ?? source.id ?? "") === slotKey)
+            if (sourceIndex < 0)
+                sourceIndex = sources.findIndex((source, index) => !usedSources[index]
+                    && root.sourceHasContent(source)
+                    && root.blockKind(source) === kind)
+            if (sourceIndex >= 0) {
+                usedSources[sourceIndex] = true
+                const sourceKey = String(sources[sourceIndex].key ?? sources[sourceIndex].id ?? "")
+                if (sourceKey !== "") consumedSourceKeys[sourceKey] = true
+            }
+            if (slotKey === "" || outputKeys[slotKey]) continue
+            outputKeys[slotKey] = true
+            templateBlocks.push(Object.assign({}, slot, { text: "", bind: slot.bind ?? "" }))
+        }
+        for (const source of sources) {
+            const key = String(source.key ?? source.id ?? "")
+            if (key === "" || consumedSourceKeys[key] || outputKeys[key]) continue
+            outputKeys[key] = true
+            templateBlocks.push(Object.assign({}, source, { text: "", bind: "" }))
+        }
+        if (templateBlocks.length === 0) {
+            EventBus.notify(qsTr("There are no slide items to use for a template."), "warning", qsTr("Template"))
+            return
+        }
+        const name = qsTr("%1 Template").arg(String(root.item.name ?? qsTr("Show")))
+        const id = TemplateLibraryService.createDesign(name)
+        if (id === "") return
+        const firstSlide = root.slides.length > 0 ? root.slides[0] : ({})
+        let background = String(firstSlide.background ?? "")
+        if (background === "") background = String(root.categoryTemplateDesign?.background ?? "transparent")
+        if (!TemplateLibraryService.setDesignBlocks(id, background, templateBlocks)) {
+            TemplateLibraryService.deleteDesign(id)
+            EventBus.notify(qsTr("The template could not be created from this show."), "error", qsTr("Template"))
+            return
+        }
+        TemplateLibraryService.setDesignContentType(id, "shows")
+        root.templateEditRequested(id)
+    }
+    onHasUnmatchedTemplateItemsChanged: templateNoticeTimer.restart()
+    onShowTemplateIdChanged: templateNoticeTimer.restart()
+    Timer {
+        id: templateNoticeTimer
+        interval: 350
+        repeat: false
+        onTriggered: root.offerTemplateForMissingText()
+    }
+    function renderSlide(slide) {
+        if (!slide || !root.renderShow || !root.categoryTemplateDesign)
+            return slide
+        const resolved = ShowService.resolveSlide(root.renderShow, String(slide.id ?? ""), "")
+        if (!resolved || resolved.visible === false)
+            return slide
+        let blocks = resolved.blocks ?? slide.blocks ?? []
+        // Match by stable block id where possible, then by item type. Template
+        // geometry and typography stay authoritative even if the slide uses a
+        // different id for its content item.
+        blocks = root.templateComposition(slide, resolved).blocks
+        return Object.assign({}, slide, {
+            blocks: blocks,
+            background: resolved.background ?? slide.background ?? "",
+            templateOverride: true
+        })
+    }
+    function renderedSlides() {
+        return root.slides.map((slide) => root.renderSlide(slide))
+    }
 
     // Reuse the configurable Left/Right slide hotkeys for the centre preview's
     // slide selector. Do not steal those keys while the user is typing in a field.
@@ -57,6 +365,19 @@ Item {
     readonly property int columns: Math.max(2, Math.min(10, Number(SettingsService.values["session.slideColumns"] ?? 4)))
     readonly property string viewMode: String(SettingsService.values["session.slideView"] ?? "grid")
     readonly property real cellWidth: Math.floor((width - 10) / columns)     // (FreeShow: the grid has 5px padding, a cell is 100 / columns %)
+    // Whole-show lyric rewriting is safe only while slides contain plain text.
+    // Rich FreeShow slides own their geometry and non-text blocks, so their
+    // quick-edit route keeps those items and edits text blocks individually.
+    readonly property bool hasRichContent: root.slides.some((slide) => {
+        const blocks = slide.blocks ?? []
+        const background = String(slide.background ?? "").toLowerCase()
+        return blocks.length > 1
+            || blocks.some((block) => (block.kind ?? "text") !== "text"
+                || Number(block.x ?? 0) !== 0 || Number(block.y ?? 0) !== 0
+                || Number(block.width ?? 160) !== 160 || Number(block.height ?? 40) !== 40
+                || String(block.style?.backgroundColor ?? "transparent").toLowerCase() !== "transparent")
+            || (background !== "" && background !== "transparent" && background !== "#00000000")
+    })
     // FreeShow's "dark" theme
     readonly property color cLighter: Theme.border
     readonly property color cDarker: Theme.rowBg
@@ -105,6 +426,10 @@ Item {
     }
     // grid -> list -> lyrics -> grid, like FreeShow's view button
     function nextView() {
+        if (root.hasRichContent) {
+            SettingsService.setValue("session.slideView", root.viewMode === "grid" ? "list" : "grid")
+            return
+        }
         const order = { grid: "list", list: "lyrics", lyrics: "grid" }
         SettingsService.setValue("session.slideView", order[root.viewMode] ?? "grid")
     }
@@ -145,6 +470,14 @@ Item {
     function slideText(slide) {
         return (slide.blocks ?? []).filter((b) => (b.kind ?? "text") === "text" && (b.text ?? "") !== "").map((b) => b.text).join("\n")
     }
+    function slideTextItems(slide) {
+        const blocks = slide.blocks ?? []
+        const items = blocks.filter((block) => (block.kind ?? "text") === "text")
+            .map((block) => ({ blockId: String(block.key ?? block.id ?? ""), text: String(block.text ?? "") }))
+        if (items.length > 0)
+            return items
+        return slide.text ? [{ blockId: "@slide_text", text: String(slide.text) }] : []
+    }
 
     // A double-click on a slide STAGES it into the Main Output tile — it
     // used to go live immediately (goLiveWithSlides), which flipped the top
@@ -182,7 +515,7 @@ Item {
         // mode nothing needs it: the wall's ‹ › stages the neighbouring slide itself
         // (see stepSlide), one slide at a time.
         const name = root.item ? root.item.name : ""
-        const picked = slide ? slide
+        const picked = slide ? root.renderSlide(slide)
                              : ((index >= 0 && index < root.slides.length) ? root.slides[index] : null)
         if (picked)
             LiveOutputService.stageSlideSet(name, [picked], 0)
@@ -201,7 +534,15 @@ Item {
         const at = root.selectedSlide
         if (at < 0 || at >= root.slides.length)
             return
-        LiveOutputService.stageSlideSet(root.item.name, root.slides, at)
+        LiveOutputService.stageSlideSet(root.item.name, root.renderedSlides(), at)
+    }
+    function stageFirstSlide() {
+        if (!root.show) {
+            root.stageFirstPending = true
+            return
+        }
+        if (root.slides.length > 0)
+            root.takeSlideLive(0, root.slides[0], null)
     }
     Timer {
         id: showSetFill
@@ -268,7 +609,10 @@ Item {
         target: ShowService
         function onShowChanged() { if (root.visible && root.type === "show") root.reload++ }
     }
-    onVisibleChanged: if (visible && root.type === "show") root.reload++
+    onVisibleChanged: if (visible && root.type === "show") {
+        root.reload++
+        templateNoticeTimer.restart()
+    }
 
     Rectangle { anchors.fill: parent; color: root.cDarkest }
 
@@ -381,9 +725,16 @@ Item {
                     // "Template for Shows" pick), applied the SAME way
                     // onAirSlide/stagedSlide already do — so the thumbnail
                     // shows what the slide will actually look like on air,
-                    // not just its own raw blocks. root.reload keys this
-                    // to StylesScreen edits too (see the Connections below).
-                    readonly property var styled: { void root.reload; return LiveOutputService.previewWithActiveStyle(cell.modelData) }
+                    // not just its own raw blocks. Depend explicitly on both
+                    // the output-style and design-library revisions: template
+                    // canvas edits do not change the show's file/reload token.
+                    readonly property var styled: {
+                        void root.reload
+                        void root.styleRevision
+                        void root.templateCatalogRevision
+                        void root.showTemplateId
+                        return LiveOutputService.previewWithActiveStyle(root.renderSlide(cell.modelData))
+                    }
                     width: root.cellWidth
                     height: body.height + 4              // (FreeShow: a cell has 2px of padding)
 
@@ -476,14 +827,18 @@ Item {
                     readonly property bool selected: root.selectedSlide === index
                     // Same active-style-template composition as the grid
                     // cell's own `styled` — see its comment.
-                    readonly property var styled: { void root.reload; return LiveOutputService.previewWithActiveStyle(listRow.modelData) }
-                    // Grows to fit the WHOLE lyric text — was fixed at 104px
-                    // with a 3-line ellipsis, which cut real content off
-                    // (a 4+ line verse just lost its last line behind "…").
-                    // No cap now: the row is exactly as tall as its text
-                    // needs, never less than tall enough for the thumbnail.
+                    readonly property var styled: {
+                        void root.reload
+                        void root.styleRevision
+                        void root.templateCatalogRevision
+                        void root.showTemplateId
+                        return LiveOutputService.previewWithActiveStyle(root.renderSlide(listRow.modelData))
+                    }
+                    property var pendingTextEdits: ({})
+                    property var inFlightTextEdits: ({})
+                    property int quickEditToken: 0
                     width: listCol.width
-                    height: Math.max(80, lyricText.y + lyricText.implicitHeight + 10)
+                    height: Math.max(80, textItemsColumn.y + textItemsColumn.implicitHeight + 10)
                     radius: 6
                     color: selected ? Theme.activeBg : (listHover.hovered ? Theme.surface : Theme.panelBg)
                     // Purple selection — the app-wide selection accent
@@ -501,27 +856,36 @@ Item {
                         }
                     }
                     Text { x: 130; y: 10; text: (listRow.index + 1) + "  " + (listRow.modelData.title ?? "") + ((listRow.modelData.nextTimer ?? 0) > 0 ? "  ·  " + root.formatTime(listRow.modelData.nextTimer) : ""); color: Theme.textPrimary; font.family: Theme.fontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
-                    // EDITABLE — same live-autosave mechanism as the "lyrics"
-                    // view (ShowService.rewriteShowFromText), just presented
-                    // per row instead of one big text block: a row's own
-                    // words are what's edited here, everyone else's are
-                    // read back from root.slides unchanged and rejoined
-                    // around it. `ready` skips the autosave the binding's
-                    // OWN initial assignment would otherwise fire.
-                    TextEdit {
-                        id: lyricText
+                    // Edit each text item in place. Rebuilding a rich slide from
+                    // joined plain text discarded its image and block geometry.
+                    Column {
+                        id: textItemsColumn
                         x: 130; y: 32; width: parent.width - 146
-                        text: root.slideText(listRow.modelData)
-                        color: Theme.textSecondary; wrapMode: TextEdit.Wrap
-                        selectByMouse: true
-                        font.family: Theme.fontFamily; font.pixelSize: 14
-
-                        property bool ready: false
-                        Component.onCompleted: lyricText.ready = true
-                        onTextChanged: if (lyricText.ready) rowSaveTimer.restart()
-                        onActiveFocusChanged: if (!activeFocus && rowSaveTimer.running) {
-                            rowSaveTimer.stop()
-                            listRow.flushEdit()
+                        spacing: 4
+                        Repeater {
+                            model: root.slideTextItems(listRow.modelData)
+                            delegate: TextEdit {
+                                required property var modelData
+                                width: textItemsColumn.width
+                                text: modelData.text
+                                color: Theme.textSecondary
+                                wrapMode: TextEdit.Wrap
+                                selectByMouse: true
+                                font.family: Theme.fontFamily; font.pixelSize: 14
+                                property bool ready: false
+                                Component.onCompleted: ready = true
+                                onTextChanged: {
+                                    if (!ready) return
+                                    const edits = Object.assign({}, listRow.pendingTextEdits)
+                                    edits[String(modelData.blockId)] = text
+                                    listRow.pendingTextEdits = edits
+                                    rowSaveTimer.restart()
+                                }
+                                onActiveFocusChanged: if (!activeFocus && rowSaveTimer.running) {
+                                    rowSaveTimer.stop()
+                                    listRow.flushEdit()
+                                }
+                            }
                         }
                     }
                     Timer {
@@ -530,10 +894,25 @@ Item {
                         onTriggered: listRow.flushEdit()
                     }
                     function flushEdit() {
-                        if (!root.item) return
-                        const full = root.slides.map((s, i) =>
-                            i === listRow.index ? lyricText.text : root.slideText(s)).join("\n\n")
-                        ShowService.rewriteShowFromText(root.item.ref, full)
+                        if (!root.item || Object.keys(listRow.pendingTextEdits).length === 0) return
+                        listRow.inFlightTextEdits = listRow.pendingTextEdits
+                        listRow.quickEditToken = ShowService.updateShowTextItems(
+                                    root.item.ref, String(listRow.modelData.id ?? ""),
+                                    listRow.inFlightTextEdits)
+                        listRow.pendingTextEdits = ({})
+                    }
+                    Connections {
+                        target: ShowService
+                        function onDocumentJobFinished(token, kind, ok) {
+                            if (kind !== "quickEdit" || token !== listRow.quickEditToken) return
+                            listRow.quickEditToken = 0
+                            if (ok) root.reload++
+                            else listRow.pendingTextEdits = Object.assign(
+                                        {}, listRow.inFlightTextEdits, listRow.pendingTextEdits)
+                            listRow.inFlightTextEdits = ({})
+                            if (Object.keys(listRow.pendingTextEdits).length > 0)
+                                rowSaveTimer.restart()
+                        }
                     }
                     HoverHandler { id: listHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -564,7 +943,7 @@ Item {
         // so it can't collide with unsaved work open there.
         Column {
             id: lyricsCol
-            visible: root.viewMode === "lyrics"
+            visible: root.viewMode === "lyrics" && !root.hasRichContent
             x: Math.max(0, (parent.width - width) / 2)
             width: Math.min(parent.width, 760)
 
@@ -608,6 +987,34 @@ Item {
                 onTriggered: {
                     if (lyricsCol.editingPath !== "")
                         ShowService.rewriteShowFromText(lyricsCol.editingPath, lyricsEditor.text)
+                }
+            }
+        }
+        Rectangle {
+            visible: root.viewMode === "lyrics" && root.hasRichContent
+            anchors.centerIn: parent
+            width: Math.min(parent.width - 40, 520)
+            height: noticeColumn.implicitHeight + 32
+            radius: 8
+            color: Theme.surface
+            border.color: Theme.borderSubtle
+            Column {
+                id: noticeColumn
+                anchors.centerIn: parent
+                width: parent.width - 32
+                spacing: 10
+                Text {
+                    width: parent.width
+                    text: qsTr("This show contains positioned text and media items. Edit text in List view to preserve its layout.")
+                    color: Theme.textSecondary
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                }
+                AppButton {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: qsTr("Open List view")
+                    variant: "secondary"
+                    onClicked: SettingsService.setValue("session.slideView", "list")
                 }
             }
         }

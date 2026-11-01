@@ -95,6 +95,17 @@ fi
 rm -rf "$SEED_RUN"
 
 echo "== bundling this machine's configuration (settings + kernel) =="
+# A development build runs against this checkout's dev-profile, so prefer that
+# active profile when creating its installer. Otherwise the installer silently
+# snapshots the separately installed app's older settings. Explicit environment
+# overrides still take precedence for release/CI packaging.
+DEV_PROFILE="$ROOT/dev-profile"
+if [ -z "${BPS_SETTINGS_FILE:-}" ] && [ -f "$DEV_PROFILE/local/settings.json" ]; then
+    export BPS_SETTINGS_FILE="$DEV_PROFILE/local/settings.json"
+fi
+if [ -z "${BPS_KERNEL_FILE:-}" ] && [ -f "$DEV_PROFILE/roaming/enginedata/kernel.json" ]; then
+    export BPS_KERNEL_FILE="$DEV_PROFILE/roaming/enginedata/kernel.json"
+fi
 if ! "$NODE_BIN" "$ROOT/tools/make_seed_config.mjs"; then
     echo "INSTALLER: FAIL seed"
     exit 1
@@ -115,6 +126,13 @@ echo "== bundling this machine's Shows library, Bibles and The Table =="
 DOCS="$(cygpath -u "$(cygpath -F 0x05)")"         # Documents (OneDrive-redirect-safe)
 ROAMING_SRC="$(cygpath -u "$APPDATA")/VGR/VGRPresenter"
 LOCAL_SRC="$(cygpath -u "$LOCALAPPDATA")/bps"
+if [ -d "$DEV_PROFILE/roaming" ] && \
+        { [ -f "$DEV_PROFILE/roaming/enginedata/kernel.json" ] || [ -f "$DEV_PROFILE/roaming/enginedata/bibles.json" ]; }; then
+    ROAMING_SRC="$DEV_PROFILE/roaming"
+fi
+if [ -f "$DEV_PROFILE/local/settings.json" ]; then
+    LOCAL_SRC="$DEV_PROFILE/local"
+fi
 
 # Shows library (the song/sermon categories a show-list screenshot showed
 # empty on a fresh install) -> its OWN seed path, not roaming/local:

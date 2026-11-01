@@ -222,20 +222,17 @@ Result<void> MediaLibrary::Load() {
         return {};
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    order_.clear();
-    items_.clear();
-    scanned_.clear();
-    fits_ = std::move(storedFits);
+    std::vector<std::string> loadedOrder;
+    std::map<std::string, std::vector<LibraryItem>, std::less<>> loadedItems;
     if (const auto* list = parsed.value().Find("folders"))
         if (const auto* arr = list->asArray())
             for (const auto& v : *arr) {
                 const std::string path(v.asString());
                 if (path.empty()) continue;
                 const std::string key = Norm(path);
-                const bool known = std::any_of(order_.begin(), order_.end(),
+                const bool known = std::any_of(loadedOrder.begin(), loadedOrder.end(),
                                                [&](const std::string& f) { return Norm(f) == key; });
-                if (!known) order_.push_back(path);
+                if (!known) loadedOrder.push_back(path);
             }
 
     // The remembered index (what was in each folder last time). It is an
@@ -243,40 +240,50 @@ Result<void> MediaLibrary::Load() {
     // aside as evidence and the library comes up unscanned — the first Scan()
     // of each folder rebuilds it — instead of the bytes being overwritten by a
     // save the operator never got told about.
-    if (!fs.Exists(indexFile_)) return {};
-    auto indexText = fs.ReadText(indexFile_);
-    if (!indexText.ok()) return {};
-    auto index = json::Parse(indexText.value());
-    const std::string indexProblem =
-        index.ok() ? recovery::DocumentShapeProblem(index.value(), "folders", json::Value::Type::Object)
-                   : index.error().message;
-    if (!indexProblem.empty()) {
-        (void)recovery::SetAsideDamagedDocument(indexFile_, kModule, indexProblem);
-        return {};
-    }
-    const auto* object = index.value().Find("folders")->asObject();
-    for (const std::string& folder : order_) {
-        auto entry = object->find(folder);
-        if (entry == object->end()) continue;
-        const auto* list = entry->second.asArray();
-        if (!list) continue;
-        std::vector<LibraryItem> restored;
-        restored.reserve(list->size());
-        for (const auto& row : *list) {
-            LibraryItem item;
-            item.path = std::string(row.Find("p") ? row.Find("p")->asString() : "");
-            const auto kind = MediaKindOf(item.path);
-            if (item.path.empty() || !kind) continue;
-            item.id = MediaPathHash(item.path);
-            item.name = StripExtension(LeafName(item.path));
-            item.kind = *kind;
-            item.folder = folder;
-            item.sizeBytes = static_cast<uint64_t>(row.Find("s") ? row.Find("s")->asInt() : 0);
-            item.modifiedMs = static_cast<int64_t>(row.Find("m") ? row.Find("m")->asInt() : 0);
-            restored.push_back(std::move(item));
+    if (fs.Exists(indexFile_)) {
+        auto indexText = fs.ReadText(indexFile_);
+        if (indexText.ok()) {
+            auto index = json::Parse(indexText.value());
+            const std::string indexProblem =
+                index.ok() ? recovery::DocumentShapeProblem(index.value(), "folders", json::Value::Type::Object)
+                           : index.error().message;
+            if (!indexProblem.empty()) {
+                (void)recovery::SetAsideDamagedDocument(indexFile_, kModule, indexProblem);
+            } else {
+                const auto* object = index.value().Find("folders")->asObject();
+                for (const std::string& folder : loadedOrder) {
+                    auto entry = object->find(folder);
+                    if (entry == object->end()) continue;
+                    const auto* list = entry->second.asArray();
+                    if (!list) continue;
+                    std::vector<LibraryItem> restored;
+                    restored.reserve(list->size());
+                    for (const auto& row : *list) {
+                        LibraryItem item;
+                        item.path = std::string(row.Find("p") ? row.Find("p")->asString() : "");
+                        const auto kind = MediaKindOf(item.path);
+                        if (item.path.empty() || !kind) continue;
+                        item.id = MediaPathHash(item.path);
+                        item.name = StripExtension(LeafName(item.path));
+                        item.kind = *kind;
+                        item.folder = folder;
+                        item.sizeBytes = static_cast<uint64_t>(row.Find("s") ? row.Find("s")->asInt() : 0);
+                        item.modifiedMs = static_cast<int64_t>(row.Find("m") ? row.Find("m")->asInt() : 0);
+                        restored.push_back(std::move(item));
+                    }
+                    loadedItems[folder] = std::move(restored);
+                }
+            }
         }
-        items_[folder] = std::move(restored);
     }
+
+    // Commit the fully loaded snapshot only after every filesystem operation.
+    // Readers never wait behind a slow index read or damaged-file recovery.
+    std::lock_guard<std::mutex> lock(mutex_);
+    order_ = std::move(loadedOrder);
+    items_ = std::move(loadedItems);
+    scanned_.clear();
+    fits_ = std::move(storedFits);
     return {};
 }
 

@@ -242,7 +242,7 @@ public:
     Q_INVOKABLE QVariantList searchLibrary(const QString &text) const;
     Q_INVOKABLE bool createLibraryCategory(const QString &name);
     Q_INVOKABLE bool renameLibraryCategory(const QString &from, const QString &to);
-    Q_INVOKABLE bool removeLibraryCategory(const QString &name);              // only when empty
+    Q_INVOKABLE bool removeLibraryCategory(const QString &name);              // keeps shows in Unlabeled
     // Moves every show in `name` to the recoverable .deleted bin (a re-import
     // calls this to replace the previous batch). True when the folder is clear.
     Q_INVOKABLE bool clearLibraryCategory(const QString &name);
@@ -279,6 +279,13 @@ public:
     // fine for lyrics text; per-slide custom styling would not survive a
     // re-edit today. A failure toasts why when the verdict lands.
     Q_INVOKABLE int rewriteShowFromText(const QString &path, const QString &text);
+    // Quick edit for a slide's existing text blocks. Other blocks (images,
+    // shapes, layout and style) stay as-authored in the show file.
+    Q_INVOKABLE int updateShowTextItems(const QString &path, const QString &slideId,
+                                        const QVariantMap &textByBlockId);
+    // Applies a whole-show Text edit in one worker-thread document transaction.
+    // Each row has { slideId, textByBlockId, newItems, fontFamily }.
+    Q_INVOKABLE int applyTextEditBatch(const QVariantList &slideEdits);
 
 signals:
     void showChanged();

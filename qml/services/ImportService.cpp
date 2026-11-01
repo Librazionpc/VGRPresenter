@@ -20,6 +20,8 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QFileInfo>
 #include <QThread>
@@ -59,6 +61,25 @@ QString safeFolderName(QString name)
     while (!name.isEmpty() && (name.back() == QLatin1Char(' ') || name.back() == QLatin1Char('.')))
         name.chop(1);
     return name;
+}
+
+void pointImportedMediaAtCopy(bi::ImportedShow &show, const QString &source, const QString &target)
+{
+    const QByteArray sourceBytes = source.toUtf8();
+    const QString targetPath = QDir::toNativeSeparators(target);
+    for (bi::ImportedSection &section : show.sections) {
+        for (bi::ImportedSlide &slide : section.slides) {
+            for (bps::presentation::ContentBlock &block : slide.blocks) {
+                QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(block.metaJson));
+                if (!doc.isObject()) continue;
+                QJsonObject meta = doc.object();
+                if (meta.value(QStringLiteral("src")).toString().toUtf8() != sourceBytes)
+                    continue;
+                meta.insert(QStringLiteral("src"), targetPath);
+                block.metaJson = QJsonDocument(meta).toJson(QJsonDocument::Compact).toStdString();
+            }
+        }
+    }
 }
 
 QVariantMap failure(const QString &why)
@@ -335,7 +356,7 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         const QString mediaRoot = dataroot::appDataRoot() + QStringLiteral("/media/imported");
         QStringList mediaFolders;
         int mediaCopied = 0;
-        for (const bi::ImportedShow &show : result.value().shows) {
+        for (bi::ImportedShow &show : result.value().shows) {
             if (show.mediaRefs.empty()) continue;
             QString folder = safeFolderName(!libraryFolder.isEmpty() ? libraryFolder : qstr(show.sourceFolder));
             if (folder.isEmpty()) folder = safeFolderName(formatName);
@@ -351,6 +372,7 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
                     if (!QFile::copy(source, target)) continue;
                     ++mediaCopied;
                 }
+                pointImportedMediaAtCopy(show, source, target);
                 if (!mediaFolders.contains(dir)) mediaFolders.append(dir);
             }
         }

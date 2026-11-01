@@ -6,6 +6,9 @@
 - **More control over your recordings.** Choose video formats and quality, or save audio as WAV, M4A, or MP3.
 - **Start fresh when installing.** An optional clean install resets settings and libraries while keeping your recordings.
 - **A clearer workspace.** Routing and settings have been refreshed to make connections and choices easier to follow.
+- **Your setup comes with the installer.** Fresh installs can start with your current preferences, output routing, styles, templates, and content libraries.
+- **Smoother Scripture controls and previews.** Bible scroll buttons respond while passage layout loads, and selected slides appear sooner in monitor previews.
+- **FreeShow imports preserve slide layouts.** Text boxes stay separate, and supported background images come along with each slide.
 
 # VGRPresenter 0.1.2
 

@@ -225,6 +225,18 @@ Rectangle {
     // export never captured what TEXT/SLIDE should actually show, so the
     // panel content underneath doesn't vary by tab yet.
     property string rightPanelTab: "items"
+    // The central workspace can show the visual slide canvas or FreeShow-style
+    // whole-show text editing. The text form keeps textbox markers so copied
+    // FreeShow text can be pasted back into the same positioned items.
+    property string editWorkspaceMode: "slide"
+    property string textEditBuffer: ""
+    property string textEditStatus: ""
+    property bool loadingTextEditBuffer: false
+    property bool textEditBufferDirty: false
+    property bool textEditApplying: false
+    property bool textEditSwitchAfterApply: false
+    property int textEditApplyToken: 0
+    property string textEditSubmittedBuffer: ""
     // True once the operator has LEFT the item facets on purpose, by clicking ITEMS or
     // SLIDE. From then on a new selection does not move the panel to TEXT or MEDIA on
     // its own — not even after the selection is cleared and made again. It stays that way
@@ -234,6 +246,246 @@ Rectangle {
     // belonging to a tab you've left is exactly the "not tied to its
     // parent" class of bug.
     onRightPanelTabChanged: { textFontMenu.visible = false; textFontFamilyMenu.visible = false; textAutoSizeMenu.visible = false; textCaseMenu.visible = false; borderStyleMenu.visible = false }
+
+    function textEditGroupLabel(fields) {
+        const raw = String(fields.tag ?? "")
+        if (!raw) return String(fields.title ?? "")
+        return raw.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+    }
+    function exportTextEditBuffer() {
+        const slides = []
+        let previousGroup = null
+        for (let row = 0; row < slideModel.rowCount(); ++row) {
+            slides.push("[#slide:" + (row + 1) + "]")
+            const slideId = slideModel.slideIdAt(row)
+            const fields = slideModel.slideFieldsAt(row)
+            const textItems = slideStore.blocksOf(slideId).filter((block) => block.kind === "text").reverse()
+            const group = root.textEditGroupLabel(fields)
+            const lines = []
+            if (group && group !== previousGroup)
+                lines.push("[" + group + "]")
+            previousGroup = group
+            textItems.forEach((item, index) => {
+                lines.push("[" + "#" + (index + 1) + "]")
+                const itemText = String(item.text ?? "")
+                if (itemText !== "") lines.push(itemText)
+            })
+            slides.push(lines.join("\n"))
+        }
+        return slides.join("\n\n")
+    }
+    function enterTextEditMode() {
+        if (root.designMode || root.editWorkspaceMode === "text" || root.textEditApplying) return
+        if (root.anyTextEditing) root.endTextEdit()
+        if (!root.textEditBufferDirty) {
+            showSession.flushAll()
+            showSession.flushTimer.stop()
+            root.loadingTextEditBuffer = true
+            root.textEditBuffer = root.exportTextEditBuffer()
+            root.loadingTextEditBuffer = false
+        }
+        root.editWorkspaceMode = "text"
+    }
+    function leaveTextEditMode() {
+        if (root.editWorkspaceMode !== "text") return
+        textEditApplyTimer.stop()
+        root.startTextEditApply(true)
+    }
+    function startTextEditApply(switchToSlide) {
+        if (root.textEditApplying) {
+            EngineBridge.log("debug", "Text edit", "Apply request coalesced; already applying, switchToSlide=" + switchToSlide)
+            root.textEditSwitchAfterApply = root.textEditSwitchAfterApply || switchToSlide
+            return
+        }
+        root.textEditSwitchAfterApply = switchToSlide
+        root.textEditApplying = true
+        EngineBridge.log("info", "Text edit", "Apply timer started; bufferChars=" + String(root.textEditBuffer).length
+                         + ", switchToSlide=" + switchToSlide)
+        textEditWorkTimer.start()
+    }
+    function finishTextEditApply() {
+        const switchToSlide = root.textEditSwitchAfterApply
+        EngineBridge.log("info", "Text edit", "Apply timer fired; bufferChars=" + String(root.textEditBuffer).length)
+        let token = -1
+        try {
+            token = root.applyTextEditBufferNow()
+        } catch (e) {
+            root.textEditStatus = qsTr("Couldn't apply the text edits. Your text is still here.")
+            EngineBridge.log("warning", "Text edit", "Apply failed: " + String(e))
+        }
+        if (token > 0) {
+            root.textEditSubmittedBuffer = String(root.textEditBuffer)
+            root.textEditApplyToken = token
+            return
+        }
+        root.textEditApplying = false
+        root.textEditSwitchAfterApply = false
+        if (token === 0)
+            root.textEditBufferDirty = false
+        if (switchToSlide)
+            root.editWorkspaceMode = "slide"
+    }
+    function applyTextEditBufferNow() {
+        const source = String(root.textEditBuffer).replace(/\r/g, "").trim()
+        let chunks = []
+        const markedSlides = /^\s*\[#slide:\d+\]\s*$/m.test(source)
+        const itemSectionCount = (source.match(/^\s*\[#1\]\s*$/gm) || []).length
+        const numberedItemSections = !markedSlides && itemSectionCount > 1
+        const chunkSlideNumbers = []
+        if (markedSlides) {
+            let current = null
+            source.split("\n").forEach((line) => {
+                const slideMarker = line.match(/^\s*\[#slide:(\d+)\]\s*$/)
+                if (slideMarker) {
+                    if (current !== null) chunks.push(current.join("\n"))
+                    chunkSlideNumbers.push(Number(slideMarker[1]))
+                    current = []
+                } else if (current !== null) {
+                    current.push(line)
+                }
+            })
+            if (current !== null) chunks.push(current.join("\n"))
+        } else if (numberedItemSections) {
+            // FreeShow clipboard text has no slide markers. In this format a
+            // repeated [#1]/[#2] pair is one slide section; split at each new
+            // [#1] and associate the sections with slides in order.
+            let current = []
+            let sawItemMarker = false
+            const finishSection = () => {
+                while (current.length > 0 && String(current[current.length - 1]).trim() === "")
+                    current.pop()
+                chunks.push(current.join("\n"))
+                chunkSlideNumbers.push(chunks.length)
+                current = []
+            }
+            source.split("\n").forEach((line) => {
+                const startsItem = /^\s*\[#1\]\s*$/.test(line)
+                if (startsItem && sawItemMarker)
+                    finishSection()
+                current.push(line)
+                if (startsItem)
+                    sawItemMarker = true
+            })
+            if (sawItemMarker)
+                finishSection()
+        } else {
+            chunks = source.split(/\n[\t ]*\n+/)
+        }
+        if (!markedSlides && !numberedItemSections && chunks.length !== slideModel.rowCount()) {
+            root.textEditStatus = qsTr("Slide count changed. Restore the original slide breaks before applying text.")
+            EngineBridge.log("warning", "Text edit", "Paste has " + chunks.length
+                             + " slides; this show has " + slideModel.rowCount()
+                             + ". Keep the slide count unchanged to preserve slide layouts.")
+            return -1
+        }
+        if (markedSlides) {
+            const seenSlides = ({})
+            for (const slideNumber of chunkSlideNumbers) {
+                if (slideNumber < 1 || slideNumber > slideModel.rowCount() || seenSlides[slideNumber]) {
+                    root.textEditStatus = qsTr("A slide marker is invalid or repeated. Your text is still here.")
+                    EngineBridge.log("warning", "Text edit", "Rejected slide marker " + slideNumber
+                                     + " in a " + slideModel.rowCount() + "-slide show")
+                    return -1
+                }
+                seenSlides[slideNumber] = true
+            }
+            if (chunks.length !== slideModel.rowCount())
+                EngineBridge.log("info", "Text edit", "Applying " + chunks.length + " marked slide section(s) to a "
+                                 + slideModel.rowCount() + "-slide show; unlisted slides will be left unchanged")
+        }
+        const parsedSlides = []
+        for (let i = 0; i < chunks.length; ++i) {
+            const lines = chunks[i].split("\n")
+            if (lines.length && /^\s*\[#slide:\d+\]\s*$/.test(lines[0]))
+                lines.shift()
+            if (lines.length && /^\s*\[[^#\]]+\]\s*$/.test(lines[0]))
+                lines.shift() // FreeShow group heading; slide order/groups stay intact here.
+            const values = ({})
+            let currentItem = 0
+            let sawMarker = false
+            for (const line of lines) {
+                const marker = line.match(/^\s*\[#(\d+)(?::[^\]]+)?\](.*)$/)
+                if (marker) {
+                    sawMarker = true
+                    currentItem = Math.max(0, Number(marker[1]) - 1)
+                    if (values[currentItem] === undefined) values[currentItem] = ""
+                    const rest = marker[2].replace(/^\s+/, "")
+                    if (rest) values[currentItem] += (values[currentItem] ? "\n" : "") + rest
+                } else {
+                    values[currentItem] = (values[currentItem] === undefined ? "" : values[currentItem])
+                        + (values[currentItem] ? "\n" : "") + line
+                }
+            }
+            EngineBridge.log("debug", "Text edit", "slide "
+                             + ((markedSlides || numberedItemSections) ? chunkSlideNumbers[i] : i + 1)
+                             + ": parsed item indexes="
+                             + Object.keys(values).join(",") + ", marker=" + sawMarker)
+            parsedSlides.push({ values: values, sawMarker: sawMarker,
+                                slideNumber: (markedSlides || numberedItemSections) ? chunkSlideNumbers[i] : 0 })
+        }
+
+        const slideEdits = []
+        for (let row = 0; row < parsedSlides.length; ++row) {
+            const parsed = parsedSlides[row]
+            const targetRow = parsed.slideNumber > 0 ? parsed.slideNumber - 1 : row
+            const uiSlideId = slideModel.slideIdAt(targetRow)
+            const slideId = slideModel.engineIdAt(targetRow)
+            const textBlocks = slideStore.blocksOf(uiSlideId)
+                .filter((block) => block.kind === "text").reverse()
+            let requestedCount = textBlocks.length
+            if (parsed.sawMarker) {
+                for (const key in parsed.values)
+                    requestedCount = Math.max(requestedCount, Number(key) + 1)
+            }
+            const textByBlockId = ({})
+            if (parsed.sawMarker) {
+                for (const key in parsed.values) {
+                    const index = Number(key)
+                    const next = String(parsed.values[key] ?? "")
+                    if (index < textBlocks.length) {
+                        const target = textBlocks[index]
+                        if (target.text !== next)
+                            textByBlockId[target.key] = next
+                    }
+                }
+            } else if (textBlocks.length > 0) {
+                // FreeShow's unmarked text maps to its first text item; other
+                // existing boxes are left untouched unless explicitly marked.
+                const next = String(parsed.values[0] ?? "")
+                if (textBlocks[0].text !== next)
+                    textByBlockId[textBlocks[0].key] = next
+            }
+            for (let index = textBlocks.length; index < requestedCount; ++index) {
+                textByBlockId["@new:" + index] = String(parsed.values[index] ?? "")
+            }
+            const newItemCount = Math.max(0, requestedCount - textBlocks.length)
+            EngineBridge.log("info", "Text edit",
+                             "slide " + (targetRow + 1) + " (" + slideId + "): parsedMarkers="
+                             + parsed.sawMarker + ", existingTextItems=" + textBlocks.length
+                             + ", requestedTextItems=" + requestedCount + ", newItems="
+                             + newItemCount + ", changedExistingItems="
+                             + Object.keys(textByBlockId).filter((key) => key.indexOf("@new:") !== 0).length)
+            if (Object.keys(textByBlockId).length > 0)
+                slideEdits.push({ slideId: slideId, textByBlockId: textByBlockId,
+                                  fontFamily: FontService.defaultContentFamily })
+        }
+        if (slideEdits.length === 0) {
+            root.textEditStatus = qsTr("No changes detected. Add the next [#N] marker on a slide to create another text box.")
+            EngineBridge.log("info", "Text edit", "Parsed " + parsedSlides.length
+                             + " slide(s); no slide edits were submitted")
+            return 0
+        }
+        EngineBridge.log("info", "Text edit", "Submitting " + slideEdits.length
+                         + " changed slide(s) from " + parsedSlides.length + " parsed slide(s)")
+        const token = ShowService.applyTextEditBatch(slideEdits)
+        if (token <= 0) {
+            root.textEditStatus = qsTr("Couldn't start the text update. Your text is still here.")
+            EngineBridge.log("warning", "Text edit", "Batch submission returned token " + token)
+            return -1
+        }
+        EngineBridge.log("info", "Text edit", "Submitted batch job token " + token)
+        return token
+    }
 
     // Background-color picker (see bgColorModal near the end of this file)
     // and the current selection it applies to the "Background" row's swatch.
@@ -1275,7 +1527,7 @@ Rectangle {
     // item's geometry/text/style and lands the copy one tile down-right.
     // The item is created and owned by the slide store so it archives with
     // its slide. Returns the new CanvasItem.
-    function addCanvasItem(kind, copyFrom) {
+    function addCanvasItem(kind, copyFrom, insertAt) {
         // Deferred: several callers (CameraSourceModal.onApplied etc.) set
         // item.text/item.meta right after this returns, in the same tick —
         // the deferred commit fires after those too, so the undo step
@@ -1294,7 +1546,8 @@ Rectangle {
             40 + (n % 6) * 20,
             isCamera ? 112 : 220,
             isCamera ? 84 : 44,
-            copyFrom)
+            copyFrom,
+            insertAt)
         if (!item)
             return null
         root.handleCanvasSelect(item.key, 0)
@@ -1310,8 +1563,8 @@ Rectangle {
     // Cambria, Segoe UI is for the app['s] UI"). Two call sites need this
     // (the + menu's popover and the addText shortcut), so it is one
     // function, not two copies of the same Object.assign.
-    function addTextItem() {
-        const item = root.addCanvasItem("text")
+    function addTextItem(insertAt) {
+        const item = root.addCanvasItem("text", null, insertAt)
         if (item)
             item.meta = Object.assign({}, item.meta, { fontFamily: FontService.defaultContentFamily })
         return item
@@ -1944,6 +2197,39 @@ Rectangle {
             }
         }
 
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 4
+            visible: !root.designMode
+            Repeater {
+                model: [
+                    { id: "slide", label: qsTr("Slide") },
+                    { id: "text", label: qsTr("Text edit") }
+                ]
+                delegate: Rectangle {
+                    required property var modelData
+                    width: modelData.id === "slide" ? 76 : 94
+                    height: 30
+                    radius: 6
+                    color: root.editWorkspaceMode === modelData.id ? Theme.activeBg : "transparent"
+                    border.color: root.editWorkspaceMode === modelData.id ? Theme.accent : Theme.borderSubtle
+                    Text {
+                        anchors.centerIn: parent
+                        text: modelData.label
+                        color: root.editWorkspaceMode === modelData.id ? Theme.textPrimary : Theme.textSecondary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: modelData.id === "text" ? root.enterTextEditMode() : root.leaveTextEditMode()
+                    }
+                }
+            }
+        }
+
         Connections {
             target: EngineBridge
             function onEngineEvent(topic, payload) {
@@ -1960,11 +2246,153 @@ Rectangle {
         color: Theme.border
     }
 
+    Rectangle {
+        id: textEditWorkspace
+        x: root.slidePanelWidth
+        y: 97
+        width: root.centerRegionWidth
+        height: root.height - y
+        visible: root.editWorkspaceMode === "text" && root.hasActiveSlide
+        color: Theme.panelBg
+        border.color: Theme.border
+        clip: true
+        Flickable {
+            anchors.fill: parent
+            contentWidth: width
+            contentHeight: Math.max(height, textEditArea.implicitHeight + 48)
+            clip: true
+            TextEdit {
+                id: textEditArea
+                x: 24
+                y: 20
+                width: Math.max(0, parent.width - 48)
+                text: root.textEditBuffer
+                color: Theme.textPrimary
+                selectionColor: Qt.alpha(Theme.accent, 0.45)
+                selectedTextColor: Theme.textPrimary
+                wrapMode: TextEdit.Wrap
+                selectByMouse: true
+                persistentSelection: true
+                font.family: FontService.monoFamily
+                font.pixelSize: 15
+                onTextChanged: {
+                    if (!root.loadingTextEditBuffer) {
+                        root.textEditBuffer = text
+                        root.textEditBufferDirty = true
+                        textEditApplyTimer.restart()
+                    }
+                }
+            }
+        }
+        Text {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 12
+            text: root.textEditStatus || qsTr("Use [#1], [#2] markers to edit separate text boxes")
+            color: Theme.textMuted
+            font.family: Theme.fontFamily
+            font.pixelSize: 10
+            opacity: 0.8
+        }
+        Timer {
+            id: textEditApplyTimer
+            interval: 550
+            repeat: false
+            onTriggered: root.startTextEditApply(false)
+        }
+        Timer {
+            id: textEditWorkTimer
+            interval: 50
+            repeat: false
+            onTriggered: root.finishTextEditApply()
+        }
+        Connections {
+            target: ShowService
+            function onDocumentJobFinished(token, kind, ok, error, payload) {
+                if (kind !== "textEditBatch" || token !== root.textEditApplyToken)
+                    return
+                const switchToSlide = root.textEditSwitchAfterApply
+                root.textEditApplyToken = 0
+                if (ok) {
+                    EngineBridge.log("info", "Text edit", "Installing returned slide data for job " + token)
+                    showSession.applyTextEditResult(payload ? payload.slides ?? [] : [])
+                    root.textEditStatus = qsTr("Text items updated")
+                    EngineBridge.log("info", "Text edit",
+                                     "Job " + token + " completed; returned slides="
+                                     + ((payload && payload.slides) ? payload.slides.length : 0)
+                                     + ", new items requested="
+                                     + (payload ? payload.requestedNewItems ?? 0 : 0)
+                                     + ", created=" + (payload ? payload.createdNewItems ?? 0 : 0))
+                    if (root.textEditBuffer === root.textEditSubmittedBuffer)
+                        root.textEditBufferDirty = false
+                    if (switchToSlide)
+                        root.editWorkspaceMode = "slide"
+                } else {
+                    root.textEditStatus = qsTr("Couldn't apply the text edits. Your text is still here.")
+                    EngineBridge.log("warning", "Text edit", "Job " + token + " failed: " + String(error))
+                    if (error)
+                        EngineBridge.log("warning", "Text edit", String(error))
+                    root.textEditBufferDirty = true
+                    if (switchToSlide)
+                        root.editWorkspaceMode = "slide"
+                }
+                root.textEditApplying = false
+                root.textEditSwitchAfterApply = false
+                if (root.textEditBuffer !== root.textEditSubmittedBuffer)
+                    textEditApplyTimer.restart()
+            }
+            function onDocumentJobCancelled(token, kind) {
+                if (kind !== "textEditBatch" || token !== root.textEditApplyToken)
+                    return
+                const switchToSlide = root.textEditSwitchAfterApply
+                root.textEditApplyToken = 0
+                root.textEditApplying = false
+                root.textEditSwitchAfterApply = false
+                root.textEditStatus = qsTr("Text update cancelled. Your text is still here.")
+                root.textEditBufferDirty = true
+                if (switchToSlide)
+                    root.editWorkspaceMode = "slide"
+            }
+        }
+        ModalScrim {
+            visible: root.textEditApplying
+            z: 20
+            Rectangle {
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 32, 320)
+                height: 92
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.color: Theme.border
+
+                BusySpinner {
+                    x: 22
+                    anchors.verticalCenter: parent.verticalCenter
+                    running: root.textEditApplying
+                    color: Theme.accent
+                }
+                Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 64
+                    anchors.right: parent.right
+                    anchors.rightMargin: 18
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Updating show text…")
+                    color: Theme.textPrimary
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 15
+                    font.weight: Font.DemiBold
+                }
+            }
+        }
+    }
+
     // ---- Canvas ----
     // The stage keeps its native editing coordinates; its display scale fits
     // the available center region without changing saved item geometry.
     Rectangle {
         id: mCanvas
+        visible: root.editWorkspaceMode === "slide"
 
         // Dropping a metadata field makes its item where the pointer is — the + 
         // palette's chips are DragSources, and this is the canvas half of that 

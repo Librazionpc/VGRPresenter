@@ -18,11 +18,11 @@ the build (and the building machine's content) rather than a stale manual copy:
 | Generated file | From |
 | --- | --- |
 | `seed-data/local/overlays.json` | the engine's own shipped catalog (`bps_cli --dump-catalogs`) — font-free, with the current catalog revision |
-| `seed-data/local/settings.json`, `seed-data/roaming/enginedata/kernel.json` | this machine's live settings and the engine's configuration collections, with this PC's absolute paths stripped (`tools/make_seed_config.mjs`) |
+| `seed-data/local/settings.json`, `seed-data/roaming/enginedata/kernel.json` | the active checkout `dev-profile` when present, otherwise this machine's installed-app settings and engine configuration; machine-specific settings paths are stripped (`tools/make_seed_config.mjs`) |
 | `seed-data/shows/*` | this machine's Shows library (`Documents\VGR Presenter\Shows`, minus `.deleted`) |
-| `seed-data/roaming/enginedata/bibles.json` | this machine's Bibles (not `bibles.userdata.json` — that's personal marks/notes, never starter content) |
-| `seed-data/local/the_table.json` + `the_table_texts/` | this machine's The Table sermon library (not the `.bak*` variants, `cache/`, `backups/` or `recovery/` — this machine's own safety nets, not content) |
-| `seed-data/local/templates.json` | this machine's OWN live templates, written LAST so it overrides `bps_cli`'s empty catalog dump — see the note below |
+| `seed-data/roaming/enginedata/bibles.json` | the active checkout profile's Bibles when present, otherwise the installed-app profile (not `bibles.userdata.json`, which holds personal marks/notes) |
+| `seed-data/local/the_table.json` + `the_table_texts/` | the active checkout profile's Table library when present, otherwise the installed-app profile (excluding backups, caches and recovery data) |
+| `seed-data/local/templates.json` | the active checkout profile's templates when present, otherwise the installed-app profile, written after `bps_cli`'s empty catalog dump |
 
 A fresh install used to open Scripture/The Table EMPTY, because nothing ever
 copied the library content itself — only the catalogs and settings above. The
@@ -57,6 +57,15 @@ are what an INSTALLED app actually reads — every install replaces them:
 
 That is why the installer never has to delete `settings.json` or `kernel.json` to
 make a fix visible.
+
+When building from this checkout, `tools/make_installer.sh` snapshots
+`dev-profile/local` and `dev-profile/roaming` first. That is the profile the
+development build uses, so the installer includes the settings and routing,
+style, output, and profile configuration you have been editing. If no dev
+profile exists, it falls back to the installed app's profile. Set
+`BPS_SETTINGS_FILE` or `BPS_KERNEL_FILE` to explicitly choose a source file.
+The installer seeds these values for fresh installs; an existing install keeps
+its own saved choices.
 
 Catalogs are never hand-copied: a hand-copied catalog is how the shipped
 templates once ended up naming the fonts of the machine they were copied from.

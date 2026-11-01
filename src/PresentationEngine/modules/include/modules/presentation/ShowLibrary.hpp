@@ -59,7 +59,8 @@ public:
     // empty, not "." / "..". Returns InvalidArgument otherwise.
     Result<void> CreateCategory(std::string_view name);
     Result<void> RenameCategory(std::string_view from, std::string_view to);
-    Result<void> RemoveCategory(std::string_view name);          // only when empty
+    // Moves its shows into Unlabeled, then removes the empty category folder.
+    Result<void> RemoveCategory(std::string_view name);
     // Moves every show in `name` to the recoverable .deleted bin (one rescan).
     // A no-op when the category does not exist. Re-imports use it to replace
     // the previous batch instead of piling duplicates beside it.

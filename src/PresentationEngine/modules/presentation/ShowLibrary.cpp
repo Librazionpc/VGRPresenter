@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <format>
+#include <utility>
 
 namespace bps::presentation {
 
@@ -258,10 +259,37 @@ Result<void> ShowLibrary::RemoveCategory(std::string_view name) {
         return Error::Make(Err::NotFound, kModule, std::format("no category '{}'", name));
     auto contents = fs.Enumerate(dir);
     if (!contents.ok()) return contents.error();
-    if (!contents.value().empty())
-        return Error::Make(Err::InvalidState, kModule,
-                           std::format("category '{}' still has shows in it — move or delete them first", name));
-    if (auto r = fs.Remove(dir); !r.ok()) return r.error();
+
+    // Removing a category should not require deleting its shows. Move them to
+    // the library root (Unlabeled), choosing unique names if needed, then remove
+    // the now-empty folder. Roll back earlier moves if any later move fails.
+    std::vector<std::pair<std::string, std::string>> moved;
+    for (const std::string& source : contents.value()) {
+        if (fs.IsDirectory(source) || !IsShowFile(source)) {
+            for (auto it = moved.rbegin(); it != moved.rend(); ++it)
+                (void)fs.Move(it->second, it->first);
+            return Error::Make(Err::InvalidState, kModule,
+                               std::format("category '{}' contains unsupported files", name));
+        }
+        const std::string leaf = LeafName(source);
+        std::string target = fs.Join(root_, leaf);
+        const size_t dot = leaf.find_last_of('.');
+        const std::string stem = dot == std::string::npos ? leaf : leaf.substr(0, dot);
+        const std::string ext = dot == std::string::npos ? std::string() : leaf.substr(dot);
+        for (int suffix = 2; fs.Exists(target); ++suffix)
+            target = fs.Join(root_, std::format("{} ({}){}", stem, suffix, ext));
+        if (auto move = fs.Move(source, target); !move.ok()) {
+            for (auto it = moved.rbegin(); it != moved.rend(); ++it)
+                (void)fs.Move(it->second, it->first);
+            return move.error();
+        }
+        moved.emplace_back(source, target);
+    }
+    if (auto r = fs.Remove(dir); !r.ok()) {
+        for (auto it = moved.rbegin(); it != moved.rend(); ++it)
+            (void)fs.Move(it->second, it->first);
+        return r.error();
+    }
     return Scan();
 }
 

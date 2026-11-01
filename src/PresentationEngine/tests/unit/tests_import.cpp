@@ -438,10 +438,10 @@ void TestShowFromImported() {
     show.notes = "play it slowly";
     show.origin = "txt";
     auto section = [](const char* group, const char* label, const char* text) {
-        im::ImportedSection s; s.group = group; s.label = label; s.slides.push_back({ text, "n", "" }); return s;
+        im::ImportedSection s; s.group = group; s.label = label; s.slides.push_back({ text, "n", "", {} }); return s;
     };
     show.sections = { section("verse", "Verse", "first"), section("chorus", "Chorus", "sing"), section("verse", "Verse", "second"), section("chorus", "Chorus", "sing") };
-    show.sections[2].slides.push_back({ "second, part two", {}, "[[{\"pos\":0,\"key\":\"C\"}]]" });
+    show.sections[2].slides.push_back({ "second, part two", {}, "[[{\"pos\":0,\"key\":\"C\"}]]", {} });
 
     // ---- with no template: a plain centred text box ----
     auto p = im::ShowFromImported(show);

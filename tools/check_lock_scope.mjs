@@ -564,10 +564,12 @@ let waivers = 0;
 // macro is expanded. Counted (and stated in the summary) instead of either
 // guessed at or silently ignored.
 let macroLocks = 0;
+const macroLockSites = [];
 // Calls that hand the caller's lock to a helper (`Drain(lock, exec)`), where the
 // point of the parameter is to release it. Counted, not judged — see
 // takesLockParam.
 let handedLocks = 0;
+const handedLockSites = [];
 for (const file of files) {
   // POSIX separators in every reported/ledger path, so the baseline is not
   // Windows-only.
@@ -612,7 +614,10 @@ for (const file of files) {
     // preprocessor directive is not code at all.
     let hit = null;
     if (isDirective) {
-      if (LOCK_DECL.test(line)) macroLocks++;   // real, but not visible here
+      if (LOCK_DECL.test(line)) {
+        macroLocks++;   // real, but not visible here
+        macroLockSites.push(`${rel}:${no}: ${line.trim()}`);
+      }
       return;
     }
     if (!LOCK_DECL.test(line)) {
@@ -651,15 +656,13 @@ for (const file of files) {
           if (insideLambda(lambdas, call.at)) continue;
           const t = resolveCalleeAt(call.name, call.onThis, cur);
           if (!t) {
-            // Not resolved, and worth SAYING so: either the name has several
-            // definitions in scope (which one a call binds to is unanswerable
-            // from the text) or the call is on an object this scan cannot type —
-            // and in both cases a definition of that name reaches a blocking
-            // call, so silence here would read as "checked, clean".
+            // Only report ambiguity when a lock is actually held here. This
+            // guard audits lock scope; an ambiguous call outside one cannot
+            // explain a lock being held across blocking work.
             const own = defsByName.get(call.name) || [];
-            if (own.some((d) => d.labels.size > 0))
+            if (active.length && own.some((d) => d.labels.size > 0))
               unresolved.add(
-                `${rel}:${no}:${call.name}` +
+                `${rel}:${no}:${call.name} (lock at :${active[active.length - 1].line})` +
                   (!cur
                     ? " (no enclosing definition parsed)"
                     : call.onThis
@@ -669,7 +672,10 @@ for (const file of files) {
             continue;
           }
           if (takesLockParam(t)) {
-            handedLocks++;
+            if (active.length) {
+              handedLocks++;
+              handedLockSites.push(`${rel}:${no}: ${call.name} (lock at :${active[active.length - 1].line})`);
+            }
             continue;
           }
           if (t.labels.size === 0) continue;
@@ -998,6 +1004,8 @@ if (listMode) {
   for (const f of stale) report(f);
   for (const f of known) console.error(`  ${f.file}:${f.line}  [${f.label}]  (baselined)`);
   for (const u of unresolved) console.error(`  ${u}  (not judged)`);
+  for (const u of handedLockSites) console.error(`  ${u}  (callee releases caller lock)`);
+  for (const u of macroLockSites) console.error(`  ${u}  (lock declaration in macro; inspect expansions)`);
 } else {
   if (fresh.length) {
     console.error(`check_lock_scope: ${fresh.length} NEW lock(s) held across a blocking call:\n`);
@@ -1047,10 +1055,10 @@ if (unresolved.size)
 if (macroLocks)
   console.error(
     `check_lock_scope: ${macroLocks} lock declaration(s) inside a #define — whether they\n` +
-      `  are held depends on where the macro expands, which this scan cannot see.`
+      `  are held depends on where the macro expands, which this scan cannot see. Run --list for sites.`
   );
 if (handedLocks)
   console.error(
     `check_lock_scope: ${handedLocks} call(s) handed this line's lock (a lock parameter:\n` +
-      `  the callee releases it around the work, which is the point of the parameter).`
+      `  the callee releases it around the work, which is the point of the parameter). Run --list for sites.`
   );

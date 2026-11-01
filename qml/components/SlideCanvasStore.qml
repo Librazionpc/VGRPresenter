@@ -325,6 +325,27 @@ QtObject {
                            filters: filters ? Object.assign({}, filters) : store.identityFilters() } })
     }
 
+    function replaceSlide(slideId, blocks, background, filters) {
+        const items = store.itemsFromBlocks(blocks)
+        const textItemCount = items.filter((item) => item.kind === "text").length
+        const nextBackground = background || "transparent"
+        const nextFilters = filters ? Object.assign({}, filters) : store.identityFilters()
+        EngineBridge.log("info", "Text edit", "SlideCanvasStore built " + items.length + " item(s), including "
+                         + textItemCount + " text item(s), for slide " + slideId)
+        if (slideId === store.activeSlideId) {
+            store.current.items.forEach((item) => item.destroy())
+            store.current.items = items
+            store.current.background = nextBackground
+            store.current.filters = nextFilters
+            return
+        }
+        const old = store.slides[slideId]
+        if (old)
+            old.items.forEach((item) => item.destroy())
+        store.slides = Object.assign({}, store.slides,
+            { [slideId]: { items: items, background: nextBackground, filters: nextFilters } })
+    }
+
     // ---- Live thumbnails -----------------------------------------------------
 
     // Every item of any slide, in canvas order — the real CanvasItem

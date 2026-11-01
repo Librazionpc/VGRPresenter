@@ -2334,7 +2334,11 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     // that switches the shows family OFF still composes background-only for
     // these slides.
     //
-    // THE ONE EXCEPTION IS A CHOICE, NOT AN INFERENCE: a template picked in the
+    // A show's explicit Preview Template override is also a choice: its resolved
+    // blocks carry `templateOverride`, so they remain the slide layout even when
+    // Styles has its own Shows template selected.
+    //
+    // THE OTHER EXCEPTION IS A CHOICE, NOT AN INFERENCE: a template picked in the
     // style's OWN Shows slot (Settings · Styles → "Template for Shows" →
     // Change, i.e. familyTemplateKeys/familyTemplateBlocks[shows]) is the
     // operator saying "lay my shows out with THIS design" — the picker's own
@@ -2355,8 +2359,13 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     // so "has blocks" would be true for every style and would hand every
     // authored show to a design its operator never chose. Only a key names a
     // choice; the blocks are then its baked form.
+    const auto slideMeta = json::Parse(slide.metaJson);
+    const json::Value* templateOverride = slideMeta.ok()
+        ? slideMeta.value().Find("templateOverride") : nullptr;
+    const bool explicitSlideTemplate = templateOverride && templateOverride->asBool();
     const bool stylePickedShowsLayout =
-        comp.familyIdx < 4 && !style.familyTemplateKeys[comp.familyIdx].empty();
+        !explicitSlideTemplate && comp.familyIdx < 4
+        && !style.familyTemplateKeys[comp.familyIdx].empty();
     if (slideIsShowsContent && !slide.blocks.empty() && !stylePickedShowsLayout) {
         comp.source = SlideComposition::Source::SlideBlocks;
         return comp;   // `blocks` stays empty: the caller draws the slide's own

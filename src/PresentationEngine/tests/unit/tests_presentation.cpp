@@ -745,7 +745,9 @@ void TestShowLibrary() {
     CHECK(lib.RenameCategory("Youth", "Youth Ministry").ok());
     CHECK(lib.ShowsIn("Youth Ministry").size() >= 1 && lib.ShowsIn("Youth").empty());
     CHECK(!lib.RenameCategory("Youth", "X").ok());        // no longer exists
-    CHECK(!lib.RemoveCategory("Youth Ministry").ok());    // not empty
+    CHECK(lib.RemoveCategory("Youth Ministry").ok());
+    CHECK(lib.ShowsIn("Youth Ministry").empty());
+    CHECK(lib.ShowsIn("").size() == 3);                  // category shows are kept as Unlabeled
     CHECK(lib.CreateCategory("Empty").ok());
     CHECK(lib.RemoveCategory("Empty").ok());
     CHECK(!lib.RemoveCategory("Empty").ok());

@@ -707,8 +707,8 @@ ImportedShow ParseSongText(const std::string& input, const SongTextOptions& opti
         ImportedSection section;
         section.group = d.group;
         section.label = d.label;
-        section.slides.push_back({ d.text, d.notes, d.chordsJson });
-        for (size_t child : d.children) section.slides.push_back({ drafts[child].text, drafts[child].notes, drafts[child].chordsJson });
+        section.slides.push_back({ d.text, d.notes, d.chordsJson, {} });
+        for (size_t child : d.children) section.slides.push_back({ drafts[child].text, drafts[child].notes, drafts[child].chordsJson, {} });
         show.sections.push_back(std::move(section));
     }
 

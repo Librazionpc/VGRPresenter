@@ -69,6 +69,21 @@ bp::ContentBlock blockFromVariant(const QVariantMap &b)
 
 QVariantMap blockToVariant(const bp::ContentBlock &b)
 {
+    QVariantMap style{
+        { QStringLiteral("padding"), b.style.padding },
+        { QStringLiteral("backgroundColor"), qstr(b.style.backgroundColor) },
+        { QStringLiteral("cornerRadius"), b.style.cornerRadius },
+        { QStringLiteral("borderEnabled"), b.style.borderEnabled },
+        { QStringLiteral("borderWidth"), b.style.borderWidth },
+        { QStringLiteral("borderStyle"), qstr(b.style.borderStyle) },
+        { QStringLiteral("borderColor"), qstr(b.style.borderColor) },
+    };
+    const QVariantMap media = metaFromJson(b.metaJson).value(QStringLiteral("media")).toMap();
+    if (media.contains(QStringLiteral("fit")))
+        style.insert(QStringLiteral("mediaFit"), media.value(QStringLiteral("fit")));
+    if (media.contains(QStringLiteral("opacity")))
+        style.insert(QStringLiteral("opacity"), media.value(QStringLiteral("opacity")));
+
     return {
         { QStringLiteral("key"), qstr(b.id) },
         { QStringLiteral("kind"), qstr(b.kind) },
@@ -79,15 +94,7 @@ QVariantMap blockToVariant(const bp::ContentBlock &b)
         { QStringLiteral("height"), b.height },
         { QStringLiteral("bind"), qstr(b.bind) },
         { QStringLiteral("meta"), metaFromJson(b.metaJson) },
-        { QStringLiteral("style"), QVariantMap{
-            { QStringLiteral("padding"), b.style.padding },
-            { QStringLiteral("backgroundColor"), qstr(b.style.backgroundColor) },
-            { QStringLiteral("cornerRadius"), b.style.cornerRadius },
-            { QStringLiteral("borderEnabled"), b.style.borderEnabled },
-            { QStringLiteral("borderWidth"), b.style.borderWidth },
-            { QStringLiteral("borderStyle"), qstr(b.style.borderStyle) },
-            { QStringLiteral("borderColor"), qstr(b.style.borderColor) },
-        } },
+        { QStringLiteral("style"), style },
     };
 }
 
@@ -290,6 +297,7 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
         { QStringLiteral("line2"), line2 },
         { QStringLiteral("ref"), s.value(QStringLiteral("ref")) },
         { QStringLiteral("contentType"), s.value(QStringLiteral("contentType")) },
+        { QStringLiteral("templateOverride"), s.value(QStringLiteral("templateOverride"), false) },
     };
     // A slide the FILL built carries its whole placeholder vocabulary under
     // `fill` (SlideBuilder::valuesToMeta). Merged AS GIVEN, empties included:
@@ -397,6 +405,7 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
             { QStringLiteral("line1"), meta.value(QStringLiteral("line1")).toString() },
             { QStringLiteral("line2"), meta.value(QStringLiteral("line2")).toString() },
             { QStringLiteral("ref"), meta.value(QStringLiteral("ref")).toString() },
+            { QStringLiteral("templateOverride"), meta.value(QStringLiteral("templateOverride")).toBool() },
             { QStringLiteral("background"), qstr(s.background) },
             // The slide's filter set travels with it, for the Edit panel's rows
             // and for the canvas preview shader — the on-air pass applies the

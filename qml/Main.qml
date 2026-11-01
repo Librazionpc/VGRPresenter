@@ -554,6 +554,12 @@ ApplicationWindow {
             else
                 EventBus.notify(qsTr("That %1 no longer exists.").arg(kind), "warning", qsTr("Edit"))
         }
+        onShowTemplateEditRequested: (id) => {
+            if (editScreen.openDesign("template", id))
+                window.currentView = "edit"
+            else
+                EventBus.notify(qsTr("The new template could not be opened for editing."), "warning", qsTr("Templates"))
+        }
         // The Scripture tab's "Convert to show": a new show with the slides the engine built for the passage, opened on the Edit screen.
         // A Functions-pane action row's Run mark.
         onActionRunRequested: (actionId) => window.runActionById(actionId)
@@ -698,7 +704,7 @@ ApplicationWindow {
             // preview, not straight into Edit (this used to jump the
             // search result directly into editing, unlike every other way
             // of reaching a show).
-            showScreen.centerItem = { type: "show", ref: r.path, name: r.title, layout: "" }
+            showScreen.centerItem = { type: "show", ref: r.path, name: r.title, category: r.category ?? "", layout: "" }
             window.currentView = "show"
             break
         case "slide":

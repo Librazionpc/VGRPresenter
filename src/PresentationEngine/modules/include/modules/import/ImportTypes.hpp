@@ -10,6 +10,7 @@
 // a converter is a function from one file's text to imported shows and knows nothing of the UI, the library or the disk.
 
 #include "core/common/Common.hpp"
+#include "modules/presentation/PresentationTypes.hpp"
 
 #include <map>
 #include <string>
@@ -58,6 +59,9 @@ struct ImportedSlide {
     std::string text;         // lines separated by "\n"
     std::string notes;
     std::string chordsJson;   // "[[{\"pos\":0,\"key\":\"C\"}], ...]" one entry per line, or "" (no chords)
+    // FreeShow slides may contain several independently positioned text items.
+    // Other import formats leave this empty and use the ordinary single text box.
+    std::vector<presentation::ContentBlock> blocks;
 };
 
 // A GROUP of the show (Verse, Chorus...): its first slide and any child slides that follow it.

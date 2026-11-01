@@ -223,6 +223,28 @@ QtObject {
         session.canvasHistory.clear()
     }
 
+    function applyTextEditResult(slides) {
+        EngineBridge.log("info", "Text edit", "Applying " + slides.length + " returned slide(s) to the edit canvas")
+        session._applying = true
+        for (const slide of slides) {
+            const row = session.slideModel.indexOfEngineId(String(slide.id ?? ""))
+            if (row < 0) {
+                EngineBridge.log("warning", "Text edit", "Returned slide id was not found in the current slide model: "
+                                 + String(slide.id ?? ""))
+                continue
+            }
+            const slideId = session.slideModel.slideIdAt(row)
+            const returnedTextItems = (slide.blocks ?? []).filter((block) => block.kind === "text").length
+            EngineBridge.log("info", "Text edit", "Replacing canvas slide " + slideId + " from engine slide "
+                             + String(slide.id ?? "") + "; returned text items=" + returnedTextItems)
+            session.slideStore.replaceSlide(slideId, slide.blocks ?? [], slide.background,
+                                            slide.filters)
+            delete session._flushed[slideId]
+            session._rememberFlushed(slideId)
+        }
+        session._applying = false
+    }
+
     // ---- slide actions (all engine-first) -----------------------------------------
 
     function addSlide() {
@@ -255,7 +277,7 @@ QtObject {
     // Adds an item to the active slide; the ENGINE assigns its id. `copyFrom` =
     // duplicate that item (engine copy, offset). Returns the live CanvasItem, or
     // null if the engine refused (no slide / no show).
-    function addItem(kind, x, y, width, height, copyFrom) {
+    function addItem(kind, x, y, width, height, copyFrom, insertAt) {
         const sid = session.activeEngineId()
         if (sid === "")
             return null
@@ -270,11 +292,18 @@ QtObject {
             session._rememberFlushed(session.slideStore.activeSlideId)
             return item
         }
-        const key = session.backend.addBlock(sid, { kind: kind, text: "", x: x, y: y, width: width, height: height })
+        const key = session.backend.addBlock(sid, { kind: kind, text: "", x: x, y: y, width: width, height: height },
+                                             insertAt === undefined ? -1 : insertAt)
         if (key === "")
             return null
         const item = session.slideStore.createItem(kind, "", x, y, width, height, null, key)
-        session.slideStore.addItem(item)
+        if (insertAt !== undefined && insertAt >= 0) {
+            const items = session.slideStore.current.items.slice()
+            items.splice(Math.min(insertAt, items.length), 0, item)
+            session.slideStore.current.items = items
+        } else {
+            session.slideStore.addItem(item)
+        }
         return item
     }
 

@@ -106,6 +106,9 @@ Rectangle {
     // A card's Edit action in the Overlays / Templates tab: open design `id` (`kind` = "overlay" | "template") in the
     // Edit screen (Main.qml switches to it).
     signal designEditRequested(string kind, string id)
+    // ShowCenter can create a template from a show's text boxes and hand it to
+    // the same editor route used by the Templates library.
+    signal showTemplateEditRequested(string id)
     // The Functions pane's action rows: run stored action `actionId` now.
     // Main.qml owns the dispatcher (runEffect), so the request goes up rather
     // than the pane growing a second copy of the effect switch.
@@ -730,6 +733,7 @@ Rectangle {
                     item: vGRPresenter_Main_Screen.centerItem
                     slideHotkeysEnabled: media_tab_bar.currentPane === "shows"
                     onEditRequested: (path) => vGRPresenter_Main_Screen.openShowRequested(path)
+                    onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.showTemplateEditRequested(id)
                     onCloseRequested: vGRPresenter_Main_Screen.centerItem = null
                 }
             }
@@ -1061,6 +1065,8 @@ Rectangle {
                     // the right-click context menu; Enter/focus-loss commits,
                     // Escape cancels.
                     property int renamingIndex: -1
+                    property string deletingCategoryName: ""
+                    property int deletingCategoryIndex: -1
                     // Right-click context menu state — which row opened it
                     // (-1 = closed). One shared menu instance lives at the
                     // pane level (below), positioned over the clicked row.
@@ -1226,15 +1232,11 @@ Rectangle {
                         const list = showCategories
                         if (i < 0 || i >= list.length)
                             return
-                        if (currentCategory === i + 1)
-                            currentCategory = 0            // deleted selection → All
-                        else if (currentCategory > i + 1)
-                            currentCategory--
-                        if (renamingIndex === i)
-                            renamingIndex = -1
-                        else if (renamingIndex > i)
-                            renamingIndex--
-                        ShowService.removeLibraryCategory(list[i].name)
+                        deletingCategoryName = list[i].name
+                        deletingCategoryIndex = i
+                        deleteCategoryConfirm.message = qsTr("Remove ‘%1’? Its %2 show(s) will be kept in Unlabeled.")
+                            .arg(list[i].name).arg(list[i].count)
+                        deleteCategoryConfirm.open()
                     }
 
                     LibrarySidebar {
@@ -1576,6 +1578,38 @@ Rectangle {
                     }
 
                     ConfirmDialog {
+                        id: deleteCategoryConfirm
+                        objectName: "selfTestDeleteShowCategoryConfirm"
+                        anchors.fill: parent
+                        z: 30000
+                        title: qsTr("Remove category")
+                        confirmLabel: qsTr("Remove")
+                        confirmVariant: "danger"
+                        onConfirmed: {
+                            close()
+                            const name = media_table.deletingCategoryName
+                            const index = media_table.deletingCategoryIndex
+                            if (name !== "" && ShowService.removeLibraryCategory(name)) {
+                                if (media_table.currentCategory === index + 1)
+                                    media_table.currentCategory = 0
+                                else if (media_table.currentCategory > index + 1)
+                                    media_table.currentCategory--
+                                if (media_table.renamingIndex === index)
+                                    media_table.renamingIndex = -1
+                                else if (media_table.renamingIndex > index)
+                                    media_table.renamingIndex--
+                            }
+                            media_table.deletingCategoryName = ""
+                            media_table.deletingCategoryIndex = -1
+                        }
+                        onDismissed: {
+                            close()
+                            media_table.deletingCategoryName = ""
+                            media_table.deletingCategoryIndex = -1
+                        }
+                    }
+
+                    ConfirmDialog {
                         id: showDeleteConfirm
                         anchors.fill: parent
                         z: 30000
@@ -1702,7 +1736,8 @@ Rectangle {
                                 return
                             const show = rows[at]
                             vGRPresenter_Main_Screen.centerItem = {
-                                type: "show", ref: show.path, name: show.name, layout: ""
+                                type: "show", ref: show.path, name: show.name,
+                                category: show.category ?? "", layout: ""
                             }
                         }
 
@@ -1866,7 +1901,7 @@ Rectangle {
                                     anchors.fill: parent
                                     payload: ({ kind: "show_drawer", items: [{ ref: modelData.path, name: modelData.name }] })
                                     label: modelData.name
-                                    onActivated: vGRPresenter_Main_Screen.centerItem = { type: "show", ref: modelData.path, name: modelData.name, layout: "" }
+                                    onActivated: vGRPresenter_Main_Screen.centerItem = { type: "show", ref: modelData.path, name: modelData.name, category: modelData.category ?? "", layout: "" }
                                     onOpened: {
                                         const showRef = String(modelData.path)
                                         const showName = String(modelData.name)
@@ -1877,7 +1912,7 @@ Rectangle {
                                         // centre preview after the project drop completes.
                                         vGRPresenter_Main_Screen.centerItem = {
                                             type: "show", ref: showRef,
-                                            name: showName, layout: ""
+                                            name: showName, category: modelData.category ?? "", layout: ""
                                         }
                                         // Stage the show's first slide onto the monitor
                                         // preview tile immediately (user call: a double-
@@ -1892,14 +1927,9 @@ Rectangle {
                                         // stages just the clicked slide first): this path has
                                         // no pane guaranteed to answer a step, so ‹ › has to be
                                         // able to walk the set from the engine's side.
-                                        const peeked = ShowService.peekShow(showRef)
-                                        if (peeked && peeked.ok && peeked.show
-                                                && peeked.show.slides && peeked.show.slides.length > 0) {
-                                            const wordsPerScreen = Number(SettingsService.value("shows.wordsPerSlide"))
-                                            LiveOutputService.readingWordBudget = wordsPerScreen > 0
-                                                ? wordsPerScreen : 40
-                                            LiveOutputService.stageSlideSet(showName, peeked.show.slides, 0)
-                                        }
+                                        // Let Show Center resolve the selected show's
+                                        // category template before staging its first slide.
+                                        Qt.callLater(() => showCenter.stageFirstSlide())
                                     }
                                     onContextRequested: (x, y) => {
                                         const p = rowMouse.mapToItem(media_table, x, y)
@@ -2068,6 +2098,16 @@ Rectangle {
 
                     color: Theme.panelBg
 
+                    // TemplateLibraryService.design() is an invokable read,
+                    // so bindings that only call it do not know when an
+                    // existing design is edited. Track the library signal so
+                    // both the name and the live canvas preview re-read it.
+                    property int templateRevision: 0
+                    Connections {
+                        target: TemplateLibraryService
+                        function onChanged() { shows_template_sidebar.templateRevision++ }
+                    }
+
                     // The selected category's name ("" for All — the DEFAULT row).
                     readonly property string categoryName: media_table.currentCategory <= 0
                                                            ? "" : media_table.showCategories[media_table.currentCategory - 1].name
@@ -2120,6 +2160,7 @@ Rectangle {
                     // catalog no longer has (shows as "Missing template", Reset
                     // still offered).
                     readonly property var templateDesign: {
+                        shows_template_sidebar.templateRevision
                         if (templateId === "") return null
                         const list = TemplateLibraryService.designs()
                         for (let i = 0; i < list.length; ++i)
@@ -2155,6 +2196,7 @@ Rectangle {
                     // preview renders the category's template the way
                     // ReferencePane's renders the picked verses' slide.
                     readonly property var previewDesign: {
+                        shows_template_sidebar.templateRevision
                         if (templateId === "") return null
                         try { return TemplateLibraryService.design(templateId) } catch (e) { return null }
                     }

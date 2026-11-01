@@ -173,10 +173,10 @@ Item {
     property real booksColWidth: Number(SettingsService.values["session.referencePaneBooksWidth"] ?? 150)
     property real chaptersColWidth: Number(SettingsService.values["session.referencePaneChaptersWidth"] ?? 52)
     property real previewColWidth: Number(SettingsService.values["session.referencePanePreviewWidth"] ?? Math.max(320, Math.min(420, root.width * 0.3)))
-    // During The Table search, the year/sermon pickers and design preview are
-    // unnecessary; the result list gets the full reading area.
-    readonly property bool compactTableSearch: !!(root.adapter
-        && root.adapter.contentType === "table" && root.searching)
+    // During a Scripture or The Table search, the book/chapter pickers and
+    // design preview are unnecessary; the verse/paragraph list gets the full
+    // reading area on the left, with its number column beside the text.
+    readonly property bool compactReferenceSearch: !!(root.adapter && root.searching)
     // Whether a width was already remembered before this pane ever auto-widened the chapters column for titles (below) - if so, that
     // remembered width IS the user's choice, and the auto-widen must not override it.
     readonly property bool chaptersWidthRemembered: SettingsService.values["session.referencePaneChaptersWidth"] !== undefined
@@ -3473,8 +3473,8 @@ Item {
     Rectangle {
         id: booksCol
         x: sidebar.width; y: 0
-        visible: !root.compactTableSearch
-        width: root.compactTableSearch ? 0 : root.booksColWidth; height: parent.height
+        visible: !root.compactReferenceSearch
+        width: root.compactReferenceSearch ? 0 : root.booksColWidth; height: parent.height
         color: Theme.panelBg
 
         Flickable {
@@ -3582,10 +3582,10 @@ Item {
         // Widened once, the first time there turn out to be names to show (a bare Bible chapter number needs far less room than a
         // sermon's title) - after that the user's own drag is what decides, same as every other column here.
         property bool widenedForTitles: false
-        visible: !root.compactTableSearch
+        visible: !root.compactReferenceSearch
         onHasTitlesChanged: if (hasTitles && !widenedForTitles && !root.chaptersWidthRemembered) { widenedForTitles = true; root.chaptersColWidth = 190 }
         x: booksCol.x + booksCol.width; y: 0
-        width: root.compactTableSearch ? 0 : root.chaptersColWidth; height: parent.height
+        width: root.compactReferenceSearch ? 0 : root.chaptersColWidth; height: parent.height
         color: Theme.windowBg
 
         Flickable {
@@ -4950,8 +4950,8 @@ Item {
     Rectangle {
         id: previewCol
         anchors.right: parent.right
-        visible: !root.compactTableSearch
-        width: root.compactTableSearch ? 0 : root.previewColWidth; height: parent.height
+        visible: !root.compactReferenceSearch
+        width: root.compactReferenceSearch ? 0 : root.previewColWidth; height: parent.height
         color: Theme.windowBg
 
         Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: Theme.border }

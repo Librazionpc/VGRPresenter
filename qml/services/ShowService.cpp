@@ -23,6 +23,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <string_view>
 
 namespace bp = bps::presentation;
 
@@ -1359,6 +1360,256 @@ int ShowService::rewriteShowFromText(const QString &path, const QString &text)
         r.libraryChanged = true;
         r.documentChanged = true;
         r.touchedPath = cleanPath(path);
+        return r;
+    });
+}
+
+int ShowService::updateShowTextItems(const QString &path, const QString &slideId,
+                                     const QVariantMap &textByBlockId)
+{
+    const bool booted = EngineBridge::instance().booted();
+    return runDocumentJobOffThread(QStringLiteral("quickEdit"), JobDurability::Durable,
+                                   [booted, path, slideId, textByBlockId]() {
+        JobResult r;
+        r.title = QStringLiteral("Couldn't save the quick edit");
+        if (!booted || path.isEmpty())
+            return r;
+
+        // Keep the centre's file edit isolated from the Edit screen's working
+        // document, and patch only the requested text items in place.
+        bp::PresentationDocument doc;
+        if (auto opened = doc.Open(vgrPath(path)); !opened.ok()) {
+            r.error = message(opened.error());
+            return r;
+        }
+        auto changed = doc.Edit([&](bp::Presentation &show) -> bps::Result<void> {
+            auto slide = std::find_if(show.slides.begin(), show.slides.end(),
+                                      [&](const bp::Slide &candidate) {
+                return candidate.id == slideId.toStdString();
+            });
+            if (slide == show.slides.end())
+                return bps::Error::Make(bps::Err::NotFound, "ShowService",
+                                        "the slide changed before the quick edit was saved");
+
+            bool updated = false;
+            for (auto it = textByBlockId.constBegin(); it != textByBlockId.constEnd(); ++it) {
+                const std::string blockId = it.key().toStdString();
+                const std::string text = it.value().toString().toStdString();
+                if (blockId == "@slide_text") {
+                    slide->text = text;
+                    updated = true;
+                    continue;
+                }
+                auto block = std::find_if(slide->blocks.begin(), slide->blocks.end(),
+                                          [&](const bp::ContentBlock &candidate) {
+                    return candidate.id == blockId && candidate.kind == "text";
+                });
+                if (block == slide->blocks.end())
+                    return bps::Error::Make(bps::Err::NotFound, "ShowService",
+                                            "a text item changed before the quick edit was saved");
+                block->text = text;
+                updated = true;
+            }
+            if (!updated)
+                return bps::Error::Make(bps::Err::InvalidArgument, "ShowService",
+                                        "there is no text to save");
+
+            if (!slide->blocks.empty()) {
+                slide->text.clear();
+                for (const bp::ContentBlock &block : slide->blocks) {
+                    if (block.kind != "text" || block.text.empty())
+                        continue;
+                    if (!slide->text.empty())
+                        slide->text.push_back('\n');
+                    slide->text += block.text;
+                }
+            }
+            return bps::presentation::ShowEditor::UpdateSlide(show, slideId.toStdString(), *slide);
+        });
+        if (!changed.ok()) {
+            r.error = message(changed.error());
+            return r;
+        }
+        if (auto saved = doc.Save(vgrPath(path)); !saved.ok()) {
+            r.error = message(saved.error());
+            return r;
+        }
+
+        r.ok = true;
+        r.documentChanged = true;
+        r.libraryChanged = true;
+        r.touchedPath = cleanPath(path);
+        r.logLine = QStringLiteral("Quick-edited text items on slide %1 in %2")
+                        .arg(slideId, path);
+        return r;
+    });
+}
+
+int ShowService::applyTextEditBatch(const QVariantList &slideEdits)
+{
+    const bool booted = EngineBridge::instance().booted();
+    return runDocumentJobOffThread(QStringLiteral("textEditBatch"), JobDurability::Durable,
+                                   [booted, slideEdits]() {
+        JobResult r;
+        r.title = QStringLiteral("Couldn't apply the text edits");
+        if (!booted) {
+            r.error = QStringLiteral("The engine isn't running.");
+            r.logLine = QStringLiteral("Text edit batch rejected before parsing: engine is not running");
+            return r;
+        }
+        const auto doc = showDocument();
+        if (!doc || !doc->HasDocument()) {
+            r.error = QStringLiteral("No show is open.");
+            r.logLine = QStringLiteral("Text edit batch rejected before applying: no open show");
+            return r;
+        }
+
+        QStringList changedSlideIds;
+        int requestedNewItems = 0;
+        int createdNewItems = 0;
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Text edit"),
+                            QStringLiteral("Worker received batch with %1 slide edit(s)")
+                                .arg(slideEdits.size()));
+        QString failedSlideId;
+        QString failedOperation;
+        auto changed = doc->Edit([&](bp::Presentation &show) -> bps::Result<void> {
+            for (const QVariant &entry : slideEdits) {
+                const QVariantMap edit = entry.toMap();
+                const QString slideId = edit.value(QStringLiteral("slideId")).toString();
+                failedSlideId = slideId;
+                auto slide = std::find_if(show.slides.begin(), show.slides.end(),
+                                          [&](const bp::Slide &candidate) {
+                    return candidate.id == slideId.toStdString();
+                });
+                if (slide == show.slides.end()) {
+                    failedOperation = QStringLiteral("slide lookup");
+                    return bps::Error::Make(bps::Err::NotFound, "ShowService",
+                                            "a slide changed before the text edit was applied");
+                }
+
+                bool slideChanged = false;
+                const QVariantMap textByBlockId = edit.value(QStringLiteral("textByBlockId")).toMap();
+                std::vector<std::pair<int, std::string>> newItems;
+                EngineBridge::write(QStringLiteral("debug"), QStringLiteral("Text edit"),
+                                    QStringLiteral("Worker parsing slide %1: %2 item change(s)")
+                                        .arg(slideId).arg(textByBlockId.size()));
+                for (auto it = textByBlockId.constBegin(); it != textByBlockId.constEnd(); ++it) {
+                    const std::string key = it.key().toStdString();
+                    const std::string text = it.value().toString().toStdString();
+                    constexpr std::string_view kNewPrefix = "@new:";
+                    if (key.compare(0, kNewPrefix.size(), kNewPrefix) == 0) {
+                        ++requestedNewItems;
+                        bool ok = false;
+                        const int order = QString::fromStdString(key.substr(kNewPrefix.size())).toInt(&ok);
+                        if (!ok || order < 0) {
+                            failedOperation = QStringLiteral("new-item marker validation");
+                            return bps::Error::Make(bps::Err::InvalidArgument, "ShowService",
+                                                    "a new text item has an invalid position");
+                        }
+                        newItems.emplace_back(order, text);
+                        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Text edit"),
+                                            QStringLiteral("Queued new text item for slide %1 at text index %2 (%3 chars)")
+                                                .arg(slideId).arg(order).arg(text.size()));
+                        continue;
+                    }
+                    if (key == "@slide_text") {
+                        slide->text = text;
+                        slideChanged = true;
+                        continue;
+                    }
+                    auto block = std::find_if(slide->blocks.begin(), slide->blocks.end(),
+                                              [&](const bp::ContentBlock &candidate) {
+                        return candidate.id == key && candidate.kind == "text";
+                    });
+                    if (block == slide->blocks.end()) {
+                        failedOperation = QStringLiteral("existing text-item lookup");
+                        return bps::Error::Make(bps::Err::NotFound, "ShowService",
+                                                "a text item changed before the text edit was applied");
+                    }
+                    block->text = text;
+                    slideChanged = true;
+                }
+
+                std::sort(newItems.begin(), newItems.end(), [](const auto &a, const auto &b) {
+                    return a.first < b.first;
+                });
+                const QString fontFamily = edit.value(QStringLiteral("fontFamily")).toString();
+                for (std::size_t i = 0; i < newItems.size(); ++i) {
+                    const int count = static_cast<int>(slide->blocks.size());
+                    QVariantMap block{
+                        { QStringLiteral("kind"), QStringLiteral("text") },
+                        { QStringLiteral("text"), QString::fromStdString(newItems[i].second) },
+                        { QStringLiteral("x"), 40 + (count % 6) * 20 },
+                        { QStringLiteral("y"), 40 + (count % 6) * 20 },
+                        { QStringLiteral("width"), 220 },
+                        { QStringLiteral("height"), 44 },
+                        { QStringLiteral("meta"), QVariantMap{
+                            { QStringLiteral("fontFamily"), fontFamily }
+                        } }
+                    };
+                    auto added = bp::ShowEditor::AddBlock(show, slideId.toStdString(),
+                                                          ShowConverter::blockFromVariant(block), 0);
+                    if (!added.ok()) {
+                        failedOperation = QStringLiteral("AddBlock");
+                        return added.error();
+                    }
+                    ++createdNewItems;
+                    EngineBridge::write(QStringLiteral("info"), QStringLiteral("Text edit"),
+                                        QStringLiteral("AddBlock created text item %1/%2 on slide %3 (%4 chars)")
+                                            .arg(i + 1).arg(newItems.size()).arg(slideId)
+                                            .arg(newItems[i].second.size()));
+                    slideChanged = true;
+                }
+
+                if (!slideChanged)
+                    continue;
+                if (!slide->blocks.empty()) {
+                    slide->text.clear();
+                    for (const bp::ContentBlock &block : slide->blocks) {
+                        if (block.kind != "text" || block.text.empty())
+                            continue;
+                        if (!slide->text.empty())
+                            slide->text.push_back('\n');
+                        slide->text += block.text;
+                    }
+                }
+                changedSlideIds.append(slideId);
+            }
+            return bps::Ok();
+        });
+        if (!changed.ok()) {
+            r.error = message(changed.error());
+            r.logLine = QStringLiteral("Text edit batch failed at %1 for slide %2; new text items requested=%3, created=%4: %5")
+                            .arg(failedOperation, failedSlideId)
+                            .arg(requestedNewItems)
+                            .arg(createdNewItems)
+                            .arg(r.error);
+            return r;
+        }
+
+        const bp::Presentation snapshot = doc->Snapshot();
+        QVariantList updatedSlides;
+        for (const QString &id : changedSlideIds) {
+            const bp::Slide *slide = bp::SlideResolver::FindSlide(snapshot, id.toStdString());
+            if (!slide)
+                continue;
+            bp::Presentation one;
+            one.slides.push_back(*slide);
+            const QVariantList slides = ShowConverter::toVariant(one)
+                                            .value(QStringLiteral("slides")).toList();
+            if (!slides.isEmpty())
+                updatedSlides.append(slides.first());
+        }
+        r.ok = true;
+        r.documentChanged = true;
+        r.openDocumentEdited = true;
+        r.payload.insert(QStringLiteral("slides"), updatedSlides);
+        r.payload.insert(QStringLiteral("requestedNewItems"), requestedNewItems);
+        r.payload.insert(QStringLiteral("createdNewItems"), createdNewItems);
+        r.logLine = QStringLiteral("Text edit batch applied to %1 slide(s); new text items requested=%2, created=%3")
+                        .arg(updatedSlides.size())
+                        .arg(requestedNewItems)
+                        .arg(createdNewItems);
         return r;
     });
 }

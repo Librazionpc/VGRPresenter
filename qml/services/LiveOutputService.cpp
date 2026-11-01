@@ -1305,6 +1305,7 @@ void LiveOutputService::prewarmReadingLines()
 void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVariantList &slides,
                                                 const QVariantMap &styledPreview)
 {
+    pendingReadingSteps_ = 0;
     ++readingStageSerial_;
     emit readingStageChanged();
     // THE PICK IS THE READING SET: whatever a pane stages (a passage's verses,
@@ -1391,6 +1392,8 @@ void LiveOutputService::setScrollMode(bool on)
     if (on == scrollMode_)
         return;
     scrollMode_ = on;
+    if (!on)
+        pendingReadingSteps_ = 0;
     emit scrollModeChanged();
 }
 
@@ -1416,6 +1419,7 @@ void LiveOutputService::noteOperatorJump()
 void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &slides, int index)
 {
     VGR_CALL_TRACE("LiveOutputService.stageSlideSet");
+    pendingReadingSteps_ = 0;
     if (slides.isEmpty()) {
         lineSetRaw_.clear();
         lineSourceTextOnly_ = false;
@@ -1501,6 +1505,7 @@ void LiveOutputService::activatePendingTextSource()
 {
     if (pendingTextSourcePages_.isEmpty())
         return;
+    pendingReadingSteps_ = 0;
     QVariantMap visualPage;
     const QVariantList visualSlides = live_ ? onAirSlidesRaw() : stagedSlidesRaw_;
     if (!visualSlides.isEmpty())
@@ -1792,6 +1797,7 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
                                     }
                                 }
                                 emit self->readingScrollChanged();
+                                QTimer::singleShot(0, self, &LiveOutputService::drainPendingReadingSteps);
                             }
                         }, Qt::QueuedConnection);
                 });
@@ -2932,6 +2938,7 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
                         readingWindowRefreshPending_ = false;
                         applyReadingScroll(readingScroll_);
                     }
+                    drainPendingReadingSteps();
                 });
     }
     // THE OPERATOR'S PACE, from the same two keys the old glide read
@@ -2965,6 +2972,19 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
                                                                                : QEasingCurve::InOutCubic);
     }
     readingScrollAnim_->start();
+}
+
+void LiveOutputService::drainPendingReadingSteps()
+{
+    if (pendingReadingSteps_ == 0 || !lineSourceTextOnly_ || !scrollMode_)
+        return;
+    if (readingScrollAnim_ && readingScrollAnim_->state() == QAbstractAnimation::Running)
+        return;
+
+    const int direction = pendingReadingSteps_ > 0 ? 1 : -1;
+    pendingReadingSteps_ -= direction;
+    if (!lineStep(direction))
+        pendingReadingSteps_ = 0;
 }
 
 // The page as it stands, staged or on air, carrying the passage it begins in and
@@ -3229,6 +3249,10 @@ bool LiveOutputService::lineStep(int direction)
     // moves an index into the passage's table, so a page is as many lines long as the
     // passage makes it.
     const int ownLines = readingPageLineCount(lineSlideIndex_);
+    if (lineSourceTextOnly_ && readingBudgetFitActive_ && ownLines <= 0) {
+        pendingReadingSteps_ = qBound(-24, pendingReadingSteps_ + direction, 24);
+        return true;
+    }
     // Where the picture already is: every move starts here, so a press in the
     // middle of a glide continues from the words' real position instead of
     // snapping back to the previous stop first.

@@ -1003,6 +1003,7 @@ private:
     bool readingWindowRefreshPending_ = false;
     bool readingScrollPreparing_ = false;
     int readingLayoutTargetChar_ = -1;
+    int pendingReadingSteps_ = 0;
     qreal readingScroll_ = 0.0;
     // THE RUN THE SCROLLER DRAWS — slide picks use nearby pages; JSON scroll uses
     // the whole passage as one stable reading unit. `readingScroll_` is measured
@@ -1114,6 +1115,7 @@ private:
     void announceReadingPage();
     int readingPageAnnounced_ = -1;
     void applyReadingScroll(qreal lines);
+    void drainPendingReadingSteps();
     void animateReadingScroll(qreal from, qreal to);
     // Settles a page change a landing step owes (readingRebaseSlide_), the
     // same commit readingScrollAnim_'s own finished handler makes when a

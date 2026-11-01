@@ -4,12 +4,14 @@
 #include "modules/bible/BibleEngine.hpp"
 #include "modules/import/Archive.hpp"
 #include "modules/import/SongText.hpp"
+#include "modules/library/DesignLibrary.hpp"
 #include "modules/media/MediaLibrary.hpp"
 #include "modules/songs/ISongProvider.hpp"
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <format>
 #include <map>
 #include <mutex>
@@ -125,7 +127,7 @@ ImportedShow ParseCsv(const ImportFile& file) {
         ImportedSection section;
         section.group = "verse";
         section.label = "Verse";
-        section.slides.push_back({ body, {}, {} });
+        section.slides.push_back({ body, {}, {}, {} });
         show.sections.push_back(std::move(section));
     }
     return show;
@@ -357,7 +359,7 @@ ImportedShow SongToImported(const song::Song& s, const ImportFile& file, const s
         section.label = match.empty() ? sec->name : GroupLabel(match);
         std::string text;
         for (size_t i = 0; i < sec->lines.size(); ++i) { if (i) text += "\n"; text += sec->lines[i].lyrics; }
-        section.slides.push_back({ text, {}, ChordsJsonOf(*sec) });
+        section.slides.push_back({ text, {}, ChordsJsonOf(*sec), {} });
         show.sections.push_back(std::move(section));
     }
     return show;
@@ -392,6 +394,173 @@ std::string ItemsText(const J& items) {
         }
     }
     return out;
+}
+
+std::string_view Trim(std::string_view value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+        value.remove_prefix(1);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+        value.remove_suffix(1);
+    return value;
+}
+
+std::map<std::string, std::string> FreeShowCss(std::string_view style) {
+    std::map<std::string, std::string> properties;
+    size_t start = 0;
+    while (start < style.size()) {
+        const size_t end = style.find(';', start);
+        const std::string_view declaration = style.substr(
+            start, end == std::string_view::npos ? style.size() - start : end - start);
+        const size_t colon = declaration.find(':');
+        if (colon != std::string_view::npos) {
+            const auto key = Trim(declaration.substr(0, colon));
+            const auto value = Trim(declaration.substr(colon + 1));
+            if (!key.empty() && !value.empty())
+                properties[std::string(key)] = std::string(value);
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return properties;
+}
+
+double FreeShowNumber(const std::map<std::string, std::string>& properties,
+                      std::string_view key, double fallback) {
+    const auto it = properties.find(std::string(key));
+    if (it == properties.end()) return fallback;
+    char* end = nullptr;
+    const double value = std::strtod(it->second.c_str(), &end);
+    return end == it->second.c_str() ? fallback : value;
+}
+
+std::string FreeShowText(const J& item) {
+    const J* lines = item.Find("lines");
+    if (!lines || !lines->asArray()) return {};
+    std::string out;
+    for (const J& line : *lines->asArray()) {
+        if (!out.empty()) out += '\n';
+        if (const J* runs = line.Find("text"); runs && runs->asArray())
+            for (const J& run : *runs->asArray())
+                if (const J* value = run.Find("value")) out += std::string(value->asString());
+    }
+    return out;
+}
+
+std::vector<presentation::ContentBlock> FreeShowBlocks(const J& items, const ImportFile& file) {
+    using namespace presentation;
+    std::vector<ContentBlock> blocks;
+    if (!items.asArray()) return blocks;
+
+    // FreeShow stores positions in a 1920x1080 canvas; the app's stage uses
+    // the same proportions on its 754x428 logical grid.
+    constexpr double kFreeShowWidth = 1920.0;
+    constexpr double kFreeShowHeight = 1080.0;
+    const double scaleX = library::kStageWidth / kFreeShowWidth;
+    const double scaleY = library::kStageHeight / kFreeShowHeight;
+
+    int itemNumber = 0;
+    for (const J& item : *items.asArray()) {
+        const J* lines = item.Find("lines");
+        ContentBlock block;
+        block.id = std::format("item-{}", ++itemNumber);
+        const J* styleValue = item.Find("style");
+        const auto geometry = FreeShowCss(styleValue ? styleValue->asString() : std::string_view{});
+        block.x = FreeShowNumber(geometry, "left", 0.0) * scaleX;
+        block.y = FreeShowNumber(geometry, "top", 0.0) * scaleY;
+        block.width = FreeShowNumber(geometry, "width", kFreeShowWidth) * scaleX;
+        block.height = FreeShowNumber(geometry, "height", kFreeShowHeight) * scaleY;
+
+        if (!lines || !lines->asArray()) {
+            const J* type = item.Find("type");
+            const J* src = item.Find("src");
+            if (!type || !src || src->type() != J::Type::String
+                    || (type->asString() != "media" && type->asString() != "image"
+                        && type->asString() != "video"))
+                continue;
+            const std::string path = ResolveMediaPath(std::string(src->asString()), file.path);
+            if (path.empty()) continue;
+            const auto mediaKind = media::MediaKindOf(path);
+            if (!mediaKind) continue;
+
+            block.kind = type->asString() == "video" || *mediaKind == media::MediaKind::Video
+                ? "video" : "image";
+            J::Object meta;
+            meta["src"] = J::String(path);
+            J::Object mediaOptions;
+            if (const J* fit = item.Find("fit"); fit && !fit->asString().empty())
+                mediaOptions["fit"] = J::String(std::string(fit->asString()));
+            if (const J* filter = item.Find("filter"); filter && filter->type() == J::Type::String) {
+                const std::string value(filter->asString());
+                constexpr std::string_view opacityPrefix = "opacity(";
+                const size_t at = value.find(opacityPrefix);
+                if (at != std::string::npos) {
+                    const char* number = value.c_str() + at + opacityPrefix.size();
+                    char* end = nullptr;
+                    const double opacity = std::strtod(number, &end);
+                    if (end != number)
+                        mediaOptions["opacity"] = J::Number(std::clamp(opacity, 0.0, 1.0));
+                }
+            }
+            if (!mediaOptions.empty()) meta["media"] = J(std::move(mediaOptions));
+            block.metaJson = J(std::move(meta)).ToString();
+            blocks.push_back(std::move(block));
+            continue;
+        }
+
+        block.kind = "text";
+        block.text = FreeShowText(item);
+
+        J::Object meta;
+        const J* autoFontSize = item.Find("autoFontSize");
+        const double sourceFontSize = autoFontSize && autoFontSize->type() == J::Type::Number
+            ? autoFontSize->asNumber() : 54.0;
+        meta["fontSize"] = J::Number(sourceFontSize * scaleY);
+        meta["color"] = J::String("#f2f4fa");
+        meta["align"] = J::String("center");
+        meta["autoSize"] = J::String("shrinkToFit");
+
+        // The first run describes the text item's common font in FreeShow's
+        // usual case. Preserve its supported font attributes at block level.
+        std::string runStyle;
+        for (const J& line : *lines->asArray()) {
+            const J* runs = line.Find("text");
+            if (!runs || !runs->asArray() || runs->asArray()->empty()) continue;
+            const J* value = runs->asArray()->front().Find("style");
+            if (value) runStyle = std::string(value->asString());
+            if (!runStyle.empty()) break;
+        }
+        const auto textStyle = FreeShowCss(runStyle);
+        if (const auto family = textStyle.find("font-family"); family != textStyle.end()) {
+            std::string name = family->second;
+            if (name.size() >= 2 && ((name.front() == '\'' && name.back() == '\'')
+                                     || (name.front() == '"' && name.back() == '"')))
+                name = name.substr(1, name.size() - 2);
+            meta["fontFamily"] = J::String(std::move(name));
+        }
+        if (const auto color = textStyle.find("color"); color != textStyle.end())
+            meta["color"] = J::String(color->second);
+        if (const auto weight = textStyle.find("font-weight"); weight != textStyle.end())
+            meta["bold"] = J::Bool(weight->second == "bold" || weight->second == "700");
+        if (const auto fontStyle = textStyle.find("font-style"); fontStyle != textStyle.end())
+            meta["italic"] = J::Bool(fontStyle->second == "italic");
+        if (const auto decoration = textStyle.find("text-decoration"); decoration != textStyle.end())
+            meta["underline"] = J::Bool(decoration->second.find("underline") != std::string::npos);
+
+        if (const J* align = item.Find("align"); align && !align->asString().empty())
+            meta["align"] = J::String(std::string(align->asString()));
+        else {
+            for (const J& line : *lines->asArray()) {
+                const J* align = line.Find("align");
+                if (align && !align->asString().empty()) {
+                    meta["align"] = J::String(std::string(align->asString()));
+                    break;
+                }
+            }
+        }
+        block.metaJson = J(std::move(meta)).ToString();
+        blocks.push_back(std::move(block));
+    }
+    return blocks;
 }
 
 // The pictures and videos a FreeShow show puts on its slides.
@@ -486,7 +655,10 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     auto slideOf = [&](const std::string& id) -> const J* { return slides->asObject() ? slides->Find(id) : nullptr; };
     auto textOf = [&](const J& s) {
         ImportedSlide out;
-        if (const J* items = s.Find("items")) out.text = ItemsText(*items);
+        if (const J* items = s.Find("items")) {
+            out.text = ItemsText(*items);
+            out.blocks = FreeShowBlocks(*items, file);
+        }
         if (const J* notes = s.Find("notes")) out.notes = std::string(notes->asString());
         return out;
     };
@@ -549,6 +721,11 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     }
     CollectFreeShowMedia(*root, file, show);
     return show;
+}
+
+bool IsEmptyFreeShowReference(const Error& error) {
+    return error.message.find("holds no show data (an empty reference, nothing to import)")
+        != std::string::npos;
 }
 
 std::string BibleFormatOf(std::string_view formatId) {
@@ -619,7 +796,8 @@ Result<ImportResult> ImportFiles(std::string_view formatId, const std::vector<Im
             if (show.sections.empty()) fail("no lines found"); else result.shows.push_back(std::move(show));
         } else if (formatId == "freeshow") {
             auto show = ParseFreeShowFile(file);
-            if (show.ok()) result.shows.push_back(std::move(show.value())); else fail(show.error().message);
+            if (show.ok()) result.shows.push_back(std::move(show.value()));
+            else if (!IsEmptyFreeShowReference(show.error())) fail(show.error().message);
         } else if (formatId == "freeshow_project") {
             // A FreeShow PROJECT: a zip of show files (or a JSON ARRAY of
             // [id, show] pairs) — every show inside is imported in archive
@@ -765,9 +943,14 @@ presentation::Presentation ShowFromImported(const ImportedShow& imported, const 
                 if (auto chords = json::Parse(src.chordsJson); chords.ok()) slideMeta["chords"] = chords.value();
             slide.metaJson = J(std::move(slideMeta)).ToString();
 
-            // the words on the slide: the template's blocks with the text filled in
+            // FreeShow's imported text items already carry independent boxes;
+            // keep those placements instead of flattening them into one box.
+            // Other import formats continue using the configured template or
+            // the neutral single-box layout below.
             int blockNumber = 0;
-            if (options.templateBlocks.empty()) {
+            if (!src.blocks.empty()) {
+                slide.blocks = src.blocks;
+            } else if (options.templateBlocks.empty()) {
                 ContentBlock b;
                 b.id = "item-1";
                 b.kind = "text";

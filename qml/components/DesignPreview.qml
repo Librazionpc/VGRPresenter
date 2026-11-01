@@ -532,6 +532,8 @@ Item {
                 // size; a column drawn at four is four grids).
                 readonly property string readingFitKey: {
                     const reading = el.readingBlock && root.animateLineSteps
+                    const budgetFit = reading && typeof LiveOutputService !== "undefined"
+                                      && LiveOutputService.readingBudgetFitActive === true
                     const parts = []
                     // ...AND THE PICK, for the reading block: one WALK is one size, so
                     // every page commit inside it must reuse the answer the walk
@@ -540,9 +542,14 @@ Item {
                     // that changes when one passage ends and the next begins.
                     if (reading && typeof LiveOutputService !== "undefined") {
                         parts.push(String(LiveOutputService.readingSetName ?? ""))
-                        parts.push(String(LiveOutputService.readingBudgetFitActive ?? false))
-                        if (LiveOutputService.readingBudgetFitActive)
+                        parts.push(String(budgetFit))
+                        if (budgetFit) {
                             parts.push(String(LiveOutputService.readingWordBudget ?? 40))
+                        } else {
+                            // Slide mode fits each selected slide's own text. Reuse
+                            // the size only when the slide text is unchanged.
+                            parts.push(String(fitText.text ?? ""))
+                        }
                         // ...AND THE JUMP/WALK DISTINCTION (readingStageSerial). One
                         // WALK is one size: a line step inside the page already on
                         // screen must not re-fit, or the column re-flows under the
@@ -568,7 +575,7 @@ Item {
                                MetadataFields.lineHeight(el.meta),
                                MetadataFields.lineSpacing(el.meta),
                                MetadataFields.letterSpacing(el.meta))
-                    if (!reading)
+                    if (!reading || !budgetFit)
                         parts.push(el.meta.fontSize ?? 16)
                     return parts.join("|")
                 }
@@ -645,7 +652,10 @@ Item {
                 onFitInputsChanged: {
                     if (fitSolving)
                         return
-                    if (el.readingBlock && root.animateLineSteps)
+                    const scrollBudgetFit = el.readingBlock && root.animateLineSteps
+                                            && typeof LiveOutputService !== "undefined"
+                                            && LiveOutputService.readingBudgetFitActive === true
+                    if (scrollBudgetFit)
                         el.solveFit()
                     else
                         Qt.callLater(el.solveFit)
@@ -653,7 +663,10 @@ Item {
                 Component.onCompleted: {
                     if (fitSolving)
                         return
-                    if (el.readingBlock && root.animateLineSteps)
+                    const scrollBudgetFit = el.readingBlock && root.animateLineSteps
+                                            && typeof LiveOutputService !== "undefined"
+                                            && LiveOutputService.readingBudgetFitActive === true
+                    if (scrollBudgetFit)
                         el.solveFit()
                     else
                         Qt.callLater(el.solveFit)
