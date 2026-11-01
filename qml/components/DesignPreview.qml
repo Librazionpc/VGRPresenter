@@ -173,7 +173,8 @@ Item {
         const local = LiveOutputService.readingCharOffset()
         if (!starts || line < 0 || line >= starts.length || passage < 0 || local < 0)
             return
-        const base = passage - local          // where this run's text begins in the passage
+        const base = passage - local + (LiveOutputService.readingBudgetFitActive
+            ? LiveOutputService.readingFlowCharStart() : 0)
         const pitch = Number(block.linePitch) > 0 ? Number(block.linePitch) : 1
         const visible = Math.max(1, Math.floor(Number(block.height) / pitch))
         const topLocal = Number(starts[line])

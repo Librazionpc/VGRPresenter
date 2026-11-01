@@ -2998,6 +2998,7 @@ Item {
         if (!ours)
             return
         root.scrollSourced = true
+        root.lastFollowedScrollChar = -1
         root.syncReadingWordBudget()   // the walk's budget, read where the walk begins
         const source = root.readingPagesFromChapter(root.scrollPiece.number,
                                                    root.scrollPiece.part)
@@ -3019,6 +3020,7 @@ Item {
         root.scrollPiece = { number: Number(number), part: Number(part) }
         root.scrollSourced = false
         root.followedScrollPiece = ""
+        root.lastFollowedScrollChar = -1
         // In Scroll, a click shows the chapter text from the clicked paragraph on, in
         // the template's box at the budget size, not the slide's own split.
         if (LiveOutputService.scrollMode)
@@ -3119,16 +3121,18 @@ Item {
     // the row to highlight. Runs on every scroll emit with no delay; the
     // followedScrollPiece check makes frames inside one paragraph a no-op.
     property string followedScrollPiece: ""
+    property int lastFollowedScrollChar: -1
     function followScrollWalk() {
         if (!root.scrollSourced || root.scrollPages.length === 0 || !root.followSelectorMoves)
             return
         const passage = LiveOutputService.readingPassageChar()
-        if (passage < 0)
+        if (passage < 0 || passage === root.lastFollowedScrollChar)
             return
         const origin = Number(root.scrollPages[0].start ?? 0)
         const piece = root.pieceAtChapterOffset(origin + passage)
         if (!piece)
             return
+        root.lastFollowedScrollChar = passage
         const sig = piece.number + "|" + piece.partIndex
         if (sig === root.followedScrollPiece)
             return

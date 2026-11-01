@@ -34,7 +34,7 @@ namespace bs = bps::settings;
 namespace {
 
 // One place the app's version is written for the Settings screens (the nav rail and menus still carry their own copy).
-constexpr const char *kAppVersion = "0.1.1";
+constexpr const char *kAppVersion = "0.1.2";
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 

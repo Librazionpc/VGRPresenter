@@ -40,6 +40,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QMetaObject>
 #include <QPointer>
 #include <QThreadPool>
 #include <QTimer>
@@ -954,8 +955,9 @@ static QFont blockFontAt(const QVariantMap &block, double pixelSize)
     // draws the reading block with FontService.resolve (a missing family falls
     // back to the content face), so measuring with the raw name would wrap a
     // block in a font nobody paints whenever the design's font is not installed.
-    const QString family = FontService::instance()
-                               .resolve(meta.value(QStringLiteral("fontFamily")).toString());
+    const QString family = meta.value(QStringLiteral("fontFamilyResolved")).toBool()
+        ? meta.value(QStringLiteral("resolvedFontFamily")).toString()
+        : FontService::instance().resolve(meta.value(QStringLiteral("fontFamily")).toString());
     if (!family.isEmpty())
         font.setFamily(family);
     // TRUNCATED, not rounded: QML's own `font.pixelSize` setter stores the integer
@@ -1314,6 +1316,11 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
     lineSetName_ = name;
     lineSetRaw_ = slides;
     lineSourceTextOnly_ = false;
+    readingTextSourcePages_.clear();
+    readingTextSourcePageEnds_.clear();
+    readingTextSourceText_.clear();
+    readingTextSourceStartChar_ = -1;
+    readingTextSourceInitialPositionPending_ = false;
     readingBudgetFitActive_ = false;
     pendingTextSourceName_.clear();
     pendingTextSourcePages_.clear();
@@ -1412,6 +1419,11 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     if (slides.isEmpty()) {
         lineSetRaw_.clear();
         lineSourceTextOnly_ = false;
+        readingTextSourcePages_.clear();
+        readingTextSourcePageEnds_.clear();
+        readingTextSourceText_.clear();
+        readingTextSourceStartChar_ = -1;
+        readingTextSourceInitialPositionPending_ = false;
         readingBudgetFitActive_ = false;
         pendingTextSourceName_.clear();
         pendingTextSourcePages_.clear();
@@ -1435,6 +1447,11 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
     lineSetName_ = name;
     lineSetRaw_ = slides;
     lineSourceTextOnly_ = false;
+    readingTextSourcePages_.clear();
+    readingTextSourcePageEnds_.clear();
+    readingTextSourceText_.clear();
+    readingTextSourceStartChar_ = -1;
+    readingTextSourceInitialPositionPending_ = false;
     readingBudgetFitActive_ = false;
     pendingTextSourceName_.clear();
     pendingTextSourcePages_.clear();
@@ -1496,11 +1513,33 @@ void LiveOutputService::activatePendingTextSource()
             page[QStringLiteral("contentType")] = visualPage.value(QStringLiteral("contentType"));
         readingPages.append(page);
     }
+    const int selectedPage = qBound(0, pendingTextSourceIndex_,
+                                    static_cast<int>(readingPages.size()) - 1);
+    int selectedChar = 0;
+    QString passage;
+    readingTextSourcePageEnds_.clear();
+    readingTextSourcePageEnds_.reserve(readingPages.size());
+    for (int i = 0; i < readingPages.size(); ++i) {
+        if (i == selectedPage)
+            selectedChar = passage.size();
+        passage += readingTextOf(readingPages.at(i).toMap());
+        readingTextSourcePageEnds_.append(passage.size());
+    }
+    readingTextSourceText_ = passage;
+    QVariantMap passagePage = readingPages.first().toMap();
+    passagePage[QStringLiteral("body")] = passage;
+
     lineSetName_ = pendingTextSourceName_;
-    lineSetRaw_ = readingPages;
+    // Word-budget slices are UI navigation anchors, not scroll pages. Joining
+    // them once here gives the walk one immutable JSON text/line grid; otherwise
+    // each slice boundary rewrapped the run and changed the word under the cursor.
+    lineSetRaw_ = QVariantList{passagePage};
+    readingTextSourcePages_ = readingPages;
+    readingTextSourceStartChar_ = selectedChar;
+    readingTextSourceInitialPositionPending_ = true;
     lineSourceTextOnly_ = true;
     readingBudgetFitActive_ = true;
-    lineSlideIndex_ = qBound(0, pendingTextSourceIndex_, static_cast<int>(readingPages.size()) - 1);
+    lineSlideIndex_ = 0;
     pendingTextSourceName_.clear();
     pendingTextSourcePages_.clear();
     readingPickBase_ = 0;
@@ -1513,10 +1552,41 @@ void LiveOutputService::activatePendingTextSource()
     if (readingScrollAnim_)
         readingScrollAnim_->stop();
     readingScroll_ = 0.0;
+    readingTextWindowCharStart_ = 0;
+    readingFlowText_.clear();
+    refreshReadingTextWindow(selectedChar);
     rebuildReadingRun(lineSlideIndex_, true);
-    readingFlowText_ = readingRunText_;
+    const auto *model = OutputListModel::instance();
+    const QString referenceStyle = model ? model->activeStyleId() : QString();
+    const QVector<int> starts = styleRunLinesForText(referenceStyle, readingRunText_).charStarts;
+    const int localChar = qMax(0, selectedChar - readingTextWindowCharStart_);
+    if (!starts.isEmpty()) {
+        const auto at = std::upper_bound(starts.constBegin(), starts.constEnd(), localChar);
+        lineOffset_ = qMax(0, static_cast<int>(at - starts.constBegin()) - 1);
+        readingLayoutTargetChar_ = -1;
+    } else {
+        readingLayoutTargetChar_ = selectedChar;
+    }
+    readingScroll_ = lineOffset_;
     emit readingStageChanged();
     applyReadingRestage(false, false, true);
+}
+
+int LiveOutputService::readingPage() const
+{
+    return lineSourceTextOnly_ && !readingTextSourcePages_.isEmpty()
+        ? readingTextSourcePageForChar(readingCharOffset()) : lineSlideIndex_;
+}
+
+int LiveOutputService::readingTextSourcePageForChar(int charOffset) const
+{
+    if (readingTextSourcePages_.isEmpty())
+        return lineSlideIndex_;
+    const auto it = std::upper_bound(readingTextSourcePageEnds_.cbegin(),
+                                     readingTextSourcePageEnds_.cend(), charOffset);
+    return it == readingTextSourcePageEnds_.cend()
+        ? readingTextSourcePages_.size() - 1
+        : static_cast<int>(it - readingTextSourcePageEnds_.cbegin());
 }
 
 // ONE PAGE'S PASSAGE: that page followed by the next one, joined by the page
@@ -1601,6 +1671,40 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLines(const Q
     return styleRunLinesForText(styleId, readingFlowText_);
 }
 
+bool LiveOutputService::refreshReadingTextWindow(int passageChar)
+{
+    if (!lineSourceTextOnly_ || readingTextSourceText_.isEmpty())
+        return false;
+    constexpr int kWindowChars = 6000;
+    constexpr int kWindowMargin = 1200;
+    const int size = readingTextSourceText_.size();
+    const int currentStart = readingTextWindowCharStart_;
+    const int currentEnd = currentStart + readingFlowText_.size();
+    if (!readingFlowText_.isEmpty() && passageChar >= currentStart + kWindowMargin
+            && passageChar <= currentEnd - kWindowMargin)
+        return false;
+
+    const int desiredStart = qBound(0, passageChar, qMax(0, size - kWindowChars));
+    int start = desiredStart;
+    int end = qMin(size, desiredStart + kWindowChars);
+    while (end < size && end > start && !readingTextSourceText_.at(end - 1).isSpace())
+        --end;
+    if (end <= start)
+        end = qMin(size, start + kWindowChars);
+    const QString windowText = readingTextSourceText_.mid(start, end - start);
+    if (start == currentStart && windowText == readingFlowText_)
+        return false;
+    readingTextWindowCharStart_ = start;
+    readingFlowText_ = windowText;
+    readingRunText_ = readingFlowText_;
+    return true;
+}
+
+qreal LiveOutputService::readingFlowCharForScroll(qreal lines) const
+{
+    return qBound(0.0, readingCharForScroll(lines), static_cast<qreal>(readingFlowText_.size()));
+}
+
 // ...the same table for a text that is not installed yet. rebuildReadingRun needs
 // this: it has just built the run's NEW text and has to ask what line the reader's
 // character sits on in IT — readingFlowText_ is still the previous run at that
@@ -1617,14 +1721,82 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
         return none;
     const QString key = styleId + QLatin1Char('#') + QString::number(lineSlideIndex_)
                         + QLatin1Char('#') + QString::number(qHash(text), 16);
-    const auto cached = readingRunLinesCache_.constFind(key);
-    if (cached != readingRunLinesCache_.constEnd()) {
-        // Touch: move to most-recently-used so eviction below takes the
-        // table that has actually gone cold, not just whichever happened
-        // to be inserted first.
-        readingRunLinesLru_.removeOne(key);
-        readingRunLinesLru_.append(key);
-        return cached.value();
+    if (lineSourceTextOnly_ && readingBudgetFitActive_) {
+        const auto *scrollModel = OutputListModel::instance();
+        const QString columnKey = styleId.isEmpty()
+            ? (scrollModel ? scrollModel->activeStyleId() : QString()) : styleId;
+        const auto column = scrollColumns_.constFind(columnKey);
+        if (column == scrollColumns_.constEnd() || column->size <= 0.0)
+            return none;
+        const QString columnCacheKey = QStringLiteral("c#") + columnKey + QLatin1Char('#')
+                                       + QString::number(qHash(text), 16);
+        const auto hit = readingRunLinesCache_.constFind(columnCacheKey);
+        if (hit != readingRunLinesCache_.constEnd())
+            return hit.value();
+        if (!readingRunLinesPending_.contains(columnCacheKey)) {
+            readingRunLinesPending_.insert(columnCacheKey);
+            const QString columnSig = column->sig;
+            QVariantMap workerBlock = column->block;
+            QVariantMap meta = workerBlock.value(QStringLiteral("meta")).toMap();
+            meta.insert(QStringLiteral("resolvedFontFamily"),
+                        FontService::instance().resolve(meta.value(QStringLiteral("fontFamily")).toString()));
+            meta.insert(QStringLiteral("fontFamilyResolved"), true);
+            workerBlock.insert(QStringLiteral("meta"), meta);
+            const double pixelSize = column->size;
+            const QString workerText = text;
+            QPointer<LiveOutputService> guard(const_cast<LiveOutputService *>(this));
+            QThreadPool::globalInstance()->start(
+                [guard, columnCacheKey, columnKey, columnSig, workerText, workerBlock, pixelSize]() {
+                    const QVector<VisualSpan> spans = visualLinesOfTextAtSize(
+                        workerText, workerBlock, pixelSize);
+                    if (!guard)
+                        return;
+                    QMetaObject::invokeMethod(guard.data(),
+                        [guard, columnCacheKey, columnKey, columnSig, workerText, spans]() {
+                            auto *self = guard.data();
+                            if (!self)
+                                return;
+                            self->readingRunLinesPending_.remove(columnCacheKey);
+                            const auto currentColumn = self->scrollColumns_.constFind(columnKey);
+                            if (currentColumn == self->scrollColumns_.constEnd()
+                                    || currentColumn->sig != columnSig)
+                                return;
+                            StyleRunLines entry;
+                            entry.lines.reserve(spans.size());
+                            entry.charStarts.reserve(spans.size());
+                            for (const VisualSpan &span : spans) {
+                                entry.lines.append(workerText.mid(span.start, span.end - span.start));
+                                entry.charStarts.append(span.start);
+                            }
+                            while (self->readingRunLinesCache_.size() >= 16
+                                   && !self->readingRunLinesLru_.isEmpty())
+                                self->readingRunLinesCache_.remove(
+                                    self->readingRunLinesLru_.takeFirst());
+                            self->readingRunLinesLru_.append(columnCacheKey);
+                            self->readingRunLinesCache_.insert(columnCacheKey, entry);
+                            if (self->lineSourceTextOnly_ && self->readingFlowText_ == workerText) {
+                                const auto *model = OutputListModel::instance();
+                                if (model && model->activeStyleId() == columnKey) {
+                                    self->readingRunPageLines_.insert(0, spans.size());
+                                    if (self->readingLayoutTargetChar_ >= 0 && !entry.charStarts.isEmpty()) {
+                                        const int localChar = qBound(0,
+                                            self->readingLayoutTargetChar_ - self->readingTextWindowCharStart_,
+                                            workerText.size());
+                                        const auto at = std::upper_bound(entry.charStarts.constBegin(),
+                                            entry.charStarts.constEnd(), localChar);
+                                        const int line = qMax(0, static_cast<int>(
+                                            at - entry.charStarts.constBegin()) - 1);
+                                        self->readingScroll_ = line;
+                                        self->lineOffset_ = line;
+                                        self->readingLayoutTargetChar_ = -1;
+                                    }
+                                }
+                                emit self->readingScrollChanged();
+                            }
+                        }, Qt::QueuedConnection);
+                });
+        }
+        return none;
     }
     // SCROLL MEASURES ITS OWN COLUMN and nothing else (see scrollColumnSize): the
     // block the surface draws the passage in, at the one size the budget solved. No
@@ -1657,6 +1829,15 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
             readingRunLinesLru_.append(columnCacheKey);
             return *readingRunLinesCache_.insert(columnCacheKey, entry);
         }
+    }
+    const auto cached = readingRunLinesCache_.constFind(key);
+    if (cached != readingRunLinesCache_.constEnd()) {
+        // Touch: move to most-recently-used so eviction below takes the
+        // table that has actually gone cold, not just whichever happened
+        // to be inserted first.
+        readingRunLinesLru_.removeOne(key);
+        readingRunLinesLru_.append(key);
+        return cached.value();
     }
     const QVariantMap page = lineSetRaw_.at(lineSlideIndex_).toMap();
     // WHICH SLIDE'S COMPOSITION THE BOX IS MEASURED ON: THE ONE THE SURFACES DRAW.
@@ -2042,7 +2223,7 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
 {
     if (!readingBudgetFitActive_ || block.isEmpty())
         return 0.0;
-    const QString flow = readingFlowText_;
+    const QString flow = lineSourceTextOnly_ ? readingTextSourceText_ : readingFlowText_;
     if (flow.trimmed().isEmpty())
         return 0.0;
     const int budget = qMax(3, readingWordBudget_);
@@ -2116,6 +2297,12 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
     const auto seated = scrollColumns_.constFind(key);
     const bool vacant = seated == scrollColumns_.constEnd();
     if ((named || vacant) && (vacant || seated->sig != sig)) {
+        const qreal previousChar = readingCharForScroll(readingScroll_);
+        const int preserveChar = lineSourceTextOnly_
+            ? (readingTextSourceInitialPositionPending_
+                   ? readingTextSourceStartChar_
+                   : readingTextWindowCharStart_ + static_cast<int>(std::floor(previousChar)))
+            : static_cast<int>(std::floor(previousChar));
         ScrollColumn column;
         column.block = block;
         column.size = size;
@@ -2131,8 +2318,23 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
         readingRunLinesLru_.removeIf([&prefix](const QString &k) { return k.startsWith(prefix); });
         // The reference grid is the active style's: re-measure the run in place, at the
         // reader's own page and offset, exactly as a changed fit always did.
-        if (key == active)
+        if (key == active && lineSourceTextOnly_) {
+            const QVector<int> starts = styleRunLinesForText(key, readingRunText_).charStarts;
+            if (!starts.isEmpty()) {
+                const int localChar = lineSourceTextOnly_
+                    ? qMax(0, preserveChar - readingTextWindowCharStart_) : preserveChar;
+                const auto at = std::upper_bound(starts.constBegin(), starts.constEnd(), localChar);
+                lineOffset_ = qMax(0, static_cast<int>(at - starts.constBegin()) - 1);
+                readingScroll_ = lineOffset_;
+            }
+            readingTextSourceInitialPositionPending_ = false;
             applyReadingRestage(true, /*forceRebuild=*/ true);
+        } else if (key == active) {
+            applyReadingRestage(true, /*forceRebuild=*/ true);
+        }
+    } else if (key == active && lineSourceTextOnly_) {
+        // This surface already reports the exact column used to seed the grid.
+        readingTextSourceInitialPositionPending_ = false;
     }
     return size;
 }
@@ -2168,8 +2370,12 @@ QVariantList LiveOutputService::readingRunLineStarts(const QString &styleId) con
 qreal LiveOutputService::readingLineForStyle(const QString &styleId, qreal charAt) const
 {
     const QVector<int> starts = styleRunLines(styleId).charStarts;
-    if (starts.isEmpty() || charAt < 0.0)
-        return charAt;   // nothing to convert: the caller's number is already lines
+    if (starts.isEmpty())
+        return lineSourceTextOnly_ ? readingScroll_ : charAt;
+    if (charAt < 0.0)
+        return charAt;
+    if (lineSourceTextOnly_)
+        charAt = qMax(0.0, charAt - readingTextWindowCharStart_);
     // THE CHARACTER, IN WHOLE CHARACTERS. readingChar is a reference line's first
     // character plus the glide's progress through that line (a fraction of a LINE,
     // 0..1 — see readingCharForScroll). Added to this style's line index as it stood,
@@ -2217,7 +2423,8 @@ int LiveOutputService::readingCharOffset() const
     if (readingRunText_.isEmpty() || readingRunFirst_ < 0)
         return -1;
     const qreal at = readingCharForScroll(readingScroll_);
-    return static_cast<int>(std::floor(at));
+    const int local = static_cast<int>(std::floor(at));
+    return lineSourceTextOnly_ ? readingTextWindowCharStart_ + local : local;
 }
 
 // The run-relative offset plus the run's own origin: the position in the PICK's
@@ -2227,7 +2434,7 @@ int LiveOutputService::readingPassageChar() const
     const int local = readingCharOffset();
     if (local < 0)
         return -1;
-    return readingRunCharBase_ + local;
+    return lineSourceTextOnly_ ? local : readingRunCharBase_ + local;
 }
 
 // HOW MANY LINES THIS PAGE OCCUPIES IN THE PASSAGE — the unit the step moves in.
@@ -2240,6 +2447,8 @@ int LiveOutputService::readingPageLineCount(int index) const
     const auto it = readingRunPageLines_.constFind(index);
     if (it != readingRunPageLines_.constEnd())
         return it.value();
+    if (lineSourceTextOnly_)
+        return 0;
     return static_cast<int>(readingLinesAt(index).size());
 }
 
@@ -2306,9 +2515,10 @@ qreal LiveOutputService::readingWindowOffset(qreal absolute) const
 
 void LiveOutputService::announceReadingPage()
 {
-    if (readingPageAnnounced_ == lineSlideIndex_)
+    const int page = readingPage();
+    if (readingPageAnnounced_ == page)
         return;
-    readingPageAnnounced_ = lineSlideIndex_;
+    readingPageAnnounced_ = page;
     emit readingPageChanged();
 }
 
@@ -2335,14 +2545,10 @@ void LiveOutputService::rebuildReadingRun(int anchor, bool force)
         resetReadingRun();
         return;
     }
-    // A PICK THAT FITS IN TWICE THE RADIUS IS ITS OWN RUN. With a sliding
-    // [anchor-4..anchor+4] window, a 10-page pick starts as [0..4] and GROWS to
-    // [0..8] the moment the reader reaches page 4 — a refill landing on a step
-    // they are watching (reported as "works from 1 to 1-3, then misbehaves").
-    // Covering the whole pick costs nothing here (it is the pick's own text, not
-    // a copy) and removes every mid-walk rebuild for it. A JSON passage is the whole
-    // chapter, so it is windowed like a slide set: laying out the chapter every frame
-    // is what stalled the GUI thread.
+    // A small slide pick is kept whole to avoid a mid-walk refill. Larger slide sets
+    // use a bounded window. JSON scroll reaches this with one full-passage reading
+    // unit, so it also keeps one stable wrap grid instead of reflowing at each
+    // max-words slice.
     constexpr int kReadingRunWholePick = 2 * LiveOutputService::kReadingRunRadius * 2 + 1;
     const bool wholePick = !lineSourceTextOnly_ && count <= kReadingRunWholePick;
     const int first = wholePick ? 0 : qMax(0, anchor - kReadingRunRadius);
@@ -2397,7 +2603,8 @@ void LiveOutputService::rebuildReadingRun(int anchor, bool force)
     readingRunPageStart_.clear();
     readingRunPageLines_.clear();
     for (int i = first; i <= last; ++i) {
-        QString page = readingTextOf(lineSetRaw_.at(i).toMap());
+        QString page = lineSourceTextOnly_
+            ? readingFlowText_ : readingTextOf(lineSetRaw_.at(i).toMap());
         if (page.trimmed().isEmpty())
             continue;
         if (!run.isEmpty()) {
@@ -2476,7 +2683,8 @@ void LiveOutputService::rebuildReadingRun(int anchor, bool force)
         QString pageLines;
         for (int i = first; i <= last; ++i) {
             const int n = readingPageLineCount(i);
-            const int own = static_cast<int>(readingLinesAt(i).size());
+            const int own = lineSourceTextOnly_
+                ? 0 : static_cast<int>(readingLinesAt(i).size());
             pageSum += n;
             pageOwnSum += own;
             if (i > first)
@@ -2605,9 +2813,64 @@ void LiveOutputService::connectReadingBasis()
 void LiveOutputService::applyReadingScroll(qreal lines)
 {
     readingScroll_ = lines;
+    bool windowChanged = false;
+    if (lineSourceTextOnly_) {
+        const int passageChar = readingTextWindowCharStart_
+            + static_cast<int>(std::floor(readingCharForScroll(lines)));
+        const int windowEnd = readingTextWindowCharStart_ + readingFlowText_.size();
+        const bool nearEdge = passageChar < readingTextWindowCharStart_ + 1200
+                              || passageChar > windowEnd - 1200;
+        if (nearEdge && (readingScrollPreparing_ || (readingScrollAnim_
+                && readingScrollAnim_->state() == QAbstractAnimation::Running))) {
+            readingWindowRefreshPending_ = true;
+        } else if (nearEdge) {
+            windowChanged = refreshReadingTextWindow(passageChar);
+            readingWindowRefreshPending_ = false;
+            if (windowChanged) {
+                const auto *model = OutputListModel::instance();
+                const QString ref = model ? model->activeStyleId() : QString();
+                const QVector<int> starts = styleRunLinesForText(ref, readingRunText_).charStarts;
+                readingRunPageLines_.insert(0, starts.size());
+                readingLayoutTargetChar_ = passageChar;
+                const qreal localLine = starts.isEmpty()
+                    ? 0.0 : readingLineForStyle(ref, passageChar);
+                lineOffset_ = localLine;
+                readingScroll_ = localLine;
+                lines = localLine;
+                if (!starts.isEmpty())
+                    readingLayoutTargetChar_ = -1;
+            }
+        }
+    }
+    if (lineSourceTextOnly_) {
+        const int page = readingPage();
+        if (page != readingPageAnnounced_) {
+            readingPageAnnounced_ = page;
+            emit readingPageChanged();
+        }
+    }
     // Atomics only, from the interface thread — no lock, no device (see
     // LiveOutputController::SetFlowChar).
-    bps::live::LiveOutputController::Instance().SetFlowChar(readingCharForScroll(lines));
+    bps::live::LiveOutputController::Instance().SetFlowChar(
+        lineSourceTextOnly_ ? readingFlowCharForScroll(lines) : readingCharForScroll(lines));
+    if (windowChanged) {
+        if (live_) {
+            QVariantList current = onAirSlidesRaw();
+            if (!current.isEmpty()) {
+                QVariantMap shown = current.first().toMap();
+                shown[QStringLiteral("flowText")] = readingFlowText_;
+                shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(lines);
+                goLiveWithSlides(onAirTitle_, QVariantList{shown});
+            }
+        } else if (!stagedSlidesRaw_.isEmpty()) {
+            QVariantMap shown = stagedSlidesRaw_.first().toMap();
+            shown[QStringLiteral("flowText")] = readingFlowText_;
+            shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(lines);
+            stagedSlidesRaw_ = QVariantList{shown};
+            stagedSlide_ = previewWithActiveStyle(shown);
+            emit stagedChanged();
+        }
+    }
     emit readingScrollChanged();
 }
 
@@ -2663,7 +2926,13 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
         connect(readingScrollAnim_, &QVariantAnimation::valueChanged, this,
                 [this](const QVariant &v) { applyReadingScroll(v.toReal()); });
         connect(readingScrollAnim_, &QVariantAnimation::finished, this,
-                [this]() { commitPendingRebase(); });
+                [this]() {
+                    commitPendingRebase();
+                    if (readingWindowRefreshPending_) {
+                        readingWindowRefreshPending_ = false;
+                        applyReadingScroll(readingScroll_);
+                    }
+                });
     }
     // THE OPERATOR'S PACE, from the same two keys the old glide read
     // (Settings › Slide options › Reading step speed / motion) — one pair for
@@ -2675,7 +2944,9 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
                               .value(QStringLiteral("reading.stepEasing"))
                               .toString();
     readingScrollAnim_->stop();
+    readingScrollPreparing_ = true;
     applyReadingScroll(from);   // starts where the picture already is
+    readingScrollPreparing_ = false;
     // CONFIGURED SILENTLY. A finished animation sits parked at its END time, so
     // setEndValue(to) below made it announce the NEW TARGET at once (valueChanged
     // before start() rewound it) — every press published from -> to -> from: the
@@ -2728,8 +2999,21 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     readingRunBaseLine_ = readingBaseForSlide(lineSlideIndex_);
     const QString previousFlow = readingFlowText_;
     const qreal previousScroll = readingScroll_;
-    readingFlowText_ = readingRunText_;
     readingScroll_ = readingRunBaseLine_ + lineOffset_;
+    if (lineSourceTextOnly_) {
+        const int passageChar = readingTextWindowCharStart_
+            + static_cast<int>(std::floor(readingCharForScroll(readingScroll_)));
+        if (refreshReadingTextWindow(passageChar)) {
+            const auto *model = OutputListModel::instance();
+            const QString ref = model ? model->activeStyleId() : QString();
+            const QVector<int> starts = styleRunLinesForText(ref, readingRunText_).charStarts;
+            readingRunPageLines_.insert(0, starts.size());
+            readingScroll_ = readingLineForStyle(ref, passageChar);
+            lineOffset_ = readingScroll_;
+            if (!starts.isEmpty())
+                readingLayoutTargetChar_ = -1;
+        }
+    }
     const bool flowChanged = readingFlowText_ != previousFlow;
     // ONE LINE WHEN THE RUN'S TEXT CHANGED: the character the reader is on before
     // and after. They must be equal (the window slid under a still picture); a
@@ -2787,8 +3071,10 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // back to runs through here, so one call site covers forward and
     // backward both.
     QTimer::singleShot(0, this, &LiveOutputService::prewarmReadingLines);
-    const bool pageChanged = (readingPageAnnounced_ != lineSlideIndex_);
-    readingPageAnnounced_ = lineSlideIndex_;
+    const int page = readingPage();
+    const bool pageChanged = (readingPageAnnounced_ != page);
+    if (!readingStepGlide_)
+        readingPageAnnounced_ = page;
     if (lineSourceTextOnly_) {
         if (live_) {
             if (flowChanged) {
@@ -2796,19 +3082,19 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
                 if (!current.isEmpty()) {
                     QVariantMap shown = current.first().toMap();
                     shown[QStringLiteral("flowText")] = readingFlowText_;
-                    shown[QStringLiteral("flowChar")] = readingCharForScroll(readingScroll_);
+                    shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(readingScroll_);
                     goLiveWithSlides(onAirTitle_, QVariantList{shown});
                 }
             }
         } else if (flowChanged && !stagedSlidesRaw_.isEmpty()) {
             QVariantMap shown = stagedSlidesRaw_.first().toMap();
             shown[QStringLiteral("flowText")] = readingFlowText_;
-            shown[QStringLiteral("flowChar")] = readingCharForScroll(readingScroll_);
+            shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(readingScroll_);
             stagedSlidesRaw_ = QVariantList{shown};
             stagedSlide_ = previewWithActiveStyle(shown);
             emit stagedChanged();
         }
-        if (pageChanged)
+        if (pageChanged && !readingStepGlide_)
             emit readingPageChanged();
         if (!readingStepGlide_ && (flowChanged || scrollChanged))
             emit readingScrollChanged();
@@ -2861,7 +3147,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
         QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
         // The two fields the engine scrolls by (Slide::flowText / Slide::flowChar).
         shown[QStringLiteral("flowText")] = readingFlowText_;
-        shown[QStringLiteral("flowChar")] = readingCharForScroll(readingScroll_);
+        shown[QStringLiteral("flowChar")] = readingFlowCharForScroll(readingScroll_);
         goLiveWithSlides(lineSetName_, QVariantList{shown});
         // The pick is ON AIR, so nothing is staged any more — the tiles read the
         // new on-air slide (same contract as stageSlidesWithPreview's live path).
@@ -2882,7 +3168,8 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // OFF AIR the staged copy has to carry them: it is what GO LIVE will send.
     QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
     shown[QStringLiteral("flowText")] = readingFlowText_;
-    shown[QStringLiteral("flowChar")] = readingCharForScroll(readingScroll_);
+    shown[QStringLiteral("flowChar")] = lineSourceTextOnly_
+        ? readingFlowCharForScroll(readingScroll_) : readingCharForScroll(readingScroll_);
     stagedName_ = lineSetName_;
     stagedSlidesRaw_ = QVariantList{shown};
     stagedSlide_ = previewWithActiveStyle(shown);

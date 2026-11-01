@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(VGRPresenterUI VERSION 0.1.1 LANGUAGES CXX)
+project(VGRPresenterUI VERSION 0.1.2 LANGUAGES CXX)
 
 # C++23 project-wide — the Qt app and the engine (src/PresentationEngine/)
 # build as one project now, one CMakeLists.txt, so they share one dialect

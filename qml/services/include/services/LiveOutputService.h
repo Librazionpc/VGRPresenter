@@ -23,6 +23,7 @@
 #include <QQmlEngine>
 #include <QtQml/qqmlregistration.h>
 #include <QVariantMap>
+#include <QVector>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -526,11 +527,18 @@ public:
     // derived from it, once per frame), so a binding on THIS property re-runs
     // through a glide and a binding on readingScroll does not have to.
     Q_PROPERTY(qreal readingChar READ readingChar NOTIFY readingScrollChanged)
-    qreal readingChar() const { return readingCharForScroll(readingScroll_); }
+    qreal readingChar() const
+    {
+        const qreal local = readingCharForScroll(readingScroll_);
+        return lineSourceTextOnly_ ? readingTextWindowCharStart_ + local : local;
+    }
     bool readingFlowActive() const { return !readingFlowText_.isEmpty(); }
     QString readingFlowText() const { return readingFlowText_; }
     qreal readingScroll() const { return readingScroll_; }
-    // THE PAGE THE WALK IS ON — an index into the pick. NOT the same thing as
+    // THE PAGE THE WALK IS ON — an index into the pick. For JSON scroll this is
+    // the word-budget slice containing the visible character; those slices are
+    // navigation anchors only, while the walk itself uses one full-passage grid.
+    // NOT the same thing as
     // `readingScroll`, which is measured from the RUN's first line: the run is a
     // WINDOW that slides as the reader walks (kReadingRunRadius pages each way),
     // so the scroll number is not comparable across a window shift. A surface
@@ -539,7 +547,7 @@ public:
     // page. Its own notify signal (not readingScrollChanged) so reading it does
     // not make a binding re-run on every frame of a glide.
     Q_PROPERTY(int readingPage READ readingPage NOTIFY readingPageChanged)
-    int readingPage() const { return lineSlideIndex_; }
+    int readingPage() const;
     // ...and WHERE IN THE PICK the words are, in lines: the page's own start (the
     // line counts of every page before it) plus the offset inside that page.
     // Window-independent BY CONSTRUCTION, which is what makes it the number a
@@ -754,6 +762,7 @@ public:
     // The character starts of that style's run lines — the table the two functions
     // above read. Exposed for the walk's own diagnostic (and cheap: cached).
     Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
+    Q_INVOKABLE int readingFlowCharStart() const { return readingTextWindowCharStart_; }
     // THE SIZE THAT TABLE WAS LAID OUT AT, for a style the walk has measured (-1
     // when it has not). A surface comparing its own drawn column against the table
     // needs it: the same words at a different pixel size are a different number of
@@ -969,6 +978,13 @@ private:
     QString pendingTextSourceName_;
     QVariantList pendingTextSourcePages_;
     int pendingTextSourceIndex_ = 0;
+    // Scroll walks one stable JSON passage. These original word-budget slices
+    // remain only to map the current character back to the pane's page/verse.
+    QVariantList readingTextSourcePages_;
+    QVector<int> readingTextSourcePageEnds_;
+    QString readingTextSourceText_;
+    int readingTextSourceStartChar_ = -1;
+    bool readingTextSourceInitialPositionPending_ = false;
     int lineSlideIndex_ = 0;
     int lineOffset_ = 0;
     // Counts applied steps and remembers which way the last one went — see the
@@ -983,14 +999,15 @@ private:
     // THE PASSAGE the reading block is a page of (see the Q_PROPERTYs above) and
     // where it rests, in line heights of the reading text.
     QString readingFlowText_;
+    int readingTextWindowCharStart_ = 0;
+    bool readingWindowRefreshPending_ = false;
+    bool readingScrollPreparing_ = false;
+    int readingLayoutTargetChar_ = -1;
     qreal readingScroll_ = 0.0;
-    // THE RUN THE SCROLLER DRAWS — the page being read plus kReadingRunRadius
-    // pages on each side, joined into ONE passage. `readingScroll_` is measured
-    // from the RUN's first line, never from a page's, so a page turn is only a
-    // pointer move: the words on screen keep their place while the reference,
-    // the slide number and the engine's current slide change around them. That
-    // is what "the scroller does not need to know about slides" means in code —
-    // it draws `readingFlowText_` at `readingScroll_`, full stop.
+    // THE RUN THE SCROLLER DRAWS — slide picks use nearby pages; JSON scroll uses
+    // the whole passage as one stable reading unit. `readingScroll_` is measured
+    // from the run's first line, so slide-window rebases keep the same words under
+    // the reader while the JSON walk never rewraps at word-budget boundaries.
     int readingRunFirst_ = -1;             // first slide in the run, -1 = none
     int readingRunLast_ = -1;              // last slide in the run
     QString readingRunText_;               // the run, joined by page breaks
@@ -1153,6 +1170,7 @@ private:
     // readingRunLinesForStyle's own answers, keyed by (style, page whose box is
     // used, the run's text). The key IS the content, so nothing invalidates it.
     mutable QHash<QString, StyleRunLines> readingRunLinesCache_;
+    mutable QSet<QString> readingRunLinesPending_;
     // LRU ORDER for the cache above, oldest at the front — see
     // styleRunLinesForText's own comment on why a bare size cap that CLEARS
     // the whole table on overflow is the wrong shape for a cache read every
@@ -1222,6 +1240,7 @@ private:
     // The step's answer for one page (see above): the passage's count when the page
     // is in the run, the page's own count otherwise.
     int readingPageLineCount(int index) const;
+    int readingTextSourcePageForChar(int charOffset) const;
     // The characters of the pages in [from, to) as the run's own join counts them
     // (a non-empty page plus its break) — how readingRunCharBase_ is moved when the
     // run's window slides, and computed from scratch for a fresh run.
@@ -1235,6 +1254,8 @@ private:
     // The reference-grid line number turned into the passage's character offset
     // (plus the fraction of the move in flight) — see applyReadingScroll.
     qreal readingCharForScroll(qreal lines) const;
+    bool refreshReadingTextWindow(int passageChar);
+    qreal readingFlowCharForScroll(qreal lines) const;
 
     // ---- Clear all's undo (see clearAll/restoreCleared) -------------------
     // A plain snapshot of each content layer at the moment Clear all ran.
