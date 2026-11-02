@@ -51,8 +51,8 @@ struct OutputItem
     // go live. Named for the role; QML's Item already owns "enabled".
     bool isEnabled = true;
     QString styleId;
-    // "direct" uses the output's selected video bus full-frame; "compose"
-    // paints the output's design and only its wired bus windows.
+    // Legacy persisted routing mode. GO LIVE always renders the on-air program;
+    // this field is retained for compatibility with existing show files.
     QString videoMode = QStringLiteral("direct");
     bool showOverlay = false;
     bool showMedia = false;

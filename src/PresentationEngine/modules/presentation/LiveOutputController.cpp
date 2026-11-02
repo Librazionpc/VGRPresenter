@@ -265,6 +265,7 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
         lastCompiledCount_ = liveContent_.slides.size();
         lastRenderedScene_.clear();
         lastStyleRevision_ = 0;
+        SeedFlowCharFromContent();
         // THE FIRST PICTURE IS ON AIR (see OnAirSlidesSnapshot): the interface
         // thread reads THIS, never the runtime's raw pointer the loop owns.
         PublishOnAirSnapshot();
@@ -289,6 +290,7 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     lastCompiledCount_ = liveContent_.slides.size();
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
+    SeedFlowCharFromContent();
     PublishOnAirSnapshot();   // the slides the interface thread may now read
     // Start the operator-visible clock: the loop reports how long this replace
     // took to reach the preview (see the publish in RenderOnce).
@@ -594,6 +596,7 @@ void LiveOutputController::ApplyPendingLiveContent() {
     lastCompiledCount_ = liveContent_.slides.size();
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
+    SeedFlowCharFromContent();
     readingFlowWindowMoved_ = true;
     // THE OLD SLIDES DIE WITH THIS SWAP. The interface thread reads them through
     // the snapshot, so it has to be refreshed here, before the lock is released.
@@ -674,6 +677,17 @@ std::string LiveOutputController::CurrentSceneId() const {
         if (cs.slideId == slide->id)
             return cs.sceneId;
     return {};
+}
+
+// A NEW PICK rests where ITS OWN SLIDE says. The scroll position the outputs draw is the
+// pushed one (FlowCharPush), which only moves while the reader steps: left alone, a pick
+// made after a walk drew its passage at the previous walk's place, a different paragraph
+// from the one the monitors showed. (Caller holds control_ or is the only thread yet.)
+void LiveOutputController::SeedFlowCharFromContent() {
+    const float rest = liveContent_.slides.empty()
+        ? 0.0f : std::max(0.0f, liveContent_.slides.front().flowChar);
+    flowChar_.store(rest);
+    hasComposedFlow_ = false;
 }
 
 void LiveOutputController::FlowCharPush(float chars) {
@@ -879,25 +893,16 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
                 ? bufSize
                 : rendering::Size(kFrameBufferWidth, kFrameBufferHeight);
 
-        const bool busWired = specs[i].videoBus > 0;
-        const bool templateBusWired =
-            specs[i].templateBus > 0 && !specs[i].templateBusBlocks.empty();
-        if (!busWired && !templateBusWired && (!active || !slide))
+        if (!active || !slide)
             continue;   // a program pass with nothing on air: nothing to compose
-        auto sceneId = templateBusWired
-            ? pres_->Builder().BuildTemplateBusScene(specs[i].templateBus,
-                                                     specs[i].templateBusBlocks,
-                                                     specs[i].templateBusBackground,
-                                                     engine, sceneSize)
-            : busWired
-                ? pres_->Builder().BuildBusFeedScene(specs[i].videoBus, engine, sceneSize)
-                : pres_->Builder().BuildGatedSlideScene(*active, *slide, specs[i], engine, sceneSize);
+        auto sceneId = pres_->Builder().BuildGatedSlideScene(
+            *active, *slide, specs[i], engine, sceneSize);
         if (!sceneId.ok()) {
             fb->SetAcceptsDistributedFrames(true);
             continue;
         }
         // ---- SHARED COMPOSED FRAME: COPY, DO NOT RASTERIZE AGAIN -----------
-        if (refreshReadingFlow && !busWired && !templateBusWired && slide)
+        if (refreshReadingFlow)
             (void)pres_->Builder().RefreshReadingFlow(engine, sceneId.value(), *slide);
         if (sceneId.value() == lastRenderedScene_) {
             const bool ownedByItsOwnPass = !fb->AcceptsDistributedFrames();
@@ -911,8 +916,7 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
         rendering::RenderOptions passOpts;
         passOpts.distribute = false;
         passOpts.capture = true;
-        if (!busWired && !templateBusWired && slide)
-            passOpts.filters = slide->filters;
+        passOpts.filters = slide->filters;
         passOpts.contentScrollChars = contentScrollChars;
         passOpts.contentScrollFromScene = false;
         if (auto img = engine.Render(sceneId.value(), passOpts); img.ok() && !img.value().empty()) {

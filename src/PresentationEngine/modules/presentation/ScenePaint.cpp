@@ -151,6 +151,21 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                      ? static_cast<double>(readingFontPx)
                      : MetaNumber(block.metaJson, "fontSize", kDefaultTextFontSize))
                 * size.height / kBlockStageH);
+            // THE READING COLUMN KEEPS THE MONITOR'S PROPORTIONS. The monitors wrap a column of
+            // `width` stage px with a font of `readingFontPx` stage px, so words-per-line is that
+            // ratio. Scaling the font by the HEIGHT ratio (the stage is not exactly 16:9) and the
+            // wrap width by the WIDTH ratio, then flooring the font to a whole pixel, made the
+            // engine's column ~1-2% wider than the monitor's: one more word on a line. Here the
+            // font follows the width ratio, and the wrap is trimmed by what the whole-pixel font
+            // lost, so the box-to-font ratio is the monitor's own.
+            float flowWrapScale = 1.0f;
+            if (isFlowBlock && readingFontPx > 0.0f) {
+                const float exact = static_cast<float>(
+                    static_cast<double>(readingFontPx) * size.width / kBlockStageW);
+                const float whole = static_cast<float>(rendering::FontManager::QtPixelSize(exact));
+                styleComp->style.size = whole;
+                flowWrapScale = whole / exact;
+            }
             styleComp->style.color = StyleBuilder::ParseColor(
                 MetaString(block.metaJson, "color").empty()
                     ? "#ffffff" : MetaString(block.metaJson, "color"));
@@ -177,7 +192,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             }
             styleComp->style.italic = MetaBool(block.metaJson, "italic");
             styleComp->style.wrap = !oneLine;
-            styleComp->style.wrapWidth = oneLine ? 0.0f : textBounds.width;
+            styleComp->style.wrapWidth = oneLine ? 0.0f : textBounds.width * flowWrapScale;
             {
                 const double lh = template_text_metrics::lineHeightMultiplier(
                     MetaNumber(block.metaJson, "lineHeight", kNaturalLineHeight));

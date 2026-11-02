@@ -617,9 +617,6 @@ Item {
                 items.push({ divider: true })
                 items.push({ id: "unwireVideo", label: qsTr("Unwire video") })
             }
-            if (o)
-                items.push({ id: "toggleCompose", label: String(o.videoMode || "") === "compose"
-                    ? qsTr("Show direct feed") : qsTr("Compose design") })
             if (o && String(o.styleId || "").length > 0)
                 items.push({ id: "unwireStyle", label: qsTr("Take the style off") })
             // No Delete here: a screen is deleted on Settings · Screens, where
@@ -633,11 +630,6 @@ Item {
             items.push({ id: "editRecording", label: qsTr("Edit presets") })
         if (o && Number(o.videoBus) >= 0)
             items.push({ id: "unwireVideo", label: qsTr("Unwire video") })
-        // The picture this output shows: its one routed feed, or the design with
-        // each bus window showing its own assigned bus (compose).
-        if (o)
-            items.push({ id: "toggleCompose", label: String(o.videoMode || "") === "compose"
-                ? qsTr("Show direct feed") : qsTr("Compose design") })
         if (o && Number(o.audioBus) >= 0)
             items.push({ id: "unwireAudio", label: qsTr("Unwire audio") })
         if (gateItems.length > 0) {
@@ -740,20 +732,10 @@ Item {
             if (id === "edit") root.editNode(key)
             else if (id === "unwireVideo") RoutingService.assignBus(rosterRow, "video", -1)
             else if (id === "unwireStyle") OutputListModel.setStyle(rosterRow, "")
-            else if (id === "toggleCompose") {
-                const so = root.outputByRow(rosterRow)
-                OutputListModel.setVideoMode(rosterRow,
-                    so && String(so.videoMode || "") === "compose" ? "direct" : "compose")
-            }
             return
         }
         if (id === "edit") root.editNode(key)
         else if (id === "editRecording") root.sectionRequested("recording")
-        else if (id === "toggleCompose") {
-            const o = root.outputByRow(rosterRow)
-            OutputListModel.setVideoMode(rosterRow,
-                o && String(o.videoMode || "") === "compose" ? "direct" : "compose")
-        }
         else if (id === "unwireVideo") RoutingService.assignBus(rosterRow, "video", -1)
         else if (id === "unwireAudio") RoutingService.assignBus(rosterRow, "audio", -1)
         else if (id === "toggleOverlay") {

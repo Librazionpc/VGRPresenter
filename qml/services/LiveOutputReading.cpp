@@ -218,9 +218,13 @@ static double fittedPixelSize(const QString &text, const QVariantMap &block)
             natural, factor, gap);
         const QVector<VisualSpan> spans = layoutSpansAt(text, block, mid);
         double widest = 0.0;
+        // A line's INK, not its trailing space: the break leaves the space on the line it
+        // ends, and counting it rejected sizes whose words fit (a 754px box refused a line
+        // 760px wide that was 8px of space), so the solved size came out far too small and
+        // the box showed far more than the max words.
         for (const VisualSpan &span : spans)
             widest = qMax(widest, metrics.horizontalAdvance(
-                                       text.mid(span.start, span.end - span.start)));
+                                       text.mid(span.start, span.end - span.start).trimmed()));
         if (widest <= width + 0.01 && spans.size() * step <= height + 0.01)
             lo = mid;
         else

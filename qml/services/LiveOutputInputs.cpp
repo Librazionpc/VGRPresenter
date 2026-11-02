@@ -409,6 +409,8 @@ void LiveOutputService::AddWantedBusFeed(int busId, QList<int> &namedBuses, QHas
 
 void LiveOutputService::CollectBusFeedWants(QHash<int, BusFeed> &wanted, QList<int> &namedBuses)
 {
+    // Only feeds explicitly used by the on-air slide are part of the program.
+    // Output routing must not start a bus feed just because GO LIVE was pressed.
     const QVariantList blocks = onAirSlide_.value(QStringLiteral("blocks")).toList();
     for (const QVariant &v : blocks) {
         const QVariantMap block = v.toMap();
@@ -418,12 +420,6 @@ void LiveOutputService::CollectBusFeedWants(QHash<int, BusFeed> &wanted, QList<i
                              .value(QStringLiteral("busId")).toInt(),
                          namedBuses, wanted);
     }
-
-    const auto *outputs = OutputListModel::instance();
-    if (!outputs)
-        return;
-    for (int i = 0; i < outputs->rowCount(); ++i)
-        AddWantedBusFeed(outputs->routedVideoBus(i), namedBuses, wanted);
 }
 
 void LiveOutputService::AddTemplateWindowsFor(int busId, QHash<int, BusFeed> &wanted)

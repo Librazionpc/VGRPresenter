@@ -259,6 +259,52 @@ Item {
             root.followedRowIndex = index
         })
     }
+    // THE SELECTOR STAYS IN VIEW. A change that re-cuts the rows (Max words, split,
+    // verse numbers) rebuilds the list under the reader: the selection is still there but
+    // the list can be left anywhere. Once the rows settle, bring the active row back if it
+    // is off screen — never while the reader is scrolling the list themselves, and never
+    // when it is already visible (so a manual scroll afterwards is left alone).
+    property int settledRowCount: -1
+    onMainRowsChanged: {
+        if (root.mainRows.length === root.settledRowCount)
+            return
+        root.settledRowCount = root.mainRows.length
+        keepSelectionTimer.restart()
+    }
+    Connections {
+        target: LiveOutputService
+        function onReadingWordBudgetChanged() { keepSelectionTimer.restart() }
+    }
+    Timer {
+        id: keepSelectionTimer
+        interval: 150
+        repeat: false
+        onTriggered: root.keepSelectionInView()
+    }
+    function keepSelectionInView() {
+        if (root.chapterLoading) {
+            keepSelectionTimer.restart()    // the rows are still arriving
+            return
+        }
+        if (root.selected.length === 0 || root.mainRows.length === 0
+                || versesFlick.moving || versesFlick.dragging)
+            return
+        let index = -1
+        for (let i = 0; i < root.mainRows.length; ++i) {
+            const r = root.mainRows[i]
+            if (root.rowIsActive(Number(r.number), Number(r.partIndex ?? 0), r.isSplit === true)) {
+                index = i
+                break
+            }
+        }
+        if (index < 0)
+            index = root.rowIndexFor(root.selected[0])
+        if (index < 0)
+            return
+        const row = root.mainRows[index]
+        root.followedRowIndex = -1          // the old index meant a different row list
+        root.centerRow(row.number, row.partIndex ?? 0, true)
+    }
     NumberAnimation {
         id: centerRowScroll
         target: versesFlick
@@ -1059,13 +1105,13 @@ Item {
             }
             return false
         }
-        // A REAL edge: the pick is the first (or last) row, so the next one is in the
-        // neighbouring sermon.
-        root.stepChapter(direction)
+        // A REAL edge: the pick is the first (or last) row of what is being read. The
+        // step STOPS here: it does not throw the reader into the neighbouring chapter,
+        // sermon or book (that is what the chapter and book lists are for).
         return false
     }
 
-    function stepChapter(direction) {
+    function stepChapter(direction, withinBook) {
         if (!root.book)
             return false
         const chapters = root.book.chapters || []
@@ -1075,6 +1121,8 @@ Item {
             root.chapterSelectLast = direction < 0
             return true
         }
+        if (withinBook === true)
+            return false
         const bi = root.bookIndex + direction
         if (bi >= 0 && bi < root.books.length) {
             const b = root.books[bi]
@@ -1912,6 +1960,11 @@ Item {
             root.operatorPiece = { number: Number(first.number),
                                    part: Number(first.partIndex ?? 0) }
         root.lineStepOwnerRef = root.referenceText
+        if (first && root.sendScrollPick(root.referenceText, slides, 0, slides, 0,
+                                         first.number, first.partIndex ?? 0)) {
+            root.refreshLiveFlowSlide()
+            return
+        }
         root.goLiveRequested(root.referenceText, slides)
         if (first)
             root.rememberPick(slides, 0, first.number, first.partIndex ?? 0)
@@ -2007,6 +2060,21 @@ Item {
             return null
         root.syncReadingWordBudget()   // the walk's budget, read where the walk begins
         return root.readingPagesFromChapter(number, part)
+    }
+    // EVERY PICK IN SCROLL MODE (a double-click, Play / Enter, a ‹ › stage; Table and
+    // Scripture alike) goes out through here: ONE commit that carries the passage,
+    // never a slide with the passage following. False where there is no passage to
+    // read (Scroll off, or content that has none): the caller sends the plain slide.
+    function sendScrollPick(ownerRef, slides, slideIndex, rememberOutput, rememberIndex, number, part) {
+        const passage = LiveOutputService.scrollMode
+            ? root.scrollPassageFor(Number(number), Number(part)) : null
+        if (!passage)
+            return false
+        LiveOutputService.stagePassagePick(ownerRef, slides, slideIndex,
+                                           passage.pages, passage.index)
+        root.scrollPages = passage.pages
+        root.rememberPick(rememberOutput, rememberIndex, number, part, true)
+        return true
     }
     function ensureScrollSource() {
         if (root.scrollSourced || !root.scrollPiece)
@@ -2147,9 +2215,12 @@ Item {
         if (!hit)
             return false
         root.lineStepOwnerRef = root.referenceText
-        LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
         const piece = (root.previewSlides[index].parts || [])[0]
-        root.rememberPick(hit.output, hit.index, piece.number, piece.partIndex ?? 0)
+        if (!root.sendScrollPick(root.referenceText, hit.output, hit.index, hit.output, hit.index,
+                                 piece.number, piece.partIndex ?? 0)) {
+            LiveOutputService.stageSlideSet(root.referenceText, hit.output, hit.index)
+            root.rememberPick(hit.output, hit.index, piece.number, piece.partIndex ?? 0)
+        }
         root.refreshLiveFlowSlide()
         return true
     }
@@ -2184,15 +2255,8 @@ Item {
                                                        [Number(number)])
         if (!pickedSlide)
             return false
-        // Scroll is already decided: the pick goes out once, carrying its passage,
-        // not as a slide with the passage following.
-        const passage = LiveOutputService.scrollMode ? root.scrollPassageFor(Number(number), part) : null
-        if (passage) {
-            LiveOutputService.stagePassagePick(root.lineStepOwnerRef, [pickedSlide], 0,
-                                               passage.pages, passage.index)
-            root.scrollPages = passage.pages
-            root.rememberPick(null, 0, number, part, true)
-        } else {
+        // Scroll is already decided: the pick goes out once, carrying its passage.
+        if (!root.sendScrollPick(root.lineStepOwnerRef, [pickedSlide], 0, null, 0, number, part)) {
             LiveOutputService.stageSlideSet(root.lineStepOwnerRef, [pickedSlide], 0)
             root.rememberPick(null, 0, number, part)
         }
@@ -4011,7 +4075,7 @@ Item {
             return true
         }
         if (root.column === 1)
-            return root.stepChapter(direction)
+            return root.stepChapter(direction, true)   // the end of the book is the end
         return root.step(direction)
     }
 

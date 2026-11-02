@@ -149,6 +149,7 @@ private:
     static constexpr int kHeartbeatMs = 1000;
 
     void FlowCharPush(float chars);
+    void SeedFlowCharFromContent();
     bool FlowCharMoving(int64_t nowMs);
     std::atomic<float> flowChar_{0.0f};
     std::atomic<int64_t> flowCharAtMs_{0};

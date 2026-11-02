@@ -1187,8 +1187,6 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
         const OutputItem &item = m_outputs.at(i);
         if (!hasOwnPass(i))
             continue;
-        // THE WIRED VIDEO BUS FOR THIS ROW (Settings · Routing). 0 = unwired.
-        const int routedBus = i < routedVideoBuses_.size() ? routedVideoBuses_.at(i) : 0;
         const int styleRow = item.styleId.isEmpty() ? -1 : styleRowForId(item.styleId);
         bps::presentation::OutputStyleSpec outSpec = styleRow >= 0
             ? StyleSpecBuilder::specForStyleRow(styleRow, styleRoster(), slideTag)
@@ -1198,37 +1196,10 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
         if (styleRow >= 0)
             outSpec.readingFontPx = static_cast<float>(
                 LiveOutputService::instance().readingColumnPxFor(item.styleId));
-        const bool composeDesign = item.videoMode == QStringLiteral("compose");
-        outSpec.videoBus = composeDesign ? 0 : routedBus;
-        const int busRow = BusListModel::rowForBusNumber(routedBus);
-        const QVariantMap bus = busRow >= 0 ? BusListModel::Instance()->getBus(busRow) : QVariantMap{};
-        const QString templateId = bus.value(QStringLiteral("templateId")).toString();
-        if (!templateId.isEmpty()) {
-            const QVariantMap design = TemplateLibraryService::templates().design(templateId);
-            const QVariantList blocks = design.value(QStringLiteral("blocks")).toList();
-            if (composeDesign) {
-                outSpec.templateBus = routedBus;
-                outSpec.templateBusBackground = design.value(QStringLiteral("background")).toString().toStdString();
-                outSpec.templateBusBlocks.clear();
-                for (const QVariant &entry : blocks)
-                    outSpec.templateBusBlocks.push_back(
-                        ShowConverter::blockFromVariant(entry.toMap()));
-            } else {
-                outSpec.videoBus = 0;
-                int windowIndex = 0;
-                for (const QVariant &entry : blocks) {
-                    const QVariantMap block = entry.toMap();
-                    if (block.value(QStringLiteral("kind")).toString() != QStringLiteral("bus"))
-                        continue;
-                    const int assigned = block.value(QStringLiteral("meta")).toMap()
-                                             .value(QStringLiteral("busId")).toInt();
-                    outSpec.videoBus = assigned > 0 ? assigned
-                        : bps::presentation::CompositorState::TemplateWindowPlaneKey(routedBus, windowIndex);
-                    break;
-                }
-            }
-        }
-        outSpec.gateVideoBuses = !composeDesign;
+        // Per-output routing must not replace or filter the on-air program.
+        // Match the monitor's program pass: explicit bus blocks on the slide
+        // remain governed by the active program style.
+        outSpec.gateVideoBuses = spec.gateVideoBuses;
         outSpec.allowedVideoBuses.clear();
         outSpec.showOverlay = outSpec.showOverlay && item.showOverlay;
         outSpec.showMedia = outSpec.showMedia && item.showMedia;
@@ -1275,8 +1246,8 @@ bool OutputListModel::hasOwnPass(int row) const
         return true;
     if (item.kind == QLatin1String("REC") || item.kind == QLatin1String("STREAM"))
         return true;
-    // A wired row with NO style is exactly the row an operator wires a camera
-    // into, and the pass it gets composes that bus full-frame.
+    // Keep a per-output program pass for routed rows too; the route does not
+    // choose the picture sent live.
     return (row < routedVideoBuses_.size() ? routedVideoBuses_.at(row) : 0) > 0;
 }
 
