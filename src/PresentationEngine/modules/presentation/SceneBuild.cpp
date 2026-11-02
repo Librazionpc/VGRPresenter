@@ -26,6 +26,25 @@
 #include <vector>
 
 namespace bps::presentation {
+// This output's line breaks for the slide's passage, if the service cut them (see Slide::flowBreaks).
+static const std::vector<int>* ReadingBreaksFor(const Slide& slide, const OutputStyleSpec& style) {
+    if (style.readingStyleKey.empty())
+        return nullptr;
+    const auto it = slide.flowBreaks.find(style.readingStyleKey);
+    return it == slide.flowBreaks.end() ? nullptr : &it->second;
+}
+
+// The font size (stage px) this output draws the slide's passage at: the size the service fitted THIS
+// window to (so the page fills the text area), else the output's solved column size.
+static float ReadingFontFor(const Slide& slide, const OutputStyleSpec& style) {
+    if (!style.readingStyleKey.empty()) {
+        const auto it = slide.flowSizes.find(style.readingStyleKey);
+        if (it != slide.flowSizes.end() && it->second > 0.0f)
+            return it->second;
+    }
+    return style.readingFontPx;
+}
+
 static std::vector<int> FlowCharStartsFor(const std::string& flowText,
                                           const rendering::TextStyle& style,
                                           const rendering::FontManager& fonts)
@@ -64,7 +83,7 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
                 "SceneBuilder");
         }
     }
-    if (slide.flowText.rfind(reading->Text(), 0) != 0) {
+    if (slide.flowBreaks.empty() && slide.flowText.rfind(reading->Text(), 0) != 0) {
         static std::mutex gateMutex;
         static std::set<std::string> logged;
         std::lock_guard<std::mutex> lock(gateMutex);
@@ -446,16 +465,16 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         switch (comp.source) {
         case SlideComposition::Source::FamilyTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText,
-                                         style.readingFontPx, &style.readingLineStarts,
-                                         style.readingLineTextHash);
+                                         ReadingFontFor(slide, style), ReadingBreaksFor(slide, style),
+                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
                                                 sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
             return;
         }
         case SlideComposition::Source::StyleTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText,
-                                         style.readingFontPx, &style.readingLineStarts,
-                                         style.readingLineTextHash);
+                                         ReadingFontFor(slide, style), ReadingBreaksFor(slide, style),
+                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;
@@ -469,8 +488,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         }
         case SlideComposition::Source::SlideBlocks: {
             const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText,
-                                         style.readingFontPx, &style.readingLineStarts,
-                                         style.readingLineTextHash);
+                                         ReadingFontFor(slide, style), ReadingBreaksFor(slide, style),
+                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;

@@ -60,7 +60,11 @@ Item {
             return           // list formatting rewrites the text: its offsets are not the table's
         const style = String(root.readingStyleId)
         let starts = []
-        try { starts = LiveOutputService.readingRunLineStarts(style) } catch (e) { return }
+        try {
+            starts = LiveOutputService.readingWindowActive
+                ? LiveOutputService.readingWindowLineStarts(style)
+                : LiveOutputService.readingRunLineStarts(style)
+        } catch (e) { return }
         if (!starts || starts.length === 0)
             return           // table not measured yet
         const label = (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
@@ -330,6 +334,9 @@ Item {
                         }
                         parts.push(String(Number((LiveOutputService.readingJumpSerial
                                                   ?? LiveOutputService.readingStageSerial) ?? 0)))
+                        // The window the page shows: its size is fitted to the text area per window.
+                        if (budgetFit && LiveOutputService.readingWindowActive === true)
+                            parts.push(String(LiveOutputService.readingWindowText ?? ""))
                     }
                     parts.push(el.width, el.height, el.style.padding ?? 0,
                                el.meta.fontFamily ?? "",
@@ -415,9 +422,14 @@ Item {
                             const columnSize = Number(LiveOutputService.scrollColumnSize(
                                                           root.readingStyleId, el.modelData))
                             if (columnSize > 0) {
+                                // THE PAGE FILLS THE TEXT AREA: in window mode the size is this
+                                // window's own fit (the service's), else the column's solved size.
+                                const windowSize = LiveOutputService.readingWindowActive === true
+                                    ? Number(LiveOutputService.readingWindowSizeFor(root.readingStyleId)) : 0
+                                const pageSize = windowSize > 0 ? windowSize : columnSize
                                 root.readingFitKey = el.readingFitKey
-                                root.readingFitSize = columnSize
-                                fitAnswer = columnSize
+                                root.readingFitSize = pageSize
+                                fitAnswer = pageSize
                                 el.scrollColumnPending = false
                             } else {
                                 fitAnswer = el.meta.fontSize ?? 16
@@ -561,7 +573,9 @@ Item {
                     // the offset, one measured line at a time.
                     Item {
                         id: flowBox
-                        y: -root.stepLine * el.linePitch
+                        // In window mode the text IS the window (exactly the max words from the
+                        // current word), drawn from the top: there is no scroll offset to apply.
+                        y: LiveOutputService.readingWindowActive ? 0 : -root.stepLine * el.linePitch
                         width: parent.width
                         height: flowText.implicitHeight
 
@@ -578,7 +592,9 @@ Item {
                             id: flowText
                             width: parent.width
                             text: TextFormatService.applyList(
-                                      String(LiveOutputService.readingFlowText ?? ""),
+                                      String(LiveOutputService.readingWindowActive
+                                             ? LiveOutputService.readingWindowText
+                                             : LiveOutputService.readingFlowText ?? ""),
                                       el.meta.list ?? "")
                             font: fitText.font
                             fontSizeMode: Text.FixedSize

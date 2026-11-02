@@ -270,12 +270,25 @@ public:
     int readingWordBudget() const { return readingWordBudget_; }
     bool readingBudgetFitActive() const { return readingBudgetFitActive_; }
     qreal readingColumnPxFor(const QString &styleId) const;
-    // The line breaks of THIS style's reading column for the passage window now on the slide, cut
-    // once at the stage's size (the table the monitors scroll through) and the hash of the text they
-    // were cut from — handed to the engine so its outputs draw exactly these lines. False while the
-    // table is not ready (it is measured off-thread; the style is pushed again when it lands).
-    bool readingLineTableFor(const QString &styleId, std::vector<int> &starts,
-                             uint64_t &textHash) const;
+    // ---- THE EXACT WORD WINDOW (Scroll) ------------------------------------------------
+    // Every screen shows the SAME words: from the word the reading position is on, for exactly the
+    // max-words budget — each in its own size and wrap. True once the reference table is measured.
+    bool readingWindowMode() const;
+    // The words [position, position + budget) as text, for the reading position `lines` (the walk's
+    // own unit; fractional while it glides, floored here: the window moves a whole line at a time).
+    QString readingWindowTextFor(qreal lines) const;
+    // Where each output style breaks that text into lines, cut once at the stage's own size.
+    QVariantMap readingWindowBreaksFor(const QString &windowText, bool fitToWindow) const;
+    // The passage text and position a slide carries to the screens: the exact window and 0 in
+    // window mode, else the whole passage and the char the walk is at.
+    void attachReadingFlow(QVariantMap &slide, qreal lines) const;
+    QString readingWindowText() const { return readingWindowTextFor(readingScroll_); }
+    Q_PROPERTY(QString readingWindowText READ readingWindowText NOTIFY readingScrollChanged)
+    Q_PROPERTY(bool readingWindowActive READ readingWindowMode NOTIFY readingScrollChanged)
+    Q_INVOKABLE QVariantList readingWindowLineStarts(const QString &styleId) const;
+    // The font size (stage px) the current window is fitted to in that style's text area.
+    Q_INVOKABLE qreal readingWindowSizeFor(const QString &styleId) const;
+    qreal readingWindowSizeForText(const QString &styleId, const QString &windowText) const;
     void setReadingWordBudget(int words);
     bool scrollMode() const { return scrollMode_; }
     void setScrollMode(bool on);
@@ -480,6 +493,7 @@ private:
     QString readingEngineFlowText_;
     // stagePassagePick: the picked slide is held here instead of being committed, and
     // the passage publish sends it (carrying the flow) as the one engine commit.
+    mutable QHash<QString, qreal> readingWindowSizes_;   // (style, column, window text) -> fitted size
     bool holdingPassagePick_ = false;
     bool heldPickSent_ = false;
     QVariantMap heldPickSlide_;

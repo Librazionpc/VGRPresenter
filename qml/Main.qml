@@ -1116,8 +1116,12 @@ ApplicationWindow {
     }
 
     // ---- REAL-PASSAGE reading walk (VGR_TABLEWALK_TEST=1 only) ---------------
-    readonly property string twQuery: (typeof SelfTestTableWalkQuery !== "undefined")
+    // A query that starts with "live:" also puts the pick ON AIR (so the engine's outputs, NDI
+    // included, can be photographed beside the tiles); the rest is the search text.
+    readonly property string twQueryRaw: (typeof SelfTestTableWalkQuery !== "undefined")
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
+    readonly property bool twGoLive: window.twQueryRaw.indexOf("live:") === 0
+    readonly property string twQuery: window.twGoLive ? window.twQueryRaw.slice(5) : window.twQueryRaw
     property int twTries: 0
     property int twPress: 0
     property int twJump: 0
@@ -1130,8 +1134,16 @@ ApplicationWindow {
         const m = String(text).match(/(\d+)\s*$/)
         return m ? Number(m[1]) : -1
     }
+    // The reference pane the picked result opened: Scripture when a Bible chapter was chosen,
+    // else The Table (the walk is the same for both).
+    function twPane() {
+        const bible = SelfTest.findItem("selfTestScripturePane")
+        if (bible && bible.visible && bible.book)
+            return bible
+        return SelfTest.findItem("selfTestTablePane")
+    }
     function twPaneLine(press) {
-        const pane = SelfTest.findItem("selfTestTablePane")
+        const pane = window.twPane()
         if (!pane)
             return "[SELFTEST-TABLEWALK] press=" + press + " pane=missing"
         return "[SELFTEST-TABLEWALK] press=" + press + " pane=yes"
@@ -1187,7 +1199,7 @@ ApplicationWindow {
         id: selfTestTableWalkSettle
         interval: 3000
         onTriggered: {
-            const pane = SelfTest.findItem("selfTestTablePane")
+            const pane = window.twPane()
             if (!pane || !pane.book || pane.selected.length === 0) {
                 console.log("[SELFTEST-TABLEWALK] FAIL no-pick pane=" + (pane ? "yes" : "no")
                             + " book=" + (pane && pane.book ? pane.book.id : "-")
@@ -1198,6 +1210,8 @@ ApplicationWindow {
             if (!window.setReadingScrollMode(true, "tablewalk"))
                 console.log("[SELFTEST-TABLEWALK] FAIL not-scroll — the walk needs Scroll mode")
             pane.playPicked()
+            if (window.twGoLive)
+                LiveOutputService.goLive()
             window.twRewound = 0
             selfTestTableWalkRewind.restart()
         }
@@ -1251,6 +1265,12 @@ ApplicationWindow {
                 console.log(window.twPaneLine(press))
                 if (press === 0 || press === 30)
                     window.twGrab("press" + press)
+                if (press === 30) {
+                    // Hold still so tiles and the NDI output can be photographed AT REST: the
+                    // glide has ended 1.5 s from now, and the walk stays put for 14 s.
+                    selfTestTableWalkPress.stop()
+                    twHold.restart()
+                }
             } catch (err) {
                 console.log("[SELFTEST-TABLEWALK] log-error press=" + press + " " + err)
             }
@@ -1262,7 +1282,22 @@ ApplicationWindow {
             }
         }
     }
+    Timer {
+        id: twHold
+        interval: 1500
+        onTriggered: {
+            window.twGrab("rest30")
+            twResume.restart()
+        }
+    }
+    Timer {
+        id: twResume
+        interval: 14000
+        onTriggered: selfTestTableWalkPress.restart()
+    }
     function twGrab(phase) {
+        // (engine.log marker: an outside tool photographs the NDI output at this same moment)
+        EngineBridge.log("info", "TWGRAB", "phase=" + phase)
         const count = OutputListModel.rowCount()
         for (let i = 0; i < count; ++i) {
             const ok = SelfTest.grab("selfTestMonitorTile" + i, "tw_" + phase + "_" + i + ".png")
@@ -1274,7 +1309,7 @@ ApplicationWindow {
         interval: 2500
         repeat: true
         onTriggered: {
-            const pane = SelfTest.findItem("selfTestTablePane")
+            const pane = window.twPane()
             if (!pane) {
                 console.log("[SELFTEST-TABLEWALK] FAIL no-pane-at-jump")
                 SelfTest.quit()

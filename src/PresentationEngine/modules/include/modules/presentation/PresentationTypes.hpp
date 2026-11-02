@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <string>
+#include <map>
 #include <vector>
 
 namespace bps::presentation {
@@ -150,6 +151,13 @@ struct Slide {
     // ---- THE READING FLOW (the Alt+Down / Alt+Up teleprompter step) ---------
     std::string flowText;
     float flowChar = -1.0f;
+    // The line breaks of `flowText` for each output style (keyed by OutputStyleSpec::readingStyleKey),
+    // cut once at the stage's own size by the service. They travel WITH the text they were cut from,
+    // so a scene never draws one passage with another's lines. Absent = the output wraps by itself.
+    std::map<std::string, std::vector<int>> flowBreaks;
+    // ...and the font size (stage px) each output style fits THIS window to, so the page fills its text
+    // area (see LiveOutputService::readingWindowSizeFor). Absent = the output's solved column size.
+    std::map<std::string, float> flowSizes;
     std::string notes;
     std::vector<std::string> tags;
     std::vector<std::string> sections;
@@ -247,11 +255,8 @@ struct OutputStyleSpec {
     std::string backgroundImage;
     std::string mediaFit;
     float readingFontPx = 0.0f;
-    // The reading column's line breaks for THIS output's style, cut once at the stage's own size
-    // (UTF-16 offsets into the passage window) and the hash of the text they were cut from. The
-    // scene draws exactly these lines (rendering::ForcedLineBreaks); empty = wrap normally.
-    std::vector<int> readingLineStarts;
-    uint64_t readingLineTextHash = 0;
+    // Which key this output's line breaks carry in Slide::flowBreaks (the output style's id).
+    std::string readingStyleKey;
     int videoBus = 0;
     bool gateVideoBuses = false;
     std::vector<int> allowedVideoBuses;   // bus NUMBERS (CompositorState's key)

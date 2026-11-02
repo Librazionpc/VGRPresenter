@@ -80,7 +80,8 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    const std::string& flowText,
                    float readingFontPx,
                    const std::vector<int>* readingLineStarts,
-                   uint64_t readingLineTextHash) {
+                   uint64_t readingLineTextHash,
+                   bool flowWindow) {
     constexpr double kBlockStageW = bps::library::kStageWidth, kBlockStageH = bps::library::kStageHeight;
     constexpr double kDefaultTextFontSize = 16.0;
     constexpr double kNaturalLineHeight = template_text_metrics::kNaturalLineHeight;
@@ -90,6 +91,16 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
     int n = 0;
     int demoted = 0;
     size_t blockIndex = 0;
+    size_t longestTextBlock = blocks.size();   // none
+    {
+        size_t longest = 0;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (blocks[i].kind == "text" && blocks[i].text.size() > longest) {
+                longest = blocks[i].text.size();
+                longestTextBlock = i;
+            }
+        }
+    }
     for (const ContentBlock& block : blocks) {
         ++n;
         const std::string objId = std::format("{}{}", tag, n);
@@ -125,8 +136,13 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 for (char& ch : textBody)
                     if (ch == '\n' || ch == '\r') ch = ' ';
             }
-            const bool isFlowBlock =
-                !flowText.empty() && !textBody.empty() && flowText.rfind(textBody, 0) == 0;
+            // The reading block: the one whose text the passage continues. In window mode the passage
+            // is the exact word window, which starts at the current word and so does not begin with
+            // the slide's own text — there the reading block is the longest text block, the same
+            // rule the service steps the walk by.
+            const size_t thisBlock = static_cast<size_t>(&block - blocks.data());
+            const bool isFlowBlock = !flowText.empty() && !textBody.empty()
+                && (flowWindow ? thisBlock == longestTextBlock : flowText.rfind(textBody, 0) == 0);
             if (!isFlowBlock) {
                 textBody = ApplyTextCase(
                     bps::presentation::ApplyList(textBody, MetaString(block.metaJson, "list")),

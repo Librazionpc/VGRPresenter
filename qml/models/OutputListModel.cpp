@@ -1173,8 +1173,7 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
     if (!styleId.isEmpty()) {
         spec.readingFontPx = static_cast<float>(
             LiveOutputService::instance().readingColumnPxFor(styleId));
-        LiveOutputService::instance().readingLineTableFor(styleId, spec.readingLineStarts,
-                                                          spec.readingLineTextHash);
+        spec.readingStyleKey = styleId.toStdString();
     }
     const int activeRow = activeIndex();
     if (activeRow >= 0 && activeRow < m_outputs.size()) {
@@ -1199,9 +1198,8 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
         if (styleRow >= 0) {
             outSpec.readingFontPx = static_cast<float>(
                 LiveOutputService::instance().readingColumnPxFor(item.styleId));
-            // ...and the line breaks cut for it, so that scene draws the monitor's own lines.
-            LiveOutputService::instance().readingLineTableFor(item.styleId, outSpec.readingLineStarts,
-                                                              outSpec.readingLineTextHash);
+            // ...and the key its line breaks travel under on the slide (Slide::flowBreaks).
+            outSpec.readingStyleKey = item.styleId.toStdString();
         }
         // Per-output routing must not replace or filter the on-air program.
         // Match the monitor's program pass: explicit bus blocks on the slide

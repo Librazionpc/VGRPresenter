@@ -1822,7 +1822,12 @@ Item {
         // matched against the items it actually contains, below.)
         const row = root.mainRows.find((r) => Number(r.number) === Number(number)
                                               && Number(r.partIndex ?? 0) === Number(partIndex ?? 0))
-        const paragraphBreak = root.adapter && String(root.adapter.contentType || "") === "table" ? "\n" : " "
+        // EVERY ITEM STARTS ON A NEW LINE, Table paragraph and Bible verse alike. Joined by a space, a
+        // verse began part-way along a line, and each screen (its own width and wrap) started the picked
+        // verse at a DIFFERENT word — whichever line it fell on. A hard break makes the pick's first word
+        // the first word of a line on every screen, as a Table paragraph already is. (One character either
+        // way, so every offset below and pieceAtChapterOffset's joining arithmetic are unchanged.)
+        const paragraphBreak = "\n"
         let text = ""
         const items = []
         for (const verse of root.chapterVerses) {

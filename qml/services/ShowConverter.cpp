@@ -251,6 +251,21 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
     slide.flowChar = s.contains(QStringLiteral("flowChar"))
                          ? static_cast<float>(s.value(QStringLiteral("flowChar")).toDouble())
                          : -1.0f;
+    // The passage's line breaks per output style (see Slide::flowBreaks): {styleId: [line starts]}.
+    {
+        const QVariantMap breaks = s.value(QStringLiteral("flowBreaks")).toMap();
+        for (auto it = breaks.constBegin(); it != breaks.constEnd(); ++it) {
+            std::vector<int> starts;
+            const QVariantList list = it.value().toList();
+            starts.reserve(static_cast<size_t>(list.size()));
+            for (const QVariant &start : list)
+                starts.push_back(start.toInt());
+            slide.flowBreaks[utf8(it.key())] = std::move(starts);
+        }
+        const QVariantMap sizes = s.value(QStringLiteral("flowSizes")).toMap();
+        for (auto it = sizes.constBegin(); it != sizes.constEnd(); ++it)
+            slide.flowSizes[utf8(it.key())] = static_cast<float>(it.value().toDouble());
+    }
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     // Slide-wide filters (see applyFilters — the same door the Edit panel's live
     // patch comes through).

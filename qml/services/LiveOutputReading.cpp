@@ -509,8 +509,8 @@ void LiveOutputService::republishReadingFlow()
     if (current.isEmpty())
         return;
     QVariantMap shown = current.first().toMap();
-    setSlideReadingFlow(shown, /*enabled=*/ true, readingFlowText_,
-                        readingFlowCharForScroll(readingScroll_));
+    attachReadingFlow(shown, readingScroll_);
+    readingEngineFlowText_ = shown.value(QStringLiteral("flowText")).toString();
     updateReadingPick(onAirTitle_.isEmpty() ? lineSetName_ : onAirTitle_, shown);
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadFlowRepublish"),
                         QStringLiteral("staged=%1 stagedFlow=%2 onAir=%3 flow=%4 live=%5 scroll=%6")
@@ -977,12 +977,11 @@ void LiveOutputService::QueueScrollColumnMeasure(const QString &columnKey, const
                             }
                         }
                         emit self->readingScrollChanged();
+                        // The reference table is measured: the exact word window can now be cut,
+                        // so the screens are handed it (they had the whole passage until now).
+                        if (self->live_)
+                            QTimer::singleShot(0, self, [self]() { self->republishReadingFlow(); });
                         QTimer::singleShot(0, self, &LiveOutputService::drainPendingReadingSteps);
-                        // The table the engine's outputs draw is ready: hand it over.
-                        QTimer::singleShot(0, self, []() {
-                            if (auto *outputs = OutputListModel::instance())
-                                outputs->repushEngineStyles();
-                        });
                     }
                 }, Qt::QueuedConnection);
         });
@@ -1187,9 +1186,11 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
         column.size = size;
         column.sig = sig;
         scrollColumns_.insert(key, column);
-        QTimer::singleShot(0, this, []() {
+        QTimer::singleShot(0, this, [this]() {
             if (auto *outputs = OutputListModel::instance())
                 outputs->repushEngineStyles();
+            if (live_)
+                republishReadingFlow();   // this column's line breaks join the slide's
         });
         const QString prefix = QStringLiteral("c#") + key + QLatin1Char('#');
         for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
@@ -1232,19 +1233,137 @@ qreal LiveOutputService::readingColumnPxFor(const QString &styleId) const
     return it == scrollColumns_.constEnd() ? 0.0 : std::floor(it->size);
 }
 
-bool LiveOutputService::readingLineTableFor(const QString &styleId, std::vector<int> &starts,
-                                            uint64_t &textHash) const
+// ---- THE EXACT WORD WINDOW ------------------------------------------------------
+// THE EXACT WORD WINDOW IS OFF. Scroll reads like a book page: a long justified column that fills the
+// text area and glides, the max-words count only sizing the type. The window (every screen cut to exactly
+// N words from the current word, each page fitted to its box) is built and kept behind this switch, but
+// it is not what Scroll looks like, so it stays dark.
+static constexpr bool kExactWordWindow = false;
+
+bool LiveOutputService::readingWindowMode() const
 {
-    starts.clear();
-    textHash = 0;
-    if (!scrollMode_ || !readingBudgetFitActive_ || readingFlowText_.isEmpty() || styleId.isEmpty())
+    if (!kExactWordWindow)
         return false;
-    const QVector<int> table = styleRunLines(styleId).charStarts;   // none while still measuring
-    if (table.isEmpty())
+    if (!scrollMode_ || !readingBudgetFitActive_ || !lineSourceTextOnly_ || readingFlowText_.isEmpty())
         return false;
-    starts.assign(table.constBegin(), table.constEnd());
-    textHash = bps::rendering::TextLayout::TextHash(readingFlowText_.toUtf8().toStdString());
-    return true;
+    const auto *model = OutputListModel::instance();
+    return !readingRunCharStarts(model ? model->activeStyleId() : QString()).isEmpty();
+}
+
+QString LiveOutputService::readingWindowTextFor(qreal lines) const
+{
+    if (!readingWindowMode())
+        return readingFlowText_;
+    // The word the position is on: the char at the start of the (whole) reference line it rests on.
+    const int size = static_cast<int>(readingFlowText_.size());
+    int at = qBound(0, static_cast<int>(std::floor(readingCharForScroll(std::floor(qMax(0.0, lines))))),
+                    size);
+    while (at < size && readingFlowText_.at(at).isSpace())
+        ++at;
+    const int start = at;
+    const int budget = qMax(3, readingWordBudget_);
+    int end = start;
+    for (int words = 0; at < size && words < budget; ++words) {
+        while (at < size && !readingFlowText_.at(at).isSpace())
+            ++at;
+        end = at;
+        while (at < size && readingFlowText_.at(at).isSpace())
+            ++at;
+    }
+    return readingFlowText_.mid(start, end - start);
+}
+
+qreal LiveOutputService::readingWindowSizeForText(const QString &styleId, const QString &windowText) const
+{
+    const auto *model = OutputListModel::instance();
+    const QString key = styleId.isEmpty() ? (model ? model->activeStyleId() : QString()) : styleId;
+    const auto column = scrollColumns_.constFind(key);
+    if (column == scrollColumns_.constEnd() || column->size <= 0.0 || windowText.trimmed().isEmpty())
+        return 0.0;
+    // THE PAGE FILLS ITS TEXT AREA: the largest size at which THIS window's words fit the box, as a
+    // slide's text is fitted to its box. (The walk's own grid keeps the column's solved size so the
+    // reference lines stay put; this is only how big the page is drawn.) Never more than half again
+    // the column's size, so a short last window does not balloon to fill the box.
+    const QString cacheKey = key + QLatin1Char('#') + column->sig + QLatin1Char('#')
+                             + QString::number(qHash(windowText), 16);
+    const auto hit = readingWindowSizes_.constFind(cacheKey);
+    if (hit != readingWindowSizes_.constEnd())
+        return hit.value();
+    QVariantMap grown = column->block;
+    QVariantMap meta = grown.value(QStringLiteral("meta")).toMap();
+    meta.insert(QStringLiteral("autoSize"), QStringLiteral("grow"));
+    grown.insert(QStringLiteral("meta"), meta);
+    // An EXACT fit is brittle: the surfaces (Qt Text, the engine at its own scale) lay the same words
+    // out within a percent of the solver, and a word that lands on one more line is a cut-off page.
+    // So the page is fitted into a box a few percent smaller than the real one — it still fills it —
+    // and the size is a whole pixel, which is what every surface really draws.
+    grown.insert(QStringLiteral("width"), column->block.value(QStringLiteral("width"), 160.0).toDouble() * 0.97);
+    grown.insert(QStringLiteral("height"), column->block.value(QStringLiteral("height"), 40.0).toDouble() * 0.97);
+    const qreal size = std::floor(qMin(fittedPixelSize(windowText.trimmed(), grown), column->size * 1.5));
+    if (readingWindowSizes_.size() >= 256)
+        readingWindowSizes_.clear();
+    readingWindowSizes_.insert(cacheKey, size);
+    return size;
+}
+
+qreal LiveOutputService::readingWindowSizeFor(const QString &styleId) const
+{
+    return readingWindowSizeForText(styleId, readingWindowText());
+}
+
+QVariantMap LiveOutputService::readingWindowBreaksFor(const QString &windowText, bool fitToWindow) const
+{
+    QVariantMap breaks;
+    if (windowText.isEmpty())
+        return breaks;
+    // One table per output style, cut at the stage's own size from the style's own column — the
+    // same cut the monitors' tiles make, handed to the engine so its outputs draw those lines.
+    // (A long column is cut at the column's solved size; a word window at its own fitted size.)
+    for (auto it = scrollColumns_.constBegin(); it != scrollColumns_.constEnd(); ++it) {
+        if (it->size <= 0.0)
+            continue;
+        const qreal fitted = fitToWindow ? readingWindowSizeForText(it.key(), windowText) : 0.0;
+        const QVector<VisualSpan> spans = visualLinesOfTextAtSize(windowText, it->block,
+                                                                  fitted > 0.0 ? fitted : it->size);
+        QVariantList starts;
+        starts.reserve(spans.size());
+        for (const VisualSpan &span : spans)
+            starts.append(span.start);
+        breaks.insert(it.key(), starts);
+    }
+    return breaks;
+}
+
+QVariantList LiveOutputService::readingWindowLineStarts(const QString &styleId) const
+{
+    const auto *model = OutputListModel::instance();
+    const QString key = styleId.isEmpty() ? (model ? model->activeStyleId() : QString()) : styleId;
+    return readingWindowBreaksFor(readingWindowText(), readingWindowMode()).value(key).toList();
+}
+
+void LiveOutputService::attachReadingFlow(QVariantMap &slide, qreal lines) const
+{
+    if (readingWindowMode()) {
+        const QString text = readingWindowTextFor(lines);
+        setSlideReadingFlow(slide, scrollMode_, text, 0.0);
+        slide.insert(QStringLiteral("flowBreaks"), readingWindowBreaksFor(text, true));
+        QVariantMap sizes;
+        for (auto it = scrollColumns_.constBegin(); it != scrollColumns_.constEnd(); ++it) {
+            const qreal fitted = readingWindowSizeForText(it.key(), text);
+            if (fitted > 0.0)
+                sizes.insert(it.key(), fitted);
+        }
+        slide.insert(QStringLiteral("flowSizes"), sizes);
+        return;
+    }
+    slide.remove(QStringLiteral("flowSizes"));
+    setSlideReadingFlow(slide, scrollMode_, readingFlowText_, readingFlowCharForScroll(lines));
+    // The long column: every output draws the line breaks cut for its style at the stage's size (the
+    // very lines the monitors' tiles scroll through), so NDI/HDMI put the same words on each line.
+    if (scrollMode_ && lineSourceTextOnly_ && readingBudgetFitActive_ && !readingFlowText_.isEmpty())
+        slide.insert(QStringLiteral("flowBreaks"), readingWindowBreaksFor(readingFlowText_, false));
+    else
+        slide.remove(QStringLiteral("flowBreaks"));
 }
 
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
@@ -1579,17 +1698,20 @@ void LiveOutputService::applyReadingScroll(qreal lines)
             emit readingPageChanged();
         }
     }
+    // In window mode the screens show the exact word window, which sits at the top of its own
+    // text: the engine's scroll is 0 and what changes is the TEXT (and its line breaks).
+    const bool windowMode = readingWindowMode();
     bps::live::LiveOutputController::Instance().SetFlowChar(
-        lineSourceTextOnly_ ? readingFlowCharForScroll(lines) : readingCharForScroll(lines));
-    if (live_ && scrollMode_ && !readingFlowText_.isEmpty()
-            && readingEngineFlowText_ != readingFlowText_) {
+        windowMode ? 0.0f
+                   : (lineSourceTextOnly_ ? readingFlowCharForScroll(lines) : readingCharForScroll(lines)));
+    const QString sentFlow = windowMode ? readingWindowTextFor(lines) : readingFlowText_;
+    if (live_ && scrollMode_ && !sentFlow.isEmpty() && readingEngineFlowText_ != sentFlow) {
         const QVariantList current = onAirSlidesRaw();
         if (!current.isEmpty()) {
             QVariantMap shown = current.first().toMap();
-            setSlideReadingFlow(shown, /*enabled=*/ true, readingFlowText_,
-                                readingFlowCharForScroll(lines));
+            attachReadingFlow(shown, lines);
             updateReadingPick(onAirTitle_, shown);
-            readingEngineFlowText_ = readingFlowText_;
+            readingEngineFlowText_ = sentFlow;
         }
     }
     if (windowChanged) {
@@ -1597,14 +1719,13 @@ void LiveOutputService::applyReadingScroll(qreal lines)
             QVariantList current = onAirSlidesRaw();
             if (!current.isEmpty()) {
                 QVariantMap shown = current.first().toMap();
-                setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                                    readingFlowCharForScroll(lines));
+                attachReadingFlow(shown, lines);
                 updateReadingPick(onAirTitle_, shown);
             }
         } else if (!stagedSlidesRaw_.isEmpty()) {
             QVariantMap shown = stagedSlidesRaw_.first().toMap();
-            setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                                readingFlowCharForScroll(lines));                stagedSlidesRaw_ = QVariantList{shown};
+            attachReadingFlow(shown, lines);
+            stagedSlidesRaw_ = QVariantList{shown};
             stagedSlide_ = readingStagedPreview(shown);
             emit stagedChanged();
         }
@@ -1795,22 +1916,23 @@ void LiveOutputService::LogReadingRestage(bool commitPage, bool flowChanged, boo
 
 void LiveOutputService::PublishReadingFlowOnly(bool flowChanged, bool scrollChanged, bool pageChanged)
 {
+    // What the screens are to carry: the exact word window in window mode, else the passage.
+    const QString display = readingWindowMode() ? readingWindowTextFor(readingScroll_) : readingFlowText_;
     if (live_) {
         if (holdingPassagePick_ && !heldPickSlide_.isEmpty()) {
             // The pick's one commit: the held slide, carrying the passage it scrolls.
             QVariantMap shown = heldPickSlide_;
-            setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                                readingFlowCharForScroll(readingScroll_));
+            attachReadingFlow(shown, readingScroll_);
             updateReadingPick(lineSetName_, shown);
-            readingEngineFlowText_ = readingFlowText_;   // the engine holds this passage now
+            readingEngineFlowText_ = display;   // the engine holds this passage now
             heldPickSent_ = true;
-        } else if (flowChanged) {
+        } else if (flowChanged || (!display.isEmpty() && display != readingEngineFlowText_)) {
             QVariantList current = onAirSlidesRaw();
             if (!current.isEmpty()) {
                 QVariantMap shown = current.first().toMap();
-                setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                                    readingFlowCharForScroll(readingScroll_));
+                attachReadingFlow(shown, readingScroll_);
                 updateReadingPick(onAirTitle_, shown);
+                readingEngineFlowText_ = display;
             }
         }
     } else if (!stagedSlidesRaw_.isEmpty()
@@ -1818,12 +1940,11 @@ void LiveOutputService::PublishReadingFlowOnly(bool flowChanged, bool scrollChan
                // source has just replaced; what matters is whether the STAGED SLIDE
                // already carries this passage — GO LIVE sends the slide as it stands.
                && (flowChanged
-                   || (scrollMode_ && !readingFlowText_.isEmpty()
+                   || (scrollMode_ && !display.isEmpty()
                        && stagedSlidesRaw_.first().toMap().value(QStringLiteral("flowText")).toString()
-                          != readingFlowText_))) {
+                          != display))) {
         QVariantMap shown = stagedSlidesRaw_.first().toMap();
-        setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                            readingFlowCharForScroll(readingScroll_));
+        attachReadingFlow(shown, readingScroll_);
         stagedSlidesRaw_ = QVariantList{shown};
         stagedSlide_ = readingStagedPreview(shown);
         emit stagedChanged();
@@ -1837,8 +1958,7 @@ void LiveOutputService::PublishReadingFlowOnly(bool flowChanged, bool scrollChan
 void LiveOutputService::CommitReadingPageOnAir(bool flowChanged, bool scrollChanged, bool pageChanged)
 {
     QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
-    setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                        readingFlowCharForScroll(readingScroll_));
+    attachReadingFlow(shown, readingScroll_);
     if (holdingPassagePick_)
         heldPickSlide_ = shown;   // stagePassagePick sends it once, with the passage
     else
@@ -1856,9 +1976,11 @@ void LiveOutputService::CommitReadingPageOnAir(bool flowChanged, bool scrollChan
 void LiveOutputService::StageReadingPageOffAir(bool flowChanged, bool scrollChanged, bool pageChanged)
 {
     QVariantMap shown = lineSetRaw_.at(lineSlideIndex_).toMap();
-    setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                        lineSourceTextOnly_ ? readingFlowCharForScroll(readingScroll_)
-                                            : readingCharForScroll(readingScroll_));
+    if (lineSourceTextOnly_)
+        attachReadingFlow(shown, readingScroll_);
+    else
+        setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
+                            readingCharForScroll(readingScroll_));
     stagedName_ = lineSetName_;
     stagedSlidesRaw_ = QVariantList{shown};
     stagedSlide_ = readingStagedPreview(shown);

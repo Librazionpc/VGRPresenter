@@ -348,6 +348,8 @@ void LiveOutputController::ApplyPendingReadingSlide() {
             if (onAir && SamePickApartFromReading(*onAir, pending->slide)) {
                 onAir->flowText = pending->slide.flowText;
                 onAir->flowChar = pending->slide.flowChar;
+                onAir->flowBreaks = pending->slide.flowBreaks;   // cut together with the text
+                onAir->flowSizes = pending->slide.flowSizes;
                 lastRenderedScene_.clear();
                 commitWhole = false;
                 PublishOnAirSnapshot();

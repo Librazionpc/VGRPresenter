@@ -132,8 +132,10 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
         id += std::format("@size:{}x{}", sw, sh);
     if (style.readingFontPx > 0.0f)
         id += std::format("@rf:{:.2f}", static_cast<double>(style.readingFontPx));
-    if (!style.readingLineStarts.empty())
-        id += std::format("@lt:{:016x}_{}", style.readingLineTextHash, style.readingLineStarts.size());
+    // A passage window carries its own line breaks: another window is another scene (its text and
+    // its lines are cut together, and an in-place text swap could pair one with the other's).
+    if (!s.flowBreaks.empty())
+        id += std::format("@fw:{:016x}", rendering::TextLayout::TextHash(s.flowText));
     if (presentation::CompositorState::Instance().HasMediaFrame())
         id += "@m:on";
     if (style.gateVideoBuses) {
