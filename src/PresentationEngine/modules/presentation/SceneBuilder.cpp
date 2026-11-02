@@ -914,7 +914,8 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    const std::vector<ContentBlock>& blocks,
                    const rendering::Size& size, std::string_view tag,
                    std::string_view layer = "text",
-                   const std::string& flowText = {}) {
+                   const std::string& flowText = {},
+                   float readingFontPx = 0.0f) {
     // The stage grid has ONE definition on this side too (bps::library's
     // kStageWidth/kStageHeight, beside the ContentBlock they describe; the QML
     // counterpart is qml/settings/StageGrid.qml) — this used to be a second copy
@@ -1060,9 +1061,17 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 rect.height - verticalPadding * 2.0f);
             auto text = std::make_shared<rendering::TextObject>(objId, objId, textBody);
             text->SetBounds(textBounds);
+            // Scroll's max-words column fills the text area with no vertical alignment.
+            text->SetFlowFillsBox(isFlowBlock && readingFontPx > 0.0f);
             auto styleComp = std::make_shared<rendering::TextStyleComponent>();
+            // SCROLL'S OWN SIZE wins for the reading block (OutputStyleSpec::readingFontPx): the
+            // app solved it once per style from the max-words budget, and every surface draws the
+            // passage at it. Any other block keeps its declared size.
             styleComp->style.size = static_cast<float>(
-                MetaNumber(block.metaJson, "fontSize", kDefaultTextFontSize) * size.height / kBlockStageH);
+                ((isFlowBlock && readingFontPx > 0.0f)
+                     ? static_cast<double>(readingFontPx)
+                     : MetaNumber(block.metaJson, "fontSize", kDefaultTextFontSize))
+                * size.height / kBlockStageH);
             styleComp->style.color = StyleBuilder::ParseColor(
                 MetaString(block.metaJson, "color").empty()
                     ? "#ffffff" : MetaString(block.metaJson, "color"));
@@ -1224,7 +1233,9 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             const bool growToFit = autoSize == "grow" || autoSize == "growToFit";
             const float minPx =
                 static_cast<float>(3.0 * size.height / kBlockStageH);   // the canvas solver's own 3px floor, output-scaled
-            if (isFlowBlock && !growToFit) {
+            // (A solved scroll size means NO auto-fit at all, grow-to-fit included: Scroll takes
+            // the budget's size as given, as the monitor surfaces do.)
+            if (isFlowBlock && (!growToFit || readingFontPx > 0.0f)) {
                 // Left exactly as the per-block default set it above
                 // (MetaNumber(..., "fontSize", ...) * size.height / kBlockStageH):
                 // the template's own declared size, not a page-specific bisection.
@@ -2035,11 +2046,11 @@ SceneBuilder::BlockLayerPlan SceneBuilder::PlanBlockLayers(const std::vector<Con
 // ---------------------------------------------------------------------------
 // THE STYLE'S OWN CHAR -> LINE TABLE for a passage (see ApplyReadingFlow).
 //
-// The offset the surfaces share is a CHARACTER of the passage; which LINE that
-// character sits on depends on the style's type size and wrap, and this output
-// is the only place that answer exists for THIS style. Built by locating each
-// laid-out line inside the passage (a line's text is a slice of it), once per
-// scene build — the per-frame read is then a binary search
+// The offset the surfaces share is a Qt/QML character of the passage (UTF-16
+// code units), not a UTF-8 byte; which LINE that character sits on depends on
+// the style's type size and wrap, and this output is the only place that answer
+// exists for THIS style. Built once per scene by mapping each folded engine
+// line back to the passage — the per-frame read is then a binary search
 // (TextObject::FlowLineForChar), because a scroll in flight maps the position
 // sixty times a second.
 //
@@ -2056,23 +2067,7 @@ static std::vector<int> FlowCharStartsFor(const std::string& flowText,
                                           const rendering::TextStyle& style,
                                           const rendering::FontManager& fonts)
 {
-    const auto flowLayout = rendering::TextLayout::Measure(flowText, style, fonts);
-    std::vector<int> starts;
-    starts.reserve(flowLayout.lines.size());
-    int cursor = 0;
-    for (const auto& line : flowLayout.lines) {
-        int at = -1;
-        if (!line.text.empty()) {
-            const size_t found = flowText.find(line.text, static_cast<size_t>(cursor));
-            if (found != std::string::npos)
-                at = static_cast<int>(found);
-        }
-        if (at < 0)
-            at = starts.empty() ? cursor : starts.back();
-        starts.push_back(at);
-        cursor = at + static_cast<int>(line.text.size());
-    }
-    return starts;
+    return rendering::TextLayout::FlowCharacterStarts(flowText, style, fonts);
 }
 
 // THE READING FLOW (Alt+Down / Alt+Up — see Slide::flowText): hand the passage
@@ -2727,6 +2722,11 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
     const int sh = static_cast<int>(sceneSize.height);
     if (sw > 0 && sh > 0 && (sw != 1920 || sh != 1080))
         id += std::format("@size:{}x{}", sw, sh);
+    // SCROLL'S TYPE SIZE (OutputStyleSpec::readingFontPx) changes the picture, so it keys the scene:
+    // a re-solved size must rebuild, not be served the scene built at the old one. Absent at 0, so
+    // every id without a scroll size is byte-identical to before.
+    if (style.readingFontPx > 0.0f)
+        id += std::format("@rf:{:.2f}", static_cast<double>(style.readingFontPx));
     // A TAKE IS PART OF THE COMPOSITION, so it is part of the KEY: with a file on
     // air the style's colour and background image step aside (ComposeSlide), and
     // a cache hit only refreshes the compositor's dynamic layers — so without
@@ -3203,13 +3203,15 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     auto addContent = [&]() {
         switch (comp.source) {
         case SlideComposition::Source::FamilyTemplate: {
-            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText);
+            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText,
+                                         style.readingFontPx);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
                                                 sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
             return;
         }
         case SlideComposition::Source::StyleTemplate: {
-            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText);
+            const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText,
+                                         style.readingFontPx);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;
@@ -3222,7 +3224,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
             return;
         }
         case SlideComposition::Source::SlideBlocks: {
-            const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText);
+            const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText,
+                                         style.readingFontPx);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;

@@ -166,6 +166,34 @@ public:
     // Always safe to call from the interface thread; returns Ok once queued.
     Result<void> UpdateReadingSlide(std::string_view name, const presentation::Slide& slide);
 
+    // ---- WHAT IS ON AIR, READ FROM THE INTERFACE THREAD ----------------------
+    //
+    // The runtime binds a RAW POINTER to the controller's own presentation, and
+    // the loop thread REPLACES or rewrites that presentation: a queued pick
+    // (ApplyPendingLiveContent -> SwapLiveContent) swaps the member contents, and
+    // a reading page commit rewrites the current slide's flow fields in place.
+    // Both happen under control_ — but these two used to be read straight off the
+    // runtime (`LiveOutputService::onAirSlidesRaw`, `refreshOnAirSlide`,
+    // `onAirSlideAt`, the on-air mirror in pollTick) with NO lock, copying the
+    // slides' strings and block vectors while the worker could free them. That is
+    // a use-after-free, and it is what the real-passage reading walk died on:
+    // Windows reported 0xC0000374 (heap corruption) and an access violation
+    // inside Qt6Core on back-to-back runs, right after the walk crossed its first
+    // page boundary (which is where a page commit re-commits the pick).
+    //
+    // These answer from a SNAPSHOT the loop thread publishes whenever the on-air
+    // slides or the current index change, behind their own short mutex — never
+    // control_. The copy is a few strings, taken on a change and never per frame,
+    // so the interface thread still never waits on a compose.
+    std::vector<presentation::Slide> OnAirSlidesSnapshot() const;
+    bool OnAirSlideSnapshot(presentation::Slide& out) const;
+    // The current index and the active set's size, from the same snapshot (what
+    // the on-air mirror's title/index/total line reads).
+    void OnAirPositionSnapshot(size_t& index, size_t& total) const;
+    // The loop's own publish point (caller holds control_): copies the runtime's
+    // active slides + current index into the snapshot above.
+    void PublishOnAirSnapshot();
+
     // The preview output the loop feeds (its name in the RenderEngine's
     // OutputManager). Registered at first StartFromOpenShow and kept (a
     // disabled output receives nothing — empty frames before go-live are
@@ -377,7 +405,12 @@ private:
     // SetLineScroll): an output with its OWN styled scene rasterises it
     // separately, so it needs the same offset or the scroll would reach only the
     // outputs that copy the program frame.
-    void RenderPerOutputPasses(float contentScrollChars = 0.0f, bool contentScrollFromScene = false);
+    void RenderPerOutputPasses(float contentScrollChars = 0.0f);
+
+    // The interface thread's copy of what is on air (see OnAirSlidesSnapshot).
+    mutable std::mutex snapshotMutex_;
+    std::vector<presentation::Slide> onAirSnapshot_;
+    size_t onAirIndexSnapshot_ = 0;
 };
 
 } // namespace bps::live

@@ -76,7 +76,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-BUILD="$ROOT/build"
+BUILD="${SELFTEST_BUILD_DIR:-$ROOT/build}"
 APP="appVGRPresenterUI.exe"
 LOG="$BUILD/table_walk_test.log"
 WAIT_SECS="${1:-120}"
@@ -96,23 +96,46 @@ if [ ! -f "$BUILD/$APP" ]; then
     exit 2
 fi
 
-echo "== stopping any running instance =="
-powershell -NoProfile -Command \
-    "Get-Process appVGRPresenterUI -ErrorAction SilentlyContinue | Stop-Process -Force" \
-    >/dev/null 2>&1
+# ONLY THIS BUILD'S INSTANCES, MATCHED BY THE EXECUTABLE'S OWN PATH — see the
+# same block in run_line_step_test.sh: killing by name takes the operator's own
+# app down with it, and a survivor appends its own walk to this run's file.
+BUILD_WIN="$(cygpath -w "$BUILD" 2>/dev/null || printf '%s' "$BUILD")"
+app_pids() {
+    powershell -NoProfile -Command \
+        "Get-Process appVGRPresenterUI -ErrorAction SilentlyContinue | Where-Object { \$_.Path -and \$_.Path.StartsWith('$BUILD_WIN') } | ForEach-Object { \$_.Id }" \
+        2>/dev/null | tr -d '\r'
+}
+echo "== stopping this build's instances ($BUILD_WIN) =="
+for _pid in $(app_pids); do
+    powershell -NoProfile -Command "Stop-Process -Id $_pid -Force" >/dev/null 2>&1
+done
 sleep 2
+
+# ONE INSTANCE, ONE LOG — see the same block in run_line_step_test.sh: a
+# survivor appends to this run's file with its own timers, and the judge then
+# reads a mix of two walks.
+if [ -n "$(app_pids)" ]; then
+    echo "TABLE_WALK: FAIL stale-instance — an instance of THIS build survived the stop;" \
+         "it would append to this run's log. Close it and re-run."
+    exit 5
+fi
 
 rm -f "$LOG"
 echo "== launching with VGR_SELFTEST=1 VGR_TABLEWALK_TEST=1 VGR_TABLEWALK_QUERY=$QUERY =="
-(
-    cd "$BUILD" || exit 1
-    VGR_SELFTEST=1 VGR_TABLEWALK_TEST=1 VGR_TABLEWALK_QUERY="$QUERY" \
-        PATH="$MINGW_BIN:$QT_BIN:$PATH" \
-        "./$APP" > "$LOG" 2>&1
-) &
+# THE APP IS THE DIRECT CHILD, so $! is ITS pid (the old form captured a subshell
+# that the final kill left in place — the app kept walking, kept logging, and the
+# next run judged both walks' lines together).
+cd "$BUILD" || exit 2
+VGR_SELFTEST=1 VGR_TABLEWALK_TEST=1 VGR_TABLEWALK_QUERY="$QUERY" \
+    PATH="$MINGW_BIN:$QT_BIN:$PATH" \
+    "./$APP" > "$LOG" 2>&1 &
 RUN_PID=$!
+cd "$ROOT" || exit 2
 
 TICK=0
+# DID THE APP EXIT ON ITS OWN? (see the same counter in run_line_step_test.sh): a
+# crash mid-walk leaves a log that reads like a scenario which simply stopped.
+EARLY_EXIT=0
 while [ "$TICK" -lt "$WAIT_SECS" ]; do
     if grep -qa "\[SELFTEST-TABLEWALK\] done" "$LOG" 2>/dev/null; then
         sleep 1
@@ -123,6 +146,7 @@ while [ "$TICK" -lt "$WAIT_SECS" ]; do
         break
     fi
     if ! kill -0 "$RUN_PID" 2>/dev/null; then
+        EARLY_EXIT=1
         break
     fi
     sleep 1
@@ -134,12 +158,28 @@ done
 # interleaved walks in one file, every press line reporting press=0 while the
 # position climbed past 600. The app is stopped by name here for the same reason
 # the script stops it before launching.
-powershell -NoProfile -Command \
-    "Get-Process appVGRPresenterUI -ErrorAction SilentlyContinue | Stop-Process -Force" \
-    >/dev/null 2>&1
 kill "$RUN_PID" 2>/dev/null
 wait "$RUN_PID" 2>/dev/null
+# ...and confirm it is gone before the log is read (the by-name stop above is the
+# pre-launch cleanup; this is the one that has to actually hold).
+for _ in 1 2 3 4 5; do
+    [ -z "$(app_pids)" ] && break
+    sleep 1
+done
+if [ -n "$(app_pids)" ]; then
+    echo "TABLE_WALK: FAIL stale-instance — the app did not exit; its own walk would join this log"
+    exit 6
+fi
 sleep 1
+
+if [ "$EARLY_EXIT" = "1" ] && ! grep -qa "\[SELFTEST-TABLEWALK\] done" "$LOG" 2>/dev/null; then
+    echo "TABLE_WALK: FAIL crashed — the app exited by itself after" \
+         "$(grep -ac 'SELFTEST-TABLEWALK] press=.* moved=' "$LOG" 2>/dev/null) press(es)," \
+         "before the scenario finished. Check Windows' Application Error log" \
+         "(Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000}) for" \
+         "the faulting module: this is a crash, not a stepper that refused to move."
+    exit 7
+fi
 
 LINES="$(grep -a "\[SELFTEST-TABLEWALK\] press=.* moved=" "$LOG" 2>/dev/null)"
 TILES="$(mktemp)"

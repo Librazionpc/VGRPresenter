@@ -226,6 +226,28 @@ QtObject {
         return (v === undefined || v === null || isNaN(n)) ? root.naturalWordSpacing : n
     }
 
+    function textFont(meta, pixelSize) {
+        const m = meta || ({})
+        const weight = m.bold === true ? Font.Bold
+            : m.fontWeight === "Regular" ? Font.Normal
+            : m.fontWeight === "SemiBold" ? Font.DemiBold
+            : m.fontWeight === "Bold" ? Font.Bold : Font.Medium
+        const capitalization = m.textCase === "upper" ? Font.AllUppercase
+            : m.textCase === "lower" ? Font.AllLowercase
+            : m.textCase === "capitalize" ? Font.Capitalize : Font.MixedCase
+        return Qt.font({
+            family: FontService.resolve(m.fontFamily),
+            pixelSize: pixelSize,
+            weight: weight,
+            italic: m.italic === true,
+            capitalization: capitalization,
+            underline: m.underline === true,
+            strikeout: m.strikethrough === true,
+            letterSpacing: root.letterSpacing(m),
+            wordSpacing: root.wordSpacing(m)
+        })
+    }
+
     // The same additive px-value rule for the air BETWEEN line boxes —
     // FreeShow's "line spacing" row, separate from the line height above: the
     // height sizes a line box, this opens a gap before the next one. Neutral 0.

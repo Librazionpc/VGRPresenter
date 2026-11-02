@@ -622,13 +622,16 @@ Item {
                         probe.push(words[i % words.length])
                     return probe.join("").trim()
                 }
-                readonly property var fitInputs: [fitText.text, el.width, el.height, el.fitMode,
-                                                  el.scrollBudget,
-                                                  el.meta.fontSize ?? 16,
-                                                  MetadataFields.lineHeight(el.meta),
-                                                  MetadataFields.lineSpacing(el.meta),
-                                                  MetadataFields.letterSpacing(el.meta),
-                                                  el.style.padding ?? 0]
+                readonly property var fitInputs: [
+                    fitText.text, el.width, el.height, el.fitMode, el.scrollBudget,
+                    el.meta.fontSize ?? 16, el.meta.fontFamily ?? "",
+                    el.meta.fontWeight ?? "", el.meta.bold === true, el.meta.italic === true,
+                    el.meta.textCase ?? "none", el.meta.underline === true,
+                    el.meta.strikethrough === true,
+                    MetadataFields.lineHeight(el.meta), MetadataFields.lineSpacing(el.meta),
+                    MetadataFields.letterSpacing(el.meta), MetadataFields.wordSpacing(el.meta),
+                    MetadataFields.oneLine(el.meta), el.style.padding ?? 0
+                ]
                 // A scroll column whose passage had not arrived when it was asked
                 // (scrollColumnSize answers 0 until there are words to budget) asks again
                 // when the passage does arrive.
@@ -724,15 +727,12 @@ Item {
                     const pad = el.style.padding ?? 0
                     const bw = el.width - pad * 2, bh = el.height - pad * 2
                     let lo = 3, hi = 400
-                    // A BOUND PLACEHOLDER IS NOT CONTENT, so the DECLARED size is the
-                    // answer in every mode (the Edit canvas's recomputeFit carries the same
-                    // rule, with the measurements) — the mode names describe what may happen
-                    // to content, and a token is not content. Asking "is this text a
-                    // stand-in?" rather than "is the mode grow?" also keeps the rule from
-                    // needing two spellings for one idea ("grow" here, "growToFit" there).
-                    // The delegate is clipped to its box, so the token is cut at the edge
-                    // instead of shrinking the type.
-                    const tokenOrZero = bw <= 0 || bh <= 0 || MetadataFields.isToken(fitText.text)
+                    // Bound placeholders keep their declared size except in Grow, where the
+                    // visible token is fitted as an editing-preview approximation. Actual
+                    // output fits the resolved value. The delegate clips any token overflow.
+                    const emptyBox = bw <= 0 || bh <= 0
+                    const tokenOrZero = MetadataFields.isToken(fitText.text)
+                    const fixedPlaceholder = tokenOrZero && el.fitMode !== "grow"
                     // SCROLLING SOLVES THE BUDGET INTO THIS BOX (see scrollProbe):
                     // the max-words worth of the passage, fitted to the box it will
                     // be drawn in — one size per box for the whole walk, so a small
@@ -757,12 +757,9 @@ Item {
                         fitSolving = false
                         return
                     }
-                    // A walk that already has its size returned above; the walk's FIRST
-                    // page reaches here, and so does every other consumer (grids, cards,
-                    // canvas thumbnails, static text) — all of them fitted as they always
-                    // have: the declared size for a placeholder token, otherwise a real
-                    // bisection against the box.
-                    if (tokenOrZero) {
+                    // A walk that already has its size returned above; all other text is
+                    // fitted against this box (including a visible placeholder in Grow).
+                    if (emptyBox || fixedPlaceholder) {
                         lo = el.meta.fontSize ?? 16
                     } else {
                         for (let i = 0; i < 11; ++i) {
@@ -800,13 +797,7 @@ Item {
                     // THE PROBE IS WHAT A SCROLL COLUMN IS MEASURED ON (see
                     // el.scrollProbe): the budget's words, not this page's.
                     text: el.scrollProbe !== "" ? el.scrollProbe : fitText.text
-                    font.family: fitText.font.family
-                    font.pixelSize: el.fitProbe
-                    font.weight: fitText.font.weight
-                    font.italic: fitText.font.italic
-                    font.capitalization: fitText.font.capitalization
-                    font.letterSpacing: fitText.font.letterSpacing
-                    font.wordSpacing: fitText.font.wordSpacing
+                    font: MetadataFields.textFont(el.meta, el.fitProbe)
                     // The same line STEP the label below draws (see
                     // MetadataFields.lineHeightWithGap): the twin must measure
                     // the spacing that is painted, or the fit solve answers for
@@ -866,28 +857,11 @@ Item {
                     // font this machine lacks must draw here in the SAME face the
                     // frame on air uses, or the card and the output disagree on
                     // advances, wrapping and the auto-size solve.
-                    font.family: FontService.resolve(el.meta.fontFamily)
                     // Always the solver's answer: grow fills the box, shrink/none render
                     // at the set size and squeeze only on overflow — the text ALWAYS sits
                     // inside its box, on every surface this item draws for.
-                    font.pixelSize: el.fitAnswer
+                    font: MetadataFields.textFont(el.meta, el.fitAnswer)
                     fontSizeMode: Text.FixedSize
-                    font.weight: el.meta.bold ? Font.Bold
-                        : el.meta.fontWeight === "Regular" ? Font.Normal
-                        : el.meta.fontWeight === "SemiBold" ? Font.DemiBold
-                        : el.meta.fontWeight === "Bold" ? Font.Bold : Font.Medium
-                    font.italic: el.meta.italic === true
-                    font.capitalization: el.meta.textCase === "upper" ? Font.AllUppercase
-                                       : el.meta.textCase === "lower" ? Font.AllLowercase
-                                       : el.meta.textCase === "capitalize" ? Font.Capitalize : Font.MixedCase
-                    font.underline: el.meta.underline === true
-                    font.strikeout: el.meta.strikethrough === true
-                    // Same ONE reading as the Edit canvas and the Text panel —
-                    // 0/absent is the font's own line height, never a hidden 1.2.
-                    font.letterSpacing: MetadataFields.letterSpacing(el.meta)
-                    // Word space: QML's own font.wordSpacing, the same additive
-                    // px value the engine adds after every space glyph.
-                    font.wordSpacing: MetadataFields.wordSpacing(el.meta)
                     lineHeight: MetadataFields.lineHeightWithGap(el.meta, labelLineBox.contentHeight)
                     // The same font's own line box, measured the same way (see
                     // measureLineBox above) so the label and the twin agree.

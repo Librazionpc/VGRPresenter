@@ -871,8 +871,13 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     // ALIGNMENT MEASURES THE PAGE, not the whole passage: the fit solver sized
     // the box to hold one page, so one page is what it centres (or bottoms), and
     // the rest of the flow lives above and below that.
+    // ...EXCEPT a max-words Scroll column (TextObject::FlowFillsBox): there is no alignment at
+    // all — the passage starts at the top of the text area and the viewport is the whole area,
+    // exactly as the QML surfaces draw it — so the "page" it aligns is the box itself and every
+    // alignment below resolves to the box's top.
     const float alignHeight = flowing
-        ? static_cast<float>(obj->FlowPageLines()) * lineHeight
+        ? (obj->FlowFillsBox() ? bounds.height
+                               : static_cast<float>(obj->FlowPageLines()) * lineHeight)
         : result.totalHeight;
     // The scroll itself, in the text's OWN line heights — the same advance the
     // lines below step by, so one line of the number is one line of the picture.

@@ -251,6 +251,9 @@ Result<void> LiveOutputController::StartFromOpenShow() {
         return live.error();
     boundPresentationId_ = liveContent_.id;
     lastCompiledCount_ = liveContent_.slides.size();
+    // THE FIRST PICTURE IS ON AIR NOW: publish it for the interface thread (see
+    // OnAirSlidesSnapshot) before the loop starts reading from it.
+    PublishOnAirSnapshot();
 
     // Render loop — one worker thread at the frame target. Detached cleanly:
     // Stop() joins, Kernel shutdown calls Stop().
@@ -345,6 +348,9 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
         // id equality alone can't tell new content from the old frame).
         lastRenderedScene_.clear();
         lastStyleRevision_ = 0;
+        // THE FIRST PICTURE IS ON AIR (see OnAirSlidesSnapshot): the interface
+        // thread reads THIS, never the runtime's raw pointer the loop owns.
+        PublishOnAirSnapshot();
 
         running_.store(true);
         worker_ = std::thread([this]() { Loop(); });
@@ -373,6 +379,7 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     // previous verse's last frame.
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
+    PublishOnAirSnapshot();   // the slides the interface thread may now read
     // Start the operator-visible clock: the loop reports how long this replace
     // took to reach the preview (see the publish in RenderOnce).
     replaceStampMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -444,6 +451,10 @@ void LiveOutputController::ApplyPendingReadingSlide() {
                 // fingerprint, so nothing else would say it changed).
                 lastRenderedScene_.clear();
                 commitWhole = false;
+                // THE SLIDE ITSELF MOVED, so the interface thread's copy has to
+                // move with it (see OnAirSlidesSnapshot): a page commit is exactly
+                // the moment a surface re-reads what is on air.
+                PublishOnAirSnapshot();
                 Logger::Instance().Info(
                     std::format("reading page kept on air: window {} ({} char(s)), resting at "
                                 "{:.2f} — no content replacement",
@@ -553,6 +564,9 @@ Result<void> LiveOutputController::StopLiveTail() {
         liveContent_ = presentation::Presentation{};   // the runtime no longer points here
         lastRenderedScene_.clear();
         lastStyleRevision_ = 0;
+        // OFF AIR: the interface thread's copy goes with it, or a surface would
+        // keep composing the session that just ended.
+        PublishOnAirSnapshot();
     }
     if (toClose) (void)toClose->Close();
     return Ok();
@@ -677,6 +691,41 @@ void LiveOutputController::Loop() {
     telemetry.OnLiveStopped();
 }
 
+// SEE OnAirSlidesSnapshot IN THE HEADER: the loop thread owns the on-air
+// presentation, so it is the only thread that may copy it. Called with control_
+// held, from one of the publish points below.
+void LiveOutputController::PublishOnAirSnapshot() {
+    std::vector<presentation::Slide> slides;
+    size_t index = 0;
+    if (pres_) {
+        if (const presentation::Presentation* active = pres_->Runtime().ActivePresentation())
+            slides = active->slides;
+        index = pres_->CurrentIndex();
+    }
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    onAirSnapshot_ = std::move(slides);
+    onAirIndexSnapshot_ = index;
+}
+
+std::vector<presentation::Slide> LiveOutputController::OnAirSlidesSnapshot() const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    return onAirSnapshot_;
+}
+
+bool LiveOutputController::OnAirSlideSnapshot(presentation::Slide& out) const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    if (onAirIndexSnapshot_ >= onAirSnapshot_.size())
+        return false;
+    out = onAirSnapshot_[onAirIndexSnapshot_];
+    return true;
+}
+
+void LiveOutputController::OnAirPositionSnapshot(size_t& index, size_t& total) const {
+    std::lock_guard<std::mutex> lock(snapshotMutex_);
+    index = onAirIndexSnapshot_;
+    total = onAirSnapshot_.size();
+}
+
 void LiveOutputController::ApplyPendingLiveContent() {
     std::optional<presentation::Presentation> pending;
     {
@@ -713,6 +762,17 @@ void LiveOutputController::ApplyPendingLiveContent() {
     lastCompiledCount_ = liveContent_.slides.size();
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
+    // THE NEW SLIDE'S PASSAGE IS NEWS TO EVERY CACHED SCENE. A reading commit that needs a whole
+    // pick sets readingFlowWindowMoved_ when it is queued, but frames keep rendering the OLD slide
+    // until this swap lands (measured: ~1.5 s), and the first of them consumes the flag against the
+    // old passage. The replacement slide has the same content-derived id, so its scenes are cache
+    // hits still holding the old (one-paragraph) passage — NDI sat on that paragraph's last line
+    // while the app scrolled the whole chapter. Set again HERE, once the new slide is the current
+    // one, so the next frame refreshes the program scene and every output's scene against it.
+    readingFlowWindowMoved_ = true;
+    // THE OLD SLIDES DIE WITH THIS SWAP. The interface thread reads them through
+    // the snapshot, so it has to be refreshed here, before the lock is released.
+    PublishOnAirSnapshot();
     Logger::Instance().Info(
         std::format("live output replaced with content: '{}' ({} slides)", liveContent_.name,
                     liveContent_.slides.size()),
@@ -974,7 +1034,7 @@ Result<void> LiveOutputController::RenderOnce() {
             // Distribute each rather than a 1080p raster apiece, which is the whole
             // point; this call is what keeps a newly enabled screen from never
             // appearing at all while the on-air scene sits still.
-            RenderPerOutputPasses(scrollChars, freshScene);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+            RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
             const double ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - presentStart).count();
             representedFrames_.fetch_add(1);
@@ -1068,16 +1128,11 @@ Result<void> LiveOutputController::RenderOnce() {
     // builder, the active slide) while the GUI thread's replace path rewrites
     // exactly those members, so releasing the lock here would let a content
     // replace tear the set out from under a pass mid-frame.
-    // ...SKIPPED WHILE THE READING POSITION IS MOVING, and run on the settle
-    // frame instead. Each pass is a full styled 1920×1080 raster of its own, so a
-    // two-output wall paid the whole stage twice per scroll tick for outputs a
-    // 60 Hz move cannot reach anyway; the settle frame (one compose after the last
-    // push — see FlowCharMoving) is where they catch up, so nothing is left on an
-    // older position. The PROGRAM pass above still feeds the preview and every
-    // output sharing the program's style, so those follow the move throughout.
-    if (!scrollMoving) {
-        RenderPerOutputPasses(scrollChars, freshScene);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
-    }
+    // These passes follow the same 20 Hz scroll-compose cap as the main pass
+    // above. Skipping them until the move settles leaves separately styled
+    // outputs (including NDI's own template) on an old frame throughout the
+    // animation, even while the shared program preview is moving.
+    RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
 
     // frames_ is what LiveOutputService::pollTick() polls to decide whether
     // to bump frameRev (the QML image providers' cache-buster) — and
@@ -1103,6 +1158,21 @@ Result<void> LiveOutputController::RenderOnce() {
         lastPhaseMs_.store(ms);
         lastPhase_.store(static_cast<int>(Phase::Composed));
     }
+    // WHICH SLIDE THE OUTPUTS ARE ON, for the interface thread (see
+    // OnAirSlidesSnapshot). The loop advances slides itself (Runtime().Tick),
+    // and a Next/Jump from the interface thread lands here too — either way this
+    // is the one point that reads the index under control_, so it is where a
+    // change is published. A comparison and (on a change) one copy of the
+    // slides; nothing per frame.
+    if (pres_) {
+        bool stale = false;
+        {
+            std::lock_guard<std::mutex> lock(snapshotMutex_);
+            stale = onAirSnapshot_.empty() || pres_->CurrentIndex() != onAirIndexSnapshot_;
+        }
+        if (stale)
+            PublishOnAirSnapshot();
+    }
     return Ok();
 }
 
@@ -1115,7 +1185,7 @@ bool LiveOutputController::RepresentLastFrame(rendering::RenderEngine& render) {
     return true;
 }
 
-void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, bool contentScrollFromScene) {
+void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
     if (!pres_) return;
     // A READING WINDOW that moved while this output's scene was already built (see
     // ApplyPendingReadingSlide): its cached reading object still draws the OLD
@@ -1274,11 +1344,12 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, bool 
         // was wired straight to a screen, so a wired output renders unfiltered.
         if (!busWired && !templateBusWired && slide)
             passOpts.filters = slide->filters;
-        // ...and the same reading scroll, so an output with its own scene (a
-        // different style or resolution) slides exactly like the program feed it
-        // sits beside rather than cutting while the next screen moves.
+        // ...and the current reading position. `freshScene` belongs to the
+        // program scene; it cannot tell whether this separately styled scene is
+        // fresh, so using it here could freeze this output at the slide's saved
+        // position instead of the animator's live position.
         passOpts.contentScrollChars = contentScrollChars;
-        passOpts.contentScrollFromScene = contentScrollFromScene;
+        passOpts.contentScrollFromScene = false;
         if (auto img = engine.Render(sceneId.value(), passOpts); img.ok() && !img.value().empty()) {
             rendering::Frame f;
             f.sceneId = sceneId.value();

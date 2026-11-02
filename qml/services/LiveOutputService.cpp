@@ -110,8 +110,64 @@ bool imageHasTransparentPixel(const QImage &image)
 // (see applyMediaTake). Reserved: it names the take that is UP, not a roster row.
 const QString kMediaMeterLabel = QStringLiteral("Media on air");
 
+// ---- THE GO LIVE CLICK TRACE ----------------------------------------------
+// "Trace the GO LIVE button while a video output is active." A press has to read
+// as a TIMELINE, because the cost of interest is not what GO LIVE does — it is
+// WHAT IT WAITED BEHIND. With a video on air this thread is already doing a
+// full-frame colour conversion and an 8 MB row copy per decoded frame (see
+// pushMediaFrameToCompositor), and GO LIVE's engine start, style compose and
+// poll all run here too, so a press can be slow for a reason that has nothing
+// to do with the press.
+//
+// Armed BY the press and closed by its own last step, so an ordinary run pays
+// one boolean test per media frame and nothing else. Every line carries
+// `GO-LIVE TRACE:` — grep that one token for the whole click.
+struct GoLiveTrace
+{
+    qint64 startMs = 0;          // 0 = no press being traced
+    int frames = 0;              // media frames handed over during the press
+    double mediaWorstMs = 0.0;
+    double mediaSumMs = 0.0;
+
+    bool armed() const { return startMs != 0; }
+    qint64 ms() const { return startMs ? QDateTime::currentMSecsSinceEpoch() - startMs : 0; }
+
+    void arm()
+    {
+        startMs = QDateTime::currentMSecsSinceEpoch();
+        frames = 0;
+        mediaWorstMs = 0.0;
+        mediaSumMs = 0.0;
+    }
+    // The press's last line: what it cost, and what this thread was busy with
+    // meanwhile (the attribution a step list alone cannot give).
+    void report(const char *what) const
+    {
+        if (!armed())
+            return;
+        qInfo("GO-LIVE TRACE: %s +%lld ms | media frames handed over meanwhile=%d "
+              "worst=%.0f ms total=%.0f ms",
+              what, static_cast<long long>(ms()), frames, mediaWorstMs, mediaSumMs);
+    }
+    void close() { startMs = 0; }
+};
+
+GoLiveTrace g_goLiveTrace;
+
+// One line per step of the press: the timeline a reader greps, outermost first.
+void goLiveTraceStep(const char *what)
+{
+    if (g_goLiveTrace.armed())
+        qInfo("GO-LIVE TRACE: step '%s' +%lld ms", what,
+              static_cast<long long>(g_goLiveTrace.ms()));
+}
+
 void pushMediaFrameToCompositor(const QImage &frame)
 {
+    // THE PRESS BEING TRACED PAYS ATTENTION TO THESE (see GoLiveTrace above):
+    // a press that took 300 ms while the decoder handed over nine 1080p frames
+    // was waiting for pixels, not for the engine.
+    const qint64 traceEnterMs = g_goLiveTrace.armed() ? QDateTime::currentMSecsSinceEpoch() : 0;
     // Log only state transitions; the paired SceneBuilder log distinguishes a
     // missing handoff from a frame the engine received but rendered incorrectly.
     static bool hadFrame = false;
@@ -144,6 +200,16 @@ void pushMediaFrameToCompositor(const QImage &frame)
         hadFrame = true;
         qInfo("media hand-off: %dx%d (%zu bytes RGBA) sent to the engine",
               rgba.width(), rgba.height(), mf.rgba.size());
+    }
+    if (traceEnterMs != 0 && g_goLiveTrace.armed()) {
+        const double took = static_cast<double>(QDateTime::currentMSecsSinceEpoch() - traceEnterMs);
+        ++g_goLiveTrace.frames;
+        g_goLiveTrace.mediaSumMs += took;
+        if (took > g_goLiveTrace.mediaWorstMs)
+            g_goLiveTrace.mediaWorstMs = took;
+        if (took >= 8.0)
+            qInfo("GO-LIVE TRACE: media frame %dx%d convert+copy took %.0f ms ON THE INTERFACE THREAD",
+                  rgba.width(), rgba.height(), took);
     }
 }
 
@@ -744,12 +810,25 @@ void LiveOutputService::goLive()
 
     // Trace this expensive QML-facing operation for startup diagnostics.
     VGR_CALL_TRACE("LiveOutputService.goLive");
+    // THE CLICK TRACE OPENS HERE — see GoLiveTrace. The state line says what press
+    // this was and what was already on the air while it ran: a video (mediaIsVideo),
+    // a taken input, overlays, and whether an NDI row was sending.
+    g_goLiveTrace.arm();
+    qInfo("GO-LIVE TRACE: press | live=%d stagedSlides=%d mediaOnAir=%d mediaIsVideo=%d "
+          "mediaState='%s' mediaRev=%d input='%s' overlays=%d ndiSending=%d '%s'",
+          live_ ? 1 : 0, static_cast<int>(stagedSlidesRaw_.size()),
+          mediaOnAir_ ? 1 : 0, mediaIsVideo_ ? 1 : 0,
+          qUtf8Printable(mediaState_), mediaRev_, qUtf8Printable(inputLabel_),
+          static_cast<int>(activeOverlays_.size()), ndiSending_ ? 1 : 0,
+          qUtf8Printable(ndiSendingOutput_));
     // Send the staged preview selection, regardless of the open document.
     if (!stagedSlidesRaw_.isEmpty()) {
+        goLiveTraceStep("branch: staged pick");
         // Staging belongs to the preview; going live does not consume it.
         goLiveWithSlides(stagedName_, stagedSlidesRaw_);
-        return;
+        return;                     // the last step inside closes the trace
     }
+    goLiveTraceStep("branch: blank carrier (nothing staged)");
 
     // Acknowledge before starting the engine, which can take time to render the
     // first frame. With no staged slide, send the composited preview layers under
@@ -765,6 +844,7 @@ void LiveOutputService::goLive()
 void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList &slides)
 {
     VGR_CALL_TRACE("LiveOutputService.goLiveWithSlides");
+    readingEngineFlowText_.clear();   // a new commit: the engine's passage is whatever these slides carry
     bps::presentation::Presentation content;
     content.name = name.toStdString();
     for (const QVariant &v : slides) {
@@ -795,25 +875,45 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         EventBus::instance().notify(QStringLiteral("Nothing selected to put on air"),
                                     QStringLiteral("warning"), QStringLiteral("Go Live"));
         emit onAirChanged();
+        if (g_goLiveTrace.armed()) {
+            g_goLiveTrace.report("press ended: nothing to send");
+            g_goLiveTrace.close();
+        }
         return;
     }
+    goLiveTraceStep("slides converted to engine shape");
     auto &controller = bps::live::LiveOutputController::Instance();
     const bool replacingLiveContent = controller.IsLive();
+    // THE PRESS'S EXPENSIVE HALF: the engine builds the first scene and renders a
+    // frame before this returns (a fresh start), or swaps the presentation and
+    // lets its worker rebuild (a replace, which is the cheap case by design).
+    const qint64 startEnterMs = QDateTime::currentMSecsSinceEpoch();
     auto r = controller.StartFromSlides(name.toStdString(), content.slides);
+    const qint64 startMs = QDateTime::currentMSecsSinceEpoch() - startEnterMs;
+    if (g_goLiveTrace.armed())
+        qInfo("GO-LIVE TRACE: step 'StartFromSlides(%s)' took %lld ms -> %s",
+              replacingLiveContent ? "replace" : "fresh start",
+              static_cast<long long>(startMs), r.ok() ? "ok" : "FAILED");
     if (!r.ok()) {
         const QString reason = QString::fromStdString(r.error().message);
         qWarning("LiveOutputService: goLiveWithSlides failed: %s", r.error().message.c_str());
         EventBus::instance().notify(reason, QStringLiteral("warning"), QStringLiteral("Go Live"));
         emit onAirChanged();
+        if (g_goLiveTrace.armed()) {
+            g_goLiveTrace.report("press ended: engine refused");
+            g_goLiveTrace.close();
+        }
         return;
     }
     // This live session's NDI sender opens under the selected NDI output's
     // own name, or the first enabled NDI row when another transport is live.
     armNdiSenderForSession();
+    goLiveTraceStep("armNdiSenderForSession");
     // ...and the program goes back on the air: GO LIVE is what re-opens the
     // default endpoint's render stream after a STOP closed it. The output
     // endpoints were never closed, so this only re-arms the program stream.
     setProgramPlayout(true);
+    goLiveTraceStep("setProgramPlayout(true)");
     // ANY OTHER CONTENT ENDS A BLACKOUT. The carrier is its own marker (a
     // clearStage slide is the blackout, not content), so a pick that goes on
     // air while blacked out drops what the blackout was hiding — otherwise a
@@ -829,6 +929,18 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         live_ = true;
         emit liveChanged();
     }
+    // A PICK THAT IS ON AIR IS NOT STAGED. The staged copy is the tile's preview of
+    // what GO LIVE would send; kept after the press it becomes a STALE page that
+    // every reader preferring `stagedSlide` draws instead of the live slide — the
+    // wall's own tile and the table-walk scenario's mode probe both do, and it is
+    // how "the outputs had the passage but the reading read as 0 chars" came about.
+    // Same contract the live branch of applyReadingRestage states for a commit.
+    if (!stagedSlidesRaw_.isEmpty() || !stagedSlide_.isEmpty()) {
+        stagedName_.clear();
+        stagedSlidesRaw_.clear();
+        stagedSlide_ = QVariantMap{};
+        emit stagedChanged();
+    }
     // A live replacement is applied by the render worker. Let pollTick read
     // the new runtime state after its replacement guard clears instead of
     // racing the worker's presentation swap here on the UI thread.
@@ -836,9 +948,23 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         refreshOnAirSlide();
         emit onAirChanged();
     }
+    goLiveTraceStep(replacingLiveContent ? "refreshOnAirSlide deferred to pollTick"
+                                       : "refreshOnAirSlide + onAirChanged");
     ensurePollTimer();          // already armed since boot — a no-op here
     startNdiSendClock();        // the NDI feed's own clock, paced by the output's refresh rate
     pollTick();
+    goLiveTraceStep("startNdiSendClock + pollTick");
+    // THE CLICK IS DONE. `frames`/`mediaWorstMs` are what the interface thread was
+    // doing to the picture WHILE the press ran: a slow press with frames counted
+    // was waiting for decoded video, a slow press with none was waiting for the
+    // engine.
+    if (g_goLiveTrace.armed()) {
+        qInfo("GO-LIVE TRACE: done | live=%d onAir='%s' ndiSending=%d '%s' mediaOnAir=%d",
+              live_ ? 1 : 0, qUtf8Printable(onAirTitle_), ndiSending_ ? 1 : 0,
+              qUtf8Printable(ndiSendingOutput_), mediaOnAir_ ? 1 : 0);
+        g_goLiveTrace.report("press done");
+        g_goLiveTrace.close();
+    }
 }
 
 // Records a pick for the Main Output tile WITHOUT going live — see the
@@ -1308,14 +1434,47 @@ QStringList LiveOutputService::readingLinesAt(int index) const
 // bounded amount of work per prewarm pass.
 constexpr int kReadingPrewarmRadius = 4;
 
+// ONE PASS, QUEUED ONCE — see the header. A page turn can ask for the prewarm
+// several times in the same turn (the restage, the scroll path's window move and
+// noteReadingFit's cascade all land here); without this each ask queued its own
+// full-radius pass, so nine compositions per ask queued up behind a press.
+void LiveOutputService::schedulePrewarmReadingLines()
+{
+    if (readingPrewarmQueued_)
+        return;
+    readingPrewarmQueued_ = true;
+    schedulePrewarmReadingLines();
+}
+
+// THE SAME PREWARM, ONE SLIDE PER EVENT-LOOP TURN. The radius is unchanged (the
+// user's own ask, kReadingPrewarmRadius both ways), but the work is spread: each
+// call composes the NEAREST uncached slide — ahead before behind, which is the
+// way a reader reads — and re-arms for the next. A pass over a cold pick used to
+// hand nine `readingLines` compositions (a styled preview + a real text layout
+// each) to the interface thread in the turn right after a press, i.e. while the
+// next frame was being composed on the same thread; now the loop paints between
+// them and the walk never waits for the whole radius at once.
 void LiveOutputService::prewarmReadingLines()
 {
+    readingPrewarmQueued_ = false;
     if (lineSetRaw_.isEmpty())
         return;
-    const int lo = qMax(0, lineSlideIndex_ - kReadingPrewarmRadius);
-    const int hi = qMin(static_cast<int>(lineSetRaw_.size()) - 1, lineSlideIndex_ + kReadingPrewarmRadius);
-    for (int i = lo; i <= hi; ++i)
-        readingLinesAt(i);   // the cache is the point; nothing else reads the return here
+    const int last = static_cast<int>(lineSetRaw_.size()) - 1;
+    int next = -1;
+    for (int step = 1; step <= kReadingPrewarmRadius && next < 0; ++step) {
+        const int ahead = lineSlideIndex_ + step;
+        if (ahead <= last && !readingLinesCache_.contains(ahead))
+            next = ahead;
+    }
+    for (int step = 1; step <= kReadingPrewarmRadius && next < 0; ++step) {
+        const int behind = lineSlideIndex_ - step;
+        if (behind >= 0 && !readingLinesCache_.contains(behind))
+            next = behind;
+    }
+    if (next < 0)
+        return;   // the whole radius is warm: nothing to do
+    readingLinesAt(next);   // the cache is the point; nothing else reads the return here
+    schedulePrewarmReadingLines();   // the next uncached one, on the next turn
 }
 
 void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVariantList &slides,
@@ -1403,6 +1562,20 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
 // re-stage (which also goes through stageSlideSet) must not.
 void LiveOutputService::setScrollMode(bool on)
 {
+    // EVERY TRANSITION, INCLUDING THE ONES THAT DO NOTHING. The wall's Slide/Scroll
+    // switch, this service's own property and the panes all write it, and a switch
+    // that reads back as ON without a restage is invisible from the outside (the
+    // table-walk mode probe read slideFlow=0 in Scroll mode while the engine's slide
+    // carried 2476 characters): the line names which of them moved it, and what the
+    // state it moved from was.
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadScrollMode"),
+                        QStringLiteral("on=%1 was=%2 live=%3 pending=%4 textOnly=%5 pick=%6")
+                            .arg(on)
+                            .arg(scrollMode_)
+                            .arg(live_)
+                            .arg(pendingTextSourcePages_.size())
+                            .arg(lineSourceTextOnly_)
+                            .arg(lineSetRaw_.size()));
     if (on == scrollMode_)
         return;
     scrollMode_ = on;
@@ -1411,9 +1584,16 @@ void LiveOutputService::setScrollMode(bool on)
         bps::live::LiveOutputController::Instance().SetFlowChar(0.0f);
     }
     emit scrollModeChanged();
+    // Scroll's type size is part of what the outputs are told (readingFontPx), and it is 0 in Slide
+    // mode: re-push the outputs' styles for either direction.
+    QTimer::singleShot(0, this, []() {
+        if (auto *outputs = OutputListModel::instance())
+            outputs->repushEngineStyles();
+    });
 
     if (on && !pendingTextSourcePages_.isEmpty()) {
         activatePendingTextSource();
+        republishReadingFlow();   // Slide mode had taken the passage off the slide
         return;
     }
     if (!on && lineSourceTextOnly_ && !readingTextSourcePages_.isEmpty()) {
@@ -1437,6 +1617,45 @@ void LiveOutputService::setScrollMode(bool on)
     }
     if (!lineSetRaw_.isEmpty())
         applyReadingRestage(true, /*forceRebuild=*/ false, /*forceScrollNotify=*/ true);
+    // AND THE PASSAGE GOES BACK ON THE SLIDE. Leaving Slide mode stages the pick
+    // again (above), but a staging is what the QML surfaces read — the ENGINE's
+    // slide is only written by a commit, and the restage that just ran is not one
+    // (`commitPage=false`: a step inside a page commits nothing). Measured in the
+    // table-walk scenario's own mode contract: Scroll mode came back with
+    // slideFlow=0, i.e. the outputs still drawing the page while the preview
+    // scrolled.
+    if (on)
+        republishReadingFlow();
+}
+
+// PUT THE PASSAGE BACK ON THE SLIDE THE OUTPUTS DRAW — the reverse of what Slide
+// mode does (setSlideReadingFlow drops flowText there so the arrows can change
+// pages). Called by the mode switch only: the engine compares and no-ops when its
+// slide already carries this passage at this position, so this costs a comparison
+// and never a re-commit of the pick.
+void LiveOutputService::republishReadingFlow()
+{
+    if (!live_ || !scrollMode_ || readingFlowText_.isEmpty())
+        return;
+    const QVariantList current = onAirSlidesRaw();
+    if (current.isEmpty())
+        return;
+    QVariantMap shown = current.first().toMap();
+    setSlideReadingFlow(shown, /*enabled=*/ true, readingFlowText_,
+                        readingFlowCharForScroll(readingScroll_));
+    updateReadingPick(onAirTitle_.isEmpty() ? lineSetName_ : onAirTitle_, shown);
+    // ONE LINE PER MODE CHANGE: what the readers that prefer the STAGED map see
+    // against what the engine's slide carries. A mode probe that reads 0 while the
+    // passage is on air is then a wrong SOURCE, not a missing flow — the two
+    // numbers name which.
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadFlowRepublish"),
+                        QStringLiteral("staged=%1 stagedFlow=%2 onAir=%3 flow=%4 live=%5 scroll=%6")
+                            .arg(stagedSlidesRaw_.size())
+                            .arg(stagedSlide_.value(QStringLiteral("flowText")).toString().size())
+                            .arg(current.size())
+                            .arg(readingFlowText_.size())
+                            .arg(live_)
+                            .arg(scrollMode_));
 }
 
 void LiveOutputService::setReadingWordBudget(int words)
@@ -2356,6 +2575,12 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
         column.size = size;
         column.sig = sig;
         scrollColumns_.insert(key, column);
+        // THE ENGINE'S OWN SCENES TAKE THIS SIZE TOO (OutputStyleSpec::readingFontPx): a column
+        // seated or re-solved is pushed to every output's style, after this call returns.
+        QTimer::singleShot(0, this, []() {
+            if (auto *outputs = OutputListModel::instance())
+                outputs->repushEngineStyles();
+        });
         const QString prefix = QStringLiteral("c#") + key + QLatin1Char('#');
         for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
             if (it.key().startsWith(prefix))
@@ -2385,6 +2610,38 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
         readingTextSourceInitialPositionPending_ = false;
     }
     return size;
+}
+
+void LiveOutputService::debugDumpOutputs(const QString &tag)   // OUTDUMP-TEMP
+{
+    const auto *om = OutputListModel::instance();
+    for (int r = 0; om && r < om->rowCount(); ++r) {
+        const QModelIndex mi = om->index(r);
+        const QString nm = om->data(mi, OutputListModel::NameRole).toString();
+        const QString kind = om->data(mi, OutputListModel::KindRole).toString();
+        const std::string buf = QStringLiteral("__out_%1__").arg(qHash(nm)).toStdString();
+        auto o = pr::RenderEngine::Instance().GetOutput(buf);
+        if (!o.ok())
+            continue;
+        auto *fb = dynamic_cast<pr::FrameBufferOutput *>(o.value().get());
+        const auto snap = fb ? fb->LastFrameSnapshot() : nullptr;
+        if (!snap || snap->empty())
+            continue;
+        const QImage img(reinterpret_cast<const uchar *>(snap->pixels.data()), int(snap->width),
+                         int(snap->height), int(snap->width) * 4, QImage::Format_RGBA8888);
+        img.scaled(640, 360, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+            .save(QStringLiteral("cmp_out%1_%2_%3.png").arg(r).arg(kind).arg(tag));
+    }
+}
+
+qreal LiveOutputService::readingColumnPxFor(const QString &styleId) const
+{
+    if (!scrollMode_ || !readingBudgetFitActive_)
+        return 0.0;
+    const auto *model = OutputListModel::instance();
+    const QString key = styleId.isEmpty() ? (model ? model->activeStyleId() : QString()) : styleId;
+    const auto it = scrollColumns_.constFind(key);
+    return it == scrollColumns_.constEnd() ? 0.0 : it->size;
 }
 
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const
@@ -2901,6 +3158,24 @@ void LiveOutputService::applyReadingScroll(qreal lines)
     // LiveOutputController::SetFlowChar).
     bps::live::LiveOutputController::Instance().SetFlowChar(
         lineSourceTextOnly_ ? readingFlowCharForScroll(lines) : readingCharForScroll(lines));
+    // KEEP THE ENGINE'S PASSAGE IN STEP WITH THE ONE THE POSITION IS MEASURED AGAINST. The offset
+    // above is a character index into readingFlowText_, but the on-air slide only learns a new
+    // passage at a commit or a moved window — so a run that grew (or was rebuilt) after the pick
+    // went on air left the engine holding a SHORTER text, and every output was told to scroll past
+    // its end (measured: the NDI Lower Third pinned on the last line while the preview scrolled).
+    if (live_ && scrollMode_ && !readingFlowText_.isEmpty()
+            && readingEngineFlowText_ != readingFlowText_) {
+        const QVariantList current = onAirSlidesRaw();
+        if (!current.isEmpty()) {
+            QVariantMap shown = current.first().toMap();
+            setSlideReadingFlow(shown, /*enabled=*/ true, readingFlowText_,
+                                readingFlowCharForScroll(lines));
+            updateReadingPick(onAirTitle_, shown);
+            // After the call: its fallback (a full commit) clears this marker, and the marker must
+            // end up describing what the engine holds NOW or the next tick would push again.
+            readingEngineFlowText_ = readingFlowText_;
+        }
+    }
     if (windowChanged) {
         if (live_) {
             QVariantList current = onAirSlidesRaw();
@@ -2913,9 +3188,8 @@ void LiveOutputService::applyReadingScroll(qreal lines)
         } else if (!stagedSlidesRaw_.isEmpty()) {
             QVariantMap shown = stagedSlidesRaw_.first().toMap();
             setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
-                                readingFlowCharForScroll(lines));
-            stagedSlidesRaw_ = QVariantList{shown};
-            stagedSlide_ = previewWithActiveStyle(shown);
+                                readingFlowCharForScroll(lines));                stagedSlidesRaw_ = QVariantList{shown};
+            stagedSlide_ = readingStagedPreview(shown);
             emit stagedChanged();
         }
     }
@@ -3090,6 +3364,21 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
             if (!starts.isEmpty())
                 readingLayoutTargetChar_ = -1;
         }
+    } else {
+        // THE PASSAGE FOLLOWS THE WINDOW. For a pick of ordinary slide pages the
+        // run IS the passage the outputs draw (there is no text-source window to
+        // slide inside it), and this was assigned only when the pick was STAGED —
+        // never again. So the moment the walk crossed the run's own edge the flow
+        // every surface draws stayed on the FIRST window while the page, the
+        // reference and the offset all moved on: the wall's words stopped being
+        // part of the service's passage, and an output in Scroll mode kept
+        // scrolling text the reader had already left. Measured by
+        // tools/selftest/run_line_step_test.sh on a 24-page pick: from press 13
+        // every tile read flow=false with flowLen stuck at 398 while the tile
+        // itself advanced page by page. Re-read here, after rebuildReadingRun,
+        // so a slid window is a flow change like any other — which is what routes
+        // it through the cheap in-place update instead of being dropped.
+        readingFlowText_ = readingRunText_;
     }
     const bool flowChanged = readingFlowText_ != previousFlow;
     // ONE LINE WHEN THE RUN'S TEXT CHANGED: the character the reader is on before
@@ -3147,20 +3436,25 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     // own header comment. Every page the stepper can land on next or come
     // back to runs through here, so one call site covers forward and
     // backward both.
-    QTimer::singleShot(0, this, &LiveOutputService::prewarmReadingLines);
+    schedulePrewarmReadingLines();
     const int page = readingPage();
     const bool pageChanged = (readingPageAnnounced_ != page);
     if (!readingStepGlide_)
         readingPageAnnounced_ = page;
     if (lineSourceTextOnly_) {
         if (live_) {
+            // Only a MOVED WINDOW has to land here: a step inside the window is
+            // the offset on its own (SetFlowChar), which is why this path is one
+            // per window move and not one per press. Coming back from SLIDE mode
+            // is a different event and is not a window move — see
+            // republishReadingFlow, which the mode switch itself calls.
             if (flowChanged) {
                 QVariantList current = onAirSlidesRaw();
                 if (!current.isEmpty()) {
                     QVariantMap shown = current.first().toMap();
                     setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
                                         readingFlowCharForScroll(readingScroll_));
-                    goLiveWithSlides(onAirTitle_, QVariantList{shown});
+                    updateReadingPick(onAirTitle_, shown);
                 }
             }
         } else if (flowChanged && !stagedSlidesRaw_.isEmpty()) {
@@ -3168,7 +3462,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
             setSlideReadingFlow(shown, scrollMode_, readingFlowText_,
                                 readingFlowCharForScroll(readingScroll_));
             stagedSlidesRaw_ = QVariantList{shown};
-            stagedSlide_ = previewWithActiveStyle(shown);
+            stagedSlide_ = readingStagedPreview(shown);
             emit stagedChanged();
         }
         if (pageChanged && !readingStepGlide_)
@@ -3259,7 +3553,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
                                             : readingCharForScroll(readingScroll_));
     stagedName_ = lineSetName_;
     stagedSlidesRaw_ = QVariantList{shown};
-    stagedSlide_ = previewWithActiveStyle(shown);
+    stagedSlide_ = readingStagedPreview(shown);
     emit stagedChanged();
     // Same reasoning as the live branch above: stagedSlidesRaw_ is only final
     // as of the assignment just above, so readingPageChanged waits for here.
@@ -3315,8 +3609,38 @@ bool LiveOutputService::lineStep(int direction)
     // THE PASSAGE'S COUNT, not the page's own — see readingPageLineCount: the step
     // moves an index into the passage's table, so a page is as many lines long as the
     // passage makes it.
-    const int ownLines = readingPageLineCount(lineSlideIndex_);
+    int ownLines = readingPageLineCount(lineSlideIndex_);
+    // ...AND WHEN THE PAGE'S OWN COUNT IS NOT THERE YET, ASK THE RUN. For a
+    // text-only pick (the passage IS one slide) the page's grid and the run's are
+    // the same grid — the one the walk's positions are defined in — so the run's
+    // own table answers exactly as well, and it is the table this function is
+    // about to move an index in. Without this, a pick whose per-page entry had not
+    // been written yet owed EVERY press instead of taking it: the queue filled to
+    // its cap and the drain played the presses back into the same refusal, so the
+    // stepper sat there looking dead while the app was perfectly alive (the
+    // reported "the scroll feature won't move or work").
+    if (ownLines <= 0 && lineSourceTextOnly_) {
+        const auto *model = OutputListModel::instance();
+        const QString ref = model ? model->activeStyleId() : QString();
+        ownLines = static_cast<int>(styleRunLinesForText(ref, readingRunText_).lines.size());
+    }
     if (lineSourceTextOnly_ && readingBudgetFitActive_ && ownLines <= 0) {
+        // AT THE PASSAGE'S FIRST LINE THERE IS NOTHING OWED. A press that cannot
+        // move yet is normally owed to the drain (the glide still has to hand over
+        // its offset), but the top of the pick is not that case: it cannot move in
+        // that direction however many times it is pressed, and counting it made a
+        // burst of ‹ into a DEBT the walk then paid back after the reader had
+        // stopped — moving backwards on its own, against every forward press.
+        // Measured by the table-walk scenario's own rewind (400 presses at the
+        // passage's first line): the walk then read press 0 abs=61, 59, 56, 54 …
+        // on lineStep(+1).
+        if (direction < 0 && lineSlideIndex_ == 0 && readingAbsoluteLine() <= 0.0)
+            return false;
+        // ...AND A PRESS THE OTHER WAY CANCELS WHAT IS OWED. What is queued means
+        // "steps in the direction the reader last pressed"; mixing both directions
+        // in one queue is what turned a burst into a slow crawl backwards.
+        if (pendingReadingSteps_ != 0 && ((pendingReadingSteps_ > 0) != (direction > 0)))
+            pendingReadingSteps_ = 0;
         pendingReadingSteps_ = qBound(-24, pendingReadingSteps_ + direction, 24);
         return true;
     }
@@ -4517,6 +4841,16 @@ void LiveOutputService::setProgramPlayout(bool onAir)
 
 void LiveOutputService::stop()
 {
+    // THE SAME BUTTON, THE OTHER DIRECTION — traced by the same rules (see
+    // GoLiveTrace), because "GO LIVE with a video on air" is a toggle: the press
+    // the operator reports may well be the one that took the program OFF.
+    g_goLiveTrace.arm();
+    qInfo("GO-LIVE TRACE: press (STOP) | live=%d stagedSlides=%d mediaOnAir=%d "
+          "mediaIsVideo=%d input='%s' overlays=%d ndiSending=%d '%s'",
+          live_ ? 1 : 0, static_cast<int>(stagedSlidesRaw_.size()),
+          mediaOnAir_ ? 1 : 0, mediaIsVideo_ ? 1 : 0, qUtf8Printable(inputLabel_),
+          static_cast<int>(activeOverlays_.size()), ndiSending_ ? 1 : 0,
+          qUtf8Printable(ndiSendingOutput_));
     // ASYNC STOP (the "press GO LIVE then immediately STOP" crash): the
     // controller's StopLive JOINS the render worker, and on this thread that
     // froze the whole GUI whenever the worker was mid-first-frame (AppHangB1
@@ -4529,7 +4863,9 @@ void LiveOutputService::stop()
     // Unconditional rather than `if (wasLive)`: playout starts with the engine at
     // boot, so a STOP pressed before the first GO LIVE has one to stop too.
     setProgramPlayout(false);
+    goLiveTraceStep("setProgramPlayout(false)");
     bps::live::LiveOutputController::Instance().StopLiveAsync();
+    goLiveTraceStep("StopLiveAsync (the join is on a reaper thread)");
     if (live_) {
         live_ = false;
         emit liveChanged();
@@ -4621,6 +4957,9 @@ void LiveOutputService::stop()
     if (wasLive)
         EventBus::instance().notify(QStringLiteral("Going off air…"),
                                     QStringLiteral("info"), QStringLiteral("Go Live"));
+    goLiveTraceStep("stop teardown done");
+    g_goLiveTrace.report("press (STOP) done");
+    g_goLiveTrace.close();
 }
 
 void LiveOutputService::goLiveBlank()
@@ -5293,16 +5632,22 @@ bool LiveOutputService::blackedOut() const
                      || onAirSlide_.value(QStringLiteral("clearStage")).toBool());
 }
 
+// THE INTERFACE THREAD'S COPY, NOT THE RUNTIME'S OWN SLIDES. The runtime binds a
+// raw pointer to the loop's presentation, and the loop FREES what it replaces
+// (a queued pick, a page commit's rewrite): reading `pres.Runtime()
+// .ActivePresentation()` here and copying its strings and block vectors was a
+// use-after-free, and the real-passage reading walk died on it exactly where a
+// page commit re-commits the pick — Windows reported heap corruption
+// (0xC0000374) and an access violation inside Qt6Core. The controller publishes
+// a snapshot on every change (LiveOutputController::OnAirSlidesSnapshot).
 QVariantList LiveOutputService::onAirSlidesRaw() const
 {
     QVariantList out;
     if (!live_)
         return out;
-    auto &pres = pl::PresentationEngine::Instance();
-    const pl::Presentation *active = pres.Runtime().ActivePresentation();
-    if (!active)
-        return out;
-    for (const pl::Slide &s : active->slides) {
+    const std::vector<pl::Slide> slides =
+        bps::live::LiveOutputController::Instance().OnAirSlidesSnapshot();
+    for (const pl::Slide &s : slides) {
         if (s.hidden)
             continue;
         out.append(slideToVariantMap(&s, pl::OutputStyleSpec{}));
@@ -5312,10 +5657,29 @@ QVariantList LiveOutputService::onAirSlidesRaw() const
 
 void LiveOutputService::refreshOnAirSlide()
 {
-    const pl::Slide *slide = live_ ? pl::PresentationEngine::Instance().CurrentSlide() : nullptr;
+    // FROM THE SNAPSHOT, never from the runtime (see onAirSlidesRaw's own
+    // comment): the loop may be replacing the presentation this instant.
+    pl::Slide current;
+    const bool haveSlide = live_
+        && bps::live::LiveOutputController::Instance().OnAirSlideSnapshot(current);
+    const pl::Slide *slide = haveSlide ? &current : nullptr;
     onAirSlide_ = slide ? slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle())
                         : QVariantMap{};
     onAirSlideRaw_ = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{}) : QVariantMap{};
+    // ...AND THE SLIDE'S OWN READING FIELDS RIDE ALONG. `slideToVariantMap`
+    // composes the PICTURE, and the passage is deliberately not part of one — but
+    // this map is the service's copy of the on-air slide, and two readers answer a
+    // question it has to be able to reply to: a monitor tile keys its composition
+    // memo on `raw.flowText` (`walking` — without it every evaluation recomposes,
+    // which is the per-tile storm this memo exists to absorb), and the
+    // table-walk scenario's mode contract asks the same map whether the engine is
+    // drawing a passage and how long it is. Empty when the slide carries none
+    // (Slide mode, a document page), which is exactly what both readers treat as
+    // "not a reading walk".
+    if (slide && !slide->flowText.empty()) {
+        onAirSlideRaw_.insert(QStringLiteral("flowText"), QString::fromStdString(slide->flowText));
+        onAirSlideRaw_.insert(QStringLiteral("flowChar"), slide->flowChar);
+    }
     // THE SLIDE'S GROUP DECIDES ITS TEMPLATE (a group can name one — Manage
     // groups), and the engine renders from the spec that was PUSHED, not from
     // anything computed here. So the push follows the slide: the group the
@@ -5336,15 +5700,16 @@ QVariantMap LiveOutputService::onAirSlideAt(int index) const
 {
     if (!live_ || index < 0)
         return {};
-    auto &pres = pl::PresentationEngine::Instance();
-    const pl::Presentation *active = pres.Runtime().ActivePresentation();
-    if (!active || active->slides.empty())
+    // THE INTERFACE THREAD'S COPY (see onAirSlidesRaw).
+    const std::vector<pl::Slide> slides =
+        bps::live::LiveOutputController::Instance().OnAirSlidesSnapshot();
+    if (slides.empty())
         return {};
     // The index is a VISIBLE index (CurrentIndex() skips hidden slides, and
     // that is what onAirIndex carries) — walk the slides skipping hidden ones
     // so a thumbnail strip's indices line up with the on-air ones.
     int visible = -1;
-    for (const pl::Slide &s : active->slides) {
+    for (const pl::Slide &s : slides) {
         if (s.hidden)
             continue;
         ++visible;
@@ -5375,6 +5740,55 @@ QVariantMap LiveOutputService::previewWithActiveStyle(const QVariantMap &slide) 
         return slideToVariantMap(&engineSlide, outputStyleForPreview(styleId, tag));
     }
     return slideToVariantMap(&engineSlide);
+}
+
+// THE PICTURE OF A SLIDE, WITHOUT WHERE THE READER IS IN IT — the comparison the
+// memo below turns on. `flowText`/`flowChar` are the slide's reading fields: the
+// engine reads them off the Slide to draw the passage, and the composed preview
+// map does not carry them at all (slideToVariantMap emits title, blocks,
+// background, body, fill, clearStage and the style's facts). So a slide whose
+// only difference is the reading position composes to the map it already has.
+static bool samePictureApartFromReading(const QVariantMap &a, const QVariantMap &b)
+{
+    const auto isReadingField = [](const QString &key) {
+        return key == QLatin1String("flowText") || key == QLatin1String("flowChar");
+    };
+    int countA = 0;
+    for (auto it = a.cbegin(); it != a.cend(); ++it) {
+        if (isReadingField(it.key()))
+            continue;
+        ++countA;
+        const auto other = b.constFind(it.key());
+        if (other == b.cend() || other.value() != it.value())
+            return false;
+    }
+    int countB = 0;
+    for (auto it = b.cbegin(); it != b.cend(); ++it)
+        if (!isReadingField(it.key()))
+            ++countB;
+    return countA == countB;
+}
+
+// THE STYLED PREVIEW OF A READING SLIDE, COMPOSED AT MOST ONCE PER PICTURE —
+// see the header (docs/scroll_mode_thread_audit.md, F5). Everything a take can
+// change about the composition (the compositor's media state, the active style)
+// is part of the key, exactly as OutputMonitorTile's own slide memo does it.
+QVariantMap LiveOutputService::readingStagedPreview(const QVariantMap &slide)
+{
+    const auto *model = OutputListModel::instance();
+    const QString key = QStringLiteral("style=%1|live=%2|take=%3|rev=%4|input=%5")
+                            .arg(model ? model->activeStyleId() : QString())
+                            .arg(live_ ? 1 : 0)
+                            .arg(mediaOnAir() ? 1 : 0)
+                            .arg(mediaRev())
+                            .arg(inputLabel());
+    if (!readingPreviewOut_.isEmpty() && key == readingPreviewKey_
+        && samePictureApartFromReading(readingPreviewRaw_, slide))
+        return readingPreviewOut_;
+    readingPreviewKey_ = key;
+    readingPreviewRaw_ = slide;
+    readingPreviewOut_ = previewWithActiveStyle(slide);
+    return readingPreviewOut_;
 }
 
 QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
@@ -5718,14 +6132,20 @@ void LiveOutputService::pollTick()
     // (drift warning + the runtime halving/restore toasts).
     checkNdiFeedRate();
 
-    // The engine's loop advances slides itself; mirror the runtime's state.
-    auto &pres = pl::PresentationEngine::Instance();
-    const pl::Slide *slide = pres.CurrentSlide();
+    // The engine's loop advances slides itself; mirror the runtime's state —
+    // FROM THE SNAPSHOT, never from the runtime's own pointer (see
+    // onAirSlidesRaw): this poll runs ten times a second on the interface thread
+    // and the loop may be replacing the presentation under it.
+    auto &controller = bps::live::LiveOutputController::Instance();
+    pl::Slide onAirNow;
+    const bool haveOnAir = controller.OnAirSlideSnapshot(onAirNow);
+    const pl::Slide *slide = haveOnAir ? &onAirNow : nullptr;
+    size_t snapshotIndex = 0;
+    size_t snapshotTotal = 0;
+    (void)controller.OnAirPositionSnapshot(snapshotIndex, snapshotTotal);
     const QString title = slide ? QString::fromStdString(slide->title) : QString();
-    const int idx = int(pres.CurrentIndex());
-    const int total = int(pres.Runtime().ActivePresentation()
-                              ? pres.Runtime().ActivePresentation()->slides.size()
-                              : 0);
+    const int idx = static_cast<int>(snapshotIndex);
+    const int total = static_cast<int>(snapshotTotal);
     if (title != onAirTitle_ || idx != onAirIndex_ || total != onAirTotal_) {
         onAirTitle_ = title;
         onAirIndex_ = idx;

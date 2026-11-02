@@ -1684,6 +1684,9 @@ ApplicationWindow {
     // undeclared one on the root throws every tick, which is how the first
     // version of that phase spun instead of finishing).
     property int twJump: 0
+    // The rewind's own counter (see selfTestTableWalkRewind), declared for the same
+    // reason: an undeclared property on the root throws on every write.
+    property int twRewound: 0
     function twRefPara(text) {
         // The Table's reference carries the paragraph it is showing ("47-1100X -
         // Fellowship 2"): the trailing number IS the value the report was about.
@@ -1776,6 +1779,7 @@ ApplicationWindow {
             if (!window.setReadingScrollMode(true, "tablewalk"))
                 console.log("[SELFTEST-TABLEWALK] FAIL not-scroll — the walk needs Scroll mode")
             pane.playPicked()
+            LiveOutputService.goLive() // CMP-TEMP
             // REWIND TO THE PICK'S FIRST LINE FIRST, so the walk always crosses the
             // same boundary sequence whatever this machine's stored pane selection
             // was. The pane stages the passage with the SELECTED paragraph already at
@@ -1784,18 +1788,43 @@ ApplicationWindow {
             // several paragraph boundaries this check is about were never reached.
             // Backward steps are the same LineWalk path (lineStep(-1)), so this
             // exercises them too.
-            let rewound = 0
-            while (rewound < 400 && LiveOutputService.lineStep(-1))
-                ++rewound
-            console.log("[SELFTEST-TABLEWALK] rewound=" + rewound
+            // ONE STEP PER EVENT-LOOP TURN, NOT A LOOP OF PRESSES. `lineStep`
+            // needs a turn between presses: the previous press's offset is committed
+            // by the restage it triggered, and the passage's line count is only known
+            // once that has run. 400 presses inside this handler therefore could not
+            // move at all — each one was OWED instead (see lineStep's own comment),
+            // and the service then played that debt out backwards AFTER the rewind,
+            // against every forward press of the walk. Measured on this scenario:
+            // press 0 abs=61, then 59, 56, 54, 52 … on lineStep(+1), with every tile
+            // agreeing with the number. The rewind is its own timer so each press
+            // lands on a settled picture.
+            window.twRewound = 0
+            selfTestTableWalkRewind.restart()
+        }
+    }
+    // THE REWIND (see the settle timer above): one backward step per turn, until
+    // the passage's first line refuses to move or the cap is reached — then the
+    // walk starts from a settled position.
+    Timer {
+        id: selfTestTableWalkRewind
+        interval: 120
+        repeat: true
+        onTriggered: {
+            if (window.twRewound < 400 && LiveOutputService.lineStep(-1)) {
+                ++window.twRewound
+                return
+            }
+            selfTestTableWalkRewind.stop()
+            console.log("[SELFTEST-TABLEWALK] rewound=" + window.twRewound
                         + " page=" + LiveOutputService.readingPage
                         + " abs=" + Number(LiveOutputService.readingAbsoluteLine).toFixed(2)
                         + " lines=" + LiveOutputService.readingRunLineStarts(String(OutputListModel.activeStyleId)).length)
-            // THE SKIP TRACE STARTS WITH THE WALK. Opening the passage re-bases the
-            // position (a new pick starts at its own first line), and the sampler has
-            // been running since boot — so without this its first sample compares the
-            // NEW pick's position against the OLD one's and reports a whole-line skip
-            // at press 0 that no picture ever made. -1 means "no previous sample yet".
+            // THE SKIP TRACE STARTS WITH THE WALK. Opening the passage re-bases
+            // the position (a new pick starts at its own first line), and the
+            // sampler has been running since boot — so without this its first
+            // sample compares the NEW pick's position against the OLD one's and
+            // reports a whole-line skip at press 0 that no picture ever made. -1
+            // means "no previous sample yet".
             window.selfTestLsPrevAbs = -1
             window.selfTestLsGlideWorst = 0
             window.selfTestLsGlideSkips = 0
@@ -1821,6 +1850,11 @@ ApplicationWindow {
             const press = window.twPress
             window.twPress = press + 1
             window.selfTestLineStepPress = press
+            if (press === 14 || press === 30) { // CMP-TEMP: tile + engine frames at the same settled moment
+                SelfTest.grab("selfTestMonitorTile0", "cmp_tile0_p" + press + ".png")
+                SelfTest.grab("selfTestMonitorTile1", "cmp_tile1_p" + press + ".png")
+                LiveOutputService.debugDumpOutputs("p" + press)
+            }
             try {
                 const absFrom = Number(LiveOutputService.readingAbsoluteLine)
                 const moved = LiveOutputService.lineStep(1)

@@ -467,6 +467,7 @@ public:
     // the step — the caller then falls back to plain next/previous slide
     // behaviour.
     Q_INVOKABLE void stageSlideSet(const QString &name, const QVariantList &slides, int index);
+    Q_INVOKABLE void debugDumpOutputs(const QString &tag);   // OUTDUMP-TEMP
     // Queues a raw-text source; lineStep activates it, while slide picks stay slides.
     Q_INVOKABLE void setReadingTextSource(const QString &name, const QVariantList &pages, int index);
     // Returns true when the words moved (a new offset, and the page re-staged or
@@ -574,6 +575,11 @@ public:
     int readingJumpSerial() const { return readingJumpSerial_; }
     int readingWordBudget() const { return readingWordBudget_; }
     bool readingBudgetFitActive() const { return readingBudgetFitActive_; }
+    // THE SCROLL TYPE SIZE SOLVED FOR A STYLE (stage px), 0 when Scroll is off or no column has been
+    // solved for it. The engine's per-output scenes (NDI, HDMI, recordings) are told this through
+    // OutputStyleSpec::readingFontPx so they wrap and size the passage exactly as the surfaces do.
+    // An empty styleId means the active style's own column.
+    qreal readingColumnPxFor(const QString &styleId) const;
     void setReadingWordBudget(int words);
     bool scrollMode() const { return scrollMode_; }
     void setScrollMode(bool on);
@@ -1004,6 +1010,11 @@ private:
     // THE PASSAGE the reading block is a page of (see the Q_PROPERTYs above) and
     // where it rests, in line heights of the reading text.
     QString readingFlowText_;
+    // THE PASSAGE THE ENGINE'S ON-AIR SLIDE LAST WAS GIVEN. The glide pushes the position (SetFlowChar)
+    // against readingFlowText_, so the engine's slide has to carry that same text or an output (NDI,
+    // HDMI) is told to scroll to a character past the end of a shorter passage and sits on its last
+    // line. applyReadingScroll re-sends the passage whenever this differs from readingFlowText_.
+    QString readingEngineFlowText_;
     int readingTextWindowCharStart_ = 0;
     bool readingWindowRefreshPending_ = false;
     bool readingScrollPreparing_ = false;
@@ -1126,6 +1137,9 @@ private:
     // window and the offset. False = the engine refused (nothing on air any
     // more) and the caller re-committed the pick itself.
     bool updateReadingPick(const QString &name, const QVariantMap &shown);
+    // RE-ATTACH the reading passage to the on-air slide after Slide mode took it
+    // off (see setScrollMode). The engine no-ops when the slide already has it.
+    void republishReadingFlow();
     void drainPendingReadingSteps();
     void animateReadingScroll(qreal from, qreal to);
     // Settles a page change a landing step owes (readingRebaseSlide_), the
@@ -1173,6 +1187,32 @@ private:
     // NEXT event-loop turn — after the step that triggered it has already
     // painted — rather than adding its own cost to that press's response.
     void prewarmReadingLines();
+    // ...AND ONE SLIDE PER TURN, not the whole radius in one go
+    // (docs/scroll_mode_thread_audit.md, F6). A pass over the radius is up to
+    // nine `readingLines` compositions — a styled preview plus a real text
+    // layout each — and they all used to land in the event-loop turn right after
+    // a press, i.e. exactly while the next frame was being composed. This queues
+    // the pass (once, however many presses ask for it) and the pass itself does
+    // ONE uncached slide, then re-arms; the event loop breathes between them, so
+    // a cold pick warms up over several turns instead of in one stall.
+    void schedulePrewarmReadingLines();
+    bool readingPrewarmQueued_ = false;
+    // THE STYLED PREVIEW OF A READING SLIDE, COMPOSED AT MOST ONCE PER PICTURE
+    // (docs/scroll_mode_thread_audit.md, F5). `previewWithActiveStyle` is a full
+    // template composition on the INTERFACE thread, and a reading walk asked for
+    // one per page commit and per window move while nothing was live — for a
+    // picture that had not changed at all: `slideToVariantMap` carries title,
+    // blocks, background, fill and the style's facts, and NOT the passage
+    // (`flowText`/`flowChar` are the slide's reading fields, read from the raw
+    // slide by every surface and by the engine). So two slides that differ only
+    // by where the reader is compose to the SAME map, and this memo skips the
+    // second composition outright. Keyed on the picture (the slide minus its
+    // reading fields) plus the active style and the compositor inputs a take can
+    // change — the same inputs OutputMonitorTile's own memo keys on.
+    QVariantMap readingStagedPreview(const QVariantMap &slide);
+    QVariantMap readingPreviewRaw_;
+    QVariantMap readingPreviewOut_;
+    QString readingPreviewKey_;
     mutable QHash<int, QStringList> readingLinesCache_;
     // One style's view of the run: its wrapped lines AND where each one starts in
     // the passage (the character starts that make the offset style-independent).

@@ -346,6 +346,13 @@ struct OutputStyleSpec {
     // on different values showed one take as two pictures on the monitor wall.
     // Kept so the roster round-trips; see SceneBuilder::AddCompositorLayers.
     std::string mediaFit;
+    // SCROLL'S TYPE SIZE FOR THIS STYLE, in stage px (0 = none: the block keeps its declared
+    // size). Scroll has no auto-fit: the app solves ONE size per style from the max-words
+    // budget (the words the reading box must hold) and every surface draws the passage at it,
+    // so the wrapping — and therefore which words sit on which line — is the same everywhere.
+    // The monitor tiles already do; this is how the engine's own scenes (NDI, HDMI, recordings)
+    // are told. Only the reading (flow) block takes it; it joins the scene fingerprint.
+    float readingFontPx = 0.0f;
     // THE WIRED VIDEO BUS (Settings · Routing) — this output's own picture.
     //
     // The bus's STABLE number as the routing canvas's video wire names it

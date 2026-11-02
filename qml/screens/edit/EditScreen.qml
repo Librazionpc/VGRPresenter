@@ -2781,36 +2781,22 @@ Rectangle {
                             // size while that fits and SQUEEZES the moment it doesn't. Nothing
                             // is ever cut or spilled on any surface.
                             //
-                            // ONE EXCEPTION, and it is why the branch below exists: A BOUND
-                            // PLACEHOLDER IS NOT CONTENT (MetadataFields.isToken).
-                            // "{table_code_paragraphs}" is 23 characters standing in for a
-                            // value of ANOTHER length, and the frame sizes the real value
-                            // ("47-0412 3", 9 characters) at the item's own fontSize — so
-                            // squeezing the TOKEN to fit made this canvas show a type size the
-                            // output never uses. Measured on a Table template: the token was
-                            // squeezed to ~18 stage units here while the NDI frame drew the
-                            // value at ~26 — same box, same centre, ~1.5x the size. A bound
-                            // block therefore renders at its OWN size (clipped to its box
-                            // above), whatever the auto-size mode, so what is sized here is what
-                            // the frame will draw.
-                            // "growToFit" and the other modes keep shaping the CONTENT: the
-                            // engine fits the real value to the box on air.
+                            // A bound placeholder is not the final content. Keep its declared
+                            // size for Shrink/None (the token can be much longer than its value),
+                            // but fit the visible token in Grow so the canvas shows that the
+                            // selected mode responds to this box. On air, the resolved value is
+                            // what gets fitted.
                             const pad = canvasItemObject.modelData.style ? (canvasItemObject.modelData.style.padding ?? 0) : 0
                             const bw = canvasItemObject.modelData.width - pad * 2
                             const bh = canvasItemObject.modelData.height - pad * 2
-                            // A BOUND PLACEHOLDER IS NOT CONTENT, so the size is the DECLARED
-                            // one in EVERY mode — including growToFit. The question this branch
-                            // asks is "is this text a stand-in?", not "which mode is it?": the
-                            // modes describe what may happen to CONTENT (the box caps it, or it
-                            // fills the box), and a token is not content — the canvas has nothing
-                            // to size. Growing a placeholder to fill its box told the operator
-                            // nothing about the real value, which on air is what gets fitted
-                            // (the engine still solves every mode for the VALUE). Special-casing
-                            // "grow" here would also have to be spelled twice — "grow" here,
-                            // "growToFit" in DesignPreview — which is how one rule becomes two.
+                            // Keep bound placeholders at their declared size except in Grow:
+                            // the canvas has no resolved value to fit, so fitting the visible
+                            // token is the useful visual indication that this box grows. The
+                            // live output still fits the actual value when it is available.
                             if (bw <= 0 || bh <= 0) {
                                 fittedSize = baseFontSize
-                            } else if (MetadataFields.isToken(itemTextLabel.shownText)) {
+                            } else if (MetadataFields.isToken(itemTextLabel.shownText)
+                                       && autoSizeMode !== "growToFit") {
                                 fittedSize = baseFontSize
                                 measureSize = baseFontSize
                             } else {
@@ -2842,23 +2828,7 @@ Rectangle {
                             visible: false
                             width: itemTextLabel.width
                             text: itemTextLabel.shownText          // what is on screen, list markers included
-                            font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
-                            font.pixelSize: itemTextLabel.measureSize
-                            font.weight: itemTextLabel.tmeta.bold ? Font.Bold
-                                : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
-                                : itemTextLabel.tmeta.fontWeight === "SemiBold" ? Font.DemiBold
-                                : itemTextLabel.tmeta.fontWeight === "Bold" ? Font.Bold
-                                : Font.Medium
-                            font.italic: itemTextLabel.tmeta.italic === true
-                            font.capitalization: itemTextLabel.tmeta.textCase === "upper" ? Font.AllUppercase
-                                : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
-                                : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
-                                : Font.MixedCase
-                            // The ONE reading of these two (see MetadataFields): the twin
-                            // must measure the spacing the display below paints, or the
-                            // auto-size solve is measuring one layout and drawing another.
-                            font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
-                            font.wordSpacing: MetadataFields.wordSpacing(itemTextLabel.tmeta)
+                            font: MetadataFields.textFont(itemTextLabel.tmeta, itemTextLabel.measureSize)
                             // Same line STEP the label draws: natural × height plus
                             // the px gap (see MetadataFields.lineHeightWithGap), so
                             // the solver measures the spacing the canvas paints.
@@ -2880,9 +2850,7 @@ Rectangle {
 
                         visible: canvasItemObject.modelData.kind === "text"
                         color: itemTextLabel.tmeta.color ?? "#f2f4fa"
-                        font.family: FontService.resolve(itemTextLabel.tmeta.fontFamily)
-
-                        font.pixelSize: fittedSize
+                        font: MetadataFields.textFont(itemTextLabel.tmeta, fittedSize)
                         fontSizeMode: Text.FixedSize
                         // Matches DesignPreview's (the thumbnails') own wrap rule:
                         // the canvas and the preview must lay text out identically
@@ -2894,20 +2862,6 @@ Rectangle {
                         // row's dropdown — matching common rich-text-editor UX
                         // where Bold stays a quick on/off regardless of the
                         // family's own weight.
-                        font.weight: itemTextLabel.tmeta.bold ? Font.Bold
-                            : itemTextLabel.tmeta.fontWeight === "Regular" ? Font.Normal
-                            : itemTextLabel.tmeta.fontWeight === "SemiBold" ? Font.DemiBold
-                            : itemTextLabel.tmeta.fontWeight === "Bold" ? Font.Bold
-                            : Font.Medium
-                        font.italic: itemTextLabel.tmeta.italic === true
-                        font.capitalization: itemTextLabel.tmeta.textCase === "upper" ? Font.AllUppercase
-                            : itemTextLabel.tmeta.textCase === "lower" ? Font.AllLowercase
-                            : itemTextLabel.tmeta.textCase === "capitalize" ? Font.Capitalize
-                            : Font.MixedCase
-                        font.underline: itemTextLabel.tmeta.underline === true
-                        font.strikeout: itemTextLabel.tmeta.strikethrough === true
-                        font.letterSpacing: MetadataFields.letterSpacing(itemTextLabel.tmeta)
-                        font.wordSpacing: MetadataFields.wordSpacing(itemTextLabel.tmeta)
                         // The panel's Height row reads the same function — 0/absent is
                         // the font's own line height, never a hidden 1.2 (see MetadataFields).
                         lineHeight: MetadataFields.lineHeightWithGap(itemTextLabel.tmeta, labelLineBox.contentHeight)

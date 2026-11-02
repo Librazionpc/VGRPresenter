@@ -563,6 +563,11 @@ void TestRenderText() {
         "\xE2\x80\x9C" "Don\xE2\x80\x99t\xE2\x80\x9D \xE2\x80\xA6 \xE2\x80\x94 ok\xC2\xA0!", false);
     CHECK(quoted.size() == 1);
     CHECK(quoted[0] == "\"Don't\" ... - ok !");
+    const std::string unicodeFlow = "A\xC3\xA9" "B\nC\xF0\x9F\x98\x80" "D";
+    const auto flowStarts = r::TextLayout::FlowCharacterStarts(unicodeFlow, style, fm);
+    CHECK(flowStarts.size() == 2);
+    CHECK(flowStarts[0] == 0);
+    CHECK(flowStarts[1] == 4);   // QML counts UTF-16 units, not UTF-8 bytes.
     // Text already ASCII must pass through byte-for-byte (fast path).
     CHECK(r::TextLayout::SplitLines("plain ascii", false)[0] == "plain ascii");
     // Invalid UTF-8 lead byte degrades to one '?', not three blank gaps.

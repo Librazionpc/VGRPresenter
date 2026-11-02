@@ -278,16 +278,7 @@ Column {
         id: fitMeasure
         visible: false
         text: root.target ? TextFormatService.applyList(root.target.text, root.listStyle) : ""
-        font.family: root.drawFamily
-        font.pixelSize: Math.max(1, root.fontSize)
-        font.weight: root.bold ? Font.Bold
-            : root.fontWeight === "Regular" ? Font.Normal
-            : root.fontWeight === "SemiBold" ? Font.DemiBold
-            : root.fontWeight === "Bold" ? Font.Bold
-            : Font.Medium
-        font.italic: root.italic
-        font.letterSpacing: root.letterSpacing
-        font.wordSpacing: root.wordSpacing
+        font: MetadataFields.textFont(root.meta, Math.max(1, root.fontSize))
         lineHeight: root.lineHeight
         lineHeightMode: Text.ProportionalHeight
         // The twin has to wrap the way the canvas does, or a one-line item is

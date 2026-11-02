@@ -5,6 +5,7 @@
 #include "services/DesignLibraryService.h"
 #include "services/EngineBridge.h"
 #include "services/EventBus.h"
+#include "services/LiveOutputService.h"
 #include "services/RoutingService.h"
 #include "services/SettingsService.h"
 #include "services/ShowConverter.h"
@@ -1487,6 +1488,11 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
     // full-frame (SceneBuilder::BuildBusFeedScene).
     spec.gateVideoBuses = true;
     spec.allowedVideoBuses.clear();
+    // ...and Scroll's solved type size for the active style (0 outside Scroll), so the program
+    // frame the unstyled outputs mirror is drawn at the same size the surfaces use.
+    if (!styleId.isEmpty())
+        spec.readingFontPx = static_cast<float>(
+            LiveOutputService::instance().readingColumnPxFor(styleId));
     // THE ACTIVE OUTPUT'S OWN GATES, on top of its style's (see
     // OutputItem::showOverlay): a row that has closed media or the overlay layer
     // for itself must not paint them just because the style allows them.
@@ -1529,6 +1535,11 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
         bps::presentation::OutputStyleSpec outSpec = styleRow >= 0
             ? StyleSpecBuilder::specForStyleRow(styleRow, styleRoster(), slideTag)
             : bps::presentation::OutputStyleSpec{};
+        // SCROLL'S TYPE SIZE FOR THIS ROW'S STYLE (0 outside Scroll): the engine's own scene for
+        // this output wraps and sizes the passage exactly as the monitor surface does.
+        if (styleRow >= 0)
+            outSpec.readingFontPx = static_cast<float>(
+                LiveOutputService::instance().readingColumnPxFor(item.styleId));
         // Each output chooses between its direct routed feed and the design.
         // In compose mode every bus window paints its own assigned bus (see the gate
         // below); in direct mode the windows are gated off and the selected bus fills

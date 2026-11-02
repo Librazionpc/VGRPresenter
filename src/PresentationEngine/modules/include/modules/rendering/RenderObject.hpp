@@ -206,6 +206,13 @@ public:
         flowCharStarts_.clear();
     }
     bool HasReadingFlow() const { return flowPageLines_ > 0; }
+    // SCROLL'S MAX-WORDS COLUMN: the passage fills the WHOLE text area from its top edge, with no
+    // vertical alignment — the same rule the QML surfaces apply when the reading column is solved
+    // from the max-words budget (DesignPreview's flowWindow). Without it the engine centred or
+    // bottomed a window one PAGE tall, so an output's words sat differently from the monitor's.
+    // Set by the scene builder (OutputStyleSpec::readingFontPx > 0); survives Set/ClearReadingFlow.
+    void SetFlowFillsBox(bool on) { flowFillsBox_ = on; }
+    bool FlowFillsBox() const { return flowFillsBox_; }
     int FlowPageLines() const { return flowPageLines_; }
     float FlowCharAt() const { return flowCharAt_; }
     // THE PASSAGE'S LINES AS THIS OBJECT'S OWN STYLE WRAPS THEM, as character
@@ -237,6 +244,7 @@ private:
     std::string text_;
     std::string pageText_;
     int flowPageLines_ = 0;
+    bool flowFillsBox_ = false;
     float flowCharAt_ = 0.0f;
     std::vector<int> flowCharStarts_;
 };

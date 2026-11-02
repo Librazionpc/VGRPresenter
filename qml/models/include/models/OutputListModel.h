@@ -530,6 +530,10 @@ public:
     // videoBus). Indexed by ROW because that is how the spec loop walks the
     // roster; a reorder re-pushes, so a stale index cannot outlive its row.
     void setRoutedVideoBuses(const QVector<int> &busNumberByRow);
+    // Something the engine's per-output looks are built from changed outside the roster (Scroll's
+    // solved type size, see OutputStyleSpec::readingFontPx): push the active style and the
+    // per-output set again. No-op before the roster is adopted.
+    void repushEngineStyles() { pushActiveEngineStyle(); }
 
 private:
     // Re-pushes the ACTIVE output's style (the one entry point every "the

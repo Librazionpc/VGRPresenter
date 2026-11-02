@@ -43,7 +43,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-BUILD="$ROOT/build"
+BUILD="${SELFTEST_BUILD_DIR:-$ROOT/build}"
 APP="appVGRPresenterUI.exe"
 LOG="$BUILD/line_step_test.log"
 WAIT_SECS="${1:-90}"
@@ -63,28 +63,59 @@ if [ ! -f "$BUILD/$APP" ]; then
 fi
 
 echo "== stopping any running instance =="
-powershell -NoProfile -Command \
-    "Get-Process appVGRPresenterUI -ErrorAction SilentlyContinue | Stop-Process -Force" \
-    >/dev/null 2>&1
+# ONLY THIS BUILD'S INSTANCES, MATCHED BY THE EXECUTABLE'S OWN PATH. The machine
+# may be running the operator's app from build/ while this runs from
+# build-agent/ (SELFTEST_BUILD_DIR): killing by NAME took that instance down with
+# it. Every process here is matched by its executable's path instead.
+BUILD_WIN="$(cygpath -w "$BUILD" 2>/dev/null || printf '%s' "$BUILD")"
+app_pids() {
+    powershell -NoProfile -Command \
+        "Get-Process appVGRPresenterUI -ErrorAction SilentlyContinue | Where-Object { \$_.Path -and \$_.Path.StartsWith('$BUILD_WIN') } | ForEach-Object { \$_.Id }" \
+        2>/dev/null | tr -d '\r'
+}
+echo "== stopping this build's instances ($BUILD_WIN) =="
+for _pid in $(app_pids); do
+    powershell -NoProfile -Command "Stop-Process -Id $_pid -Force" >/dev/null 2>&1
+done
 sleep 2
+# ONE INSTANCE, ONE LOG. A survivor writes to the SAME log and runs its own copy
+# of the scenario's timers, so the file becomes several interleaved walks —
+# measured: the runner read 184 tile lines from a log the app was still appending
+# to, half of them from an older instance that had gone LIVE, and judged the mix
+# ("shows=-1 text=\"Probe 10\"" on a walk whose tiles all read their page).
+# Refusing to run beats judging a mix.
+if [ -n "$(app_pids)" ]; then
+    echo "LINE_STEP: FAIL stale-instance — an instance of THIS build survived the stop;" \
+         "it would append to this run's log. Close it and re-run."
+    exit 5
+fi
 
 rm -f "$LOG"
 echo "== launching with VGR_SELFTEST=1 VGR_LINESTEP_TEST=1 (log -> $LOG) =="
-(
-    cd "$BUILD" || exit 1
-    VGR_SELFTEST=1 VGR_LINESTEP_TEST=1 \
-        PATH="$MINGW_BIN:$QT_BIN:$PATH" \
-        "./$APP" > "$LOG" 2>&1
-) &
+# THE APP IS THE DIRECT CHILD, so $! below is ITS pid. The old form launched a
+# subshell and captured the subshell's pid, which is why the stop at the end left
+# the app running (see the instance check above).
+cd "$BUILD" || exit 2
+VGR_SELFTEST=1 VGR_LINESTEP_TEST=1 \
+    PATH="$MINGW_BIN:$QT_BIN:$PATH" \
+    "./$APP" > "$LOG" 2>&1 &
 RUN_PID=$!
+cd "$ROOT" || exit 2
 
 TICK=0
+# DID THE APP EXIT ON ITS OWN? A crash mid-walk leaves a short press table that
+# reads exactly like a stepper which stopped moving — and it is not one: measured
+# here, a run that "stalled at press 5" was the app dying with heap corruption
+# (Windows Application Error 1000, 0xc0000374 in ntdll). The verdict below says
+# so by name, with the scenario's own line count, instead of blaming the step.
+EARLY_EXIT=0
 while [ "$TICK" -lt "$WAIT_SECS" ]; do
     if grep -qa "\[SELFTEST-LINESTEP\] done" "$LOG" 2>/dev/null; then
         sleep 1
         break
     fi
     if ! kill -0 "$RUN_PID" 2>/dev/null; then
+        EARLY_EXIT=1
         break
     fi
     sleep 1
@@ -92,6 +123,25 @@ while [ "$TICK" -lt "$WAIT_SECS" ]; do
 done
 kill "$RUN_PID" 2>/dev/null
 wait "$RUN_PID" 2>/dev/null
+# AND CONFIRM IT IS GONE: the log is only trustworthy if nothing can append to it
+# after this line (see the launch above).
+for _ in 1 2 3 4 5; do
+    [ -z "$(app_pids)" ] && break
+    sleep 1
+done
+if [ -n "$(app_pids)" ]; then
+    echo "LINE_STEP: FAIL stale-instance — the app did not exit; its own walk would join this log"
+    exit 6
+fi
+
+if [ "$EARLY_EXIT" = "1" ] && ! grep -qa "\[SELFTEST-LINESTEP\] done" "$LOG" 2>/dev/null; then
+    echo "LINE_STEP: FAIL crashed — the app exited by itself after" \
+         "$(grep -ac 'SELFTEST-LINESTEP] press=.* moved=' "$LOG" 2>/dev/null) press(es)," \
+         "before the scenario finished. Check Windows' Application Error log" \
+         "(Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000}) for" \
+         "the faulting module: this is a crash, not a stepper that refused to move."
+    exit 7
+fi
 
 LINES="$(grep -a "\[SELFTEST-LINESTEP\] press=.* moved=" "$LOG" 2>/dev/null)"
 WALL="$(mktemp)"

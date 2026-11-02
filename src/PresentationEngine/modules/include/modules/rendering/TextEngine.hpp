@@ -259,6 +259,11 @@ public:
     // Measures and wraps text per the style; returns line breaks + extents.
     static TextLayoutResult Measure(const std::string& text, const TextStyle& style,
                                     const FontManager& fonts);
+    // Character offsets for the measured lines, expressed in UTF-16 code units
+    // so callers sharing positions with Qt/QML use the same unit.
+    static std::vector<int> FlowCharacterStarts(const std::string& text,
+                                                const TextStyle& style,
+                                                const FontManager& fonts);
     // Advances per-glyph using the font's advance width (approx: cell width).
     static float MeasureLine(const std::string& text, const TextStyle& style,
                              const FontManager& fonts);

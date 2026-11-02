@@ -779,4 +779,72 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     return result;
 }
 
+std::vector<int> TextLayout::FlowCharacterStarts(const std::string& text,
+                                                 const TextStyle& style,
+                                                 const FontManager& fonts) {
+    const TextLayoutResult layout = Measure(text, style, fonts);
+    const std::string foldedText = FoldToAtlasAscii(text);
+    // The engine lays out folded bytes, while the shared scroll position is in
+    // Qt's UTF-16 units. Keep a reverse map so both sides address the same word.
+    std::vector<int> sourceCharAtFoldedOffset(foldedText.size() + 1, 0);
+
+    const bool asciiOnly = std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+        return ch < 0x80;
+    });
+    if (asciiOnly) {
+        for (size_t i = 0; i <= text.size(); ++i)
+            sourceCharAtFoldedOffset[i] = static_cast<int>(i);
+    } else {
+        size_t sourceByte = 0;
+        size_t foldedByte = 0;
+        int sourceChar = 0;
+        while (sourceByte < text.size()) {
+            const unsigned char lead = static_cast<unsigned char>(text[sourceByte]);
+            size_t sequenceLength = 1;
+            if ((lead & 0xE0) == 0xC0 && sourceByte + 1 < text.size()
+                && (static_cast<unsigned char>(text[sourceByte + 1]) & 0xC0) == 0x80) {
+                sequenceLength = 2;
+            } else if ((lead & 0xF0) == 0xE0 && sourceByte + 2 < text.size()
+                       && (static_cast<unsigned char>(text[sourceByte + 1]) & 0xC0) == 0x80
+                       && (static_cast<unsigned char>(text[sourceByte + 2]) & 0xC0) == 0x80) {
+                sequenceLength = 3;
+            } else if ((lead & 0xF8) == 0xF0 && sourceByte + 3 < text.size()
+                       && (static_cast<unsigned char>(text[sourceByte + 1]) & 0xC0) == 0x80
+                       && (static_cast<unsigned char>(text[sourceByte + 2]) & 0xC0) == 0x80
+                       && (static_cast<unsigned char>(text[sourceByte + 3]) & 0xC0) == 0x80) {
+                sequenceLength = 4;
+            }
+
+            const std::string foldedUnit =
+                FoldToAtlasAscii(text.substr(sourceByte, sequenceLength));
+            for (size_t i = 0; i < foldedUnit.size(); ++i)
+                sourceCharAtFoldedOffset[foldedByte + i] = sourceChar;
+            foldedByte += foldedUnit.size();
+            // A four-byte UTF-8 code point occupies a UTF-16 surrogate pair.
+            sourceChar += sequenceLength == 4 ? 2 : 1;
+            sourceByte += sequenceLength;
+            sourceCharAtFoldedOffset[foldedByte] = sourceChar;
+        }
+    }
+
+    std::vector<int> starts;
+    starts.reserve(layout.lines.size());
+    size_t cursor = 0;
+    size_t previousStart = 0;
+    for (const auto& line : layout.lines) {
+        size_t start = previousStart;
+        if (!line.text.empty()) {
+            const size_t found = foldedText.find(line.text, cursor);
+            if (found != std::string::npos) {
+                start = found;
+                cursor = found + line.text.size();
+            }
+        }
+        start = std::min(start, foldedText.size());
+        starts.push_back(sourceCharAtFoldedOffset[start]);
+        previousStart = start;
+    }
+    return starts;
+}
+
 } // namespace bps::rendering
