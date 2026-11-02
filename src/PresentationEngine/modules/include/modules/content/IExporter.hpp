@@ -1,9 +1,5 @@
 #pragma once
 
-// IExporter (docs/specs/13 §Export Pipeline): the Open/Closed extension point
-// for export formats. The ExportManager knows only how to discover and execute
-// registered exporters.
-
 #include "modules/content/AssetMetadata.hpp"
 #include "core/common/Common.hpp"
 
@@ -14,7 +10,6 @@
 #include <vector>
 
 namespace bps::content {
-
 struct ExportContext {
     AssetMetadata meta;                 // the asset being exported
     std::vector<uint8_t> bytes;         // payload bytes (read by caller)
@@ -81,5 +76,4 @@ public:
     bool CanExport(AssetType type) const override { return type == AssetType::Package; }
     Result<void> Export(const ExportContext& ctx) const override;
 };
-
 } // namespace bps::content

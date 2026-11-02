@@ -1,9 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One row of a library sidebar: icon, label, a count, and (optionally) a remove button
-// that shows while the pointer is over the row. The selected row gets the red edge and
-// a lifted background. Used by the Media sidebar's "All" / "Inputs" / folders.
 Rectangle {
     id: root
 
@@ -28,11 +25,6 @@ Rectangle {
     signal clicked()
     signal removeRequested()
     signal toggleRequested()
-    // Right-click — a consumer that wants a context menu (Overlays/
-    // Templates' categories: Rename + Delete, the same actions a design
-    // card already gets) wires this; everyone else (Media's plain
-    // folders) simply leaves it unconnected, no behavior change. Same
-    // signature as DesignCard's own contextMenuRequested(source, mx, my).
     signal contextMenuRequested(var source, real mx, real my)
 
     height: 30
@@ -40,9 +32,6 @@ Rectangle {
     // Same subtle pill ramp as the shows categories sidebar (the first
     // brighter ramp read too hot against the ground — user call).
     color: selected ? "#1e2130" : "#14161e"
-    // Selection is state and still fades; HOVER is the shared layer below
-    // (HoverGlow), so every row in the app lights the same way and at the same
-    // pace instead of each one guessing a colour and a duration.
     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
     HoverGlow {
@@ -61,10 +50,6 @@ Rectangle {
         name: root.icon
         color: root.selected ? Theme.accent : Theme.textSecondary
         x: 12 + root.inset; y: 8; width: 14; height: 14
-        // `fit` normalises the icon to the 14px box whichever sort it is: the
-        // row's icons mix 24-grid glyphs (camera) with ones migrated onto the
-        // grid (layoutDashboard, layers, folder), which draw at different
-        // natural sizes without it — the "All" row read smaller than "Inputs".
         fit: true
     }
     Text {
@@ -125,10 +110,6 @@ Rectangle {
         onClicked: root.clicked()
     }
 
-    // ...right-click for a context menu. A separate MouseArea filtered to
-    // RightButton only — it never competes with rowHover's left-click
-    // (PositionHoverArea only accepts the left button), so both coexist
-    // without stealing each other's events.
     MouseArea {
         id: contextArea
         anchors.fill: parent
@@ -136,9 +117,6 @@ Rectangle {
         onClicked: (mouse) => root.contextMenuRequested(contextArea, mouse.x, mouse.y)
     }
 
-    // ...except the remove button, which sits above it. (A plain MouseArea, not a PositionHoverArea:
-    // the button's visibility follows the row's hover, and a hover area reads its ancestors'
-    // visibility - that would be a binding loop. It has no hover styling of its own to need one.)
     Rectangle {
         id: removeButton
         visible: root.removable && rowHover.hovered

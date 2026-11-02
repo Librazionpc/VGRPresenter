@@ -1,10 +1,5 @@
 #pragma once
 
-// Scene Composition Engine (Phase 11, docs/specs/23). The definitive
-// architecture: everything is a Scene. Scene → Regions → Layers → Widgets →
-// Components. Layouts tell regions where to appear per output. Themes own all
-// styling. Rules decide what appears where. Content never owns style.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 #include "modules/rendering/RenderTypes.hpp"
@@ -14,7 +9,6 @@
 #include <vector>
 
 namespace bps::scene {
-
 // --- Region (a named area of a scene) ------------------------------------------
 struct Region {
     std::string id;
@@ -132,5 +126,4 @@ struct ComposedScene {
     std::vector<SceneLayout> layouts; // resolved per output
     std::string appliedRuleId;
 };
-
 } // namespace bps::scene

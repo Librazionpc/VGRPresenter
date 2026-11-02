@@ -1,22 +1,5 @@
 #pragma once
 
-// AudioEngine — the playout engine. It plays the production graph's audio buses
-// through the default output device, and it opens capture only for the graph
-// sources that something is actually PLAYING. While the program is on the air
-// that means any enabled audio bus; with the program stopped it means only the
-// buses an output's own endpoint is playing (see StartOutputAudio), because
-// those streams are the only thing left that can be heard. A source nobody
-// hears is never captured.
-//
-// Ownership: this service owns the AudioMixer that sums the graph into the render
-// stream. The graph is read through its published snapshot (see
-// ProductionGraph::PublishedSnapshot), so the render thread never touches the
-// maps the GUI thread edits.
-//
-// A source is bound to a capture device by its "device" meta (the device's roster
-// name, written by the source's owner). Until that meta is set, a source
-// contributes nothing.
-
 #include "core/common/Common.hpp"
 #include "interfaces/IService.hpp"
 #include "modules/production/AudioMixer.hpp"
@@ -35,21 +18,12 @@
 #include <vector>
 
 namespace bps::audio {
-
 class AudioEngine final : public IService {
 public:
     static AudioEngine& Instance();
 
     Result<void> Initialize() override;
     Result<void> Start() override;
-    // Stops the PROGRAM: the default endpoint's render stream and, when it never
-    // had a device, the software clock that paced it. An output playing on its
-    // own endpoint keeps playing — that stream runs on its own device thread and
-    // reads the graph directly (AudioMixer::RenderOutput), and its lifetime
-    // follows the ROUTING, not playout (see WindowsAudio's renderStreams_). The
-    // control thread and the capture bindings stay up with it, because the buses
-    // those endpoints carry are exactly what must stay captured. Shutdown() is
-    // what takes everything down.
     Result<void> Stop() override;
     Result<void> Shutdown() override;
 
@@ -79,11 +53,6 @@ public:
     bool SoftwareClock() const { return softClockOn_.load(); }
 
     // ---- an OUTPUT's own endpoint --------------------------------------------
-    // Opens/closes a render stream for ONE output node on `deviceId` (the audio
-    // roster's waveout:<n> number; UINT32_MAX = the default endpoint). The mixer
-    // renders that node's own mix at the DEVICE's rate, so an HDMI monitor's
-    // speakers get a feed of their own instead of riding the program stream.
-    // Idempotent: starting a node that already plays on that device is Ok.
     Result<void> StartOutputAudio(const std::string &outputNodeId, uint32_t deviceId);
     void StopOutputAudio(const std::string &outputNodeId);
     void StopAllOutputAudio();
@@ -94,9 +63,6 @@ private:
 
     void ControlLoop();
     void SoftClockLoop();
-    // The other end of a Stop() that left an output playing: when the last of
-    // those streams closes and the program is not on the air either, nothing can
-    // hear a source any more, so the capture devices are released here.
     void MaybeFinishStop();
     void EnsureSpeakersOutput();
     void Reconcile();
@@ -138,14 +104,9 @@ private:
     std::thread softClock_;
     std::atomic<bool> softClockOn_{false};
 
-    // Per-output render streams (see StartOutputAudio): node id → the PAL's stream
-    // id, and the device each one was opened on (so "start again on the same
-    // device" is a no-op while a device CHANGE re-opens it). Guarded by the mutex;
-    // the render callback never touches either map.
     mutable std::mutex outputAudioMutex_;
     std::map<std::string, uint64_t> outputStreams_;
     std::map<std::string, uint32_t> outputDevices_;
     uint64_t nextOutputStreamId_ = 1;
 };
-
 } // namespace bps::audio

@@ -12,7 +12,6 @@
 #include <sstream>
 
 namespace bps::production {
-
 namespace {
 constexpr const char* kModule = "ProductionEngine";
 
@@ -56,21 +55,6 @@ ProductionEngine& ProductionEngine::Instance() {
 
 void ProductionEngine::RequestPersist() {
     persistPending_.store(true, std::memory_order_release);
-    // ...AND get it to the disk during the session, not merely into the kernel's
-    // in-memory store. The flag above is consumed by PersistGate, which only
-    // exists inside THIS engine's own methods — but the graph is also mutated
-    // through Graph() directly (the QML roster models create and re-route buses
-    // that way, and they cannot construct a gate: it is private to this class).
-    // Those mutations therefore left the document in memory until
-    // DatabaseManager::Shutdown, i.e. only a CLEAN exit ever wrote a bus to
-    // disk: closing the app after building a bus worked, and a crash, a force
-    // quit or a killed task lost every bus the user had just built (observed as
-    // "my buses are not persisted").
-    //
-    // ONE deferred task per burst of edits — the atomic below coalesces them,
-    // so dragging a fader schedules a single write rather than one per step.
-    // The flush runs on the scheduler's thread with NO ProductionEngine lock
-    // held (see FlushPersistPending), which is what makes disk I/O here legal.
     bool alreadyScheduled = false;
     if (persistFlushScheduled_.compare_exchange_strong(alreadyScheduled, true,
                                                        std::memory_order_acq_rel)) {
@@ -100,11 +84,6 @@ Result<void> ProductionEngine::Initialize() {
     initialized_.store(true);
     WireEvents();
 
-    // --- Graph persistence (kernel owns the state, the DB owns the bytes) ---
-    // Restore the last saved graph, then keep it saved: every successful
-    // graph mutation re-serializes through the saver into the kernel's
-    // DatabaseManager (the DB flushes to disk at its own shutdown, and the
-    // engine flushes a final save at its Shutdown).
     auto& db = DatabaseManager::Instance();   // lock-ok: in-memory map read (no PAL)
     if (auto doc = db.Get("production", "graph"); doc.ok() && !doc.value().isNull()) {
         if (auto r = graph_.Restore(doc.value()); r.ok())
@@ -119,20 +98,12 @@ Result<void> ProductionEngine::Initialize() {
     graph_.InstallSaver([this](json::Value doc) {
         auto& db2 = DatabaseManager::Instance();   // lock-ok: in-memory Put; disk write deferred to Flush
         (void)db2.Put("production", "graph", std::move(doc));
-        // Durable per mutation, but the disk write is deferred until the
-        // mutating call releases mutex_ (PersistGate): the edit is already in
-        // the in-memory store, and the flush to disk must not run while this
-        // engine's lock is held. Repeated edits coalesce into one write.
         RequestPersist();
     });
     return Ok();
 }
 
 Result<void> ProductionEngine::Start() {
-    // Scope the lock so the dispatch below runs with mutex_ RELEASED: a
-    // subscriber's body is not visible from here and can take its time (or
-    // re-enter this engine) — every other thread that needs mutex_ must not
-    // wait behind it. Same shape everywhere in this file.
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (!initialized_.load()) return Error::Make(Err::Production_InvalidState, kModule,
@@ -157,9 +128,6 @@ Result<void> ProductionEngine::Stop() {
 Result<void> ProductionEngine::Shutdown() {
     PersistGate _save(*this);
     UnwireEvents();
-    // Final save before the DatabaseManager flushes (kernel tears services
-    // down in registration order — production before database — so this is
-    // the last chance to capture any tail mutations).
     (void)graph_.PersistDirty();
     initialized_.store(false);
     running_.store(false);
@@ -500,9 +468,6 @@ ClockSnapshot ProductionEngine::Clock() const {
 }
 
 void ProductionEngine::TickClock(int64_t advanceMs) {
-    // Collected under the lock, EXECUTED after it: SendControl dispatches on the
-    // bus, and a cue subscriber must not run with mutex_ held (nor must the
-    // other threads waiting on this engine's lock wait for it).
     std::vector<std::string> due;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -796,11 +761,6 @@ void ProductionEngine::RollbackEdit() { graph_.RollbackEdit(); }
 
 Result<void> ProductionEngine::ApplyCommand(std::string_view command) {
     PersistGate _save(*this);
-    // The lock is NOT held across the dispatch below. SetSceneState,
-    // AssignOutputBuses, TriggerFallback and SendControl all publish bus events
-    // (and take mutex_ themselves for their own short graph edits), so holding it
-    // here put a subscriber that re-enters this engine behind a lock this thread
-    // owned. Only the graph READS need it, one short critical section each.
     auto hasNode = [&](const std::string& id) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         return graph_.HasNode(id);
@@ -888,5 +848,4 @@ void ProductionEngine::OnDisplayConnected(const events::DisplayDeviceConnected&)
 void ProductionEngine::OnDisplayDisconnected(const events::DisplayDeviceDisconnected&) {
     displaysConnected_.fetch_sub(1);
 }
-
 } // namespace bps::production

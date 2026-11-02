@@ -1,11 +1,5 @@
 #pragma once
 
-// Hardware profiling + capability detection (docs/specs/16 §1–2). The engine
-// decides by *capabilities*, never by device names: modules ask
-// `Supports(HardwareVideoDecode)`, never `if (RTX ...)`. All raw OS data comes
-// from the PAL (IPlatform Info/Snapshot/Monitor/Power) — this is the only place
-// outside platform/ that reasons about hardware.
-
 #include "core/common/Common.hpp"
 #include "platform/IPlatform.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -17,7 +11,6 @@
 #include <vector>
 
 namespace bps::adaptive {
-
 // ---------------------------------------------------------------------------
 // Hardware view (gathered once at startup + refreshed on demand)
 // ---------------------------------------------------------------------------
@@ -133,5 +126,4 @@ private:
     mutable std::mutex mutex_;
     HardwareInfo hw_;
 };
-
 } // namespace bps::adaptive

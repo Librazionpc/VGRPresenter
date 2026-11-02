@@ -1,13 +1,3 @@
-// Windows IVideo backend — Media Foundation (mfplat/mf/device). REAL
-// enumeration: video-capture devices from MF_DEVSOURCE, each device's modes
-// from its media source's presentation descriptor media types (frame size +
-// frame-rate range per type — the actual sensor/capture-path capabilities,
-// not a curated list). Max fps = the fastest rate any mode reports.
-//
-// MF runs on COM (MTA); every entry point takes the ScopedComInit guard.
-// CCOMMJOR error paths degrade to empty lists — enumeration must never
-// throw into the kernel watcher.
-
 #define INITGUID
 #include "platform/windows/WindowsVideo.hpp"
 
@@ -43,7 +33,6 @@
 
 namespace bps::platform {
 namespace {
-
 // Scoped COM init — same contract as WindowsAudio's (balanced ref only when
 // WE initialized the thread).
 class ScopedComInit {
@@ -71,11 +60,6 @@ std::string LowerAscii(std::string s)
     return s;
 }
 
-// Is this camera one of the names a targeted walk was asked for? Exact first
-// (the roster came from this same walk), then case-insensitive with
-// surrounding whitespace ignored — the wanted set is a SAVED roster, and a
-// label differing only in case or padding must not read as "camera not
-// connected" for a camera that is plugged in.
 bool NamedBy(const std::set<std::string> *only, const std::string &name)
 {
     if (!only) return true;
@@ -91,7 +75,6 @@ bool NamedBy(const std::set<std::string> *only, const std::string &name)
         if (LowerAscii(trim(w)) == wanted) return true;
     return false;
 }
-
 } // namespace
 
 std::vector<VideoDeviceInfo> WindowsVideo::Enumerate() const
@@ -145,16 +128,10 @@ std::vector<VideoDeviceInfo> WindowsVideo::EnumerateFiltered(
             info.id = win::Utf8(std::wstring(symW, symLen));
             CoTaskMemFree(symW);
         }
-        // The targeted walk's whole point: a camera that was not asked for is
-        // dropped here, before ActivateObject + the media-type walk below (and
-        // it is not listed either — the caller asked for its own devices only).
         if (!NamedBy(only, info.name))
             continue;
         info.isCamera = true;
 
-        // Modes: activate the source and walk its media types. A device
-        // that fails to activate still lists (with no modes) — the UI
-        // treats empty modes as "device present, capabilities unknown".
         IMFMediaSource *source = nullptr;
         if (SUCCEEDED(activates[i]->ActivateObject(IID_IMFMediaSource,
                                                    reinterpret_cast<void **>(&source))) && source) {
@@ -162,9 +139,6 @@ std::vector<VideoDeviceInfo> WindowsVideo::EnumerateFiltered(
             if (SUCCEEDED(source->CreatePresentationDescriptor(&pd)) && pd) {
                 DWORD sdCount = 0;
                 if (SUCCEEDED(pd->GetStreamDescriptorCount(&sdCount))) {
-                    // Coalesce media types by frame size; collect each
-                    // size's discrete rates (media types repeat a size at
-                    // every rate the sensor offers).
                     std::map<std::pair<UINT32, UINT32>, std::vector<uint32_t>> bySize;
                     for (DWORD s = 0; s < sdCount; ++s) {
                         IMFStreamDescriptor *sd = nullptr;
@@ -221,10 +195,6 @@ std::vector<VideoDeviceInfo> WindowsVideo::EnumerateFiltered(
     return out;
 }
 
-// Open, visible, capturable top-level windows — the Screen source's
-// "window" options (OBS-style Window Capture). Filters: visible, titled,
-// not cloaked (UWP ghosts), not toolwindows, not our own process's
-// windows. Sorted by title so the picker is stable across opens.
 struct EnumWindowsCtx {
     std::vector<WindowInfo> out;
     DWORD selfPid = 0;
@@ -238,16 +208,6 @@ BOOL CALLBACK WindowEnumProc(HWND hwnd, LPARAM lParam)
     // capture noise either way.
     LONG exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
     if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
-    // CLOAKED — the subtle one. The shell cloaks windows it keeps alive but
-    // off-screen: OTHER VIRTUAL DESKTOPS (DWM_CLOAKED_SHELL == 2 — the exact
-    // state of the workspace window in the repeat "no display named 'live url
-    // product sync gate'" report: probe showed visible=True, toolwin=False,
-    // cloaked=2 while the window sat on another virtual desktop) and
-    // suspended UWP apps (DWM_CLOAKED_APP, also skipped here — truly ghost
-    // pixels). PrintWindow(PW_RENDERFULLCONTENT) still captures a SHELL-cloaked
-    // window's real, current content, so those stay IN the roster — they are
-    // precisely the "window I left on desktop 2" the user picks as a screen
-    // source. Only fully-invisible app-level cloaks are filtered.
     BOOL cloaked = FALSE;
     if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
         && cloaked == DWM_CLOAKED_APP)
@@ -276,38 +236,9 @@ std::vector<WindowInfo> WindowsVideo::EnumerateWindows() const
 }
 
 namespace {
-
-// The camera interface class (KSCATEGORY_VIDEO_CAMERA). The value is fixed by
-// the Windows SDK (ks.h/ksmedia.h); spelled out here so this file does not have
-// to pull in the DirectShow headers for one GUID.
-//
-// THIS CLASS AND NOT KSCATEGORY_CAPTURE: on the machine this was written on, the
-// camera-class interface list is EXACTLY the roster MF reports
-// (MFEnumDeviceSources: 10 video device sources, 10 interfaces, same paths — see
-// build/probe_cams.exe), while the capture class adds ~36 more entries that are
-// WAVE/AUDIO endpoints. Fingerprinting those would report "video device
-// configuration changed" when a headset is plugged in, and the audio fingerprint
-// next to it already covers that change.
 constexpr GUID kCameraInterfaceClass = {
     0xE5323777, 0xF976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}};
 
-// The capture roster's IDs from the Plug-and-Play DEVICE-INTERFACE LIST, which
-// answers "which capture devices exist right now" without opening one.
-//
-// WHY NOT Enumerate(): a fingerprint only has to notice that the roster changed,
-// and WindowsVideo::Enumerate does far more than list devices — it activates
-// every device through Media Foundation (MFEnumDeviceSources/MFTEnumEx, which
-// reaches deviceaccess.dll and opens a device-access handle per path) and then
-// walks every device's media types. Polled on the kernel's 1 s tick it was the
-// app's idle kernel-handle leak: measured with probe_handles.exe at ~20 File +
-// ~20 WaitCompletionPacket + ~130 Event handles accumulated per SECOND, with
-// WindowsVideo::Enumerate on the stack of two thirds of the file opens in a gdb
-// trace of NtCreateFile. CM_Get_Device_Interface_List asks the config manager for
-// the interface paths and opens nothing, so the hot-plug check can stay frequent.
-//
-// Returns std::nullopt ONLY when the config-manager API itself failed; the caller
-// then falls back to the MF walk, so a machine where this cannot answer keeps the
-// detection it has today.
 std::optional<std::string> CheapCaptureFingerprint()
 {
     std::vector<std::string> paths;
@@ -327,9 +258,6 @@ std::optional<std::string> CheapCaptureFingerprint()
                 paths.push_back(win::Utf8(p));
         }
     }
-    // SORTED AND DEDUPED: only the SET of devices is the answer — the config
-    // manager's own order is not part of it, so an unchanged roster must
-    // fingerprint identically rather than reporting a change it did not have.
     std::sort(paths.begin(), paths.end());
     paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
     std::string fp;
@@ -337,7 +265,6 @@ std::optional<std::string> CheapCaptureFingerprint()
         fp += p + ";";
     return fp;
 }
-
 } // namespace
 
 std::string WindowsVideo::Fingerprint() const
@@ -352,56 +279,15 @@ std::string WindowsVideo::Fingerprint() const
 }
 
 // ============================================================================
-// Preview taps — a REAL MF Source Reader per previewed device. The drain
-// thread owns every COM object it touches; the GUI thread only ever copies
-// the newest JPEG out of the tap under the table's mutex (same hand-off
-// discipline as WindowsAudio's meter taps).
-//
-// Scoped deliberately: native media type (no resolution negotiation), RGB32
-// output conversion via the reader's built-in converter, JPEG encode by the
-// GDI+ encoder that ships with Windows (no new dependency), one frame every
-// ~66 ms (≈15 fps — plenty for a dialog pane, far below the sensor's load).
 // ============================================================================
-// One tap's stop flag, frame slot and read handshake. SHARED (shared_ptr) on
-// purpose: a camera tap's Media Foundation callback runs on an MF thread and
-// may still be in flight — or arrive late — while the tap is torn down, so the
-// callback owns live memory of its own and never touches the tap, the table,
-// or their mutexes.
 struct VideoTapShared {
     std::atomic<bool> running{false};   // the stop flag the table's Erase/Clear sets
     std::mutex mutex;                   // guards latestJpeg/latestRgba + the read handshake below
     std::vector<uint8_t> latestJpeg;    // swapped wholesale, copied out under `mutex`
     // ---- the LIVE half (see IVideo::SetPreviewLive) -----------------------
-    // A program feed (a bus window on the on-air slide, a taken input) needs
-    // every frame at native size and native rate. The pane contract cannot
-    // carry that: it encodes a JPEG per frame (which the QML side then decodes
-    // on the GUI thread) and — the actual defect — gates publication to one
-    // frame per kPreviewFrameMs. A 30 fps camera therefore reached the
-    // compositor at 15 fps, and since both outputs render that compositor, the
-    // video bus "lagged on HDMI and NDI" together. Live taps store the newest
-    // frame as unpacked RGBA and advance `frameSeq` once per stored sample;
-    // the JPEG stays for the small tiles, at a much lower rate.
     std::atomic<bool> live{false};
-    // THE LIVE PIXEL SLOT IS A SHARED BUFFER, NOT A VECTOR.
-    //
-    // It used to be a plain vector that a reader COPIED under `mutex` — and
-    // that copy is 8 MB at 1080p, taken on the same lock the capture callback
-    // holds for every sample. So each pull (a scene build per output, the
-    // GUI's own pump) stopped the device from delivering its next frame, and
-    // each capture sample stopped every reader. On a machine already under
-    // load that handshake is what "the HDMI input lags badly" looked like: the
-    // device's effective rate was the speed of this lock being passed around,
-    // not the speed of the device.
-    //
-    // A shared_ptr makes the hand-off O(1): readers swap the POINTER under the
-    // lock and copy pixels outside it, and they copy the same buffer the
-    // capture thread has already finished with (it publishes a NEW buffer per
-    // frame, never writing into one a reader holds).
     std::shared_ptr<const std::vector<uint8_t>> latestRgba;   // tightly packed RGBA8
     uint32_t rgbaW = 0, rgbaH = 0;
-    // Bumped once per stored frame. ATOMIC so the "has anything arrived?"
-    // question (PreviewFrameSeq) costs no lock at all — it is asked on every
-    // scene build, for every output, and must never queue behind capture work.
     std::atomic<uint64_t> frameSeq{0};
     int64_t lastStoreMs = 0;            // the PANE gate (unused by a live tap)
 
@@ -416,19 +302,11 @@ struct VideoTapShared {
         return latestJpeg;
     }
 
-    // The screen/window worker's live publish: that thread does NOT hold the
-    // mutex when it hands a grab over (the camera callback does its pixel work
-    // outside it too — see StoreSampleFrame), so this takes it itself. `seq` is
-    // bumped under the same lock as the pixels, which is what makes
-    // PreviewFrameSeq/PreviewFramePixels a consistent pair for the puller.
     void PublishRgba(uint32_t w, uint32_t h, std::vector<uint8_t> rgba)
     {
         PublishRgbaFrame(std::make_shared<const std::vector<uint8_t>>(std::move(rgba)), w, h);
     }
 
-    // The same publish for a caller that already built the buffer (the camera
-    // callback, whose swizzle happens outside every lock): no second copy on the
-    // way in.
     void PublishRgbaFrame(std::shared_ptr<const std::vector<uint8_t>> rgba, uint32_t w, uint32_t h)
     {
         const std::lock_guard<std::mutex> lock(mutex);
@@ -443,27 +321,11 @@ struct VideoTapShared {
     std::atomic<IMFSourceReader *> reader{nullptr};   // borrowed; owned by the worker
     bool flushDone = false;            // OnFlush arrived: nothing is pending any more
     bool stopping = false;             // the worker released the reader — callbacks no-op
-    // The tap is dead: the stream died (unplug, driver error) OR the worker's
-    // OPEN failed (activation / reader / media type / no decodable type — those
-    // used to print to stdout and return, leaving this false, so a tap whose
-    // device never opened looked exactly like one warming up: the UI pulled an
-    // empty frame forever and showed its connecting ring with no reason
-    // anywhere, and StartPreview's idempotency check saw `running` still set and
-    // refused to retry the device for the rest of the session).
-    // Atomic because StartPreview reads it under the TABLE's mutex while the
-    // worker writes it under this state's own.
     std::atomic<bool> failed{false};
     HRESULT failure = S_OK;
     std::string failureText;           // WHY, in the platform's own words (guarded by `mutex`)
     int64_t lastEncodeMs = 0;          // the ~15 fps ceiling the sync loop got from Sleep(66)
 
-    // The ONE way a tap reports it can never produce a frame. Both workers (the
-    // camera drain and the screen/window grab) call this instead of breaking or
-    // returning silently, so `failed` means the same thing everywhere and the
-    // reason survives for the UI to ask for. `running` is cleared because a
-    // failed tap is not a running one: StartPreview's idempotency check would
-    // otherwise keep returning Ok for the rest of the session and never retry
-    // the device.
     void Fail(HRESULT hr, std::string why)
     {
         {
@@ -475,10 +337,6 @@ struct VideoTapShared {
         running.store(false);
         cv.notify_all();
     }
-    // NOT const: reading the reason takes the state's own mutex, and the guard
-    // does not own the lock — the same two-level hand-off Frame() uses. (A const
-    // reader would need a mutable mutex, which would let this one method's
-    // requirement leak into every other use of the member.)
     std::string Failure()
     {
         const std::lock_guard<std::mutex> lock(mutex);
@@ -495,24 +353,8 @@ struct WindowsVideo::PreviewTap {
     ~PreviewTap() { if (worker.joinable()) worker.join(); }
 };
 
-// A pane, not a program monitor: one ENCODED frame every ~66 ms (~15 fps) —
-// the same ceiling the synchronous loop's Sleep(66) imposed, now a throttle on
-// the encode instead of a sleep between reads. The reader therefore always
-// holds the newest frame the device delivered while the CPU cost stays put.
-// A LIVE tap ignores this gate entirely (it stores every sample as pixels — see
-// VideoTapShared::live); the constant is the pane rate and, for a live tap, the
-// rate at which the pixels are re-encoded for the small tiles that read JPEG.
 constexpr int64_t kPreviewFrameMs = 66;
-// The live tap's JPEG cadence. Its pixels are the program feed; the JPEG exists
-// for the on-screen tiles that read the SAME tap through the QML image provider
-// (a monitor tile showing the taken input, a bus card's thumbnail). It keeps the
-// pane's own 15 fps — the tiles had that before the pixel path existed and must
-// not lose it — while the frames BETWEEN jpeg ticks cost nothing but the store.
 constexpr int64_t kLiveJpegMs = 66;
-// How long the worker waits for OnFlush after cancelling the pending read. The
-// flush IS the interruptibility: past this backstop the device is ignoring the
-// cancellation, and the tap is abandoned (see the table's Clear) instead of
-// being left to block teardown forever.
 constexpr auto kFlushWait = std::chrono::milliseconds(2000);
 
 int64_t SteadyMs()
@@ -521,11 +363,6 @@ int64_t SteadyMs()
                std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// Stop-aware pause: every wait inside a capture worker is interruptible by
-// `running == false`, so a stop is honored inside one tick instead of after a
-// full Sleep. Returns false when the tap was stopped while waiting. (This is
-// the companion of the cancellable capture below: a worker that can leave its
-// own waits promptly is what makes an unbounded teardown wait unnecessary.)
 bool WaitOrStop(const std::shared_ptr<VideoTapShared> &shared, int ms)
 {
     std::unique_lock<std::mutex> lock(shared->mutex);
@@ -535,17 +372,6 @@ bool WaitOrStop(const std::shared_ptr<VideoTapShared> &shared, int ms)
     return shared->running.load();
 }
 
-// THE cancellation a GDI window capture has and PrintWindow does not.
-//
-// PrintWindow is a synchronous send of WM_PRINT: with no timeout it waits on
-// the target's UI thread forever, which is the unbounded call that used to
-// wedge teardown (and the reason a wedged tap had to be abandoned).
-// SendMessageTimeout with SMTO_ABORTIFHUNG|SMTO_BLOCK is the one primitive GDI
-// DOES bound: it gives up after the timeout and reports failure. Probing with
-// it before every window grab means PrintWindow is only ever entered for a
-// window whose message queue answered within the bound — so the worker always
-// returns and `running == false` is always honored. (WM_NULL is the canonical
-// "are you answering?" probe and does not disturb the target.)
 constexpr UINT kWindowProbeMs = 200;
 bool WindowIsAnswering(HWND hwnd)
 {
@@ -555,28 +381,8 @@ bool WindowIsAnswering(HWND hwnd)
 }
 
 namespace {
-// Declared ahead: the async frame store below encodes JPEGs, and the encoder
-// (with the shared GDI+ boot) is defined further down in THIS unnamed namespace
-// — every unnamed-namespace block in a translation unit is the same namespace,
-// so this declares that very function. A declaration at bps::platform scope
-// instead would be a second, different overload.
 std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 stride, UINT32 quality);
 
-// BT.601 limited-range YUV -> BGRA, as 16-bit fixed point (the float path's
-// own coefficients, x65536 and rounded) — this is the fallback the capture
-// callback hits for devices whose own driver (or the Source Reader's
-// MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING — already on, see the
-// tap's own setup) still would not hand over RGB32 directly, the integrated
-// webcam among them per that call site's own comment. It ran on this same
-// callback thread as raw float math (per-pixel multiply/compare/convert,
-// several of them re-evaluating the identical expression up to three times
-// for one clamp — see the NV12 branch this replaces) at full capture
-// resolution, every frame — a believable source of the reported "camera
-// source... lagging, especially... on CPU". Integer multiply+shift carries
-// no float-to-int conversion cost and the compiler auto-vectorizes a tight
-// integer loop far more readily than one built from float ternary clamps.
-// cb/cr are the caller's own u-128/v-128 offset (kept as ints, not computed
-// twice per pixel here).
 inline void Yuv601ToBgra(int y, int cb, int cr, uint8_t *dst)
 {
     const int r = y + ((91881 * cr) >> 16);
@@ -589,18 +395,6 @@ inline void Yuv601ToBgra(int y, int cb, int cr, uint8_t *dst)
 }
 } // namespace
 
-// RGB32 / YUY2 / NV12 -> the tap's published forms — the conversions the
-// synchronous loop used, verbatim.
-//
-// CALLER HOLDS NO LOCK. This runs on Media Foundation's sample callback, i.e. on
-// the CAPTURE PATH, and it is the frame the device's own rate is made of: every
-// microsecond spent inside `shared.mutex` here is a microsecond the device
-// cannot deliver its next sample — and a microsecond the renderer's pull, the
-// GUI's pull and this callback spend queuing behind each other (they all take
-// that same mutex). So the swizzle writes into a buffer nobody else can see
-// yet, the JPEG is encoded unlocked, and only the finished buffers are swapped
-// in (see PublishRgbaFrame / Publish). The async contract owns the sample only
-// for this call's duration, so everything still happens before it returns.
 void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
 {
     IMFSourceReader *reader = shared.reader.load();
@@ -610,12 +404,6 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
     BYTE *data = nullptr;
     DWORD maxLen = 0, curLen = 0;
     if (SUCCEEDED(buf->Lock(&data, &maxLen, &curLen)) && data) {
-        // Frame geometry + subtype from the CURRENT type (post-conversion) —
-        // BOTH read before the release (an earlier shape released first and
-        // read the subtype from the dangling pointer: a use-after-free that
-        // took the test binary down mid-pal). Then a size cross-check against
-        // the buffer the reader actually delivered — never read past a short
-        // buffer.
         IMFMediaType *cur = nullptr;
         UINT32 w = 0, h = 0;
         GUID subtype = {};
@@ -629,15 +417,6 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
             cur->GetGUID(MF_MT_SUBTYPE, &subtype);
             cur->Release();
         }
-        // ONE publish path for every subtype: the branch below only decides how
-        // to reach a packed BGRA picture, and this does the rest — build the
-        // pixels for a live tap (swizzled to RGBA8, the IVideo contract), then
-        // encode the JPEG a live tap re-encodes at kLiveJpegMs, a pane tap on
-        // every sample (its caller already applied the kPreviewFrameMs gate).
-        //
-        // NO LOCK IS HELD ACROSS THE WORK (see this function's header): the tap's
-        // mutex is taken only for the swaps, never across the swizzle or the
-        // encode.
         const auto publish = [&shared, w, h](const uint8_t *bgra, UINT32 stride) {
             const bool live = shared.live.load(std::memory_order_relaxed);
             if (live) {
@@ -653,15 +432,8 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
                         dst[3] = 0xFF;
                     }
                 }
-                // The hand-over is one pointer move: the buffer is complete, so
-                // a reader that takes it copies OUTSIDE every lock while the
-                // next sample overwrites a different buffer entirely.
                 shared.PublishRgbaFrame(std::move(rgba), w, h);
             }
-            // THE JPEG'S RATE: decided under the lock (it is that timestamp's),
-            // paid for outside it — a 1080p encode is milliseconds, and the
-            // capture callback must not hand those to every other thread that
-            // waits on the tap.
             {
                 const std::lock_guard<std::mutex> lock(shared.mutex);
                 const int64_t now = SteadyMs();
@@ -677,9 +449,6 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
             publish(data, w * 4);   // contiguous RGB32, BGRA byte order
         } else if (w > 0 && h > 0 && subtype == MFVideoFormat_YUY2
                    && curLen >= static_cast<DWORD>(w) * h * 2) {
-            // YUY2 packed 4:2:2 — [Y0 U Y1 V] per pixel pair. The
-            // BT.601 limited-range lift used by every capture stack, now the
-            // fixed-point form (Yuv601ToBgra) — see its own comment.
             std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 4);
             for (UINT32 y = 0; y < h; ++y) {
                 const uint8_t *src = data + static_cast<size_t>(y) * w * 2;
@@ -696,15 +465,6 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
             publish(rgb.data(), w * 4);
         } else if (w > 0 && h > 0 && subtype == MFVideoFormat_NV12
                    && curLen >= static_cast<DWORD>(w) * h * 3 / 2) {
-            // NV12 planar 4:2:0 — full-res Y plane, then interleaved
-            // UV at half resolution. Same BT.601 lift as YUY2, same
-            // fixed-point form (Yuv601ToBgra) — see its own comment. Also
-            // now reads cb/cr ONCE per horizontal pair instead of once per
-            // pixel (both pixels of a 4:2:0 pair always shared the same
-            // chroma anyway, via x & ~1u below — the original just repeated
-            // the lookup and the subtract for the second pixel of every
-            // pair). The integrated webcam delivers this when its driver
-            // refuses the reader's RGB32 conversion.
             std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 4);
             const uint8_t *yPlane = data;
             const uint8_t *uvPlane = data + static_cast<size_t>(w) * h;
@@ -739,15 +499,6 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
     buf->Release();
 }
 
-// The Source Reader callback. ASYNC mode is what makes a read INTERRUPTIBLE:
-// a synchronous ReadSample can sit inside the camera driver forever (the
-// observed MFPlat!MFCreateMediaEvent hang), whereas Flush cancels a pending
-// async request and reports completion through OnFlush — so the tap can always
-// be shut down instead of abandoned (see the table's Clear and PreviewThread).
-//
-// Every method is called from MF's own worker threads, and the object is held
-// by the reader for as long as the reader lives, so its shared state — never
-// the tap — is the only thing it touches.
 class SourceReaderNotify final : public IMFSourceReaderCallback {
 public:
     explicit SourceReaderNotify(std::shared_ptr<VideoTapShared> shared)
@@ -780,11 +531,6 @@ public:
     STDMETHODIMP OnReadSample(HRESULT hr, DWORD /*stream*/, DWORD flags,
                               LONGLONG /*timestamp*/, IMFSample *sample) override
     {
-        // THE STORE IS NOT DONE UNDER THE LOCK (see StoreSampleFrame): this
-        // callback IS the capture path, and holding the tap's mutex across a
-        // swizzle plus a JPEG encode (and across every reader's 8 MB frame copy)
-        // is what made a live HDMI feed lag when the machine got busy. The lock
-        // below covers only the tap's flags and the read handshake.
         bool stopping = false;
         bool store = false;
         {
@@ -802,11 +548,6 @@ public:
                 return S_OK;
             }
             if (sample && !(flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
-                // A LIVE tap stores EVERY sample — the camera's own rate is the
-                // program rate (the missing half of the "video bus lags on HDMI
-                // and NDI" fix; the other half is that this gate used to be the
-                // only rate the compositor ever saw). A pane tap keeps the 15
-                // fps gate, which is what keeps a wall of thumbnails cheap.
                 const bool live = shared_->live.load(std::memory_order_relaxed);
                 const int64_t now = SteadyMs();
                 if (live || now - shared_->lastStoreMs >= kPreviewFrameMs) {
@@ -817,9 +558,6 @@ public:
         }
         if (store)
             StoreSampleFrame(*shared_, sample);
-        // Re-arm under the lock, so the worker cannot release `reader` between
-        // the load and the call (a cancelled read that raced that far would be a
-        // call into a released object).
         {
             const std::lock_guard<std::mutex> lock(shared_->mutex);
             stopping = stopping || !shared_->running.load() || shared_->stopping;
@@ -851,31 +589,11 @@ private:
     std::shared_ptr<VideoTapShared> shared_;
 };
 
-// Screen taps key by the monitor id ("\\\.\DISPLAY1" from IMonitor's
-// Enumerate) in the SAME table as camera taps — the id namespaces cannot
-// collide ("\\\.\DISPLAY" vs camera symlinks), and PreviewFrame/Stop stay
-// single-surface for the bridge.
-
 struct WindowsVideo::PreviewTable {
     std::mutex mutex;
     std::map<std::string, std::unique_ptr<PreviewTap>> taps;
 
     // ---- Why a tap died, answered WITHOUT the table's lock -------------------
-    //
-    // `mutex` is taken by a capture worker around every open/close AND by the
-    // publishing hand-off, so a card asking "why is this tap dead?" used to queue
-    // behind a worker — the same shape as the audio meter's reader (see
-    // WindowsAudio's InputLevels, and §3.1 of docs/gui_thread_audit.md).
-    //
-    // The answer it wants is a STABLE fact: a tap's failure text is written once,
-    // when the tap dies, and the tap is then REMOVED from `taps`. So a reader that
-    // finds the table busy can repeat the text it last read, as long as the tap
-    // SET has not changed since. `generation` is what makes that a statement
-    // rather than a guess: it is bumped on every insertion and removal, and every
-    // cached answer carries the generation it was read under — so a tap that has
-    // since appeared or gone answers honestly (nothing) instead of being
-    // explained by a reason that belonged to a different tap. The cache itself
-    // sits under the reader's OWN mutex, which no worker can hold.
     std::atomic<uint64_t> generation{0};
 
     std::string LastFailure(const std::string &deviceId, uint64_t gen) const
@@ -895,40 +613,11 @@ struct WindowsVideo::PreviewTable {
     }
 
     // ---- Reaping: HOW A TAP DIES WITHOUT BLOCKING ITS CALLER -------------
-    //
-    // A PreviewTap joins its capture worker in its destructor, and that join
-    // waits for whatever the worker is inside. Every tap is now CANCELLABLE,
-    // so that wait is bounded by one worker iteration: a camera read is
-    // cancelled by Flush (see PreviewThread / the ASYNC note on
-    // SourceReaderNotify), and a screen/window grab is gated on a bounded
-    // probe before any PrintWindow (see WindowIsAnswering) with stop-aware
-    // waits between grabs. Reaping still happens off the caller's thread — the
-    // join is short now, but the callers of the stop path include the GUI
-    // thread and must never wait on capture work at all.
-    //
-    // The callers of the stop path include the GUI thread:
-    // EngineBridge::stopAllVideoPreviews() runs from the Audio & Video screen's
-    // Component.onDestruction — i.e. the instant the operator clicks another
-    // Settings page — and stopScreenPreview/stopVideoPreview run from the
-    // source-edit dialog when a tap is re-pointed. Joining inline there is the
-    // observed "clicking Plugins with a LIVE screen source closes the app"
-    // crash: the GUI thread stopped pumping and Windows answered with an
-    // AppHangB1 kill (the crash record is empty because a hang kill is not an
-    // exception: only the CallTrace watchdog saw it, 5 s in, with nothing
-    // instrumented in flight).
-    //
-    // So a dying tap is HANDED TO A REAPER THREAD that owns it, joins it and
-    // dies. Erase() never waits; the tap's own destructor still does the join,
-    // just not on the thread the operator is waiting on.
     void Reap(std::unique_ptr<PreviewTap> tap)
     {
         if (!tap)
             return;
         {
-            // Counted BEFORE the thread starts, and cleared by the reaper
-            // itself: Clear() (teardown) waits on this, so no capture worker can
-            // outlive the table it publishes into. NOT static — the counter is
-            // per table.
             const std::lock_guard<std::mutex> lock(reapMutex_);
             ++reaping_;
         }
@@ -952,9 +641,6 @@ struct WindowsVideo::PreviewTable {
             auto it = taps.find(deviceId);
             if (it == taps.end())
                 return;
-            // The stop flag lives in the SHARED state (the camera callback reads
-            // it off an MF thread), and the notify wakes the worker out of its
-            // stop wait instead of leaving it to its polling tick.
             it->second->shared->running.store(false);
             it->second->shared->cv.notify_all();
             tap = std::move(it->second);
@@ -966,24 +652,6 @@ struct WindowsVideo::PreviewTable {
         Reap(std::move(tap));   // join OFF this thread — see Reap
     }
 
-    // The TEARDOWN path (the PAL's own destruction, and nothing else — EngineBridge's
-    // shutdown/`Manager().Clear()` never reaches this table). It signals every
-    // tap, reaps them, then waits for every capture worker to be gone before the
-    // table is destroyed: a worker left publishing into `mutex` after the table
-    // dies would be use-after-free, which is the guarantee the inline join
-    // provided and the reason this cannot simply detach and forget.
-    //
-    // THE WAIT IS FULL, and deliberately so. It used to be bounded with a
-    // leak-the-table fallback on timeout, because a screen/window tap could be
-    // parked in PrintWindow against a wedged window with no way out. Both
-    // halves of that are gone: the tap's own waits are
-    // stop-aware and its window capture is gated on a bounded probe, and a
-    // camera tap's read is cancelled by Flush — so a worker always observes
-    // `running == false` and returns, and waiting for it is what makes
-    // destroying the table safe. (The old unbounded wait that froze shutdown
-    // was waiting on MF's synchronous read; that call no longer exists.)
-    // A slow worker is REPORTED rather than silently leaked, so a genuine
-    // regression shows up in the log instead of as a mystery leak.
     void Clear()
     {
         std::map<std::string, std::unique_ptr<PreviewTap>> all;
@@ -1009,21 +677,11 @@ struct WindowsVideo::PreviewTable {
         }
     }
 
-    // The ONLY owner (WindowsVideo::previews_) calls Clear() first, which is the
-    // whole teardown contract now that every worker is cancellable: no table can
-    // outlive the PAL that owns it.
     ~PreviewTable() = default;
 
 private:
-    // How often teardown reports a worker that is slow to exit. Healthy taps
-    // exit in milliseconds (they see running == false between reads and inside
-    // every stop-aware wait); this is a diagnostic interval, not a give-up
-    // point, because there is nothing left to give up on — see Clear().
     static constexpr std::chrono::milliseconds kReapReport{2000};
 
-    // The reader-only half of LastFailure/RememberFailure: its mutex is taken by
-    // readers and by nothing a capture worker runs (see the generation comment
-    // above), so it can only ever be contended by the other reader.
     mutable std::mutex failureMutex_;
     mutable std::map<std::string, std::pair<uint64_t, std::string>> failureCache_;
 
@@ -1032,44 +690,17 @@ private:
     int reaping_ = 0;
 };
 
-
 WindowsVideo::WindowsVideo() : previews_(std::make_shared<PreviewTable>()) {}
 
 WindowsVideo::~WindowsVideo()
 {
     if (!previews_)
         return;
-    // Clear() cancels and reaps every tap, then waits for the workers to exit —
-    // a full wait, because every capture worker is now cancellable (camera:
-    // Flush; screen/window: bounded probe + stop-aware waits). There is no
-    // keep-alive list any more: nothing can be left parked in an unbounded
-    // driver call, so the table is always safely destroyable here.
     previews_->Clear();
     previews_.reset();
 }
 
 namespace {
-
-// Encode raw BGRA pixels to JPEG via GDI+ (shipped with Windows; the same
-// encoder Windows' own snipping tools use). Returns empty on any failure —
-// the tap then keeps the previous frame instead of publishing garbage.
-//
-// GDIP BOOT: each DRAIN THREAD resolves GdiplusStartup once at its own
-// start (thread_local) — the lazy static inside the encode path raced the
-// GUI thread's first requestImage decode, and GDI+ startup itself is not
-// guaranteed reentrant. GDI+ IS multi-thread-safe once started, so one
-// process-wide init from the first tap thread + per-encode token
-// scope (the documented contract) is the safe shape.
-// GDI+ boot-once-per-process, shared by EncodeJpeg and DecodeJpeg below
-// (each DRAIN THREAD calls this before its first encode; SceneBuilder's
-// worker thread calls it before its first decode — GDI+ is documented
-// multi-thread-safe once started, so one shared token serves every caller).
-//
-// START ONCE PER PROCESS, NEVER SHUTDOWN: an earlier per-call
-// Startup/Shutdown cycle crashed the process seconds into a live stream
-// (GDI+ keeps background worker threads that outlive each cycle). One
-// deliberate init kept for the process lifetime is the standard pattern
-// for long-lived GDI+ hosts.
 bool EnsureGdiplusStarted()
 {
     // The real GdiplusStartup signature: (token*, input*, output*).
@@ -1139,10 +770,6 @@ std::vector<uint8_t> EncodeJpeg(const uint8_t *bgra, UINT32 w, UINT32 h, UINT32 
     return out;
 }
 
-// Decode JPEG bytes into tightly-packed top-down RGBA8 via GDI+ — the
-// inverse of EncodeJpeg, same shared boot-once. Empty on any failure (a
-// corrupt/partial frame, or GDI+ unavailable) — the caller just skips that
-// render rather than compositing garbage.
 struct RawRgba { UINT32 width = 0; UINT32 height = 0; std::vector<uint8_t> rgba; };
 
 RawRgba DecodeJpeg(const uint8_t *jpeg, size_t size)
@@ -1175,10 +802,6 @@ RawRgba DecodeJpeg(const uint8_t *jpeg, size_t size)
                 for (UINT y = 0; y < h; ++y) {
                     const uint8_t *row = base + static_cast<size_t>(y) * data.Stride;
                     for (UINT x = 0; x < w; ++x) {
-                        // GDI+'s ARGB32 is byte order B,G,R,A — the engine's
-                        // RGBA8 convention (SceneBuilder's own Picture->
-                        // RgbaImage conversion, LoadImageCached above) wants
-                        // R,G,B,A.
                         const uint8_t *px = row + static_cast<size_t>(x) * 4;
                         uint8_t *dst = &out.rgba[(static_cast<size_t>(y) * w + x) * 4];
                         dst[0] = px[2];
@@ -1194,27 +817,12 @@ RawRgba DecodeJpeg(const uint8_t *jpeg, size_t size)
     stream->Release();
     return out;
 }
-
 } // namespace
 
-// (A member-function definition must live OUTSIDE the anonymous namespace
-// above — GCC rejects it inside. EncodeJpeg stays hidden there; the tap
-// thread below is a WindowsVideo member and stays visible.)
-
-// The drain thread: open the device in a Source Reader, request RGB32 at
-// the UI's picked frame size when one was given (falls back to the native
-// default), loop ReadSample → JPEG → publish. Exits when the tap's running
-// flag drops, the device vanishes (MF_E_NO_MORE_TYPES on a hot-unplug
-// surfaces as a read failure), or the encoder never engages.
 void WindowsVideo::PreviewThread(PreviewTap &tap)
 {
     ScopedComInit com;
 
-    // EVERY WAY THIS WORKER CAN DIE SAYS SO. `hr` is S_OK for the failures that
-    // are not HRESULTs ("no decodable media type"); the point is not the code but
-    // the FLAG: VideoTapShared::Fail is how the UI learns that a preview it
-    // started will never produce a frame, and the stdout line stays as the PAL's
-    // own telemetry.
     const auto fail = [&tap](HRESULT hr, const char *why) {
         tap.shared->Fail(hr, why);
         std::printf("[videopreview] %s for %s (0x%08lX)\n", why, tap.deviceId.c_str(),
@@ -1222,16 +830,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         std::fflush(stdout);
     };
 
-    // Open the EXACT device — by symbolic link, never by enumeration order.
-    // MFEnumDeviceSources IGNORES the symbolic-link/friendly-name attributes
-    // as enumeration filters (telemetry: a symlink-filtered query returned
-    // ALL 10 cameras, and activates[0] was always the first device), so both
-    // "filtered" lookups here previously resolved every id to whatever camera
-    // enumerated first and every tap opened the SAME physical camera. The
-    // documented per-device open is MFCreateDeviceSource with the symlink
-    // attribute set — it matches that symlink alone and touches no other
-    // device. (MFCreateDeviceSourceActivate is not declared in MinGW's
-    // headers; the IMFMediaSource this thread needs comes straight back.)
     IMFMediaSource *source = nullptr;
     {
         IMFAttributes *attrs = nullptr;
@@ -1247,12 +845,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
     }
     IMFActivate *activate = nullptr;
     if (!source) {
-        // Fallback: enumerate every camera and match the symlink MANUALLY
-        // (case-insensitive), friendly name second — a re-plugged device can
-        // change its symlink suffix, and the roster name is then the last
-        // honest key. Nothing is released until the winner is picked: an
-        // earlier shape released non-matches while scanning and the name
-        // pass then walked dangling pointers.
         IMFAttributes *attrs = nullptr;
         if (SUCCEEDED(MFCreateAttributes(&attrs, 1)) && attrs) {
             attrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
@@ -1307,25 +899,7 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
     }
 
     IMFSourceReader *reader = nullptr;
-    // The callback: one reference is ours (released on every exit below), the
-    // reader's attribute store AddRefs it a second time and, if creation fails,
-    // releases that one again — so exactly one Release at the end balances it
-    // either way.
     SourceReaderNotify *notify = new SourceReaderNotify(tap.shared);
-    // Advanced video processing ON: several camera stacks (the integrated
-    // webcam among them) have no native RGB32 type and their built-in
-    // converter refused a plain subtype-override, so the reader must be
-    // allowed to insert its own video processor (deinterlace/colorspace
-    // MFT) for the NV12→RGB32 hop. Without it the frames arrive NV12 and
-    // every one fails the RGB32 buffer check ("frame skipped" spam) — the
-    // "integrated cam shows nothing" defect.
-    //
-    // And MF_SOURCE_READER_ASYNC_CALLBACK, which is what makes the tap
-    // interruptible: in async mode ReadSample returns at once and OnReadSample
-    // reports completion, so Flush can cancel a read the driver has stopped
-    // answering. A SYNCHRONOUS reader must never be created here — its
-    // ReadSample is precisely the call that cannot be cancelled (see
-    // SourceReaderNotify). Once created, a reader's mode cannot be switched.
     {
         IMFAttributes *readerAttrs = nullptr;
         if (SUCCEEDED(MFCreateAttributes(&readerAttrs, 2)) && readerAttrs) {
@@ -1337,9 +911,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         }
     }
     if (!reader) {
-        // Attr path failed outright — retry with the async callback alone; the
-        // YUY2 fallback below still covers the native formats this device
-        // delivers.
         IMFAttributes *asyncOnly = nullptr;
         if (SUCCEEDED(MFCreateAttributes(&asyncOnly, 1)) && asyncOnly) {
             asyncOnly->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, notify);
@@ -1355,19 +926,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         }
     }
 
-    // Steer the reader to RGB32 at the UI's picked frame size: walk the
-    // device's native types, prefer the first whose size matches the pick
-    // (width×height; the fps in the pick only breaks ties between same-size
-    // types), else fall back to type 0 (the device default). Sensors hand
-    // us NV12/YUY2 — the reader's built-in converter makes RGB32.
-    //
-    // DECODABLE-TYPES ONLY: some virtual cameras (NDI Webcam) expose ONLY
-    // H264/HEVC native types, and driving the reader through their built-in
-    // decoder crashes inside that driver. Restricted to formats this tap
-    // can actually consume (uncompressed RGB32/NV12/YUY2/IYUV + MJPG), a
-    // device with no such type gets its stream rejected EARLY with
-    // Unsupported instead of crashing mid-ReadSample. MJPG is kept: the
-    // reader decodes it reliably and it is a common capture-card type.
     UINT32 wantW = 0, wantH = 0;
     {
         const size_t x = tap.mode.find('x');
@@ -1430,23 +988,12 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         }
     }
     if (!found) {
-        // H264/HEVC-only virtual cam (NDI Webcam et al.): this tap cannot
-        // consume its stream without the driver's own decoder path, which
-        // is what crashes. Refuse cleanly — the UI keeps its glyph and the
-        // device stays usable by the graph capture path.
-        // H264/HEVC-only virtual cam (NDI Webcam et al.) — the same honest
-        // failure the other early exits now report (this one is not an HRESULT).
         fail(S_OK, "no decodable media type (H264-only virtual cam?)");
         reader->Release();
         notify->Release();
         source->Release();
         return;
     }
-    // THE DOCUMENTED TWO-STEP: select a COMPLETE native type first (a fresh
-    // reader has NO current type — setting only a partial RGB32 type on top
-    // of nothing fails on most cameras, and the tap died there before ever
-    // reading a frame), THEN set the partial RGB32 type so the reader's
-    // built-in converter kicks in.
     IMFMediaType *native = nullptr;
     if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                                              chosen, &native)) && native) {
@@ -1455,14 +1002,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         native->Release();
     }
     if (typeSet) {
-        // CLONE-AND-OVERRIDE, not a bare partial type: a fresh RGB32 type
-        // with only major+subtype set is refused by many cameras (no frame
-        // rate/size attributes) — the reader then silently stays on the
-        // NATIVE format (NV12/YUY2), and every downstream frame fails the
-        // RGB32 buffer check (skipped forever, pane never lights). Cloning
-        // the selected native type and overriding ONLY the subtype keeps
-        // the geometry the device agreed to and asks the reader's built-in
-        // converter for RGB32 — the documented, always-accepted form.
         IMFMediaType *nativeType = nullptr;
         if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                                                  chosen, &nativeType)) && nativeType) {
@@ -1470,12 +1009,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
             if (SUCCEEDED(MFCreateMediaType(&rgb)) && rgb) {
                 nativeType->CopyAllItems(rgb);
                 rgb->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-                // CRITICAL: drop the native format's MF_MT_DEFAULT_STRIDE —
-                // it says 2560 (YUY2's 2-byte stride), which contradicts
-                // RGB32's 4-byte stride and makes SetCurrentMediaType fail
-                // (MF_E_INVALIDMEDIATYPE). Deleting it lets the converter
-                // compute the RGB32 stride itself. (Telemetry proved the
-                // missing DeleteItem: frames kept arriving YUY2.)
                 rgb->DeleteItem(MF_MT_DEFAULT_STRIDE);
                 rgb->DeleteItem(MF_MT_AVG_BITRATE);   // YUY2's bitrate, same inconsistency
                 if (FAILED(reader->SetCurrentMediaType(
@@ -1489,9 +1022,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         }
     }
     if (!typeSet) {
-        // No Qt logging in the engine's PAL — printf telemetry (the UI keeps
-        // its glyph; the honest "no frames" signal), plus the flag that lets the
-        // bridge SAY so instead of leaving a ring spinning forever.
         fail(S_OK, "media type selection failed");
         reader->Release();
         notify->Release();
@@ -1500,13 +1030,6 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
     }
 
     // ---- the read chain: ASYNC, and therefore INTERRUPTIBLE ----------------
-    // ReadSample returns immediately and OnReadSample drives the chain from
-    // MF's own thread (see SourceReaderNotify); the frame conversions run there,
-    // inside the callback that owns its sample for exactly one call. Nothing on
-    // THIS thread blocks inside the driver any more, which is the whole point: a
-    // synchronous ReadSample sat in MFPlat!MFCreateMediaEvent indefinitely when
-    // a device stopped answering, and the only way out was to abandon the
-    // thread.
     tap.shared->reader.store(reader);
     {
         const std::lock_guard<std::mutex> lock(tap.shared->mutex);
@@ -1515,22 +1038,12 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
                                nullptr, nullptr, nullptr, nullptr);
     }
 
-    // Wait for the stop flag (the table sets it on Erase, Clear and re-point) or
-    // for the stream to die. The tick is a backstop for a missed wakeup, not the
-    // mechanism — the table and the callback both notify.
     {
         std::unique_lock<std::mutex> lock(tap.shared->mutex);
         while (tap.shared->running.load() && !tap.shared->failed)
             tap.shared->cv.wait_for(lock, std::chrono::milliseconds(250));
     }
     // ---- deterministic shutdown -------------------------------------------
-    // Cancel the request that is still out there, wait for OnFlush to report
-    // the cancellation, THEN release the reader with every callback already
-    // retired. `stopping` is what makes a late OnReadSample harmless: one may
-    // still be delivered (MF does not promise the callback order around a
-    // flush), but it finds the flag set and touches neither the reader nor
-    // anything else. That is the difference between this and the old bounded
-    // wait: the tap is shut down, not abandoned.
     {
         std::unique_lock<std::mutex> lock(tap.shared->mutex);
         // No further requests: a callback still racing below must not re-arm the
@@ -1552,23 +1065,9 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
     source->Release();
 }
 
-// The screen tap: BitBlt the monitor into a DIB section, downscale to the
-// pane budget, JPEG, publish — every ~66 ms, same shape as the camera drain.
-// The thread owns its own HDCs (created and released on that thread). Each
-// grab re-resolves the monitor by NAME so a display-settings change or
-// unplug surfaces as a missing HDC instead of garbage pixels.
-//
-// WINDOW branch: a "win:<hwnd>" id PrintWindows that window instead. The
-// per-grab IsWindow check ends the tap cleanly when the window closes
-// (the UI re-enumerates on dialog open, so stale ids self-heal).
 void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
 {
     const bool isWindow = tap.deviceId.rfind("win:", 0) == 0;
-    // The screen tap's reason, in the same shape as the camera tap's: a window
-    // that closed, a monitor that vanished and a source that stopped blitting
-    // are all "this preview can never produce another frame", so the UI can say
-    // so (and a later StartScreenPreview may retry the source) instead of
-    // showing a connecting ring over a dead tap.
     const auto giveUp = [&tap](const char *why) {
         tap.shared->Fail(S_OK, why);
         std::printf("[screenpreview] %s for %s\n", why, tap.deviceId.c_str());
@@ -1587,16 +1086,6 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
             giveUp("window closed");
             break;
         }
-        // A minimized window isn't composited by DWM at all — PrintWindow
-        // (even with PW_RENDERFULLCONTENT) doesn't fail, it just returns
-        // TRUE with a black/blank bitmap, which used to publish silently as
-        // a real frame (a live capture that's actually just solid black,
-        // indistinguishable from a genuine capture bug). Wait it out
-        // OUTSIDE the consecutiveFailures/give-up accounting below — a
-        // minimized source can stay that way for minutes and come back;
-        // treating it as a "failed grab" would kill the tap after ~20
-        // strikes (under a second), same mistake the give-up threshold
-        // exists to avoid for a real transient failure.
         if (isWindow && IsIconic(hwnd)) {
             if (!wasMinimized) {
                 std::printf("[screenpreview] window minimized, holding last frame: %s\n",
@@ -1608,13 +1097,6 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
             continue;
         }
         wasMinimized = false;
-        // A window that is not answering its message queue is HELD, not
-        // captured: PrintWindow would block until it answers — the unbounded
-        // call this tap can no longer make — while the probe itself is bounded
-        // (see WindowIsAnswering). Like the minimized branch above, this is not
-        // counted as a failed grab: a heavy page can stop answering for seconds
-        // and come back, and a window that stays wedged ends the tap through
-        // the same IsWindow/give-up paths instead of being captured mid-wedge.
         if (isWindow && !WindowIsAnswering(hwnd)) {
             if (!wasUnanswering) {
                 std::printf("[screenpreview] window not answering, holding last frame: %s\n",
@@ -1628,22 +1110,10 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
         wasUnanswering = false;
         HDC screenDc = nullptr;
         if (!isWindow) {
-            // A per-monitor DC: CreateDCW on the GDI device name captures
-            // THAT display only (its HORZRES/VERTRES are the monitor's own
-            // size), so multi-monitor rigs never bleed into each other and a
-            // gone monitor just fails DC creation. Re-created each grab so
-            // resolution changes are picked up without a tap restart.
             screenDc = CreateDCW(monitor.c_str(), nullptr, nullptr, nullptr);
         }
-        // Memory DC in BOTH branches: PrintWindow wants a compatible DC, and
-        // the previous GetDC(nullptr) display DC leaked one GDI object per
-        // grab (it pairs with ReleaseDC, never the DeleteDC below) — 15 fps of
-        // those exhausted the process GDI quota in minutes and hung the UI.
         HDC memDc = CreateCompatibleDC(screenDc);
         if (!screenDc && !memDc) {
-            // Transient (display-mode change, sleeping panel) vs gone: ride out
-            // a short failure streak before ending the tap — a mode change must
-            // not kill a tap whose comment promises it survives one.
             if (++consecutiveFailures < 20) {
                 WaitOrStop(tap.shared, 100);
                 continue;
@@ -1665,15 +1135,6 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
             WaitOrStop(tap.shared, 66);
             continue;
         }
-        // Downscale to ~960 wide (was 640) — a text-heavy capture (a chat/
-        // meeting window, small UI text) turned to mush after 640px + a
-        // quality-70 JPEG: fine text needs more source pixels before
-        // compression, not just a higher quality setting, or the encoder
-        // is starting from data that's already lost the detail.
-        //
-        // A LIVE tap (a screen/window bus on the on-air slide) is not a pane:
-        // it grabs at the source's own size, so the picture the outputs show is
-        // the desk's, not a 960-wide blow-up of it.
         const bool live = tap.shared->live.load(std::memory_order_relaxed);
         const int dstW = live ? srcW : std::min(srcW, 960);
         const int dstH = live ? srcH : std::max(1, srcH * dstW / srcW);
@@ -1692,13 +1153,6 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
             SetStretchBltMode(memDc, COLORONCOLOR);
             BOOL blitOk = FALSE;
             if (isWindow) {
-                // PW_RENDERFULLCONTENT (Win 8.1+) includes DWM-composited
-                // content — Chromium/Qt clients render correctly — but it
-                // renders the window 1:1 and CANNOT scale: pointing it at
-                // the pane-sized DIB captured only the window's top-left
-                // corner, magnified (the "zoomed in, not the full window"
-                // report). Render at FULL client size into a transient DIB,
-                // then one GDI StretchBlt down into the pane-sized one.
                 BITMAPINFO fbi{};
                 fbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
                 fbi.bmiHeader.biWidth = srcW;
@@ -1732,10 +1186,6 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
                 const UINT32 stride = static_cast<UINT32>(dstW) * 4;
                 const int64_t now = SteadyMs();
                 if (live) {
-                    // Pixels for the compositor: the DIB is BGRA top-down, the
-                    // IVideo contract is RGBA8 — the same swizzle the camera
-                    // tap's live publish does, for the same reason (one format
-                    // between the PAL and every puller).
                     std::vector<uint8_t> rgba(static_cast<size_t>(stride) * dstH);
                     const uint8_t *src = static_cast<const uint8_t *>(bits);
                     for (size_t i = 0; i < rgba.size(); i += 4) {
@@ -1748,13 +1198,6 @@ void WindowsVideo::ScreenPreviewThread(PreviewTap &tap)
                                             static_cast<uint32_t>(dstH), std::move(rgba));
                     gotFrame = true;
                 }
-                // The JPEG is the small tiles' feed: every grab for a pane (the
-                // caller's own ~15 fps wait paces it), 5 Hz for a live tap whose
-                // real output is the pixels above.
-                // The timestamp is the TAP's, and the camera path now owns it
-                // under the tap's mutex (see StoreSampleFrame) — so read and
-                // stamp it there too, and encode outside (a 1080p encode is
-                // milliseconds; it must not be under the lock).
                 bool encodeJpeg = true;
                 {
                     const std::lock_guard<std::mutex> frameLock(tap.shared->mutex);
@@ -1816,9 +1259,6 @@ Result<void> WindowsVideo::StartScreenPreview(const std::string &monitorId)
     {
         const std::lock_guard<std::mutex> lock(previews_->mutex);
         auto &slot = previews_->taps[monitorId];
-        // Idempotent for a tap that is actually WORKING; a tap whose worker died
-        // (see PreviewThread's `fail`) is replaced, so a monitor previewed after
-        // a failure starts again instead of returning Ok for a dead tap.
         if (slot && slot->shared->running.load() && !slot->shared->failed.load())
             return Ok();
         if (slot) {
@@ -1833,9 +1273,6 @@ Result<void> WindowsVideo::StartScreenPreview(const std::string &monitorId)
         slot = std::move(tap);
         previews_->generation.fetch_add(1, std::memory_order_acq_rel);   // see PreviewFailure
     }
-    // Re-pointed source: the replaced tap leaves through the REAPER, not an
-    // inline join — its capture worker may be parked in PrintWindow right now,
-    // and this call comes from the UI (the source-edit dialog).
     previews_->Reap(std::move(stale));
     return Ok();
 }
@@ -1849,14 +1286,6 @@ Result<void> WindowsVideo::StopScreenPreview(const std::string &monitorId)
 Result<void> WindowsVideo::StartPreview(const std::string &deviceId, const std::string &mode,
                                         const std::string &deviceName)
 {
-    // EngineBridge supplies the friendly name from its cached roster. This
-    // call only records the request and starts the capture worker; all Media
-    // Foundation discovery and device opening stays off the GUI thread.
-
-    // NDI virtual cameras crash their own driver DLL in-process during
-    // activation (before any media-type negotiation). Their feed belongs
-    // to the dedicated NDI pipeline anyway — refuse BEFORE any activation
-    // instead of taking the whole process down.
     std::string lowerName = deviceName;
     std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1868,10 +1297,6 @@ Result<void> WindowsVideo::StartPreview(const std::string &deviceId, const std::
     {
         const std::lock_guard<std::mutex> lock(previews_->mutex);
         auto &slot = previews_->taps[deviceId];
-        // Idempotent for a tap that is actually WORKING; a tap whose open failed
-        // is replaced here, so re-picking a camera that was unplugged or busy
-        // opens it again instead of returning Ok for a tap that can never
-        // produce a frame (see PreviewThread's `fail`).
         if (slot && slot->shared->running.load() && !slot->shared->failed.load())
             return Ok();
         if (slot) {
@@ -1890,9 +1315,6 @@ Result<void> WindowsVideo::StartPreview(const std::string &deviceId, const std::
         // read under (see PreviewTable::generation).
         previews_->generation.fetch_add(1, std::memory_order_acq_rel);
     }
-    // Replaced tap: reaped, not joined in place — same reason as
-    // StartScreenPreview's identical hand-off (a camera tap can be inside a
-    // Media Foundation read for seconds).
     previews_->Reap(std::move(stale));
     return Ok();
 }
@@ -1909,9 +1331,6 @@ std::vector<uint8_t> WindowsVideo::PreviewFrame(const std::string &deviceId)
     auto it = previews_->taps.find(deviceId);
     if (it == previews_->taps.end())
         return {};
-    // The frame slot is the tap's SHARED state (the camera's frame is published
-    // by an MF callback): the copy is under that state's own mutex, so it stays
-    // correct even while the table itself is being torn down.
     return it->second->shared->Frame();
 }
 
@@ -1929,16 +1348,6 @@ IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceI
         auto &shared = *it->second->shared;
         const std::lock_guard<std::mutex> frameLock(shared.mutex);
         out.seq = shared.frameSeq.load(std::memory_order_acquire);
-        // A LIVE tap already keeps the frame unpacked, in the contract's own
-        // format — one copy, no JPEG decode on the puller. That is the whole
-        // program path; the decode below only serves a pane tap.
-        //
-        // The TAKE of it is a pointer move; the copy itself happens BELOW, with
-        // both locks released. Copying 8 MB while holding the tap's mutex is the
-        // handshake that used to throttle the capture callback (see
-        // VideoTapShared::latestRgba) — the buffer cannot change under us either
-        // way, because the capture thread publishes a new one per frame instead
-        // of writing into this one.
         pixels = shared.latestRgba;
         w = shared.rgbaW;
         h = shared.rgbaH;
@@ -1948,11 +1357,6 @@ IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceI
     if (pixels) {
         out.width = w;
         out.height = h;
-        // MEASUREMENT HOOK, not a setting: BPS_TAP_COPY_UNDER_LOCK reproduces the
-        // OLD hand-off for one run — the 8 MB copy taken with the tap's mutex
-        // held, i.e. the capture callback waiting on its consumers. See
-        // tools/selftest/run_videoperf_test.sh, which runs the same feed with and
-        // without it.
         static const bool legacyLockedCopy = std::getenv("BPS_TAP_COPY_UNDER_LOCK") != nullptr;
         if (legacyLockedCopy) {
             const std::lock_guard<std::mutex> lock(previews_->mutex);
@@ -1982,9 +1386,6 @@ uint64_t WindowsVideo::PreviewFrameSeq(const std::string &deviceId)
     auto it = previews_->taps.find(deviceId);
     if (it == previews_->taps.end())
         return 0;
-    // Atomic: this is asked on EVERY scene build, for every output, and the
-    // answer must never wait on the tap's own mutex (that mutex is the capture
-    // path's). No pixel is touched, so there is nothing to be consistent with.
     return it->second->shared->frameSeq.load(std::memory_order_acquire);
 }
 
@@ -2003,16 +1404,10 @@ void WindowsVideo::SetPreviewLive(const std::string &deviceId, bool live)
             // the pane gate's timestamp is about the pane rate.
             shared.lastStoreMs = 0;
         } else {
-            // Back to a pane: the stale pixels must not keep answering as the
-            // newest frame (the JPEG path is the pane's, and the next grab or
-            // sample overwrites it).
             shared.latestRgba.reset();
             shared.rgbaW = shared.rgbaH = 0;
         }
     }
-    // A tap that only ever ran as a pane has pixels only as JPEG; the FIRST
-    // live pull may still answer through the decode path (PreviewFramePixels).
-    // Nothing to clear.
     std::printf("[videopreview] tap %s -> %s\n", deviceId.c_str(),
                 live ? "live (program rate, native size)" : "pane (15 fps JPEG)");
     std::fflush(stdout);
@@ -2022,12 +1417,6 @@ std::string WindowsVideo::PreviewFailure(const std::string &deviceId) const
 {
     if (!previews_)
         return {};
-    // THE READER NEVER WAITS. This is asked from a QML binding (a card's "can't
-    // reach" state, through EngineBridge::previewFailure) at the pump's rate,
-    // while a capture worker holds the table to open, close or hand over a tap —
-    // so the table is TRIED, not waited on, and a busy table answers from the last
-    // text read for this tap under the same tap set (see LastFailure: a bumped
-    // generation makes it answer nothing instead of guessing).
     const uint64_t gen = previews_->generation.load(std::memory_order_acquire);
     std::unique_lock<std::mutex> lock(previews_->mutex, std::try_to_lock);
     if (!lock.owns_lock())
@@ -2035,16 +1424,9 @@ std::string WindowsVideo::PreviewFailure(const std::string &deviceId) const
     auto it = previews_->taps.find(deviceId);
     if (it == previews_->taps.end())
         return {};
-    // Only a DEAD tap has a reason to give: a tap that is merely warming up (or
-    // working) must keep an empty answer, or the UI would cry wolf on every
-    // start. The reason text is copied out under the state's own mutex (the
-    // same two-level hand-off as Frame()).
     if (!it->second->shared->failed.load())
         return {};
     const std::string reason = it->second->shared->Failure();
-    // Publish the answer for the next reader that arrives while the table is
-    // busy. Between two readers nothing else can change it — the text is frozen
-    // when the tap dies, and the tap's removal bumps the generation.
     previews_->RememberFailure(deviceId, gen, reason);
     return reason;
 }
@@ -2057,5 +1439,4 @@ std::vector<std::string> WindowsVideo::ActivePreviews() const
         if (tap->shared->running.load()) ids.push_back(id);
     return ids;
 }
-
 } // namespace bps::platform

@@ -1,6 +1,3 @@
-// Unit tests: Presentation Engine (docs/specs/19).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests presentation
 #include "TestHarness.hpp"
 #include "modules/presentation/LineWalk.hpp"
 
@@ -153,7 +150,6 @@ void TestPresentationEngine() {
 #include "modules/project/DocumentManager.hpp"
 
 namespace {
-
 p::Presentation MakeShow() {
     p::Presentation pres;
     pres.id = "show-abc";
@@ -197,7 +193,6 @@ p::Presentation MakeShow() {
     pres.slides.push_back(s2);
     return pres;
 }
-
 } // namespace
 
 void TestPresentationSerializer() {
@@ -385,7 +380,6 @@ void TestPresentationDocument() {
 #include "modules/vgr/VgrFile.hpp"
 
 namespace {
-
 p::ContentBlock TBlock(const std::string& id, const std::string& bind, double x, double y,
                        double w, double h) {
     p::ContentBlock b;
@@ -481,7 +475,6 @@ std::vector<std::string> BlockIds(const std::vector<p::ContentBlock>& blocks) {
     for (const auto& b : blocks) ids.push_back(b.id);
     return ids;
 }
-
 } // namespace
 
 void TestShowStructure() {
@@ -636,13 +629,6 @@ void TestTemplateFile() {
     (void)fs.Remove(showPath);
 }
 
-// A save creates its folder. The crash-recovery copy lives in a directory
-// nothing else in the app creates (%LOCALAPPDATA%\bps\recovery), and
-// VgrFile::Write writes <path>.tmp with the PLAIN write — no parent creation,
-// unlike WriteAtomic. So the first periodic copy of an unsaved show failed with
-// "cannot open for writing: …\unsaved-show.vgr.tmp" and toasted the operator
-// about a background copy they never asked for. This pins the fix: a write into
-// a folder that does not exist yet must land.
 void TestVgrWriteCreatesItsFolder() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
     const std::string root = "/tmp/bps_mkdir_test";
@@ -781,7 +767,6 @@ void TestShowLibrary() {
 #include "modules/presentation/ShowEditor.hpp"
 
 namespace {
-
 std::string Snap(const p::Presentation& show) {
     p::PresentationSerializer ser;
     auto s = ser.Serialize(show);
@@ -798,7 +783,6 @@ p::SlideTemplate NamedTemplate(const std::string& name) {
     t.blocks.push_back(b);
     return t;
 }
-
 } // namespace
 
 void TestShowEditor() {
@@ -1280,13 +1264,6 @@ void TestShowLibraryCrud() {
 }
 
 // ---- THE READING STEP'S ARITHMETIC (LineWalk) ------------------------------
-// These are the rules every stepper regression broke, written so they can fail
-// HERE instead of in front of a congregation:
-//   * one press = one visible line, whether or not a page boundary is in the way;
-//   * `absolute` (the line within the RUN the surface draws) moves by exactly +1
-//     going down and -1 going up — never a jump, never a repeat, never backwards;
-//   * a boundary is +1, not a re-base to 0 (the blink the operator kept seeing);
-//   * shifting the run window keeps the line that is on screen.
 void TestLineWalkMonotonic()
 {
     const int counts[] = { 6, 6, 5, 4, 4, 6, 3, 5, 6, 6 };

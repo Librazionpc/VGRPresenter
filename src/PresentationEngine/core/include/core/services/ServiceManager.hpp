@@ -12,7 +12,6 @@
 #include <vector>
 
 namespace bps {
-
 // Service manifest metadata (00 §6 Versioning).
 struct ServiceInfo {
     std::string name;
@@ -22,10 +21,6 @@ struct ServiceInfo {
     Version requiredCoreVersion;
 };
 
-// Dependency injection container (docs/specs/04).
-// v1 semantics: registration is non-owning for raw singletons; lazy factories and
-// scoped/transient instances are owned by this manager and released on DestroyAll.
-// Resolution is by interface type (typeid), so mocking and replacement are easy.
 class ServiceManager final : public IService {
 public:
     static ServiceManager& Instance();
@@ -53,10 +48,6 @@ public:
                              std::move(dependencies), instance.get(), instance->ServiceName());
     }
 
-    // Lazy registration: the factory runs on the first Resolve (04 §3 Lazy).
-    // `name` is the ServiceName used by the dependency graph (defaults to the
-    // factory result's ServiceName once created; pass it explicitly for static
-    // cycle detection of not-yet-created services).
     template <class I>
     Result<void> RegisterLazy(std::function<std::shared_ptr<I>()> factory,
                               Lifetime lifetime = Lifetime::Singleton,
@@ -105,9 +96,6 @@ public:
 
     Result<void> Replace(std::type_index key, IService* instance);
 
-    // --- Dependency graph (04 §4) ---
-    // Validates the declared dependency graph: unknown dependencies are reported,
-    // cycles are rejected. No-op when nothing is registered.
     Result<void> CheckCycles();
 
     // --- Diagnostics ---
@@ -144,5 +132,4 @@ private:
     std::vector<std::shared_ptr<IService>> owned_;            // guarded by mutex_
     std::vector<std::shared_ptr<IService>> transientOwned_;   // guarded by mutex_
 };
-
 } // namespace bps

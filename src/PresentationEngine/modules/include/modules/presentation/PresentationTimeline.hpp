@@ -1,10 +1,5 @@
 #pragma once
 
-// PresentationTimeline (docs/specs/19 §Timeline system). Sequential playback,
-// parallel actions, delayed actions, timed events, loops. Deterministic: cues
-// are sorted by their absolute time and fire in order as the clock advances.
-// Adding cue types never changes this code.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/IPresentationCue.hpp"
 
@@ -15,7 +10,6 @@
 #include <vector>
 
 namespace bps::presentation {
-
 class PresentationTimeline {
 public:
     // Adds a cue; cues are kept sorted by AtSec().
@@ -29,9 +23,6 @@ public:
     size_t Size() const;
     size_t Fired() const { return fired_.load(); }
 
-    // Advances the clock to `timeSec`, firing every due cue in order.
-    // Returns the number of cues fired in this call. A fired cue that returns
-    // an error increments the engine error counter but never aborts playback.
     size_t Tick(double timeSec, CueContext& ctx);
 
 private:
@@ -41,5 +32,4 @@ private:
     std::atomic<size_t> fired_{0};
     std::atomic<uint64_t> errors_{0};
 };
-
 } // namespace bps::presentation

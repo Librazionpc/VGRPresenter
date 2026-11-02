@@ -12,13 +12,11 @@
 #include <vector>
 
 namespace bps::rendering {
-
 // ===========================================================================
 // Shared pixel helpers
 // ===========================================================================
 
 namespace {
-
 inline float Clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 inline uint8_t To8(float v) {
     return static_cast<uint8_t>(v < 0.0f ? 0.0f : (v > 1.0f ? 255.0f : v * 255.0f));
@@ -36,20 +34,10 @@ inline uint32_t ScaleAlpha(uint32_t px, float k) {
     const uint32_t ai = static_cast<uint32_t>(a < 0.0f ? 0.0f : (a > 255.0f ? 255.0f : a));
     return (px & 0x00FFFFFFu) | (ai << 24);
 }
-
 } // namespace
 
 namespace {
-
 // ---- CSS blending (W3C "Compositing and Blending Level 1") -----------------
-// The MEDIA tab offers FreeShow's own blend list, whose names ARE the CSS ones,
-// so the rasterizer implements the specification formulas rather than an
-// approximation: a picture set to Overlay in the app must be Overlay on the
-// HDMI/NDI frame, because that is the only reason the control exists.
-//
-// Separable modes work channel by channel; the last four work on the whole
-// colour, through the spec's SetLum/SetSat/ClipColor trio — which is also why
-// they live in their own helpers instead of a switch full of inline maths.
 inline float BMultiply(float cb, float cs) { return cb * cs; }
 inline float BScreen(float cb, float cs) { return cb + cs - cb * cs; }
 inline float BOverlay(float cb, float cs) { return cb <= 0.5f ? 2.0f * cb * cs : 1.0f - 2.0f * (1.0f - cb) * (1.0f - cs); }
@@ -113,9 +101,6 @@ inline float Sat(const Rgb& c) { return std::max(c.r, std::max(c.g, c.b)) - std:
 
 inline Rgb SetSat(const Rgb& c, float s) {
     const float v[3] = {c.r, c.g, c.b};
-    // Rank CHANNEL INDICES (0 smallest … 2 largest) and write the result back
-    // through those indices — sorting the values themselves would lose which
-    // channel each one belonged to.
     int rank[3] = {0, 1, 2};
     const auto swapR = [&rank](int a, int b) { const int t = rank[a]; rank[a] = rank[b]; rank[b] = t; };
     if (v[rank[0]] > v[rank[1]]) swapR(0, 1);
@@ -146,7 +131,6 @@ inline float SeparableBlend(BlendMode mode, float cb, float cs) {
         default: return cs;
     }
 }
-
 } // namespace
 
 uint32_t SoftwareGraphicsBackend::BlendPixel(uint32_t dst, uint32_t src, BlendMode mode) {
@@ -173,18 +157,10 @@ uint32_t SoftwareGraphicsBackend::BlendPixel(uint32_t dst, uint32_t src, BlendMo
         ob = (sb * sa + db * da * (1.0f - sa)) / outA;
         oa = outA;
     } else {
-        // ONE compositing formula for every CSS mode, exactly the spec's:
-        //   co = as*(1-ab)*Cs + as*ab*B(Cb,Cs) + (1-as)*ab*Cb
-        //   ao = as + ab*(1-as)
-        // With `as` = 1 (an opaque picture, the normal case) it collapses to
-        // B(Cb, Cs); with a transparent source it leaves the frame alone.
         const float ao = sa + da * (1.0f - sa);
         if (ao <= 0.0f) return 0;
         const Rgb cb{dr, dg, db};
         const Rgb cs{sr, sg, sb};
-        // The four NON-separable modes work on the colour as a whole; every
-        // other one (including Normal, whose B() is the source colour) goes
-        // channel by channel.
         Rgb blended;
         switch (mode) {
             case BlendMode::Hue:
@@ -492,9 +468,6 @@ void SoftwareGraphicsBackend::Execute(const DrawCommand& cmd) {
         case DrawCommand::Type::SetBlend:
             break;   // per-command blend stored in cmd.blend
         case DrawCommand::Type::FillRect: {
-            // EDGE-SNAPPED (RenderTypes' SnapRectToPixelEdges): a filled box must
-            // share its boundary with a box that abuts it in stage units, or the
-            // fractional edge leaves a one-pixel seam of the frame underneath.
             const Rect r = SnapRectToPixelEdges(cmd.rect);
             FillRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
                             static_cast<int>(r.width),
@@ -505,11 +478,6 @@ void SoftwareGraphicsBackend::Execute(const DrawCommand& cmd) {
         case DrawCommand::Type::BlitImage: {
             auto it = textures_.find(cmd.texture.id);
             if (it == textures_.end()) {
-                // ONE-SHOT PER TEXTURE ID: a BlitImage whose texture the backend
-                // does not hold draws NOTHING, so a stale id (the resource
-                // manager's id table outliving a backend rebind) silently turns
-                // a fully composed scene into background-only pixels — the
-                // "preview fine, outputs black" shape. Says so once.
                 static std::mutex m;
                 static std::set<uint64_t> seen;
                 bool first = false;
@@ -534,10 +502,6 @@ void SoftwareGraphicsBackend::Execute(const DrawCommand& cmd) {
             auto it = textures_.find(cmd.texture.id);
             if (it == textures_.end()) break;
             const RgbaImage& src = it->second;
-            // Glyphs live in a SHARED ATLAS: the pipeline emits the glyph's
-            // cell in cmd.srcRect. Blitting the whole texture (the old
-            // behavior) squashed the entire glyph sheet into every character
-            // cell — on-air text rendered as dense noise.
             const Rect cell = (cmd.srcRect.width > 0.0f && cmd.srcRect.height > 0.0f)
                                   ? cmd.srcRect
                                   : Rect(0, 0, static_cast<float>(src.width),
@@ -579,19 +543,6 @@ void SoftwareGraphicsBackend::FillRectBlended(int x, int y, int w, int h, Color 
         }
 }
 
-// A ROUNDED-rect fill with anti-aliased edges — the engine twin of Qt's
-// `Rectangle { radius: … }` that every QML surface uses (DesignPreview's block
-// boxes, the Edit canvas, the template previews), so a template's rounded band
-// or panel looks the same on the engine's outputs as it does in the app.
-//
-// Coverage comes from the rounded rect's signed distance: `dist` is NEGATIVE
-// inside the shape (the min corner radius away from the boundary), so a pixel
-// whose centre sits exactly on an edge lands on 0.5 and the transition band is
-// one pixel wide. `radius` is clamped to half the shorter side, like Qt's own
-// Rectangle (a radius of width/2 is a stadium/circle, never an over-round),
-// and sub-half-pixel radii are routed to the plain rect by the caller — at
-// that size a rounded corner is indistinguishable from a square one and the
-// SDF would otherwise shade the whole interior below full coverage.
 void SoftwareGraphicsBackend::FillRoundedRectBlended(int x, int y, int w, int h,
                                                      float radius, Color c,
                                                      BlendMode mode) {
@@ -637,10 +588,6 @@ void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& 
     const float sh = std::max(1.0f, srcRect.height);
     const int x0 = std::max(0, x), y0 = std::max(0, y);
     const int x1 = std::min(fbWidth_, x + w), y1 = std::min(fbHeight_, y + h);
-    // Full tint (RGB * alpha), not just alpha: the glyph atlas is WHITE — a
-    // text's color arrives as this tint (DrawGlyph -> cmd.color). Scaling
-    // alpha only painted every on-air text white and dropped styled colors
-    // (the Table template's amber reference line among them).
     const bool tinted = tint.r < 1.0f || tint.g < 1.0f || tint.b < 1.0f || tint.a < 1.0f;
     const int tr = static_cast<int>(tint.r * 255.0f + 0.5f);
     const int tg = static_cast<int>(tint.g * 255.0f + 0.5f);
@@ -648,12 +595,6 @@ void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& 
     const int ta = static_cast<int>(tint.a * 255.0f + 0.5f);
 
     // ---- THE FILTER -------------------------------------------------------
-    // A draw at the source's OWN size is a straight copy, and it stays one:
-    // that is the glyph atlas, a fullscreen image at the stage's resolution, a
-    // 1:1 video — the pixel-exact path everything already relies on. Anything
-    // else is resampled through ImageScale (bilinear when magnifying, a box
-    // average when minifying) instead of the nearest-pixel grab that made media
-    // and background pictures look blocky on the outputs (see ImageScale.hpp).
     const bool unitScale = w == static_cast<int>(sw) && h == static_cast<int>(sh);
     std::vector<ScaleTaps> xTaps, yTaps;
     if (!unitScale) {
@@ -696,18 +637,10 @@ void SoftwareGraphicsBackend::Blit(int x, int y, int w, int h, const RgbaImage& 
 }
 
 void SoftwareGraphicsBackend::RasterizeShape(const DrawCommand& cmd) {
-    // SNAP THE EDGES, NOT THE SIZE (see SnapRectToPixelEdges): a template's
-    // stacked bands are authored flush on the stage, and rounding x/y and
-    // w/h separately used to leave a one-pixel seam of the video between them
-    // on the outputs while the canvas showed none.
     const Rect r = SnapRectToPixelEdges(cmd.rect);
     // Shapes are rasterized as filled rects/ellipses; polygons are handled by
     // the scene layer above as a list of rects in the common cases.
     if (cmd.color.a <= 0.0f) return;
-    // A rounded rectangle takes the anti-aliased path; a square one (the
-    // default, and every pre-radius caller) keeps the exact old fill.
-    // The command's OWN blend mode, like every other draw: a shape that carries a
-    // blend (an object with one set) composites the same way wherever it lands.
     const auto mode = static_cast<BlendMode>(cmd.blend);
     if (cmd.cornerRadius >= 0.5f) {
         FillRoundedRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
@@ -718,5 +651,4 @@ void SoftwareGraphicsBackend::RasterizeShape(const DrawCommand& cmd) {
     FillRectBlended(static_cast<int>(r.x), static_cast<int>(r.y),
                     static_cast<int>(r.width), static_cast<int>(r.height), cmd.color, mode);
 }
-
 } // namespace bps::rendering

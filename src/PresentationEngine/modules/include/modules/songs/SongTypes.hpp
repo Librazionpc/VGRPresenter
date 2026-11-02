@@ -1,18 +1,11 @@
 #pragma once
 
-// Song Engine canonical model (Phase 13, docs/specs/25). A song is structured
-// musical content: metadata, sections, lyrics, chords, arrangements, notes,
-// licensing, and media references. Every external format (ChordPro, OpenSong,
-// OpenLP, ...) is converted into these types by a provider — the rest of the
-// platform never sees interchange formats.
-
 #include "core/common/Common.hpp"
 
 #include <string>
 #include <vector>
 
 namespace bps::song {
-
 // --- Chord (docs/specs/25 §Chord System) --------------------------------------
 enum class ChordQuality : int {
     Major = 0,
@@ -94,9 +87,6 @@ struct SongMetadata {
     std::vector<MediaRef> mediaRefs;
 };
 
-// --- Arrangement (docs/specs/25 §Arrangements) -----------------------------------
-// An independent ordered list of section ids referencing the song's sections.
-// The first arrangement in a song is the original order.
 struct Arrangement {
     std::string id;                // "original", "sunday", "short", ...
     std::string name;
@@ -132,5 +122,4 @@ struct ImportOptions {
     bool index = true;             // auto-index into the Search Engine
     bool checkDuplicates = true;   // report likely duplicates on import
 };
-
 } // namespace bps::song

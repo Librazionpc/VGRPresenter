@@ -1,10 +1,5 @@
 #pragma once
 
-// ProfileManager (docs/specs/15 §Profile Manager): stores reusable user
-// preference profiles — display profiles, import profiles, notification
-// profiles, rendering profiles. Each profile is a named, versioned JSON
-// document; applying one publishes the relevant ConfigurationManager keys.
-
 #include "core/config/Json.hpp"
 #include "interfaces/IService.hpp"
 
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct Profile {
     std::string id;
     std::string kind;      // "display" | "import" | "notification" | "rendering"
@@ -50,5 +44,4 @@ private:
     mutable std::mutex mutex_;
     std::vector<Profile> profiles_;
 };
-
 } // namespace bps::project

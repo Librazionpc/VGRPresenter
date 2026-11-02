@@ -1,10 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One selectable option chip — the active/hover chip pattern used across the
-// settings screens (Recording's platform chips, Smart Config's mode cells).
-// Extracted so chip styling can't drift; controlled component: `selected` is
-// owned by the consumer, clicking emits `picked`.
 Rectangle {
     id: root
 

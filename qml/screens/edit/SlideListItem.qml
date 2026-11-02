@@ -1,22 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One row in the Edit screen's slide list. Pulled out of EditScreen.qml's
-// Repeater so the CRUD-row presentation (selection, hover, delete) is a
-// self-contained, reusable unit instead of an inline anonymous delegate —
-// it only knows about its own props/signals, not the model.
-//
-// The thumbnail is a LIVE render of the slide, in the same 16:9 proportions as the stage (like FreeShow's slide
-// thumbnails): `previewItems` are the slide's item objects straight from SlideCanvasStore - the very objects the canvas
-// edits - handed to the SAME DesignPreview the overlay/template cards use, which draws every kind the way the canvas does
-// (text with its weight / case / list / alignment / fitting, shapes with their fill and border, clocks and timers ticking,
-// camera / media tiles, the slide's background or the transparency checkerboard). Because the objects are live, moving,
-// typing or restyling on the canvas re-renders the row the moment it happens; there is no second, simplified drawing of
-// the slide to keep in step with the real one. The model's own title/line1/line2/ref roles turned out to be dead data,
-// so this component never took them.
-//
-// Literal colors. The "AOT nesting" reason once given for these is disproven
-// (see DropdownPanel.qml's header) — this file can migrate to Theme.* tokens.
 Rectangle {
     id: root
 
@@ -41,16 +25,8 @@ Rectangle {
     signal selected()
     signal duplicateRequested()
     signal deleteRequested()
-    // (x, y) are in this item's own local coordinate space — the consumer
-    // maps them into whatever coordinate space its context-menu popup
-    // needs (see EditScreen.qml, which escapes the slide list's Flickable
-    // clip via the shared DropdownPanel.openAt helper).
     signal contextMenuRequested(real x, real y)
 
-    // Also true while hovering the delete button itself: it sits on top of
-    // hoverArea, and Qt Quick only delivers hover to the topmost MouseArea
-    // at a given point, so hoverArea.containsMouse alone would flip false
-    // (and the button fade out) the instant the cursor reached it.
     readonly property bool hovered: hoverArea.containsMouse || deleteArea.containsMouse
 
     // The thumbnail keeps the stage's proportions (StageGrid.w x StageGrid.h), so the row is as tall as the picture needs.
@@ -141,10 +117,6 @@ Rectangle {
         onDoubleClicked: root.duplicateRequested()
     }
 
-    // Hover-revealed delete button. A single click is too easy to trigger
-    // by accident for a destructive action, so it stays a deliberate
-    // button rather than living on the same click/double-click gesture as
-    // select/duplicate.
     Rectangle {
         x: 196
         y: 8

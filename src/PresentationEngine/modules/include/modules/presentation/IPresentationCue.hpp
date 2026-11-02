@@ -1,15 +1,9 @@
 #pragma once
 
-// IPresentationCue (docs/specs/19 §Cue system). Every cue type (Slide, Media,
-// Audio, Timer, Countdown, Script, MIDI, Plugin) implements this interface.
-// Adding a cue type never requires changing existing engine code — plugins
-// register new cue implementations.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 
 namespace bps::presentation {
-
 // Context handed to a cue when it fires (19 §Cue system: modular cues).
 class PresentationRuntime;
 struct CueContext {
@@ -30,5 +24,4 @@ public:
     // Execute the cue. Returns Ok on success, CueFailed otherwise.
     virtual Result<void> Execute(CueContext& ctx) = 0;
 };
-
 } // namespace bps::presentation

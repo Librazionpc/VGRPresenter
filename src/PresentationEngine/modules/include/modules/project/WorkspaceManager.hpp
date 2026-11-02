@@ -1,11 +1,5 @@
 #pragma once
 
-// WorkspaceManager (docs/specs/15 §Workspace Manager): user workspace state —
-// open documents, selected displays, current presentation/theme, zoom, recently
-// used items. Fully serializable (JSON via the DatabaseManager) so the frontend
-// can restore window layout on startup. The engine stores *state*, never
-// windowing details.
-
 #include "core/config/Json.hpp"
 #include "interfaces/IService.hpp"
 
@@ -14,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 class WorkspaceManager {
 public:
     static WorkspaceManager& Instance();
@@ -64,5 +57,4 @@ private:
     std::vector<Recent> recent_;
     int recentLimit_ = 25;
 };
-
 } // namespace bps::project

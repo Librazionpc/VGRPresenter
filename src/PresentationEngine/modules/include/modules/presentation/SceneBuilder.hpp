@@ -1,16 +1,5 @@
 #pragma once
 
-// SceneBuilder (docs/specs/19 §Scene Builder). Converts presentation data into
-// renderable scenes. The Presentation Engine never manipulates GPU objects
-// directly — it builds rendering::Scene objects (Phase 6) and hands them to the
-// Render Engine.
-//
-// Output styles (Settings · Styles): an overload of BuildSlideScene takes the
-// on-air output's OutputStyleSpec and lets it override the scene's background
-// and text layout. Scenes built under a style are keyed with a style
-// fingerprint suffix so a style edit (or a style being cleared) rebuilds them
-// instead of hitting the old cached scene.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/rendering/RenderTypes.hpp"
@@ -20,15 +9,8 @@ class RenderEngine;
 }
 
 namespace bps::presentation {
-
 class StyleBuilder {
 public:
-    // Layout presets keyed by the style's templateKey (StyleListModel's
-    // stored key: "lowerThird" | "title" | "sidebar" | "bottomBar" |
-    // "fullscreen", or an engine design id; unknown keys fall back to the
-    // default full layout). Values are Fractions Of the 1920×1080 design
-    // grid — scaled onto the actual stage below, so any output resolution
-    // renders the same composition.
     struct LayoutRect { float x, y, w, h; };
     struct Layout {
         LayoutRect title;
@@ -53,123 +35,36 @@ public:
                                         rendering::RenderEngine& engine,
                                         rendering::Size size = rendering::Size(1920, 1080));
 
-    // Style-aware build: the spec's background and layout preset override the
-    // slide's own. Scenes get a style-fingerprint suffix on their id, so
-    // editing a style (or assigning a different one) rebuilds instead of
-    // serving the unstyled cache.
     Result<std::string> BuildSlideScene(const Presentation& presentation,
                                         const Slide& slide,
                                         const OutputStyleSpec& style,
                                         rendering::RenderEngine& engine,
                                         rendering::Size size = rendering::Size(1920, 1080));
 
-    // GATE-AWARE build — the per-output rule pass: the slide's content family
-    // is checked against the spec's show* gates and a REFUSED family renders
-    // the style's background ONLY (colour + image, no content, no text) — the
-    // output wearing this style shows its look, never the forbidden content.
-    // Allowed families render exactly like BuildSlideScene. Scene ids carry a
-    // "gated" marker so the gated and ungated versions of one slide coexist
-    // in the render cache (different outputs, different rules, same slide).
     Result<std::string> BuildGatedSlideScene(const Presentation& presentation,
                                              const Slide& slide,
                                              const OutputStyleSpec& style,
                                              rendering::RenderEngine& engine,
                                              rendering::Size size = rendering::Size(1920, 1080));
 
-    // RE-ATTACH A MOVED READING WINDOW TO A SCENE THAT ALREADY EXISTS — the
-    // page commit's cheap half (docs/scroll_mode_thread_audit.md, F3).
-    //
-    // `slide.flowText` is the passage an already-built scene's reading block
-    // scrolls, and the scene id cannot say when it changed: the id is
-    // (presentation, slide, style, size), and the flow is not part of any of
-    // them (it is deliberately absent from HashSlideContent too, so a genuine
-    // re-pick of the same passage keeps its cached scene). So a window that slid
-    // forward was only ever picked up by rebuilding the scene — which, through
-    // the live path, meant re-committing the whole pick to the render worker.
-    //
-    // This is the targeted answer: hand the new window and offset to the ONE
-    // text object that draws the flow, in the scene that is already on screen.
-    // The page's own line count is NOT re-measured — it is the measure of the
-    // page the box was fitted to, and that page has not changed; only the words
-    // below it have. An empty flow detaches scrolling and restores the original
-    // page text; a later non-empty flow can attach again to the existing scene.
-    // False means the scene has no eligible reading text object.
     bool RefreshReadingFlow(rendering::RenderEngine& engine, const std::string& sceneId,
                             const Slide& slide);
 
-    // THE BUS FEED SCENE — what an output whose VIDEO WIRE is drawn shows.
-    //
-    // One full-frame video layer carrying that bus's current picture, read from
-    // the SAME per-bus frames a design's bus block and Media › Inputs' bus
-    // windows draw (CompositorState::GetBusFrame) — so the canvas's wire, the
-    // block on a slide and the window in the pane are literally one picture.
-    //
-    // The scene id carries the BUS and the SIZE: two outputs never share one
-    // scene, and a resolution edit re-keys it (a 4K output rasterises at 4K,
-    // exactly like a styled per-output pass). The frame is refreshed on every
-    // call, cache hit included, with the frame-seq skip that keeps an unchanged
-    // feed from being copied and re-uploaded again (see LayerFrameCurrent) — a
-    // camera slower than the composition is the normal case here. A bus whose
-    // feed has stopped yields an empty frame, which reads as "the wire is drawn,
-    // the feed is quiet" instead of leaving the last picture frozen on air.
-    //
-    // `busId` is the bus's stable NUMBER (0 or less is refused: there is nothing
-    // to show, and guessing would show the wrong bus).
     Result<std::string> BuildBusFeedScene(int busId, rendering::RenderEngine& engine,
                                           rendering::Size size = rendering::Size(1920, 1080));
 
-    // A TEMPLATE BUS'S PICTURE — the template design, with its windows filled.
-    //
-    // A template bus is a bus created from a template (Edit's template tab): its
-    // `bus` blocks ARE its windows, so the bus's picture is that design, drawn
-    // with each window showing its own assigned bus feed. Nothing about the
-    // windows is stored on the bus — `blocks` is the template's block list, baked
-    // by the caller on every push (the same bake a style's template gets), which
-    // is what makes an edited template reach the bus without recreating it.
-    //
-    // WINDOW → FEED. A window whose block names a bus (meta `busId`) shows THAT
-    // bus: the design's own, independently configured assignment, and the only
-    // thing a window on a slide has ever meant. A window that names none falls
-    // back to the template bus's own routed video sources in route order — the
-    // per-window planes LiveOutputService fills (CompositorState
-    // ::TemplateWindowPlaneKey) — so "route three cameras in and they fill the
-    // three windows" works without assigning anything by hand.
-    //
-    // The scene id carries the bus and the SIZE (two outputs never share one
-    // scene; a resolution edit re-keys it) and the windows are refreshed on every
-    // call, cache hit included, exactly like BuildBusFeedScene's picture.
     Result<std::string> BuildTemplateBusScene(int busNumber,
                                               const std::vector<ContentBlock>& blocks,
                                               const std::string& background,
                                               rendering::RenderEngine& engine,
                                               rendering::Size size = rendering::Size(1920, 1080));
 
-    // WHICH OF A DESIGN'S BLOCKS PAINT UNDER THE COMPOSITOR'S VIDEO LAYER.
-    // `underVideo[i]` answers for block i (parallel to the list handed in) and
-    // `stageCovered` says whether the rule's leading run reached the stage.
-    // This is the rule's ONE home: BuildSlideScene/BuildGatedSlideScene paint a
-    // scene with it, and the UI's live preview (the monitor tile) asks for it
-    // through EngineBridge::backdropBlockIndexes instead of re-deriving it — a
-    // preview with its own copy of a rule this geometric is how the tile and the
-    // real outputs come to disagree about what covers a live feed.
     struct BlockLayerPlan {
         std::vector<bool> underVideo;
         bool stageCovered = false;
     };
     static BlockLayerPlan PlanBlockLayers(const std::vector<ContentBlock>& blocks);
 
-    // WHAT A SLIDE LOOKS LIKE ON AN OUTPUT WEARING ONE STYLE — the composition
-    // decision, in one place: whether the style's gates refuse it, which layout
-    // owns it (the style's per-family template, the whole-style template, a
-    // built-in preset per family or for the style, or the slide's own blocks),
-    // the template blocks bound to the slide's content, and the background the
-    // output paints (style colour vs the slide's, clearBackgroundOnText, and an
-    // explicitly transparent style).
-    //
-    // This is the rule the engine renders AND the live preview draws. It used to
-    // exist twice — SceneBuilder's branch chain and LiveOutputService's mirror
-    // of it — and two copies of "which template owns this slide, and on what
-    // background" is how a tile comes to show a picture no output is sending.
     struct SlideComposition {
         enum class Source {
             Cleared,          // a CLEAR carrier (Slide::clearStage): the frame paints NOTHING
@@ -184,95 +79,28 @@ public:
         std::string contentType;      // the slide's family ("" = untagged = shows)
         size_t familyIdx = 0;         // the style slot that family styles through
 
-        // The layout the caller draws, already bound to the slide's content:
-        // template blocks for the two template sources, or the two text regions
-        // of a built-in preset (the engine renders them as its Title/Body text
-        // objects; a preview draws them on the preset's own rectangles).
         std::vector<ContentBlock> blocks;
         std::string presetKey;        // the two preset sources
         StyleBuilder::Layout preset;
 
-        // THE BACKGROUND, composed once. `background` is the colour that won (a
-        // style colour, or the slide's own when clearBackgroundOnText lets it),
-        // empty when NOTHING named one — and nothing named means the frame
-        // paints NOTHING: `paintBackground == false`, a keyable frame, rather
-        // than an opaque fill of the engine's own. What is keyed, recorded or
-        // composited behind such a frame shows through it until something
-        // actually paints (a style colour, a design's own backdrop, an image,
-        // pushed content).
-        // `explicitTransparent` marks the case that LOOKS identical in pixels
-        // but was chosen: the style's own value is "transparent". Surfaces that
-        // show transparency as transparency (the monitor tile's checkerboard)
-        // need that distinction, and only this composition has it.
-        // `slideOwnsBackground` is the slide's own colour being real (not "" or
-        // "transparent") — the input clearBackgroundOnText turns on.
         bool paintBackground = true;
         std::string background;
         bool explicitTransparent = false;
         bool slideOwnsBackground = false;
 
-        // THE STYLE'S BACKGROUND IMAGE STEPS ASIDE FOR CONTENT ON AIR
-        // (clearBackgroundOnText). It does so for a slide that CARRIES content
-        // (blocks), and not for one that does not — a blank GO LIVE carrier keeps
-        // the branded backdrop, which is the whole point of going live with
-        // nothing. THE RULE, once, here: both build paths paint (or do not paint)
-        // the style image from this flag, and the preview hands it to the tile
-        // and the output window instead of each surface re-deriving it from its
-        // own idea of "has content" — which is how a blank carrier came to lose
-        // the image on the tile while the engine was still painting it.
         bool styleImageSuppressed = false;
 
-        // A TAKE CLEARS THE STYLE'S BACKGROUND ENTIRELY: a file (or a pushed
-        // feed) is on air, so the frame is THAT picture — the style's colour and
-        // image are not part of it, and neither is the slide's own colour. This
-        // is the operator's rule ("anything that wants to show removes the
-        // style's bg") applied to the one layer that was still dressed in it. It
-        // is a field of its own rather than a combination of the two above
-        // because a preview cannot deduce it: `paintBackground == false &&
-        // explicitTransparent` also describes a style whose colour is
-        // "transparent", which must keep its checkerboard convention.
         bool clearedByTake = false;
 
-        // IS THIS FRAME TRANSPARENT WHERE NOTHING PAINTS? — THE ONE ANSWER.
-        // Every surface that shows transparency as transparency draws from this
-        // (the monitor tile's checkerboard, and whatever else asks the same
-        // question later), because four independent copies of the rule is how
-        // the wall showed checkered pillarbox bars around a taken photo while the
-        // output beside it — drawing the engine's own frame — showed plain dark
-        // margins, and how the same tile later refused the checkers under a
-        // genuinely transparent PNG.
-        //
-        // It is composed HERE because only the composition knows both halves:
-        //   * what the style/slide painted (`paintBackground`, `explicitTransparent`
-        //     — a frame that names nothing is keyable, one that CHOSE transparent
-        //     looks identical in pixels and is not the same statement), and
-        //   * what is composited on top of it — a taken input (an opaque feed) or
-        //     a media file (transparent only when the PICTURE is; a contain-fit
-        //     leaves the OUTPUT's empty pixels around it, which are not the
-        //     picture's alpha). That fact travels with the frame
-        //     (CompositorState::MediaFrame::hasAlpha), scanned once where the file
-        //     was decoded, never guessed from an extension here.
         bool frameTransparent = true;
     };
-    // `applyGates`: does this caller apply the style's content gates? The gated
-    // build does, and so does the live preview (it shows what the gates leave on
-    // air); the plain styled build renders the slide regardless, as it always
-    // has. Every other rule above is unconditional.
     static SlideComposition ComposeSlide(const Slide& slide, const OutputStyleSpec& style,
                                          bool applyGates = false);
 
     // Deterministic scene id for a slide ("pres:<presentationId>:<slideId>").
     static std::string SceneIdFor(const Presentation& p, const Slide& s);
-    // Style-fingerprinted scene id: "<baseId>@s:<bg>-<key>-<clear>" — a change
-    // to any styled field yields a different id (and a rebuild).
-    // `sceneSize` is the size the scene will be BUILT at: a non-default size
-    // appends a "@size:WxH" tag, because the build cache is keyed by this id
-    // and a cache hit returns the scene at the size it was FIRST built with —
-    // two outputs at different resolutions must never share one cached scene
-    // (the wider scene's layout is what a narrower output would then show).
     static std::string StyledSceneIdFor(const Presentation& p, const Slide& s,
                                         const OutputStyleSpec& style,
                                         rendering::Size sceneSize = rendering::Size(1920, 1080));
 };
-
 } // namespace bps::presentation

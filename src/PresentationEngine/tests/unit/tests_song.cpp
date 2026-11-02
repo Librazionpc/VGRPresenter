@@ -1,6 +1,3 @@
-// Unit tests: Song & Lyrics Engine (docs/specs/25).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests song
 #include "TestHarness.hpp"
 
 void TestSongChords() {

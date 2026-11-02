@@ -1,16 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// "NDI needs its runtime" notice — shown wherever an NDI source can be picked
-// (the Add/Edit source dialogs) and in Settings · Plugins when the NDI runtime
-// isn't usable on this machine. NDI is a separate, vendor-licensed install that
-// VGR can't bundle, so instead of a dead-end "not enabled" row the user gets
-// the reason plus a button straight to the download page, and a re-check
-// button for after they've installed it (no app restart needed).
-//
-// Hidden when NDI is ready (or the engine hasn't booted yet, so a healthy
-// machine never sees a flash of warning). `active` lets the consumer scope it
-// (e.g. only while the NDI kind chip is selected).
 Rectangle {
     id: root
 

@@ -17,9 +17,6 @@ Rectangle {
         { key: "plugins",   label: "Plugins",         icon: "grid" }
     ]
     property string currentKey: "general"
-    // The version is the RELEASE's: read from the C++ single source
-    // (SettingsService.appVersion — SettingsService.cpp kAppVersion), so the
-    // UI can never drift from the shipped build.
     property string appVersion: qsTr("v%1").arg(SettingsService.appVersion)
 
     signal sectionSelected(string key)
@@ -48,11 +45,6 @@ Rectangle {
         color: Theme.textMuted
     }
 
-    // The same striped-row surface Manage Actions' lists use — one ground,
-    // one hairline, one pair of row colours — instead of a hand-rolled set
-    // of pills with their own look. Full-bleed: x:0 and the FULL rail
-    // width, square corners (rowRadius: 0) — rows run edge-to-edge instead
-    // of sitting as inset pills with margin on both sides.
     StripedListPanel {
         id: navPanel
         x: 0
@@ -73,11 +65,6 @@ Rectangle {
                 width: parent.width
                 height: navPanel.rowHeight
                 radius: navPanel.rowRadius
-                // The resting colour NEVER animates — HoverGlow below is
-                // THE shared hover layer every surface in the app lights up
-                // through (a fading overlay, not a cross-faded base colour;
-                // see its own header comment for why animating color: here
-                // directly strobes/feels off against the alternating stripe).
                 color: navRow.selected ? Qt.alpha(Theme.accent, 0.12)
                                        : navPanel.rowColor(navRow.index, false)
 

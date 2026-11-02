@@ -22,7 +22,6 @@ namespace rk = bps::recording;
 namespace pr = bps::production;
 
 namespace {
-
 // Event counters shared by the recording suite.
 struct RecEvents {
     int started = 0;
@@ -92,7 +91,6 @@ private:
     std::string id_;
     bool started_ = false;
 };
-
 } // namespace
 
 void TestRecordingProfiles() {
@@ -202,11 +200,6 @@ void TestRecordingLifecycle() {
     CHECK(prod.Initialize().ok());
     CHECK(prod.Start().ok());
 
-    // The free space is simulated for every suite by the runner (see
-    // kTestFreeBytes in main.cpp): StartRecording refuses below 5% free, and a
-    // full developer drive must not read as an engine failure.
-    //
-    // A production node to record (docs/specs/28: recording taps the graph).
     auto pvb = prod.CreateBus("pvb2", "Program Video", pr::BusRole::Program,
                               pr::SignalType::Video);
     auto prog = prod.CreateBus("prog2", "Program Audio", pr::BusRole::Program,
@@ -242,9 +235,6 @@ void TestRecordingLifecycle() {
     CHECK(st.ok() && st.value().state == rk::RecordingState::Recording);
     CHECK(st.value().tapPoint == rk::TapPoint::PostProcessing);
     CHECK(!st.value().filePath.empty());
-    // The file's extension follows the profile's CONTAINER, and this profile keeps
-    // the struct's default (MP4). The check used to demand ".mkv", so it was
-    // asserting a default that had moved on rather than the contract it documents.
     CHECK(seg.container == rk::ContainerKind::MP4);
     CHECK(st.value().filePath.find(".mp4") != std::string::npos);
     CHECK(rec.SetMetadata(id, "event", "Sunday Service").ok());
@@ -309,11 +299,6 @@ void TestRecordingLifecycle() {
     auto st4 = rec.GetStatus(id);
     CHECK(st4.ok() && st4.value().state == rk::RecordingState::Completed);
     CHECK(ev.stopped >= 2);
-    // BACK TO THE RUNNER'S PIN, not to the real filesystem: the rest of this
-    // suite (recovery, replay, scheduling) starts recordings on the SAME engine
-    // instance, and a developer drive under 5% free would turn every one of them
-    // into Recording_DiskFull. kTestFreeBytes is the number the runner pins
-    // before each suite — see TestHarness.hpp.
     rec.SetSimulatedFreeBytes(kTestFreeBytes);
 
     CHECK(rec.StopRecording(id, "again").error().code == Err::Recording_NotActive);
@@ -438,9 +423,6 @@ void TestRecordingStorageAndScheduling() {
     // Policy thresholds.
     CHECK(rec.SetStoragePolicy(15, rk::StorageAction::Warn).ok());
     CHECK(rec.SetStoragePolicy(15, rk::StorageAction::None).ok());  // remove
-    // Back to the runner's pin, not the real filesystem — the scheduling half
-    // below STARTS a recording, and a nearly-full developer drive must not make
-    // it a DiskFull no-op (see kTestFreeBytes in TestHarness.hpp).
     rec.SetSimulatedFreeBytes(kTestFreeBytes);
 
     // Default directory round-trip.
@@ -449,9 +431,6 @@ void TestRecordingStorageAndScheduling() {
     CHECK(rec.DefaultDirectory() == "/tmp/vgr-rec");
     CHECK(rec.SetDefaultDirectory(oldDir).ok());
 
-    // Scheduling: start at +10s, stop at +20s (relative to the running clock,
-    // which is cumulative across suites). Clear any completed recordings left
-    // by earlier suites first.
     for (const auto& r : rec.RecordingIds())
         (void)rec.DeleteRecording(r);
     auto node = prod.Graph().AddSource("cam4", "Camera 4", pr::SignalType::Video,
@@ -489,13 +468,6 @@ void TestRecordingEngine() {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch scope: the bus dispatch runs with the recording engine's lock
-// RELEASED (the behavioural counterpart of the lock-scope guard — the guard
-// reads source, this proves the lock is free while a subscriber runs).
-//
-// A subscriber PARKS inside the dispatch, and a second thread calls engine
-// methods that all take that lock. The dispatch under test is the replay-
-// ready notice from Tick(), which is published after Tick's locked scope.
 // ---------------------------------------------------------------------------
 void TestRecordingDispatchOutsideLock() {
     auto& rec = rk::RecordingEngine::Instance();
@@ -516,10 +488,6 @@ void TestRecordingDispatchOutsideLock() {
     std::atomic<bool> inHandler{false};
     std::atomic<bool> otherThreadDone{false};
     std::atomic<bool> reachedEngineWhileParked{false};
-    // The park inside the dispatch is bounded on purpose: the call that parks
-    // here is synchronous, so an unbounded spin could only be released from a
-    // thread that is waiting on this one. The failure mode must be a failed
-    // CHECK, never a wedged suite.
     Subscription sub = EventBus::Instance().Subscribe<events::ReplayBufferReady>(
         [&](const events::ReplayBufferReady&) {
             inHandler.store(true);
@@ -555,12 +523,6 @@ void TestRecordingDispatchOutsideLock() {
 }
 
 // ---- Real files, real encoders ---------------------------------------------------------
-// Every container x every encoder THIS machine has: a short synthetic recording is written
-// through the real container (the same objects the app registers), and the finished file
-// is then opened again with Media Foundation's own reader. "The file exists" proves
-// nothing; "the reader finds N H.264 pictures in it" proves the encoder really encoded
-// and the container really muxed. Nothing is registered with the engine, so the other
-// recording suites' view of the registry is untouched.
 void TestRecordingRealEncode() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / "bps_real_encode";
@@ -721,9 +683,6 @@ void TestRecordingRealEncode() {
     }
 
     // ---- AUDIO PRESETS: audio-only files (WAV, M4A, MP3) ---------------------------------
-    // Three seconds of a 440 Hz tone through each format, then the finished file is read back:
-    // it must hold an audio track and no picture, last about three seconds, and decode to a
-    // tone of the loudness that went in.
     {
         const auto mix = bps::audio::AudioEngine::Instance().MixFormat();
         for (const rk::ContainerKind audioKind : {rk::ContainerKind::WAV, rk::ContainerKind::M4A, rk::ContainerKind::MP3}) {

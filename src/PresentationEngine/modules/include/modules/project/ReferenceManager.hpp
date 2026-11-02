@@ -1,10 +1,5 @@
 #pragma once
 
-// ReferenceManager (docs/specs/15 §Reference Manager): analyzes a project's
-// asset usage against the CAMS library — finds unused, broken, duplicate and
-// shared assets — and supports cleanup operations. CAMS integration only
-// (reads metadata; never touches files).
-
 #include "modules/project/Project.hpp"
 #include "interfaces/IService.hpp"
 
@@ -14,7 +9,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct ReferenceReport {
     std::vector<std::string> unused;      // library assets not referenced by the project
     std::vector<std::string> broken;      // project references with no library asset
@@ -45,5 +39,4 @@ private:
     mutable std::mutex mutex_;
     mutable std::atomic<uint64_t> analyzes_{0};
 };
-
 } // namespace bps::project

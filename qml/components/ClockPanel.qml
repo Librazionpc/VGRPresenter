@@ -1,20 +1,5 @@
 import QtQuick
 
-// THE CLOCK PANEL — the big time and the date that stand in the free right
-// edge of a library pane (Overlays, Templates, Media).
-//
-// A card grid two or three rows deep leaves a wide, dead gutter on a
-// full-size window, and an empty dark rectangle reads as a pane that failed to
-// load. This is the same panel the earlier build put there: the time in the
-// theme accent, the seconds and the AM/PM in the primary ink, the date under
-// it in the muted one. Nothing here is a control; it is the pane's own
-// furniture, so it carries no hover, no click, no focus.
-//
-// The ticking comes from LiveClock — the app's ONE shared second-by-second
-// clock (the Clock/Timer pickers' previews and the canvas Clock/Timer items
-// use it too), so this panel can never drift from the clock on the wall and it
-// adds no second Timer of its own. `running` is wired to the host pane's
-// visibility: a hidden pane's clock stops.
 Item {
     id: root
 
@@ -35,9 +20,6 @@ Item {
 
     function pad2(n) { return n < 10 ? "0" + n : String(n) }
 
-    // Read as separate strings so the parts can be styled (and so each is a
-    // plain property read at the call site — the shape LiveClock's own note
-    // asks for).
     readonly property date now: ticker.now
     readonly property bool afternoon: now.getHours() >= 12
     readonly property int shownHour: {
@@ -61,9 +43,6 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 12
 
-        // The time is one BASELINE row, not a Row: the seconds and the suffix
-        // have to sit on the big digits' baseline, and a positioner aligns its
-        // children by their tops.
         Item {
             anchors.horizontalCenter: parent.horizontalCenter
             width: timeRow.width

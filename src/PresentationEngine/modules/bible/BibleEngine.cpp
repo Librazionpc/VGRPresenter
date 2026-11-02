@@ -14,12 +14,7 @@
 #include <thread>
 
 namespace bps::bible {
-
 namespace {
-
-// Index adapter (docs/specs/24 §Search Integration): makes the Search Engine
-// content-aware for type "bible". Verse documents carry their text as content;
-// this adapter extracts it verbatim.
 class BibleIndexAdapter final : public search::IIndexAdapter {
 public:
     const char* Type() const noexcept override { return "bible"; }
@@ -54,7 +49,6 @@ std::string Slug(std::string_view s) {
 std::string DocId(std::string_view bibleId, const BibleVerse& v) {
     return std::format("bible:{}:{}:{}:{}", bibleId, v.bookId, v.chapter, v.verse);
 }
-
 } // namespace
 
 // PassageRef::ToString (declared in BibleTypes.hpp).
@@ -78,9 +72,6 @@ BibleEngine& BibleEngine::Instance() {
 // ---------------------------------------------------------------------------
 Result<void> BibleEngine::Initialize() {
     std::vector<BibleVersion> reindex;
-    // Store read + parse + recovery with NO lock held: the read is a PAL call and
-    // setting a damaged store aside is disk work, and neither may run under
-    // mutex_. The locked section below only consumes the parsed document.
     json::Value store;
     bool haveStore = false;
     if (!storePath_.empty()) {
@@ -92,22 +83,12 @@ Result<void> BibleEngine::Initialize() {
                     store = std::move(parsed.value());
                     haveStore = true;
                 } else {
-                    // SELF-HEALING: a damaged corpus is set aside as evidence
-                    // and the engine comes up empty instead of failing the
-                    // boot, and the next save rebuilds it at the same path.
-                    // (User data lives in its own file since schema 3, so a
-                    // damaged corpus cannot take the notes with it.)
                     (void)recovery::SetAsideDamagedDocument(
                         storePath_, "BibleEngine", parsed.error().message);
                 }
             }
         }
     }
-    // The USER-DATA sidecar (schema 3) is read and parsed out here for the same
-    // reason the corpus is: the read is a PAL call and the parse is work over
-    // the operator's notes, and neither may run under mutex_ (LoadStoreLocked
-    // only INSTALLS what this hands it). A missing sidecar means a schema <= 2
-    // store — user data still inside the corpus — or a first boot.
     json::Value userStore;
     bool haveUserStore = false;
     if (!userDataPath_.empty()) {
@@ -137,10 +118,6 @@ Result<void> BibleEngine::Initialize() {
             providers_.push_back(CreatePlainTextBibleProvider());
         }
         WireEvents();
-        // Restore the installed-bible store (imported bibles survive restarts —
-        // the user must never re-upload a full translation). A missing store is
-        // the normal first boot, and a damaged one was already set aside as
-        // evidence above; both leave the library empty, exactly like a first run.
         size_t restored = 0;
         if (haveStore) {
             if (auto loaded = LoadStoreLocked(store, haveUserStore ? &userStore : nullptr); loaded.ok())
@@ -150,40 +127,20 @@ Result<void> BibleEngine::Initialize() {
                                                loaded.error().message, "BibleEngine");
         }
         if (restored > 0) {
-            // The Search Engine's index is per-process: re-index what the store
-            // brought back, off the boot path (the The Table library's
-            // precedent). Only the snapshot is taken here — the thread itself
-            // is started BELOW, with the lock released.
             for (const auto& [id, b] : bibles_) reindex.push_back(b);
             Logger::Instance().Info(std::format("BibleEngine: restored {} bible(s) from store",
                                                 bibles_.size()), "BibleEngine");
         }
     }
-    // THE SCHEMA-3 MIGRATION: this boot read the user data out of the CORPUS
-    // (schema <= 2). Write the sidecar from memory now — built under the lock,
-    // written after it — so the corpus can stop carrying what the mark path
-    // used to rewrite. Best effort on purpose: a failed write leaves
-    // userDataFileWritten_ false, the corpus keeps carrying the data, and the
-    // next boot (or the next mark) tries again.
     if (userDataFromCorpus_.load() && !haveUserStore && !userDataPath_.empty()) {
         Snapshot sidecar;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             sidecar = BuildUserDataJsonLocked();
         }
-        // Records the new home and logs it once the write really landed; a
-        // failure leaves userDataFileWritten_ false, so the corpus keeps
-        // carrying the data.
         PersistUserDataSidecar(std::move(sidecar));
     }
     if (!reindex.empty()) {
-        // Join/start with mutex_ RELEASED: IndexBible takes that lock itself,
-        // so joining a still-running re-index under the lock would deadlock
-        // (Shutdown joins the same thread the same way — outside its locked
-        // block). The body is a lambda here (not a free function) because
-        // IndexBible is private — a lambda inside a member function keeps this
-        // function's access — and it is DEFINED below the locked scope so the
-        // lock-scope guard can see no lock is held above the call.
         if (reindexThread_.joinable()) reindexThread_.join();   // a prior restore's re-index
         reindexThread_ = std::thread([bibles = std::move(reindex)] {
             for (const BibleVersion& b : bibles) {
@@ -332,10 +289,6 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
     if (fmt.empty())
         return Error::Make(Err::Bible_UnsupportedFormat, "BibleEngine", "no format given");
 
-    // Collect every provider claiming this format — format-name matches first,
-    // then extension-only claims — and try each until one parses: several
-    // formats share an extension (Zefania <XMLBIBLE> and OSIS both ship as
-    // ".xml"), so the first claimant must not have the last word.
     std::vector<std::shared_ptr<IBibleProvider>> candidates;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -399,11 +352,6 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
             hadOld = true;
             oldBible = it->second;
         }
-        // A (re)imported translation drops any user data keyed to the OLD text
-        // ("bible replaced" ≠ "notes preserved across versions" — the notes
-        // drawer must not show notes from a translation the user removed).
-        // Prefix-checked erase (not a plain range): "KJV|" must not sweep
-        // "KJV2|..." entries when only KJV is being replaced.
         if (hadOld) {
             const std::string prefix = bible.metadata.id + "|";
             for (auto it = notes_.lower_bound(prefix); it != notes_.end() && it->first.starts_with(prefix);)
@@ -411,14 +359,7 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
             highlights_.erase(bible.metadata.id);
         }
         bibles_[bible.metadata.id] = bible;
-        // Persist the whole corpus so the import survives a restart (no-op
-        // while no store path is set — unit tests stay in memory). The JSON is
-        // BUILT here and WRITTEN below, with mutex_ released: the corpus is
-        // megabytes of verse text and WriteAtomic is a PAL call.
         if (!storePath_.empty()) storeJson = BuildStoreJsonLocked();
-        // A REPLACED translation's notes and highlights were just dropped in
-        // here: when the sidecar is their home, it has to follow — otherwise the
-        // notes drawer keeps offering notes for a text that is gone.
         if (hadOld && userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
     }
     // The write slots (see WriteSlot in the header) put these on disk in the
@@ -426,9 +367,6 @@ Result<std::string> BibleEngine::Import(std::string_view source, std::string_vie
     PersistUserDataSidecar(std::move(userJson));
     PersistStoreFile(std::move(storeJson));
 
-    // Replacing a translation: drop its stale index documents first so the
-    // global index never serves outdated verse text — whether or not this
-    // import re-indexes (docs/specs/24 §Search).
     if (hadOld) {
         auto& search = search::SearchEngine::Instance();
         for (const auto& v : oldBible.verses)
@@ -483,9 +421,6 @@ Result<size_t> BibleEngine::Validate(const BibleVersion& bible) const {
 
 Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible,
                                        const std::function<void(size_t, size_t, std::string_view)>* onProgress) {
-    // Incremental upsert per verse (docs/specs/24 §Search): importing a Bible
-    // must never clobber the global index — other Bibles, songs, and
-    // presentations stay searchable alongside this one.
     auto& search = search::SearchEngine::Instance();
     size_t indexed = 0;
     // Note: on error the loop aborts (partial index) — Import logs the failure
@@ -533,18 +468,12 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
                                "bible not found: " + std::string(bibleId));
         removed = std::move(it->second);
         bibles_.erase(it);
-        // Its user data has nowhere to live (every screen keys user data by
-        // bibleId): drop it with the translation, so a purge is a purge.
-        // Prefix-checked erase ("KJV" must not sweep "KJV2" — see Import).
         {
             const std::string prefix = std::string(bibleId) + "|";
             for (auto it = notes_.lower_bound(prefix); it != notes_.end() && it->first.starts_with(prefix);)
                 it = notes_.erase(it);
             highlights_.erase(std::string(bibleId));
         }
-        // Keep the store in sync so a removed translation stays removed after
-        // a restart (no-op while no store path is set). Built under the lock,
-        // written after it is released.
         if (!storePath_.empty()) storeJson = BuildStoreJsonLocked();
         // The removal dropped this translation's user data: its sidecar follows.
         if (userDataFileWritten_.load()) userJson = BuildUserDataJsonLocked();
@@ -563,11 +492,6 @@ Result<void> BibleEngine::RemoveBible(std::string_view bibleId) {
 // ---------------------------------------------------------------------------
 void BibleEngine::SetStorePath(std::string_view path) {
     std::string store(path);
-    // The user-data SIDECAR lives beside the corpus and is named after it
-    // ("bibles.json" -> "bibles.userdata.json"), so one path from the Kernel
-    // still configures both and no other module's file can collide with it.
-    // Derived here, outside the lock: path splitting is pure string work, and
-    // the locked scope stays a two-assignment scope.
     std::string sidecar;
     if (!store.empty()) {
         static const std::string kJson = ".json";
@@ -581,21 +505,12 @@ void BibleEngine::SetStorePath(std::string_view path) {
         liveChange = initialized_.load();
         storePath_ = std::move(store);
         userDataPath_ = std::move(sidecar);
-        // A new location is a new layout to establish: until a sidecar is
-        // written THERE, the corpus at that path carries the user data (see
-        // BuildStoreJsonLocked). Only a path set BEFORE Initialize() can be
-        // established this way — see the `liveChange` warning below.
         if (!liveChange) {
             userDataFileWritten_.store(false);
             userDataFromCorpus_.store(false);
         }
     }
     if (liveChange) {
-        // A path set on a RUNNING engine does not re-read the corpus or the
-        // sidecar (Initialize() is idempotent), so the flags have to keep
-        // describing what is actually loaded in memory. Clearing them here was
-        // the quiet data-divergence: the next mark would write the notes into
-        // the new corpus while the sidecar at the old path stayed stale.
         Logger::Instance().Warning(
             "BibleEngine: SetStorePath called after Initialize — the new location takes "
             "effect on the next boot; the user-data layout is left as loaded",
@@ -603,10 +518,6 @@ void BibleEngine::SetStorePath(std::string_view path) {
     }
 }
 
-// One bible -> JSON. Only the canonical shape persists: metadata + books +
-// chapters ("GEN.1" keys, the map GetChapter()/Outline() read). `verses` is
-// the flattened view and rebuilds on restore (FlattenVersesLocked), halving
-// the store size versus keeping both shapes.
 json::Value BibleEngine::BibleToJsonLocked(const BibleVersion& bible) const {
     using J = json::Value;
     J::Object meta;
@@ -738,11 +649,6 @@ Result<size_t> BibleEngine::LoadStoreLocked(const json::Value& root, const json:
             ++count;
         }
     }
-    // USER DATA: the SIDECAR is its home (schema 3) when it is there — the
-    // corpus's own copy is then ignored, however old it is. Without a sidecar
-    // the corpus's arrays are consumed (schema <= 2) and the corpus is REMEMBERED
-    // as their home, so the next corpus save keeps carrying them until the
-    // migration write lands (a note must never be lost to a failed write).
     if (userRoot) {
         ReadUserDataLocked(*userRoot);
         userDataFileWritten_.store(true);
@@ -764,37 +670,21 @@ BibleEngine::Snapshot BibleEngine::BuildStoreJsonLocked() {
     for (const auto& [id, bible] : bibles_)
         arr.push_back(BibleToJsonLocked(bible));
     J::Object root;
-    // schema 3 = user data lives in the sidecar; schema 2 = THIS file still
-    // carries it, which is true exactly until the sidecar's first successful
-    // write (userDataFileWritten_). A bible is ~4 MB of verse text, so that
-    // switch is what lets a mark stop rewriting megabytes.
     const bool corpusCarriesUserData = !userDataFileWritten_.load();
     root["schema"] = J::Number(corpusCarriesUserData ? 2 : 3);
     root["bibles"] = J(std::move(arr));
     if (corpusCarriesUserData)
         WriteUserDataLocked(root);   // still ONE file: never orphan user data
     out.json = J(std::move(root)).ToString();
-    // Stamped under the SAME lock that produced the document — that is what
-    // orders the write against an older snapshot built by another thread (see
-    // WriteSlot in the header).
     out.seq = ++snapshotSeq_;
     return out;
 }
 
 Result<void> BibleEngine::WriteStoreFile(const std::string& json) {
     if (storePath_.empty() || json.empty()) return Ok();
-    // ATOMIC (WriteAtomic creates the parent dir too). Called with mutex_
-    // RELEASED — see the header: this PAL write is what used to park every
-    // scripture read behind an import.
     auto& platform = platform::PlatformAccessor::Get();
     const auto t0 = std::chrono::steady_clock::now();
     auto written = platform.Filesystem().WriteAtomic(storePath_, json);
-    // Logged on the same terms as the sidecar write below, and for the same
-    // reason: this is the MEGABYTES-per-change path, so a mark that ever reads
-    // or rewrites the corpus again is visible in the log as a corpus write next
-    // to the mark — where it used to be invisible (the two writes were the same
-    // line of code). `tools/selftest/run_mark_sidecar_test.sh` counts both after
-    // a mark: sidecar writes go up, corpus writes stay at zero.
     if (written.ok())
         Logger::Instance().Info(
             "BibleEngine: store written (corpus) in " +
@@ -808,10 +698,6 @@ Result<void> BibleEngine::WriteStoreFile(const std::string& json) {
 
 // --- User-data <-> JSON -----------------------------------------------------
 
-// The SIDECAR document (notes, highlights, collections) — the only thing a mark
-// on a verse writes, and kilobytes rather than the corpus's megabytes.
-// Mutex-HELD by contract: it walks the user-data maps. The write is
-// WriteUserDataFile below, called with the lock released.
 BibleEngine::Snapshot BibleEngine::BuildUserDataJsonLocked() {
     const auto t0 = std::chrono::steady_clock::now();
     using J = json::Value;
@@ -860,11 +746,6 @@ void BibleEngine::PersistStoreFile(Snapshot snap) {
     PumpSlot(storeWrite_, std::move(snap), false);
 }
 
-// The single writer: parks the newest snapshot in the slot, claims the drain,
-// and writes until nothing newer is left. Every OTHER caller leaves its
-// snapshot parked and returns, so the order the files see is the order the
-// snapshots were BUILT — never the order two threads happened to reach the
-// disk — and the newest state is always the last thing written.
 void BibleEngine::PumpSlot(WriteSlot& slot, Snapshot snap, bool sidecar)
 {
     {
@@ -887,9 +768,6 @@ void BibleEngine::PumpSlot(WriteSlot& slot, Snapshot snap, bool sidecar)
             take = std::move(slot.pending);
             slot.pending = Snapshot{};
         }
-        // The PAL write runs with NO lock held: writeMutex_ guards the slot
-        // only (see the header), so nothing here can park the interface thread
-        // behind a disk write, and an older snapshot can no longer land last.
         const Result<void> written = sidecar ? WriteUserDataFile(take.json)
                                              : WriteStoreFile(take.json);
         if (!written.ok()) {
@@ -908,11 +786,6 @@ void BibleEngine::PumpSlot(WriteSlot& slot, Snapshot snap, bool sidecar)
         if (sidecar) {
             // The layout only turns over once the data is REALLY on disk.
             userDataFileWritten_.store(true);
-            // One line per WRITE (a burst of marks coalesces into one, which is
-            // the point), with the numbers the guarantee is about. The corpus is
-            // not read, not parsed and not rewritten by this path at all, so the
-            // two figures below ARE the whole cost of the click — and the click
-            // is a QML call on the interface thread.
             const auto stats = LastUserDataWrite();
             Logger::Instance().Info(
                 "BibleEngine: user-data sidecar written in " +
@@ -928,9 +801,6 @@ void BibleEngine::PumpSlot(WriteSlot& slot, Snapshot snap, bool sidecar)
 
 // --- User-data <-> JSON (schema 2) -----------------------------------------
 
-// One reference as a JSON object. BookName/Raw are display sugar resolved
-// from the book table — the store keeps the canonical shape only (same rule
-// the bibles obey), so only the id/verse fields persist.
 json::Value BibleEngine::RefToJson(const PassageRef& ref) {
     using J = json::Value;
     J::Object o;
@@ -950,10 +820,6 @@ PassageRef BibleEngine::RefFromJson(const json::Value& node) {
     return ref;
 }
 
-// Append the user-data arrays into the store's root OBJECT (bibles stay
-// schema 1-compatible; the user-data keys are simply absent in schema-1
-// stores). Takes the map, not the Value — operator[] lives on the object
-// map in this JSON library.
 void BibleEngine::WriteUserDataLocked(json::Value::Object& root) {
     using J = json::Value;
     J::Array notes;
@@ -1201,9 +1067,6 @@ Result<std::vector<BibleSearchHit>> BibleEngine::Search(std::string_view query,
                                                         std::string_view bookId,
                                                         int chapter) const {
     std::vector<BibleSearchHit> hits;
-    // The chapter lock's test, in one place: is this verse inside the passage the
-    // search is scoped to? (Empty bookId = the whole Bible, chapter 0 = the whole
-    // book, so the unlocked search runs through the same code it always did.)
     const auto inScope = [&](std::string_view hitBible, std::string_view hitBook, int hitChapter) {
         if (!bookId.empty() && hitBook != bookId) return false;
         if (chapter > 0 && hitChapter != chapter) return false;
@@ -1252,11 +1115,6 @@ Result<std::vector<BibleSearchHit>> BibleEngine::Search(std::string_view query,
     search::SearchFilter filter;
     filter.type = "bible";
     if (!bibleId.empty()) filter.author = std::string(bibleId);
-    // Push the scope INTO the engine as the document id prefix the Bible
-    // documents carry ("bible:<bible>:<book>:<chapter>:<verse>"), so the
-    // candidate slice is drawn from inside the one open passage instead of being
-    // filtered after the cap — which would answer a scoped query with whatever
-    // the global top-N happened to be.
     if (!bookId.empty() && !bibleId.empty()) {
         filter.idPrefix = std::format("bible:{}:{}:", bibleId, bookId);
         if (chapter > 0) filter.idPrefix += std::format("{}:", chapter);
@@ -1366,10 +1224,6 @@ Result<std::string> BibleEngine::Format(std::string_view bibleId, const PassageR
 }
 
 // ---------------------------------------------------------------------------
-// User data (docs/specs/24 §User Data) — always keyed by canonical reference,
-// never stored inside Scripture. Persisted alongside the bibles in the store
-// (schema 2): one JSON, the same write-per-change budget the bibles pay, so a
-// highlight or note survives a restart exactly like an imported translation.
 // ---------------------------------------------------------------------------
 std::string BibleEngine::RefKey(const PassageRef& ref) {
     std::string key = std::format("{}:{}", ref.bookId, ref.chapter);
@@ -1430,9 +1284,6 @@ Result<std::vector<UserNote>> BibleEngine::Notes(std::string_view bibleId,
 Result<std::vector<UserNote>> BibleEngine::Notes(std::string_view bibleId) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<UserNote> out;
-    // Only THIS bible's notes: the key is "<bibleId>|<ref>", so a plain
-    // prefix match (the map is sorted) keeps the drawer from blending notes
-    // across translations.
     const std::string prefix = std::string(bibleId) + "|";
     for (auto it = notes_.lower_bound(prefix); it != notes_.end() && it->first.starts_with(prefix); ++it)
         out.insert(out.end(), it->second.begin(), it->second.end());
@@ -1553,5 +1404,4 @@ void BibleEngine::UnwireEvents() {
 void BibleEngine::OnConfigReload(const events::ConfigHotReload&) {
     (void)Reload();
 }
-
 } // namespace bps::bible

@@ -1,10 +1,5 @@
 #pragma once
 
-// ResourceBudgetManager (docs/specs/16 §5): every subsystem receives a budget.
-// On a 4 GB laptop the renderer gets 512 MB, AI is disabled, video 256 MB,
-// cache 128 MB — automatically. Budgets derive from total RAM + quality
-// settings + pressure level, and are republished on change.
-
 #include "core/common/Common.hpp"
 #include "modules/adaptive/Quality.hpp"
 
@@ -13,7 +8,6 @@
 #include <string>
 
 namespace bps::adaptive {
-
 // Known budget consumers (docs/specs/16 §5).
 namespace Subsystem {
 inline constexpr const char* kRenderer = "renderer";
@@ -50,5 +44,4 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, Budget, std::less<>> budgets_;
 };
-
 } // namespace bps::adaptive

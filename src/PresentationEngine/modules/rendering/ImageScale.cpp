@@ -4,13 +4,7 @@
 #include <cmath>
 
 namespace bps::rendering {
-
 namespace {
-
-// A footprint longer than this is sampled on a stride rather than every pixel:
-// the tap count (and so the per-pixel cost) stays bounded however far a picture
-// is shrunk, and four evenly spaced samples inside the footprint already remove
-// the aliasing four would — a stride only thins a box that covers many pixels.
 constexpr int kMaxTapsPerAxis = 4;
 
 inline int ClampIndex(int i, int extent) {
@@ -18,7 +12,6 @@ inline int ClampIndex(int i, int extent) {
     if (i >= extent) return extent - 1;
     return i;
 }
-
 } // namespace
 
 int BuildScaleTaps(double srcStart, double srcSpan, int srcExtent, ScaleTaps& out) {
@@ -34,10 +27,6 @@ int BuildScaleTaps(double srcStart, double srcSpan, int srcExtent, ScaleTaps& ou
     }
 
     if (srcSpan <= 1.0) {
-        // MAGNIFYING — bilinear around the destination pixel's centre. The
-        // `- 0.5` is what makes a 1:1 draw land on a pixel centre (frac 0) and
-        // return exactly that pixel; without it every picture would be a half
-        // pixel soft, including the ones drawn at their own size.
         const double center = srcStart + srcSpan * 0.5 - 0.5;
         const double base = std::floor(center);
         const double frac = center - base;
@@ -51,9 +40,6 @@ int BuildScaleTaps(double srcStart, double srcSpan, int srcExtent, ScaleTaps& ou
         return 2;
     }
 
-    // MINIFYING — a box average over the footprint. `begin`/`end` are the source
-    // pixels the destination pixel actually covers; with more than
-    // kMaxTapsPerAxis of them, sample evenly across the box instead.
     const double begin = srcStart;
     const double end = srcStart + srcSpan;
     const int first = static_cast<int>(std::floor(begin));
@@ -111,10 +97,6 @@ uint32_t CombineTaps(const RgbaImage& src, const ScaleTaps& xs, const ScaleTaps&
             sumW += w;
         }
     }
-    // Round back to 8 bits per channel. A destination pixel whose whole
-    // footprint was transparent stays transparent (sumA == 0) — a black pixel
-    // with alpha 0 would be a wrong colour for anything that later reads the
-    // frame as straight alpha.
     if (sumA <= 0.0) return 0u;
     const auto toByte = [](double v) {
         const double c = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
@@ -126,5 +108,4 @@ uint32_t CombineTaps(const RgbaImage& src, const ScaleTaps& xs, const ScaleTaps&
     const uint32_t bb = toByte(sumB / sumA);
     return (aa << 24) | (bb << 16) | (gg << 8) | rr;
 }
-
 } // namespace bps::rendering

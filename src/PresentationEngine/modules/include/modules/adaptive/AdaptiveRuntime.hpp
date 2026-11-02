@@ -1,12 +1,5 @@
 #pragma once
 
-// AdaptiveRuntime (docs/specs/16): the facade every subsystem consults instead
-// of making isolated hardware/resource decisions. Owns the profilers, the
-// capability detector, feature registry, quality/user modes, budgets, the
-// optimizer brain, the pressure reflexes and the learning engine; runs a
-// heartbeat (Collect → Analyze → Optimize) and publishes adaptive.* events.
-// "The engine becomes self-optimizing rather than user-optimized."
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -28,7 +21,6 @@
 #include <vector>
 
 namespace bps::adaptive {
-
 // Dashboard snapshot (docs/specs/16 §14).
 struct RuntimeSnapshot {
     std::string mode;            // active user mode
@@ -99,9 +91,6 @@ public:
     ConfigLayer GetConfigLayer() const;
     Result<void> SetPreference(Preference p);
     Preference GetPreference() const;
-    // The share of the machine the user lets the engine use (Settings > Smart Config's resource budgets), 10..100 each.
-    // The CPU cap bounds the recommended worker count, the GPU cap scales the texture budget; everything that asks the
-    // runtime (GetRecommendedThreadCount / GetTextureBudget) sees the capped answer. 100 = no cap (the default).
     Result<void> SetResourceCaps(unsigned gpuPct, unsigned cpuPct);
     unsigned GpuCapPct() const { return gpuCapPct_.load(); }
     unsigned CpuCapPct() const { return cpuCapPct_.load(); }
@@ -120,9 +109,6 @@ public:
     Result<void> SaveLearning();
     Result<void> LoadLearning();
 
-    // --- Reactions (called by pressure events / heartbeat) ---
-    // Apply the current optimum to live systems: thread pool resize, cache
-    // budgets, resource mode. Publishes adaptive.* events on change.
     Result<void> ApplyOptimization(std::string_view reason);
 
     // --- Dashboard ---
@@ -188,5 +174,4 @@ private:
     std::atomic<uint64_t> prevCpuTotal_{0};
     std::atomic<uint64_t> prevCpuIdle_{0};
 };
-
 } // namespace bps::adaptive

@@ -1,20 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The left sidebar of a library pane (Shows, Media, Scripture / The Table): the dark
-// column with its 1 px divider on the right, that the user can DRAG wider or narrower.
-// Every library pane builds its sidebar from this, so they look and behave the same:
-//
-//   LibrarySidebar {
-//       id: sidebar
-//       height: parent.height
-//       SidebarRow { ... }            // children fill the sidebar (default property)
-//   }
-//   Item { x: sidebar.width; ... }    // the content beside it follows sidebar.width
-//
-// The width is state this component owns - drag the divider (a SplitHandle) to change it,
-// double-click it to go back to `defaultWidth`. Panes stay instantiated when their tab is
-// hidden, so each keeps its own width for the session.
 Rectangle {
     id: root
 

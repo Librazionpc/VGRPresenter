@@ -9,20 +9,6 @@
 class QJSEngine;
 class QQmlEngine;
 
-// App-wide event bus — the UI-process mirror of the backend engine's own
-// EventBus::Subscribe<T>() (see PresentationEngine docs/api/README.md §"event
-// bus"). QML has no templates to match that typed-Subscribe<T>() pattern
-// with, so this is topic-string + payload-map instead of typed events. Any
-// C++ code (CrashHandler, the Qt message handler installed in main.cpp, and
-// eventually a bridge relaying the real engine's EventBus into the UI
-// process) publishes through EventBus::instance() without touching
-// QQmlEngine at all; any QML subscribes via
-// `Connections { target: EventBus; function onEventPosted(topic, payload) {} }`.
-//
-// Kept deliberately generic rather than notification-specific: NotificationCenter.qml
-// is just one subscriber. Anything else that wants to react to app-wide
-// events (future telemetry, a debug console, etc.) can subscribe to the same
-// channel instead of every producer growing its own bespoke signal.
 class EventBus : public QObject
 {
     Q_OBJECT
@@ -34,43 +20,10 @@ public:
     // handler and main()'s message handler both need this).
     static EventBus &instance();
 
-    // QML singleton factory — returns the SAME instance as instance(), so
-    // C++-side publishes and QML-side subscriptions are never two different
-    // objects.
     static EventBus *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
-    // topic: dotted namespace, e.g. "log.warning", "app.crash",
-    // "av.routeChanged". payload: arbitrary key/value data. By convention
-    // (see NotificationCenter.qml) a payload with a non-empty "message" is
-    // treated as user-facing and becomes a toast; topics with no message are
-    // still delivered to every subscriber, just not surfaced as one.
     Q_INVOKABLE void publish(const QString &topic, const QVariantMap &payload = QVariantMap());
 
-    // The STANDARD door for UI-originated notifications — screens call THIS,
-    // never NotificationCenter directly (which stays a pure subscriber) and
-    // never hand-rolled payload maps. It stamps the conventional payload keys
-    // (level/title/message/origin) and namespaces the topic as
-    // "ui.<screen>.<what>" when the caller doesn't provide one, so engine
-    // traffic ("recording.failed", "project.saved") and UI traffic
-    // ("ui.edit.textCopied") stay distinguishable in the feed and in any
-    // future activity log/filter. Every topic published through here also
-    // carries origin="ui"; engine relay events carry origin="engine".
-    //
-    // level: "info" (default) | "success" | "warning" | "error" — error
-    // toasts stick longer (NotificationCenter's own rule).
-    // crux: the NAMES the notice is about (a device, a source, a show), as a
-    // string or a list of strings. Purely presentational — it rides the payload
-    // as "crux" and NotificationCenter/NotificationToast render those spans bold
-    // so the eye lands on the subject instead of reading the sentence (see
-    // NotificationToast.crux). Optional: a notice with no crux renders exactly
-    // as before.
-    // action: what the notice OFFERS, if anything — a map {"id": "recovery.open",
-    // "label": "Open recovered show"}, or a bare id string with the label left to
-    // the card. Same rules as crux: presentational, optional, and carried on the
-    // payload as "action". The id is looked up in QML's own registry
-    // (NotificationCenter.registerAction) when the button is clicked, so a notice
-    // raised from anywhere — this C++ door included — can offer one click to the
-    // work it is about without handing a function through a payload map.
     Q_INVOKABLE void notify(const QString &message,
                             const QString &level = QStringLiteral("info"),
                             const QString &title = QStringLiteral("Application"),

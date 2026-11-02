@@ -1,7 +1,3 @@
-// Unit tests: Output styles (Settings · Styles).
-// Persistence through the kernel's StyleStore + the style-aware SceneBuilder.
-// Split so a single phase can run alone:
-//   ./bps_unit_tests styles
 #include "TestHarness.hpp"
 #include "modules/presentation/BookFill.hpp"
 #include "modules/presentation/CompositorState.hpp"
@@ -14,6 +10,7 @@
 #include "modules/project/OutputStore.hpp"
 #include "modules/project/ShippedConfig.hpp"
 #include "modules/project/StyleStore.hpp"
+#include "modules/rendering/FlowScrollMath.hpp"
 #include "modules/rendering/PngCodec.hpp"
 #include "modules/settings/Telemetry.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -80,11 +77,6 @@ void TestStyleStore() {
 }
 
 // ---------------------------------------------------------------------------
-// Portable background paths: a roster saved on ANOTHER machine carries an
-// absolute path that cannot exist here (seeded install on a new PC). The
-// re-attach pass must find this machine's own copy by file name (the
-// installer seeds it into the user-data dir) and leave every other case —
-// valid local path, no local copy, empty — untouched.
 // ---------------------------------------------------------------------------
 void TestStylePortableImagePaths() {
     auto& platform = bps::platform::PlatformAccessor::Get();
@@ -188,9 +180,6 @@ void TestStyleBuilder() {
     CHECK(p::StyleBuilder::ParseColor("").a == 0.0f);       // "" = "no colour given"
     CHECK(p::StyleBuilder::ParseColor("#12345").a == 0.0f);  // wrong length
 
-    // Layout presets: the lower third hugs the bottom edge and shows no
-    // title block; fullscreen covers the stage; an unknown key falls back
-    // to the safe default (fullscreen-like).
     const p::StyleBuilder::Layout lower = p::StyleBuilder::LayoutFor("lowerThird");
     CHECK(!lower.showTitle);
     CHECK(lower.body.y + lower.body.h > 0.9f);   // bottom-anchored
@@ -252,12 +241,6 @@ void TestSceneBuilderStyles() {
         auto scene = engine.GetScene(plain.value());
         CHECK(scene.ok());
         if (scene.ok()) {
-            // NOTHING NAMED A COLOUR: no background object and a KEYABLE
-            // scene. The engine used to fill such a frame with an opaque black
-            // of its own; an empty style is "not painting yet", so what is keyed
-            // behind it shows through until something paints (a style colour, a
-            // design's own backdrop, an image, pushed content). See
-            // TestTransparentBackground case 2, which pins the pixels.
             CHECK(!engine.GetObject(plain.value(), "bg").ok());
             CHECK(scene.value()->TransparentBackground());
         }
@@ -396,10 +379,6 @@ void TestSetActiveOutputStyle() {
           && eng.ActiveOutputStyle().backgroundColor.empty());
 
     // ---- The live path: compile + prepare under a style, then verify the
-    // COMPILED scene id is the fingerprinted one (RenderOnce reads
-    // Compiled().slides[idx].sceneId — a plain id here would render a scene
-    // that was never built). Then RebuildScenes (what the live loop calls on
-    // a style change, legal while LIVE) moves every compiled scene id.
     auto created = eng.CreatePresentation("Style Live");
     CHECK(created.ok());
     const std::string id = created.value();
@@ -447,19 +426,7 @@ void TestSetActiveOutputStyle() {
 }
 
 // ---------------------------------------------------------------------------
-// The style background image must reach the RENDERED FRAME, not just the scene
-// graph. TestStyleBackgroundImage above pins the object and its cover-fit
-// bounds; the app's own "output frame sanity" diagnostic then showed every real
-// output's frame all-black (meanLuma=0, maxLuma=0 over the whole stage) for
-// exactly this kind of scene — which is how "the monitor shows it but HDMI/NDI
-// is black" is possible at all: the tile, the output window and the library
-// cards are QML layers drawn by Qt, while a real output gets ONLY this frame.
-// A solid RED style image over a black style must therefore leave red pixels in
-// the frame; anything else means the draw never happened.
 void TestStyleBackgroundImagePixels() {
-    // A real 4x4 solid-red PNG on disk (EncodePngRgba8; no hand-rolled bytes).
-    // Colour packing is the engine's own 0xAABBGGRR (R in the LOW byte) —
-    // 0xFF0000FF is opaque red.
     const std::filesystem::path img = std::filesystem::temp_directory_path() / "bps_style_bg_px_test.png";
     {
         r::RgbaImage px;
@@ -495,12 +462,6 @@ void TestStyleBackgroundImagePixels() {
     style.backgroundColor = "#ff000000";   // black — the red image is the only colour
     style.backgroundImage = img.string();
 
-    // BOTH SIZES: a small offscreen canvas and the REAL live one. The app's own
-    // "output frame sanity" line reports a 1920x1080 frame that is entirely
-    // black with maxAlpha=255 while the same scene's draw commands are
-    // submitted, so the backend's large-canvas path is as much under test as
-    // the builder's — a bug that only shows at the stage size the outputs
-    // actually use is exactly the one an offscreen-only test would miss.
     struct SizeCase { int w; int h; };
     const SizeCase cases[] = { { 320, 180 }, { 1920, 1080 } };
     for (const SizeCase& c : cases) {
@@ -539,24 +500,6 @@ void TestStyleBackgroundImagePixels() {
 }
 
 // ---------------------------------------------------------------------------
-// THE BLANK GO-LIVE CARRIER (LiveOutputService::goLiveBlank) plus the
-// compositor's own layers.
-//
-// GO LIVE with nothing staged sends ONE carrier slide that carries no blocks,
-// no title and a "transparent" background, precisely so the outputs can show
-// what the preview is already showing: the taken camera/screen input (or media
-// on air) over the active style's background. The report is that this case
-// renders BLACK — the media never reaches the output — while the same take IS
-// visible the moment real content (scripture/table) is on air, which points at
-// the scene this carrier builds rather than at the tap: both halves ride the
-// same builder, so the carrier must compose its compositor layers exactly like
-// a content slide does.
-//
-// The compositor's media hand-off is used here (CompositorState::SetMediaFrame,
-// a solid GREEN 8x8) because it needs no device: it lands in the SAME object,
-// on the SAME layer ("media") and therefore in the SAME pipeline pass as a
-// taken camera/screen input does — so a green pixel in the frame is the whole
-// question, and no PAL tap is involved.
 void TestBlankCarrierCompositorPixels() {
     // A real 4x4 solid-red PNG on disk (EncodePngRgba8; no hand-rolled bytes).
     // Colour packing is the engine's own 0xAABBGGRR (R in the LOW byte).
@@ -582,9 +525,6 @@ void TestBlankCarrierCompositorPixels() {
     CHECK(render.Start().ok());
     CHECK(render.SetBackend("software").ok());
 
-    // The carrier exactly as LiveOutputService::goLiveBlank builds it: id
-    // "temp:<empty name>", one slide with NO blocks, NO title, background
-    // "transparent" (the variant map's own three fields).
     p::Presentation pres;
     pres.id = "temp:";
     p::Slide carrier;
@@ -608,13 +548,6 @@ void TestBlankCarrierCompositorPixels() {
             p::CompositorState::Instance().ClearMedia();
             return;
         }
-        // STAGE-SHAPED (16:9), not square. A taken file is laid out with
-        // contain-fit — its own aspect preserved, letterboxed on the style's
-        // background (a portrait photo stays portrait; see ContainRect) — so a
-        // SQUARE frame would now leave the top/bottom bands of the design
-        // visible, and these assertions are about what sits OVER the feed, not
-        // about the feed's own margins. A 16:9 take fills the stage exactly, so
-        // their meaning is unchanged.
         p::CompositorState::MediaFrame frame;
         frame.width = 192;
         frame.height = 108;
@@ -628,11 +561,6 @@ void TestBlankCarrierCompositorPixels() {
         p::CompositorState::Instance().SetMediaFrame(std::move(frame));
     };
 
-    // A carrier AND the same carrier with content on it — the two halves the
-    // operator compares. Content changes nothing about the compositor layer, so
-    // the media must be visible either way.
-    // The full-stage slab that bury a live feed: the 754x428 design grid, so
-    // 0/0/754/428 IS the whole stage (the operator's "Big Bold" variant).
     auto slabTemplate = []() {
         p::ContentBlock slab;
         slab.id = "tpl-slab";
@@ -647,11 +575,6 @@ void TestBlankCarrierCompositorPixels() {
         headline.metaJson = R"({"color":"#ffffff","fontSize":90,"align":"center"})";
         return std::vector<p::ContentBlock>{ slab, headline };
     };
-    // ...and the design that must keep decorating OVER the feed: a lower-third
-    // band (orange) with a bound line. It never reaches the stage, so it is
-    // content, not background — the feed shows around it and it stays on top.
-    // `meta` is the band's own block meta, which is where a design author states
-    // "underVideo" instead of leaving the placement to the geometry.
     auto bandTemplate = [](std::string meta = "{}") {
         p::ContentBlock band;
         band.id = "tpl-band";
@@ -673,13 +596,6 @@ void TestBlankCarrierCompositorPixels() {
         blocks.front().metaJson = std::move(meta);
         return blocks;
     };
-    // THE OPERATOR'S OWN DESIGN SHAPE, and the reason the rule looks at the
-    // whole leading run: a body panel plus a bottom bar that only COVER the
-    // stage together (neither one of them reaches it alone). Distinct dark blue,
-    // so "is this panel drawn over the feed?" is a pixel count, not a guess.
-    // `asText` builds the same pair the way the app's own designs express it —
-    // as TEXT items that carry the fill in their own background (see the flow:
-    // a full-stage text item with an opaque box IS the design's backdrop).
     auto panelPairTemplate = [](bool asText = false) {
         auto panel = [asText](const char* id, double y, double h) {
             p::ContentBlock b;
@@ -711,36 +627,12 @@ void TestBlankCarrierCompositorPixels() {
     };
     const Case cases[] = {
         { "blank carrier", false, 0, true, false, false, false },
-        // THE REPORTED CASE: the style wears an engine template whose design
-        // carries a full-stage background slab. On a blank carrier the slab has
-        // no text to sit behind — it is pure cover — and it used to bury the
-        // compositor's live video layer (an opaque black output).
         { "blank carrier + slab template", false, 1, true, false, false, false },
-        // ...and it no longer buries the feed WITH content either: a design's
-        // full-stage background belongs UNDER the video layer, because a live
-        // feed IS the output's picture. The template's text still renders on
-        // top of it.
         { "carrier + content + slab template", true, 1, true, false, false, false },
-        // A design whose background is TWO leading boxes that only cover the
-        // stage together: the whole run is the background, so neither panel is
-        // drawn over the feed (demoting just the second one — the first fix here
-        // — left the body panel painting across 85% of the picture).
         { "carrier + content + panel pair", true, 5, true, false, false, true },
-        // ...and the same pair as the app's designs actually write it: TEXT items
-        // whose own background box is the fill. The item's paint is the backdrop
-        // (below the feed), its text still renders over the feed.
         { "carrier + content + text-item pair", true, 6, true, false, false, true },
-        // The half that must NOT change: a lower-third band is the design's
-        // decoration, not its background, so it stays above the video layer
-        // (the feed is visible around it, and the band is drawn over it).
         { "carrier + content + band template", true, 2, true, true, false, false },
-        // AN EXPLICIT "underVideo": false WINS over the geometry: the author
-        // wants this slab over the feed, so it covers it (a deliberately
-        // opaque design, not an accident).
         { "carrier + content + slab over-feed", true, 3, false, false, false, false },
-        // ...and "underVideo": true puts a band UNDER the feed: the band is
-        // part of the design's background by choice, so a live feed paints over
-        // it (the mirror image of the case above).
         { "carrier + content + band under-feed", true, 4, true, false, true, false },
     };
     for (const Case& c : cases) {
@@ -795,18 +687,11 @@ void TestBlankCarrierCompositorPixels() {
                     && b8 > 0x58 && b8 < 0x68)
                     ++pair;
             }
-            // THE FAILURE: the compositor's media is buried (the operator's "only
-            // media doesn't go": a black, media-less frame) by a template slab
-            // that was painted over it.
             CHECK((green > 0) == c.mediaVisible);
             if ((green > 0) != c.mediaVisible)
                 std::cout << "[blank-carrier] " << c.name << ": media "
                           << (green > 0 ? "visible" : "INVISIBLE")
                           << " (green=" << green << ", red=" << red << ")\n";
-            // The other half of the rule: a design's BAND is decoration and must
-            // stay drawn OVER the feed (it is content, never background) — unless
-            // the design itself said "underVideo": true, in which case the feed
-            // paints over it and no band pixel may survive.
             if (c.bandOnTop) {
                 CHECK(band > 0);
                 if (band == 0)
@@ -831,24 +716,8 @@ void TestBlankCarrierCompositorPixels() {
             }
             (void)red;
         }
-        // The style's own background IMAGE is still composed on a blank carrier
-        // that wears a template — dropping the template must not cost the
-        // operator's branded backdrop (it is the whole reason GO LIVE with
-        // nothing paints the style rather than a bare black frame). Read with
-        // the compositor's media switched off, because the media layer is
-        // cover-fit and would hide the image underneath it.
         if (c.templateKind == 1 && !c.withContent) {   // the geometric slab case
             setMedia(false);
-            // Re-run the builder first: the compositor's media layer is refreshed
-            // through the scene cache (AddCompositorLayers on a cache hit), so
-            // clearing the state alone leaves the LAST frame in the object.
-            //
-            // AND RENDER WHAT IT RETURNED. A take is part of the scene ID now
-            // (StyledSceneIdFor's "@m:on": a file on air steps the style's
-            // backdrop aside, so the two compositions cannot share one cached
-            // scene). Rendering the old id here would render the take's scene —
-            // the one deliberately built WITHOUT the backdrop — which is a
-            // stale question, not a failing rule.
             auto plainScene = builder.BuildSlideScene(pres, slide, caseStyle, render, r::Size(1920, 1080));
             auto plain = plainScene.ok() ? render.Render(plainScene.value(), opts)
                                          : render.Render(built.value(), opts);
@@ -872,19 +741,11 @@ void TestBlankCarrierCompositorPixels() {
     (void)std::filesystem::remove(img, ec);
 }
 
-
 // ---------------------------------------------------------------------------
-// Go-live paths — the ORIGINAL BUG: StartFromOpenShow opened the working show
-// by a registry id it was never registered under, so goLive failed with
-// "presentation not found" and nothing ever rendered.
 // ---------------------------------------------------------------------------
 void TestGoLivePaths() {
     auto& eng = p::PresentationEngine::Instance();
     CHECK(eng.Initialize().ok());
-    // The loop renders REAL frames: the render backend must be live (the
-    // rendering phase boots it in its own suites; this phase may run alone).
-    // The config default is "null" unless a config file says otherwise —
-    // force software for this phase.
     (void)bps::ConfigurationManager::Instance().Set(
         "render.backend", bps::json::Value::String("software"));
     auto& render = r::RenderEngine::Instance();
@@ -957,15 +818,7 @@ void TestGoLivePaths() {
         CHECK(eng.StopPlayback().ok());
         CHECK(eng.Runtime().Close().ok());
 
-        // REGISTRY HYGIENE: StartFromOpenShow/StartFromSlides mirror their
-        // content into the engine registry (PutPresentation); PresentLive does
-        // NOT (the caller owns its copy). Delete what was mirrored — a later
-        // phase counts presentations.
         CHECK(eng.Delete("pres-golive-doc").ok());
-        // (The live-replace swap does NOT re-put — "pres-golive-again" was
-        // never mirrored either, PresentLive leaves the registry alone. The
-        // "temp:..." mirror is made by section 3's StartFromSlides below and
-        // is deleted there.)
     }
 
     // 2. Empty content is refused, not crashed on.
@@ -989,15 +842,6 @@ void TestGoLivePaths() {
         CHECK(eng.Runtime().ActivePresentation()->name == "John 3:16");
         CHECK(live.RenderOnce().ok());
 
-        // 3b. PER-OUTPUT PASSES at a NON-DEFAULT resolution: a styled live
-        //     output gets its own scene built AT its configured size and its own
-        //     frame buffer — and the main pass's distribute must NOT write that
-        //     buffer. Two writers on one buffer is what the live report showed
-        //     as an output "glitching between the two templates" (the NDI sender
-        //     and the real output window both sample snapshots on their own
-        //     cadence, so they caught whichever write landed last); a frame
-        //     resampled up from the 1920x1080 layout was the "not following the
-        //     Resolution" half.
         {
             p::OutputStyleSpec outStyle;
             outStyle.backgroundColor = "#ff000000";
@@ -1035,19 +879,8 @@ void TestGoLivePaths() {
             CHECK(render.RemoveOutput(outBuffer).ok());
         }
 
-        // 3c. THE TWO HALVES OF "do not pay twice for a frame that is already
-        //     composed": an output whose own scene IS the composed one takes a
-        //     COPY of it, and a static scene is RE-PRESENTED on the heartbeat
-        //     instead of being rasterized again. Both are what stopped the live
-        //     rate from falling with every enabled output (measured in the
-        //     running app before this: two more outputs halved the delivered
-        //     frame rate — see tools/selftest/run_live_latency_test.sh).
         {
             const std::string sharedBuf = "__out_shared_test__";
-            // The SAME spec as the on-air style, and no pushed size (so the
-            // gated build uses the engine's own 1080p default — the size the
-            // compiled scene is built at). The scene id is the fingerprint of
-            // (slide, style, size), so this lands on the COMPOSED id.
             CHECK(eng.SetLiveOutputStyles({eng.ActiveOutputStyle()}, {sharedBuf}).ok());
 
             r::FrameBufferOutput *fb = nullptr;
@@ -1066,9 +899,6 @@ void TestGoLivePaths() {
             // on the sharing path — see RenderPerOutputPasses).
             CHECK(live.SharedOutputCopies() >= 1);
             if (fb) {
-                // THE COPY IS THE COMPOSED FRAME: same target size, identical
-                // pixels to what the preview feed received — not a re-drawn
-                // scene that happens to look the same.
                 auto previewReg = render.GetOutput(l::LiveOutputController::kPreviewName);
                 CHECK(previewReg.ok());
                 auto *pv = previewReg.ok()
@@ -1083,9 +913,6 @@ void TestGoLivePaths() {
                     CHECK(shot->pixels == feed->pixels);
                 }
 
-                // The dirty-frame path: with the scene unchanged, the outputs
-                // keep receiving frames (the buffer's own count moves) while the
-                // raster count does NOT — the heartbeat is a copy now.
                 const uint64_t rastersThen = render.Stats().frames;
                 const uint64_t representedThen = live.RepresentedFrames();
                 const uint64_t receivedThen = fb->FramesReceived();
@@ -1098,25 +925,6 @@ void TestGoLivePaths() {
                 CHECK(represented);
                 CHECK(render.Stats().frames == rastersThen);   // a copy, not a raster
 
-                // --- THE MEASUREMENT THE CHANGE WAS MADE FOR -----------------
-                // "Each extra enabled output halved the delivered frame rate" was
-                // measured in the app BEFORE this (tools/selftest/run_live_latency_test.sh's
-                // rungs: 1.43-1.45 fps on the plain ladder, 0.81 fps with two more
-                // outputs enabled) and the reason was structural: for a scene that
-                // had not changed, the heartbeat re-rasterised ONE FULL FRAME PER
-                // OUTPUT once a second, so a fixed per-frame budget bought fewer
-                // and fewer frames as outputs were enabled. The engine's own live
-                // section is the AFTER number in the loop's own units, and this is
-                // the whole of it in one SECOND OF STATIC SHOW: frameMs is what a
-                // raster + the per-output passes cost (now ONE raster however many
-                // outputs share the composed scene), representMs is what the copy
-                // that replaced each of those rasters costs, and the pair
-                // (composedFps, presentFps) is how many real rasters a second of
-                // show needed against how often the outputs were FED.
-                //
-                // The sample is taken from the closed CURVE rather than from the
-                // open second: LiveSnapshot's rates divide the second so far, so a
-                // reading taken 20 ms into a second reports one frame as 50 fps.
                 bps::settings::LiveSample quiet;
                 bool measured = false;
                 for (int i = 0; i < 300 && !measured; ++i) {
@@ -1126,9 +934,6 @@ void TestGoLivePaths() {
                     if (curve.empty())
                         continue;
                     const bps::settings::LiveSample& last = curve.back();
-                    // A second with NO raster at all is the claim: a fully static
-                    // scene costs the loop nothing to draw and still feeds the
-                    // outputs (and the per-output rasters became copies).
                     if (last.composedFps == 0.0 && last.presentFps > 0.0 && last.sharedCopies >= 1) {
                         quiet = last;
                         measured = true;
@@ -1147,25 +952,11 @@ void TestGoLivePaths() {
                              static_cast<unsigned long long>(totals.composed),
                              static_cast<unsigned long long>(totals.represented));
                 CHECK(measured);
-                // Nothing was re-drawn for that second, and the outputs were fed
-                // anyway: the dirty-frame path, and the rate it delivers when the
-                // scene is not moving.
                 CHECK(quiet.composedFps == 0.0);
                 CHECK(quiet.presentFps > 0.0);
-                // The copy is the cheap half — a raster plus every per-output pass
-                // costs multiples of handing the composed frame over again, which
-                // is why the delivered rate no longer divides by the output count.
                 CHECK(totals.frameMs > totals.representMs);
                 CHECK(quiet.sharedCopies >= 1);
 
-                // AND THE NAME BEHIND THE SHAPE. The same second also carries
-                // the heaviest LAYER of the frame the loop composed (the
-                // renderer's own cost profile, published by the loop), so a dip
-                // in the curve is attributable instead of merely visible. The
-                // whole chain is asserted here — RenderEngine's profile, the
-                // controller's publish, the per-second sample — and the silent
-                // failure mode it catches is the one that would leave the curve
-                // shapely but nameless.
                 std::fprintf(stderr,
                              "[live] hotspot: %s — %.0f%% of the frame (%.1f ms), background %.0f%%\n",
                              quiet.costElement.c_str(), quiet.costSharePct, quiet.costMs,
@@ -1173,11 +964,6 @@ void TestGoLivePaths() {
                 CHECK(!quiet.costElement.empty());
                 CHECK(quiet.costSharePct > 0.0 && quiet.costSharePct <= 100.0);
                 CHECK(quiet.costMs > 0.0);
-                // The ENGINE'S OWN CLEAR IS NOT THE NAME: it is a full frame of
-                // pixels before any layer draws, so naming it would report
-                // "Background clear" in every second of every service. Its share
-                // travels alongside the named one instead (and here it is the
-                // bulk of the frame — a full-frame background behind text).
                 CHECK(quiet.costElement.find("Background clear") == std::string::npos);
                 CHECK(quiet.costBackgroundPct > 0.0);
             }
@@ -1187,10 +973,6 @@ void TestGoLivePaths() {
 
         CHECK(live.StopLive().ok());
         CHECK(!live.IsLive());
-        // REGISTRY HYGIENE: StartFromSlides mirrored "temp:John 3:16" into the
-        // engine registry — delete it here (not before it exists), or the
-        // later presentation phase sees a phantom: TestPresentationEngine
-        // asserts a fresh-engine presentation count.
         CHECK(eng.Delete("temp:John 3:16").ok());
 
         std::vector<p::Slide> none;
@@ -1199,11 +981,6 @@ void TestGoLivePaths() {
 
     CHECK(live.Stop().ok());
 
-    // REGISTRY HYGIENE (render): going live registers the controller's preview
-    // feed output with the shared RenderEngine and the design KEEPS it across
-    // stop/start cycles. This test booted the render engine for the phase, so
-    // it removes the feed again — the rendering phase's TestRenderEngine
-    // asserts exact OutputCount() around its own add/remove.
     (void)render.RemoveOutput(l::LiveOutputController::kPreviewName);
 }
 
@@ -1274,26 +1051,12 @@ void TestStyleBackgroundImage() {
 }
 
 // ---------------------------------------------------------------------------
-// A PLACED MEDIA ITEM — the Edit canvas's Media chip → Picture / Video.
-//
-// The item is a block of kind "image" (or "video") whose meta `src` names the
-// file. Until the scene builder grew a branch for those kinds, the block fell
-// through its kind switch and every real output showed an EMPTY HOLE where the
-// canvas showed the operator's picture — the previews drew a stand-in card, and
-// the outputs drew nothing at all.
-//
-// Pinned at both levels: the object exists, letterboxed INSIDE the item's own
-// box (a placed item is a window, so nothing may spill outside its rect — the
-// engine has no clipping), and its pixels really are the file's.
 // ---------------------------------------------------------------------------
 void TestPlacedImageBlock() {
     r::RenderEngine& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
     CHECK(engine.SetBackend("software").ok());
 
-    // A real 4x2 PNG: left half red, right half blue. The block's box is a
-    // LANDSCAPE 2:1 stage rect, so a 4:2 picture fills it exactly — the fit
-    // assertions below then describe the picture, not a letterbox.
     const std::filesystem::path img =
         std::filesystem::temp_directory_path() / "bps_placed_media_test.png";
     {
@@ -1348,11 +1111,6 @@ void TestPlacedImageBlock() {
     CHECK(found != nullptr);
     if (found) {
         const r::Rect& b = found->Bounds();
-        // INSIDE the item's box, never outside it (the engine has no clip, so
-        // the fit itself has to stay in) — centred in it, and its HEIGHT is
-        // the box's: a 2:1 picture in a box that comes out 2.02:1 at output
-        // scale is height-limited, so it letterboxes a couple of pixels at the
-        // sides rather than overflowing them.
         CHECK(b.x >= bx - 1.0f);
         CHECK(b.y >= by - 1.0f);
         CHECK(b.Right() <= bx + bw + 1.0f);
@@ -1460,30 +1218,9 @@ void TestBlockScenes() {
 }
 
 // ---------------------------------------------------------------------------
-// A TEXT BLOCK'S OWN BOX FILL — the "Background" the Edit canvas paints
-// behind a text item (EditScreen's itemBackground target writes the item's
-// style.backgroundColor) and EVERY QML surface draws (DesignPreview's
-// `hasBox` Rectangle, the box the canvas shows and a template previews).
-//
-// AddStageBlocks turned a text block into a TextObject and NOTHING else — the
-// style was carried all the way into the engine (ShowConverter.blockFromVariant
-// → ContentBlock::style.backgroundColor) and then ignored, so a template whose
-// text sits on a box (the shipped scripture recipe's #66000000 "transparent
-// black" band is exactly this) rendered WITHOUT that box on every ENGINE
-// output — the NDI feed, the distributed frames, recordings — while the in-app
-// preview showed it: the reported "the template defined a transparent black bg
-// behind the text but it doesn't show". A box/shape BLOCK was already honored
-// (below); a text block's own box was not.
-//
-// Pinned at both levels: the box object exists under its text in the text's own
-// layer, and the rendered pixels really are darkened inside it (a structural
-// check alone would pass for a box that never rasterizes).
 // ---------------------------------------------------------------------------
 void TestBlockTextBox() {
     r::RenderEngine& engine = r::RenderEngine::Instance();
-    // This phase may run ALONE (./bps_unit_tests block-text-box), and
-    // SetBackend needs an initialized engine — the same self-boot TestGoLivePaths
-    // does for the backend it renders through. Both calls are idempotent.
     CHECK(engine.Initialize().ok());
     CHECK(engine.SetBackend("software").ok());
 
@@ -1544,10 +1281,6 @@ void TestBlockTextBox() {
     CHECK(textFound);
     CHECK(boxFound);
 
-    // …and it rasterizes: inside the box the white background is dimmed to
-    // ~40% black (the text's own glyphs sit in there too, hence "some pixels",
-    // not "the pixel at the box centre"), while everything right of the box is
-    // still untouched white.
     r::RenderOptions opts;
     opts.capture = true;
     opts.distribute = false;
@@ -1622,19 +1355,6 @@ void TestBlockTextBox() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUNDED CORNERS on template boxes — the engine twin of Qt's
-// `Rectangle { radius: … }`, which is what DesignPreview (library cards, the
-// Edit canvas) and the in-app previews round a template's band/panel with.
-//
-// ShapeComponent::radius existed but was never written by any caller and never
-// read by the rasterizer, so EVERY engine-rendered rounded box drew square:
-// "Box"'s radius 8, "Trendy Curved"'s 30, the Table designs' 20 — on NDI, the
-// distributed frames and recordings — while the same template looked rounded
-// everywhere in the app. Geometry is authored on the 754x428 stage grid, so the
-// radius scales like the width (20 stage px = ~50.9 output px at 1080p).
-// Pinned at both ends: the radius reaches the shape object AND the corners
-// really rasterize rounded (a corner pixel stays background, the centre is
-// filled, an anti-aliased edge band exists, and radius 0 still squares off).
 // ---------------------------------------------------------------------------
 void TestBlockCornerRadius() {
     r::RenderEngine& engine = r::RenderEngine::Instance();
@@ -1755,13 +1475,6 @@ void TestBlockCornerRadius() {
 }
 
 // ---------------------------------------------------------------------------
-// autoSize vocabulary — the engine twin of the canvas's solver. AddStageBlocks
-// previously honored ONLY literal "shrink", so every "growToFit"/"shrinkToFit"
-// template (TextItemPanel's picker vocabulary) rendered at its FIXED set size
-// on the engine outputs — the live "auto size only works for shows; scripture
-// and the table always shrink even when the template says otherwise" report.
-// Grow: a short verse in a tall box must END UP BIGGER than its set size.
-// Shrink: an overflowing verse must end up smaller. None/absent: exact.
 // ---------------------------------------------------------------------------
 void TestAutoSizeVocabulary() {
     p::Presentation pres;
@@ -1830,47 +1543,21 @@ void TestAutoSizeVocabulary() {
     CHECK(shrunk > 3.0f * kScale && shrunk < setOutputPx - 1.0f);
     const float shrunkLegacy = builtSize(slideWithMode("shrink", longVerse));
     CHECK(std::abs(shrunkLegacy - shrunk) < 0.5f);   // both spellings agree
-    // GROW PARITY (the canvas solver's `lo`): grow with an OVERFLOWING verse
-    // descends to the largest size that fits — the set size is not a floor.
-    // (The old engine kept the overflowing set size; every growToFit
-    // template meeting a long verse rendered ~2.5× the canvas's answer and
-    // clipped off the frame.) All three modes must now land on the SAME
-    // fitted size — the box is the master regardless of mode.
     const float grownLong = builtSize(slideWithMode("growToFit", longVerse));
     CHECK(grownLong > 3.0f * kScale && grownLong < setOutputPx - 1.0f);
     CHECK(std::abs(grownLong - shrunk) < 0.5f);
-    // CANVAS PARITY (EditScreen.recomputeFit: "EVERY mode solves, none
-    // included"): a none-mode block that overflows SQUEEZES too — the box is
-    // the master on every surface. (The engine used to render "none" at its
-    // fixed set size and honestly overflow; that divergence WAS the "NDI
-    // output renders the verse bigger than the canvas" report.)
     const float fixed = builtSize(slideWithMode("none", longVerse));
     CHECK(fixed > 3.0f * kScale && fixed < setOutputPx - 1.0f);
     CHECK(std::abs(fixed - shrunk) < 0.5f);   // none and shrinkToFit agree now
 }
 
 // ---------------------------------------------------------------------------
-// FONT-METRICS FIT PARITY — "auto size works with one font, clips with
-// another". The fit solver must measure the SAME vertical extent the renderer
-// paints, and both must vary with the font the way real fonts vary:
 //   1. lineSpacing tracks the font: SceneBuilder derives it from the font's
-//      ink height (the monitor preview's QFontMetricsF::height equivalent),
-//      so two fonts at the same set size/lineHeight produce DIFFERENT additive
-//      spacing — a font-blind constant was the clip-with-one-font bug.
 //   2. measured height fits where it solved: laying the fitted size out
-//      through TextLayout::Measure must fit a box the solver fitted. The
-//      old model counted a full line box for the LAST line too, over-
-//      measuring by (step − ink) — a per-font number — so which sizes
-//      "fit" swung with the font while the painted result clipped the tail
-//      (second screenshot: last verse line cut at the frame bottom).
 // ---------------------------------------------------------------------------
 void TestFontMetricsFitParity() {
     auto& fonts = r::RenderEngine::Instance().Fonts();
 
-    // Two families with genuinely different natural line heights if both are
-    // installed (they are on every Windows box this suite runs on); with
-    // neither, metrics fall back to the size+lineSpacing estimate and the
-    // assertions below still hold — just without proving font-dependence.
     const char* famA = "Segoe UI";
     const char* famB = "Georgia";
     r::TextStyle st;
@@ -1880,9 +1567,6 @@ void TestFontMetricsFitParity() {
     st.wrap = true;
     st.wrapWidth = 900.0f;
 
-    // (1) SceneBuilder's derivation: natural ink height × lineHeight − size, which
-    // differs between families; the fallback formula ((lh−1)·size) is what a
-    // font-blind engine used to apply to BOTH.
     const auto spacingFor = [&](const char* family) {
         r::FontManager::LineMetrics lm{};
         if (fonts.SystemLineMetrics(family, st.size, false, false, lm))
@@ -1892,12 +1576,6 @@ void TestFontMetricsFitParity() {
     if (fonts.HasSystemFont(famA) && fonts.HasSystemFont(famB))
         CHECK(std::abs(spacingFor(famB) - spacingFor(famA)) > st.size * 0.01f);
 
-    // (2) Solver contract: the fitted size measures back as fitting. Grow a
-    // short verse in a tall box (the report's growToFit path), then verify —
-    // and GROW MUST ACTUALLY GROW: the old proportional-step walker aborted
-    // on its first overshoot and returned the SET size (the live "grow does
-    // nothing until I change the font" symptom), so this also pins the
-    // bisection rewrite.
     const auto fittedSize = [&](const char* family) {
         r::TextStyle s = st;
         s.fontId = family;
@@ -1924,9 +1602,6 @@ void TestFontMetricsFitParity() {
     CHECK(m.totalHeight <= 500.0f);
     CHECK(m.totalWidth <= 900.0f);
 
-    // Multi-line height is ink-corrected: strictly less than the naive
-    // n·step (the old over-measure) whenever ink < step — true for every
-    // installed font at these sizes and identity for the builtin font.
     const char* verse =
         "It shall be light in the evening time, the path to glory you will "
         "surely find; thru the water way, it is the light today.";
@@ -1946,15 +1621,6 @@ void TestFontMetricsFitParity() {
 }
 
 // ---------------------------------------------------------------------------
-// LINE HEIGHT IS ONE RULE — the report "the height in the template is set to
-// zero and look at the line height ... this height is too much and it makes no
-// sense, let things obey the template".
-//
-// A block's `lineHeight` is a PROPORTIONAL multiplier of the font's own natural
-// line height; 0 — and a template that never names the field — means THE FONT'S
-// OWN spacing. Three surfaces draw one block (the Edit canvas, every preview
-// tile, this engine) and each used to supply its own default: the Text panel
-// showed 0 for the very item the canvas, the tiles and the engine all drew at
 // 1.2. The value the operator could see was never the value on air. This pins
 // the shared rule and its engine integration:
 //   1. absent and 0 render the SAME, natural step;
@@ -2002,10 +1668,6 @@ void TestLineHeightObeysTheTemplate() {
         return out;
     };
 
-    // A proportional lineHeight of `lh` on the engine side is a line STEP of
-    // lh x the font's own ink height (SceneBuilder: inkHeight x lh - size,
-    // then Measure adds the size back). The fallback formula, for a font
-    // without metrics, lands on the same lh x size.
     const auto expectedStep = [&](float sizePx, double lh) {
         r::FontManager::LineMetrics lm{};
         if (engine.Fonts().SystemLineMetrics("Segoe UI", sizePx, false, false, lm))
@@ -2042,9 +1704,6 @@ void TestLineHeightObeysTheTemplate() {
 }
 
 // ---------------------------------------------------------------------------
-// Engine-template styles — a style wearing a template design (templateKey
-// "tpl-…", blocks baked into the spec) renders THE TEMPLATE with the slide's
-// content bound in; the fingerprint hashes the blocks.
 // ---------------------------------------------------------------------------
 void TestTemplateStyleScenes() {
     p::Presentation pres;
@@ -2108,16 +1767,8 @@ void TestTemplateStyleScenes() {
     }
 
     // 2. The style's template OWNS the composition: a slide that arrives
-    //    with its OWN blocks (the content tab's template already laid them
-    //    out for a different design) must NOT paint them over the style's
-    //    template — the output style wins (FreeShow: output style > slide).
     p::Slide dressed = slide;
     dressed.id = "tplstyle-dressed";
-    // TAGGED with the content family: this is the case the rule is FOR — a
-    // scripture/table slide's blocks are the content tab's own template, laid
-    // out for a different design, and the output style is what restyles them.
-    // An UNTAGGED slide is SHOWS content, whose blocks ARE its design and must
-    // survive (see TestShowSlideKeepsItsOwnDesign).
     dressed.metaJson = R"({"contentType":"scripture"})";
     dressed.blocks = {chip};   // a stray box from the tab's own template
     auto dressedScene = builder.BuildSlideScene(pres, dressed, style, engine);
@@ -2217,10 +1868,6 @@ void TestTemplateStyleScenes() {
         (void)engine.DestroyScene(tableScene.value());
     }
 
-    // A Table family template can mark its reading block growToFit while leaving
-    // fontSize unset (as in the saved Table copy lower-third design). The output
-    // must fit that block like the monitor preview, not leave it at the 16-unit
-    // fallback just because the slide also carries a reading flow.
     p::Slide tableFlow = tableSlide;
     tableFlow.id = "tplstyle-table-family-flow";
     tableFlow.flowText = tableFlow.text;
@@ -2313,13 +1960,6 @@ void TestTemplateStyleScenes() {
     }
 
     // 8. RESOLUTION: an output's scene is built AT that output's own size. The
-    //    styled id carries a size tag for any non-default size, so two outputs
-    //    at different resolutions never share one cached scene (a cache hit
-    //    returns the scene at the size it was FIRST built with — so without the
-    //    tag a 4K output would be served the 1080p scene and only look resized),
-    //    and the built scene really is that size, which is what makes the render
-    //    backend rasterize the output's frame natively instead of resampling a
-    //    1080p layout up to it (the "NDI is not following the Resolution" bug).
     CHECK(p::SceneBuilder::StyledSceneIdFor(pres, slide, style)
           == p::SceneBuilder::StyledSceneIdFor(pres, slide, style, r::Size(1920, 1080)));
     const std::string idBig = p::SceneBuilder::StyledSceneIdFor(pres, slide, style, r::Size(3840, 2160));
@@ -2348,16 +1988,6 @@ void TestTemplateStyleScenes() {
 }
 
 // ---------------------------------------------------------------------------
-// Transparent style background — a frame the style does not paint is a keyable
-// overlay whichever way it came about: an EXPLICITLY transparent template, or an
-// UNSET background (the style names no colour at all). Both paint NO background
-// object, flag the scene so the renderer clears to alpha 0, and really come out
-// see-through in the raster — which is what the monitor tile shows as its
-// checkerboard and what the output window and the NDI feed carry. They are the
-// same pixels and are kept apart only by the composition that recorded them: an
-// explicit "transparent" is a CHOICE, an unnamed one is simply "not painting
-// yet" — both are ParseColor alpha 0, so they are told apart by the string, not
-// the colour.
 // ---------------------------------------------------------------------------
 void TestTransparentBackground() {
     r::RenderEngine &engine = r::RenderEngine::Instance();
@@ -2414,13 +2044,6 @@ void TestTransparentBackground() {
     }
 
     // 2. UNSET background ("" — the style carries no colour): NO background
-    //    object, scene flagged, and the pixels are see-through — the same
-    //    frame as an explicitly transparent style, because an empty style is
-    //    "not painting yet" rather than a black fill of the engine's own. What
-    //    is keyed, recorded or composited behind it shows through until
-    //    something paints. The SLIDE's own background is "transparent" here
-    //    (the data model's default for every slide), which must NOT be mistaken
-    //    for a choice — see the rule in SceneBuilder.
     {
         p::OutputStyleSpec unsetStyle;
         auto unsetScene = builder.BuildSlideScene(pres, slide, unsetStyle, engine);
@@ -2459,14 +2082,6 @@ void TestTransparentBackground() {
     }
 
     // 4. The SLIDE'S OWN OPAQUE BACKGROUND MUST NOT DEFEAT AN EXPLICITLY
-    //    TRANSPARENT STYLE. This is the reported "the lower third template never
-    //    shows the checkerboard" case: a slide can OWN an opaque background the
-    //    operator never chose (historically every Table slide did — the content
-    //    template baked #000000 into each one; SlideBuilder no longer does, but
-    //    imported/older shows still carry it). The
-    //    style's "transparent" has to win — otherwise the preview tile, the
-    //    output window and the NDI feed all render opaque black over what should
-    //    be a keyable overlay.
     {
         p::Slide owned = slide;
         owned.id = "tr-owned";
@@ -2510,11 +2125,6 @@ void TestTransparentBackground() {
     }
 
     // 6. ALPHA INSPECTION (RenderEngine::SetAlphaInspect — the engine half of
-    //    VGR_ALPHA_INSPECT): with it ON a transparent scene's clear is
-    //    composited over the checkerboard, so the frame an NDI feed, an HDMI
-    //    screen or the real output window shows is OPAQUE and visibly checkered
-    //    instead of invisible alpha. Opaque content is left bit-identical, and
-    //    the flag is GLOBAL state, so this restores it before it returns.
     {
         p::OutputStyleSpec clearStyle;
         clearStyle.backgroundColor = "transparent";
@@ -2562,14 +2172,6 @@ void TestTransparentBackground() {
     }
 }
 
-// WHAT A BLOCK RENDER CANNOT SHOW (SlideRules::NeedsDistributedFrame).
-//
-// The monitor tile and the output window both read ONE answer out of the
-// composition to decide whether the compositor's distributed frame or their own
-// block render is the honest picture for the slide on air. The rule is pinned
-// here as well as in the composition's own hand-over, because the two surfaces
-// used to carry a copy each — a rule with two copies is a rule that eventually
-// answers two ways.
 void TestFrameRule() {
     p::ContentBlock text;
     text.kind = "text";
@@ -2603,10 +2205,6 @@ void TestFrameRule() {
     CHECK(p::SlideRules::NeedsDistributedFrame({ image }));
     CHECK(p::SlideRules::NeedsDistributedFrame({ text, camera }));
 
-    // AND THE COMPOSITION'S HALF OF IT, which is what makes the answer
-    // reachable for a real output: a slide carrying its own blocks (no style
-    // template to override them) is composed FROM those blocks, so the
-    // preview's answer and the frame's content come from the same list.
     p::Slide slide;
     slide.id = "frame-rule-1";
     slide.blocks = { text, camera };
@@ -2615,12 +2213,6 @@ void TestFrameRule() {
     CHECK(own.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
     CHECK(p::SlideRules::NeedsDistributedFrame(slide.blocks));
 
-    // A style's TEMPLATE owns the layout instead: what is composed is the
-    // template's own blocks (its text regions), so the frame is not wanted —
-    // the blocks are the picture, and they cannot lag a slide change. A
-    // CONTENT-FAMILY slide is the case (a scripture pick restyled by an output
-    // style): a show's own authored blocks keep their layout, see
-    // TestShowSlideKeepsItsOwnDesign.
     p::ContentBlock bound = text;
     bound.bind = "text";
     bound.text = "a line the template paints";
@@ -2637,14 +2229,6 @@ void TestFrameRule() {
 // Placeholder binding — an unbound `{token}` block must render the SAME
 // sentence the preview fills, not an empty box
 // ---------------------------------------------------------------------------
-//
-// The reported shape: a table design's slot carried {table_code_paragraphs} (and
-// a body of {table_number} {table_text}) with NO bind — that is how the metadata
-// palette inserts a field. The preview pane showed the sentence (it fills through
-// BookFill), while the outputs drew the box with no text at all: BindTemplateBlocks
-// blanked every non-`bind` block that still held a `{`. This pins both halves of
-// the fix — resolution through the shared vocabulary, and the deliberate blank for
-// a token whose value never reaches the engine.
 void TestPlaceholderBinding() {
     p::Slide slide;
     slide.id = "tbl-1";
@@ -2700,24 +2284,6 @@ void TestPlaceholderBinding() {
 // ---------------------------------------------------------------------------
 // The body of a slide that carries SEVERAL slots is not the first one
 // ---------------------------------------------------------------------------
-//
-// The reported shape: a table design built from the metadata palette — a date
-// code in its top corner, the sermon body under it — rendered its CODE where the
-// body belonged on the outputs, at the body's own size and colour ("that is
-// table code what was defined in the template is table text").
-//
-// How: a table slide goes live with NO `text` of its own (SlideBuilder::slides
-// never fills line1/line2, so ShowConverter's slideFromVariant leaves it empty)
-// and its body riding in the DESIGN's blocks, which BookFill has already filled
-// — code slot "47-0412 4", body slot the sentence. ContentText's fallback then
-// took "the first text-bearing block", i.e. whichever slot the author placed
-// first, which for a design with a code in its corner IS the code. Every consumer
-// of "the body" inherited it: the bind="text" block, {table_text}, and
-// {scripture_text} on a design whose first slot is the verse number.
-//
-// The design NAMES its body — the palette's Text field and the shipped layouts'
-// Text() both carry bind "text" (MetadataFields) — so that is what ContentText
-// reads first, and the code slot stays exactly where the author put it.
 void TestPlaceholderBodyNotFirstSlot() {
     const std::string body = "3 I trust that sometime when I come back again to Oakland";
 
@@ -2782,10 +2348,6 @@ void TestPlaceholderBodyNotFirstSlot() {
     CHECK(slide.blocks.size() == 3 && slide.blocks[0].text == "47-0412 4");
 
     // 4. THE REPORTED DESIGN ITSELF, through the real fill. It declares NO bind
-    //    on either slot (the palette of the day inserted bare tokens), so nothing
-    //    in the block list can name the body — which is why the fill CARRIES it
-    //    (BookSlide::body, put on the slide by SlideBuilder and read by
-    //    ShowConverter) instead of leaving the engine to pick by position.
     p::BookSource sermon;
     sermon.family = p::ContentFamily::Table;   // named: the shape of the reference and of the tokens follows it
     sermon.book = "47-0412 - Faith Is The Substance";
@@ -2803,28 +2365,18 @@ void TestPlaceholderBodyNotFirstSlot() {
         CHECK(filledSlides[0].blocks[0].text == "47-0412 3");        // the code slot still gets the code
         CHECK(filledSlides[0].blocks[1].text == filledSlides[0].body);   // ...and the body slot the body
 
-        // What the slide carries once the services have built it (the fill's
-        // `body` becomes the slide's own text) — the code can no longer be
-        // mistaken for the content, whatever order the design put its slots in.
         p::Slide carried = slide;
         carried.blocks = filledSlides[0].blocks;
         carried.text = filledSlides[0].body;
         CHECK(p::SlideRules::ContentText(carried) == filledSlides[0].body);
 
         // 5. THE REST OF THE VOCABULARY rides the same way. "It just remains the
-        //    code" was the report: the design's corner slot asks for
-        //    {table_code_paragraphs} — the date code AND this slide's paragraph
-        //    numbers — and the engine can only answer it from the slide, because
-        //    a filled block no longer says what it used to ask for.
         const p::BookValues &v = filledSlides[0].values;
         CHECK(v.code == "47-0412");
         CHECK(v.numbers == "3");
         CHECK(p::FillTokens("{table_code_paragraphs}", v) == "47-0412 3");
         CHECK(p::FillTokens("{table_reference}", v) == "47-0412 - Faith Is The Substance 3");
 
-        // ...and it renders: the meta the services now write (SlideBuilder's
-        // `fill` map -> ShowConverter's metaJson) is what SlideValues reads, so
-        // the SAME slide with that meta draws the code in the corner slot.
         p::Slide onAir = carried;
         onAir.metaJson = R"({"ref":"47-0412 - Faith Is The Substance 3","refFull":"47-0412 - Faith Is The Substance 3","refLast":"","tableCode":"47-0412","tableNumbers":"3","book":"47-0412 - Faith Is The Substance","contentType":"table"})";
         p::OutputStyleSpec corner;
@@ -2838,9 +2390,6 @@ void TestPlaceholderBodyNotFirstSlot() {
         if (composed.blocks.size() == 3) {
             CHECK(composed.blocks[0].text == onAir.text);            // the body
             CHECK(composed.blocks[1].text == "47-0412 3");           // the code + ITS paragraph numbers
-            // `refLast` is PRESENT and empty here: the fill saying "this is not
-            // the last slide". It must stay blank — falling back to the slide's
-            // own reference put the whole selection on every slide.
             CHECK(composed.blocks[2].text.empty());
         }
         // The same slide on its LAST one: the fill's whole selection, verbatim.
@@ -2854,26 +2403,6 @@ void TestPlaceholderBodyNotFirstSlot() {
 }
 
 // ---------------------------------------------------------------------------
-// A LAYOUT WITH NOTHING TO DRAW DOES NOT GET TO SEND A BLANK FRAME.
-//
-// Reported live: the NDI output read "sending - 2205 frames - 2 monitor(s)"
-// while the receiving monitor stayed black, and — from the operator — "it did
-// not even show the background image before you even get to slides". The engine
-// frame the feed carried was EMPTY (the presenter's own sanity line: maxAlpha=0,
-// not one object painted anything) while the app's tiles showed the sermon,
-// because the tiles draw the slide's own blocks and the style's family template
-// had claimed the composition. That template is a TABLE design whose slots are
-// palette FIELD tokens ({table_text}, {table_code_paragraphs}) and the slide
-// that went on air carried its content in its OWN blocks, so every token bound
-// to nothing: a layout of empty text, under a transparent style whose
-// clearBackgroundOnText had hidden the style image, is a fully see-through
-// frame. Squarely the rule this file exists to keep: the engine must not render
-// a picture the preview already shows content in.
-//
-// The rule the suite pins: a template or preset that would paint NOTHING hands
-// the composition back to the slide's own blocks (the same picture the preview
-// draws), while a template that DOES paint keeps FreeShow's precedence — output
-// style > slide — exactly as before.
 // ---------------------------------------------------------------------------
 void TestBlankTemplateFallsBackToSlideBlocks() {
     r::RenderEngine& engine = r::RenderEngine::Instance();
@@ -2892,9 +2421,6 @@ void TestBlankTemplateFallsBackToSlideBlocks() {
         return b;
     };
 
-    // The slide the Table tab puts on air: its content IS its own blocks (the
-    // fill put the sermon there) and it carries no title/body of its own — the
-    // exact shape a template's field slots and a preset's title/body cannot draw.
     p::Slide tableSlide;
     tableSlide.id = "blank-tpl-1";
     tableSlide.metaJson = R"({"contentType":"table"})";
@@ -2902,9 +2428,6 @@ void TestBlankTemplateFallsBackToSlideBlocks() {
         textBlock("b1", "Faith is the substance of things hoped for...", 60),
     };
 
-    // The style an NDI row wears: a transparent background, the branded image
-    // stepping aside for content, and a TABLE family template made of the
-    // palette's field slots (id values the slide was never given).
     p::OutputStyleSpec style;
     style.name = "NDI screen";
     style.backgroundColor = "transparent";
@@ -2912,10 +2435,6 @@ void TestBlankTemplateFallsBackToSlideBlocks() {
     style.backgroundImage = "";   // no disk dependency in a unit test
     style.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("table")] = "tpl-3";
     style.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("table")] = {
-        // The slots a palette design carries: field tokens whose values the
-        // slide was never given (the slide's own block holds the sermon, and
-        // SlideValues has no `table_notes` to hand this slot), so both bind to
-        // nothing and the layout is a line-up of empty text.
         textBlock("t1", "{table_code_paragraphs}", 45),
         textBlock("t2", "{table_notes}", 150),
     };
@@ -2928,9 +2447,6 @@ void TestBlankTemplateFallsBackToSlideBlocks() {
     CHECK(comp.blocks.empty());
 
     // 2. ...and the real scene the outputs render carries the picture: the
-    //    slide's own block is a real object in it AND the raster is not a blank
-    //    frame. This is the assertion the black monitor failed — before the
-    //    fallback the same scene rasterized to maxAlpha=0.
     auto scene = builder.BuildSlideScene(pres, tableSlide, style, engine);
     CHECK(scene.ok());
     if (scene.ok()) {
@@ -2989,21 +2505,6 @@ void TestBlankTemplateFallsBackToSlideBlocks() {
 }
 
 // ---------------------------------------------------------------------------
-// CLEAR ALL REALLY CLEARS — the report "the clear all doesn't clear well: it
-// shows the style bg image ... the bg brings back the background image and
-// clears the slide".
-//
-// Clear all used to send the SAME carrier GO LIVE-with-nothing sends, and the
-// engine composites the output's style onto an empty slide exactly as it does
-// onto a full one — which is deliberate there (going live with nothing is meant
-// to show the output's own look) and wrong here: pressing Clear all took the
-// slide down and put the style's poster back up. The clear is now its own
-// carrier (Slide::clearStage) composed to paint NOTHING.
-//
-// Both halves are asserted, because only the pair says anything: the blank
-// carrier must KEEP the style (nothing here may regress the GO LIVE promise),
-// and the clear must take every last bit of it down — including at the pixel
-// level, which is what the operator actually sees on the screens.
 // ---------------------------------------------------------------------------
 void TestClearCarrierPaintsNothing() {
     // A real red PNG on disk — the style's branded backdrop, the thing the
@@ -3031,11 +2532,6 @@ void TestClearCarrierPaintsNothing() {
     CHECK(render.Start().ok());
     CHECK(render.SetBackend("software").ok());
 
-    // DISTINCT IDs, the way the live path names them: SceneBuilder keys scenes
-    // by "pres:<presentation>:<slide id>", so two slides with the same id share
-    // one cached scene and the second build would be served the first one
-    // (StartFromSlides does exactly this naming, folding the slide's content
-    // into the id — see HashSlideContent, which is where the flag has to be too).
     p::Slide blank;                 // the GO-LIVE-with-nothing carrier
     blank.id = "clear-test-blank";
     p::Slide clear = blank;
@@ -3067,10 +2563,6 @@ void TestClearCarrierPaintsNothing() {
     CHECK(clearComp.explicitTransparent);      // ...as a CHOSEN empty frame
     CHECK(clearComp.styleImageSuppressed);     // ...not even the background image
     CHECK(clearComp.blocks.empty());           // ...and no layout of its own
-    // ...AND THAT IS THE ONE ANSWER TO "IS THIS FRAME TRANSPARENT?" (see
-    // SlideComposition::frameTransparent): a clear is transparency by
-    // definition, while the blank GO LIVE carrier beside it wears the style's
-    // own opaque poster.
     CHECK(clearComp.frameTransparent);
     CHECK(!blankComp.frameTransparent);
 
@@ -3117,24 +2609,12 @@ void TestClearCarrierPaintsNothing() {
             auto frame = render.Render(builtClear.value(), opts);
             CHECK(frame.ok());
             if (frame.ok() && !frame.value().empty()) {
-                // THE FIX, in the operator's own terms: not one pixel of the
-                // style's colour, its background image or its design survives —
-                // the frame is the empty one a keyer/black screen gets.
                 CHECK(countNonBlack(frame.value()) == 0);
                 CHECK(countVisible(frame.value()) == 0);
             }
             (void)render.DestroyScene(builtClear.value());
         }
 
-        // 2b. "NOTHING" INCLUDES THE COMPOSITOR'S OWN LAYERS.
-        //
-        // The wall's Blackout control sends this same carrier, and the report
-        // it exists for is "nothing at all on screen". The engine used to
-        // composite a taken camera/screen, a media file and the overlay stack
-        // INTO every scene before the content switch — the clear included — so
-        // a blackout mid-service still showed the camera. The clear carrier now
-        // owns no compositor layers; the state itself is untouched, which is
-        // what lets the blackout be lifted with the feed and overlays back.
         auto &compositor = p::CompositorState::Instance();
         p::CompositorState::MediaFrame onAirFrame;
         onAirFrame.width = 4;
@@ -3181,26 +2661,12 @@ void TestClearCarrierPaintsNothing() {
     }
 
     // 3. THE LIVE PATH the button really takes — and the trap beside it.
-    //
-    // Clear all reaches the engine as StartFromSlides(name, {carrier}), and the
-    // slide id those pushed slides get is a CONTENT fingerprint: an empty clear
-    // carrier and an empty blank carrier fingerprint identically unless the flag
-    // is part of the hash. SceneBuilder caches scenes by that id, so a collision
-    // means the clear is SERVED THE BLANK CARRIER'S SCENE — the style painted
-    // again, no matter how right the composition is. Nothing else can catch
-    // this: the composition is correct in both runs.
     auto &eng = p::PresentationEngine::Instance();
     CHECK(eng.Initialize().ok());
     auto &live = l::LiveOutputController::Instance();
     CHECK(live.Initialize().ok());
     CHECK(live.Start().ok());
     {
-        // Both pushes under the SAME name — the way the wall does it (the
-        // "temp:<name>" presentation, a fresh carrier each press). STOPPED
-        // between them because a live REPLACE is applied by the render worker
-        // (LiveOutputController::StartFromSlides queues it), so reading the
-        // compiled set straight after the second push would read the FIRST
-        // one's scenes and assert nothing.
         CHECK(live.StartFromSlides("Clear Test", { blank }).ok());
         const std::string blankScene = eng.Runtime().Compiled().slides[0].sceneId;
         CHECK(live.StopLive().ok());
@@ -3220,21 +2686,6 @@ void TestClearCarrierPaintsNothing() {
 // ---------------------------------------------------------------------------
 // A SHOW'S SLIDE KEEPS ITS OWN DESIGN ON THE OUTPUTS
 // ---------------------------------------------------------------------------
-//
-// The reported shape: a show authored on the Edit canvas — a title item, a text
-// band, a shape — showed completely in the monitor preview and only partly on
-// the real outputs ("scripture and The Table work, shows do not"): the NDI feed
-// and HDMI window drew the output style's whole-style template instead, which
-// binds the slide's BODY into the style's own slots (the hymn lines, the
-// operator's title gone, the band resized or squeezed small), while the tile and
-// canvas — which draw the slide's blocks — showed the whole design.
-//
-// Why only shows: a scripture/table slide's blocks are a DESIGN's field slots,
-// so a style template restyling them is the feature. A show's blocks ARE the
-// design, and the style's template (style.contentType empty, so not keyed to any
-// family) was claiming them as well. ComposeSlide now keeps a shows-family
-// slide's own blocks; the style still paints the background, and a style that
-// explicitly keys shows keeps the old precedence.
 void TestShowSlideKeepsItsOwnDesign() {
     const auto textBlock = [](const char* id, const char* text, double y, double h) {
         p::ContentBlock b;
@@ -3282,17 +2733,6 @@ void TestShowSlideKeepsItsOwnDesign() {
     CHECK(scriptureComp.blocks.size() == 1);
 
     // 3. A template PICKED IN THE STYLE'S SHOWS SLOT (Settings · Styles →
-    //    "Template for Shows" → Change) DOES lay the show out — that pick is an
-    //    explicit request, and the picker promises it ("the engine renders that
-    //    design as the style's layout"). The report behind this assertion:
-    //    "I chose Lower Third for style 2 and it does the opposite" — the pick
-    //    was being ignored on every authored show, so choosing a lower third
-    //    left the full-frame canvas layout on air.
-    //
-    //    Still NOT a licence for the WHOLE-STYLE template to do the same
-    //    (assertion 1: that one names no family and must leave an authored show
-    //    alone), and a style that merely NAMES "shows" as its content type is
-    //    not a pick either (assertion 3c).
     p::OutputStyleSpec showsStyle = style;
     showsStyle.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("shows")] = "shows-tpl";
     showsStyle.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("shows")] = {
@@ -3313,9 +2753,6 @@ void TestShowSlideKeepsItsOwnDesign() {
     CHECK(plainShowsComp.source == p::SceneBuilder::SlideComposition::Source::FamilyTemplate);
     CHECK(plainShowsComp.blocks.size() == 1);
 
-    // 3c. ...while a style that only NAMES "shows" as its own content type —
-    //     both of the operator's styles do — is not a pick: the authored show
-    //     still keeps its layout. This is the shape the picker has to beat.
     p::OutputStyleSpec namedShowsStyle = style;
     namedShowsStyle.contentType = "shows";
     const auto namedShowsComp =
@@ -3323,12 +2760,6 @@ void TestShowSlideKeepsItsOwnDesign() {
     CHECK(namedShowsComp.source == p::SceneBuilder::SlideComposition::Source::SlideBlocks);
     CHECK(namedShowsComp.blocks.empty());
 
-    // 3d. BAKED BLOCKS ARE NOT A PICK. The front-end's shows fallback bakes the
-    //     Scripture design into an UNPICKED shows slot (keys stay ""); both of
-    //     the operator's styles carry exactly that, so "has blocks" would send
-    //     every authored show to a scripture layout they never chose — the same
-    //     "hymn lines, no title, no authored band" fault in a new coat. Only a
-    //     KEY names a choice.
     p::OutputStyleSpec fallbackShowsStyle = style;
     fallbackShowsStyle.familyTemplateBlocks[p::SlideRules::FamilyTemplateSlot("shows")] = {
         textBlock("b1", "SCRIPTURE FALLBACK", 0, 400),
@@ -3347,10 +2778,6 @@ void TestShowSlideKeepsItsOwnDesign() {
     const auto plainComp = p::SceneBuilder::ComposeSlide(plainShow, style, /*applyGates=*/true);
     CHECK(plainComp.source == p::SceneBuilder::SlideComposition::Source::StyleTemplate);
 
-    // 4b. THE SAME RULE, ASKED AS A QUESTION Settings · Outputs PRINTS. The row
-    //     under a style's name says what that style does to a slide, and it is
-    //     this call — so the sentence on the row and the picture on air cannot
-    //     drift apart.
     CHECK(p::SlideRules::LayoutScope(style) == p::SlideRules::StyleLayoutScope::ContentFamilies);
     CHECK(p::SlideRules::LayoutScope(showsStyle) == p::SlideRules::StyleLayoutScope::Shows);
     {
@@ -3362,9 +2789,6 @@ void TestShowSlideKeepsItsOwnDesign() {
         keyedOnly.familyTemplateKeys[p::SlideRules::FamilyTemplateSlot("table")] = "tpl-3";
         CHECK(p::SlideRules::LayoutScope(keyedOnly)
               == p::SlideRules::StyleLayoutScope::ContentFamilies);
-        // Naming "shows" as the style's own type is not a layout request (a
-        // new style defaults to it) — the row must not claim it lays shows
-        // out when ComposeSlide keeps the authored show.
         p::OutputStyleSpec named;
         named.contentType = "shows";
         CHECK(p::SlideRules::LayoutScope(named) == p::SlideRules::StyleLayoutScope::None);
@@ -3399,18 +2823,6 @@ void TestShowSlideKeepsItsOwnDesign() {
 // ---------------------------------------------------------------------------
 // Bus windows — a "bus" block's live plane on the real output frame
 // ---------------------------------------------------------------------------
-// The Edit canvas draws a bus's feed inside its rectangle; before this the
-// outputs drew NOTHING there — a "bus" block fell through AddStageBlocks' kind
-// switch (text / box / shape, everything else ignored), so NDI and HDMI showed
-// an empty hole where the operator's canvas showed video. This pins the three
-// things that make it a WINDOW rather than a placeholder:
-//   * the plane is painted at the BLOCK's own rect, not full-frame (the taken
-//     input and media layers are full-frame; a bus block's geometry is the
-//     design's);
-//   * a new frame reaches it through a CACHE HIT — a scene that is already
-//     built must not freeze on the first frame it ever saw;
-//   * a bus whose feed stops goes INVISIBLE (not frozen), and a bus block that
-//     names no bus paints nothing at all.
 void TestBusWindowPlane() {
     r::RenderEngine& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -3443,9 +2855,6 @@ void TestBusWindowPlane() {
     window.kind = "bus";
     window.x = 100; window.y = 60; window.width = 400; window.height = 225;
     window.metaJson = R"({"busId":3,"busName":"Camera 1","busType":"video"})";
-    // A caption: the plane lives on the compositor's video layer, UNDER the
-    // slide's text, which is exactly the layering a lower-third over a feed
-    // relies on.
     p::ContentBlock caption;
     caption.id = "cap";
     caption.kind = "text";
@@ -3494,10 +2903,6 @@ void TestBusWindowPlane() {
             CHECK(video->LayerId() == "media");
             const uint64_t firstRev = video->FrameRevision();
 
-            // A NEW FRAME THROUGH A CACHE HIT. The second build is the same
-            // sceneId (same slide + style), so nothing is rebuilt — and the bus
-            // must STILL pick up the newer frame, or a live feed freezes the
-            // moment its slide first goes on air.
             compositor.SetBusFrame(3, solid(4, 4));
             auto again = builder.BuildSlideScene(pres, slide, style, engine);
             CHECK(again.ok() && again.value() == built.value());
@@ -3514,14 +2919,6 @@ void TestBusWindowPlane() {
                     CHECK(v->SourceSeq() == compositor.GetBusFrameSeq(3));
                     CHECK(v->SourceSeq() != 0);
 
-                    // NOTHING NEW ⇒ NOTHING COPIED. A build that finds the same
-                    // push counter must leave the plane completely alone — same
-                    // picture, same revision, no re-upload. This is the per-frame
-                    // cost that made a live HDMI feed lag on a loaded machine
-                    // (every layer re-copied twice and re-uploaded on EVERY
-                    // build, and a tick builds one scene per output); skipping
-                    // it is only safe while the frame still reaches the plane
-                    // when it DOES move, which the check above pins.
                     const uint64_t quietRev = v->FrameRevision();
                     auto quietBuild = builder.BuildSlideScene(pres, slide, style, engine);
                     CHECK(quietBuild.ok() && quietBuild.value() == built.value());
@@ -3538,13 +2935,6 @@ void TestBusWindowPlane() {
                 }
             }
 
-            // A BUS WHOSE FEED STOPPED LOSES ITS PICTURE — the last frame must
-            // not freeze on air. It does NOT go invisible: a window paints a flat
-            // plate of its own rectangle instead (SceneBuilder::BusPlaceholder —
-            // an unfed window reads as a window, not as a hole in the design), so
-            // the check is the one that matters either way: the stopped feed's
-            // picture is gone, nothing has been pushed since, and the plate is the
-            // WINDOW's size rather than a full frame.
             compositor.ClearBusFrames();
             CHECK(!compositor.HasBusFrames());
             (void)builder.BuildSlideScene(pres, slide, style, engine);
@@ -3583,28 +2973,12 @@ void TestBusWindowPlane() {
 // ---------------------------------------------------------------------------
 // A TEMPLATE BUS's WINDOWS — which feed each window reads, and where it draws
 // ---------------------------------------------------------------------------
-// A template bus is a design whose `bus` blocks are windows: a window that NAMES
-// a bus shows that bus, and a window that names none shows the template bus's own
-// routed video sources IN ROUTE ORDER. The two halves of that contract live in
-// different files — LiveOutputService publishes route i at
-// CompositorState::TemplateWindowPlaneKey(bus, i), SceneBuilder records which key
-// each window reads — so the pairing is pinned here, end to end.
-//
-// THE CASE THAT BREAKS: a design whose FIRST window names a bus and whose OPEN
-// windows follow it. Counting every bus block as a route index put the first
-// route on window index 1 — a key LiveOutputService never publishes — so routing
-// one camera into the bus painted nothing, and with two routes the open window
-// showed the SECOND camera. The index has to count OPEN windows only, and these
-// checks fail the moment it counts blocks again.
 void TestTemplateBusWindows() {
     r::RenderEngine& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
     CHECK(engine.SetBackend("software").ok());
 
     auto& compositor = p::CompositorState::Instance();
-    // ONE DISTINCT SIZE PER FEED: a window's frame size is what says WHICH plane
-    // it ended up reading, and a route that was never pushed leaves the plane's
-    // SourceSeq at 0 (a place-holder plate carries pixels but no push counter).
     auto solid = [](int w, int h) {
         p::CompositorState::MediaFrame f;
         f.width = static_cast<uint32_t>(w);
@@ -3716,11 +3090,6 @@ void TestTemplateBusWindows() {
         CHECK(rectMatches(c, expectRect(openC)));
     }
 
-    // ...AND THE INDICES DO NOT COLLAPSE. With only route 1 fed, the SECOND open
-    // window is the one with a picture; the first reads its own key and shows the
-    // place-holder plate (no push, SourceSeq 0) instead of borrowing the
-    // neighbour's feed. This build is a CACHE HIT — the layout did not move —
-    // which is also what pins that the planes still refresh on one.
     compositor.ClearBusFrames();
     compositor.SetBusFrame(route1, solid(4, 4));
     auto again = builder.BuildTemplateBusScene(kTemplateBus, blocks, "#ff101010", engine);
@@ -3741,29 +3110,8 @@ void TestTemplateBusWindows() {
 }
 
 // ---------------------------------------------------------------------------
-// ONE PICTURE, ONE SHAPE: the FILE's own fill decides, else contain — and a take
-// clears the style's background.
-//
-// The operator's ask, in two halves:
-//   * "per-media fill override (Contain/Cover/Fill on the file itself)" — the
-//     choice belongs to the PICTURE, so a portrait photo marked "cover" crops
-//     on every output, and one nobody has said anything about is CONTAIN
-//     everywhere. The output's own (Settings · Outputs) value no longer decides
-//     a take at all: two outputs left on different values showed one file two
-//     ways on the monitor wall, for the same slide, at the same moment;
-//   * "the style already said shows should clear bg — anything that wants to
-//     show removes the style's bg" — a take is the frame, not a guest inside the
-//     style's poster, so the style's colour (and image) must not survive under
-//     it in the letterbox margins.
-//
-// Both are read off the real scene the outputs render: `mediaonair`'s bounds say
-// which fit was applied, `mediabars` says whether the contained picture needed
-// the blown-up bar fill, and the absence of `bg` says the style cleared.
 // ---------------------------------------------------------------------------
 void TestMediaFitOnTheFileWins() {
-    // Self-contained: the suite is reachable on its own (its name contains
-    // "media", so `./bps_unit_tests media` runs it), and a render engine that
-    // was never booted refuses SetBackend.
     (void)bps::ConfigurationManager::Instance().Set(
         "render.backend", bps::json::Value::String("software"));
     r::RenderEngine& engine = r::RenderEngine::Instance();
@@ -3800,9 +3148,6 @@ void TestMediaFitOnTheFileWins() {
             frame.rgba[i + 2] = 0xC0;   // B
             frame.rgba[i + 3] = 0xFF;   // A
         }
-        // Opaque everywhere — the alpha flag the take carries (see
-        // MediaFrame::hasAlpha) says so, exactly as LiveOutputService's scan of a
-        // decoded JPEG does.
         frame.hasAlpha = false;
         compositor.SetMediaFrame(std::move(frame));
     };
@@ -3831,9 +3176,6 @@ void TestMediaFitOnTheFileWins() {
     };
 
     // 1. CONTAIN IS THE DEFAULT when the file names none — the whole picture,
-    //    its own aspect kept (a narrow band down the middle, empty space either
-    //    side). NOT the output's fill: this style says "contain" here and the
-    //    check below says a style saying "cover" answers the same way.
     takeWithFit("");
     auto built = builder.BuildSlideScene(pres, slide, style, engine);
     CHECK(built.ok());
@@ -3844,9 +3186,6 @@ void TestMediaFitOnTheFileWins() {
         const r::Rect rect = mediaBounds(sceneId, "mediaonair");
         CHECK(rect.height > 1079.0f);          // full height...
         CHECK(rect.width < 700.0f);            // ...and the picture's own width
-        // THE MARGINS STAY EMPTY: no blown-up copy of the picture under it (the
-        // operator's "if the image is 16:1 I expect the transparent bg around
-        // it, that is EMPTY SPACE").
         CHECK(!engine.GetObject(sceneId, "mediabars").ok());
         // THE TAKE CLEARS THE STYLE: no background object of the style's, and the
         // composition says so (the preview surfaces read this to clear too).
@@ -3856,19 +3195,10 @@ void TestMediaFitOnTheFileWins() {
         CHECK(!comp.paintBackground);
         CHECK(comp.background.empty());
         CHECK(comp.styleImageSuppressed);
-        // AND IT IS NOT A TRANSPARENT FRAME: an opaque picture on air replaced
-        // the background, so the frame is opaque where the picture is — the
-        // margins a contain-fit leaves are the OUTPUT's empty pixels, never the
-        // picture's alpha. This is the one answer every surface draws its
-        // transparency convention from (the monitor wall used to read the take
-        // itself and painted checkered pillarbox bars no output had).
         CHECK(!comp.frameTransparent);
         CHECK(!compositor.MediaFrameIsTransparent());
     }
 
-    // 1b. A PICTURE THAT REALLY CARRIES TRANSPARENCY is a transparent frame —
-    //     the convention exists for exactly this ("the checkerboard signifies
-    //     transparent"), and it must survive the rule above.
     takeWithAlpha();
     {
         CHECK(compositor.MediaFrameIsTransparent());
@@ -3878,18 +3208,12 @@ void TestMediaFitOnTheFileWins() {
     }
 
     // 2. THE FILE'S OWN FIT WINS: "cover" on the file crops it to the stage even
-    //    though this output says "contain". Same scene id (a fit change is a
-    //    LAYOUT change, not a new composition), refreshed through the cache hit —
-    //    which is exactly how a pick while the file is on air reaches the output.
     takeWithFit("cover");
     auto again = builder.BuildSlideScene(pres, slide, style, engine);
     CHECK(again.ok());
     if (again.ok()) {
         CHECK(again.value() == sceneId);
         const r::Rect rect = mediaBounds(sceneId, "mediaonair");
-        // COVER preserves the picture's aspect and CROPS: a 100x200 take on a
-        // 1920x1080 stage covers it at 1920x3840 (the stage is a window onto the
-        // middle of the picture), not stretched to the stage.
         CHECK(std::abs(rect.width - 1920.0f) < 0.5f);
         CHECK(std::abs(rect.height - 3840.0f) < 0.5f);
     }
@@ -3914,11 +3238,6 @@ void TestMediaFitOnTheFileWins() {
         CHECK(!engine.GetObject(sceneId, "mediabars").ok());
     }
 
-    // 3b. AND THE OUTPUT'S FILL DECIDES NOTHING — with the style asking for
-    //     "cover" and the file naming none, the take is CONTAIN (the whole
-    //     picture). This is the promise that makes every output track the one
-    //     picture instead of cropping on the screens whose Fill said so, so it is
-    //     pinned here rather than left to the style push to honour.
     style.mediaFit = "cover";
     takeWithFit("");
     (void)builder.BuildSlideScene(pres, slide, style, engine);
@@ -3942,9 +3261,6 @@ void TestMediaFitOnTheFileWins() {
         CHECK(!comp.clearedByTake);
         CHECK(comp.paintBackground);
         CHECK(comp.background == style.backgroundColor);
-        // A STYLE THAT PAINTS ITS OWN COLOUR IS NOT A TRANSPARENT FRAME — the
-        // other half of the one answer: with the take gone, what the operator
-        // sees is the style's poster, not transparency.
         CHECK(!comp.frameTransparent);
     }
 
@@ -3968,11 +3284,6 @@ void TestMediaFitOnTheFileWins() {
 // ---------------------------------------------------------------------------
 // ShippedConfig — the BUILD's configuration reaching an install that exists
 // ---------------------------------------------------------------------------
-// An install that had already run kept its styles and outputs forever: the
-// installer only copies seed files that do not exist. This merges
-// <install>/assets/kernel.shipped.json once per CONTENT FINGERPRINT — shipped
-// entries are refreshed in place or appended, the user's own entries keep their
-// place, and nothing is ever removed. A graph is per-machine and is not merged.
 void TestShippedConfig() {
     using J = bps::json::Value;
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -4099,19 +3410,32 @@ void TestShippedConfig() {
     CHECK(db.Open("").ok());   // leave the shared store in-memory for the next suite
 }
 
-// A READING WINDOW THAT MOVED UNDER A SCENE THAT ALREADY EXISTS — the page
-// commit's cheap half (SceneBuilder::RefreshReadingFlow).
-//
-// A page commit inside one passage changes nothing a scene is BUILT from: the
-// blocks, their boxes and the page are the same words; what moved is the
-// passage below the page and where in it the reader is. The scene id cannot say
-// so (the flow is in no fingerprint), so the only way the outputs ever saw the
-// new window was a REBUILD — and, through the live path, a whole content
-// replacement at the moment the reader crossed a paragraph
-// (docs/scroll_mode_thread_audit.md, F3). This pins the cheap path: the scene is
-// not rebuilt, its reading block re-reads the moved window, and the picture at
-// the page's top is unchanged while a position the old window could not reach
-// now draws.
+void TestFlowScrollMath() {
+    namespace fs = bps::rendering::flowscroll;
+    const std::vector<int> reference{0, 40, 80, 125, 160};   // a wide wrap
+    const std::vector<int> narrow{0, 18, 37, 60, 79, 100, 121, 140, 160, 181};   // a narrow one
+
+    // Reference line <-> character round-trips exactly, so the tile that speaks the
+    // reference's own lines and the engine reading the character agree.
+    for (double line : {0.0, 0.25, 1.0, 1.5, 2.9, 3.0})
+        CHECK(std::abs(fs::LineForChar(reference, fs::CharForLine(reference, line)) - line) < 1e-9);
+
+    // Half-way through reference line 1 is 20 characters in. Every wrap must put its
+    // own line at the line holding that character, fractionally (linear in chars).
+    const double ch = fs::CharForLine(reference, 1.5);
+    CHECK(std::abs(ch - 60.0) < 1e-9);
+    CHECK(std::abs(fs::LineForChar(narrow, ch) - 3.0) < 1e-9);   // char 60 starts narrow line 3
+
+    // A glide of N characters moves a surface by N / (its line length) lines: the same
+    // words in the same time, whatever the wrap.
+    const double a = fs::LineForChar(narrow, 45.0), b = fs::LineForChar(narrow, 55.0);
+    CHECK(std::abs((b - a) - 10.0 / 23.0) < 1e-9);
+
+    // Past the passage it rests on the last line instead of running off blank.
+    CHECK(fs::LineForChar(narrow, 5000.0) <= static_cast<double>(narrow.size() - 1));
+    CHECK(fs::LineForChar(std::vector<int>{}, 7.5) == 7.5);   // no table: already lines
+}
+
 void TestReadingFlowWindowRefresh() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -4217,10 +3541,6 @@ void TestReadingFlowWindowRefresh() {
     CHECK(topAfter.pixels == topBefore.pixels);
     CHECK(!(deepAfter.pixels == deepBefore.pixels));
 
-    // Switching to Slide mode sends an empty flow to the already-built scene.
-    // It must restore the original page text instead of leaving the passage
-    // attached (which made the NDI renderer keep scrolling after the preview
-    // had switched back to the selected page).
     p::Slide slideMode = moved;
     slideMode.flowText.clear();
     slideMode.flowChar = 0.0f;
@@ -4229,14 +3549,6 @@ void TestReadingFlowWindowRefresh() {
     CHECK(!reading->HasFlowCharTable());
     CHECK(reading->Text() == slide.text);
     const auto restoredPage = frameAt(0.0f);
-    // WHAT "THE PAGE IS BACK" IS MEASURED AGAINST: a scene built for the page
-    // alone, not the flow frame at rest. The two differ by one rendering-path
-    // detail and only that one: a flowing block CLIPS its glyphs to the page's
-    // rectangle (RenderEngine::DrawTextObject's `flowing` branch), a plain block
-    // draws byte-for-byte what it always drew — unclipped — so a line whose last
-    // glyph overhangs the box paints its fringe past the edge in one and not the
-    // other. What must hold is that this scene now draws the PAGE the way a page
-    // is drawn, and that it no longer scrolls.
     p::Slide plainSlide = slide;             // the page, NO passage attached
     plainSlide.id = "reading-window-refresh-plain";
     plainSlide.flowText.clear();
@@ -4255,9 +3567,6 @@ void TestReadingFlowWindowRefresh() {
     }();
     CHECK(!plainFrame.empty());
     CHECK(restoredPage.pixels == plainFrame.pixels);
-    // ...and it is STATIC again: the position that used to scroll the passage now
-    // draws the same page (the reported "the NDI output kept scrolling after the
-    // preview switched back to Slide mode").
     const auto restoredDeep = frameAt(pastWindow);
     CHECK(restoredDeep.pixels == restoredPage.pixels);
 
@@ -4273,15 +3582,6 @@ void TestReadingFlowWindowRefresh() {
     (void)engine.DestroyScene(sceneId);
 }
 
-// A PAGE COMMIT IS AN OFFSET UPDATE, NOT A NEW PICK (the engine half of F3).
-//
-// The stepper re-stages the SAME slide at every page boundary of one passage:
-// same title, same blocks, same page — only flowText/flowChar moved. Committing
-// that through StartFromSlides meant a content replacement on the render worker
-// (recompile, runtime rebind, every output's scene rebuilt, composed frame
-// dropped) at the moment the reader crossed a paragraph. UpdateReadingSlide puts
-// the same slide on air as an in-place update instead, and refuses (queues a real
-// commit) when the picture itself changed.
 void TestReadingPageKeepsPick() {
     auto& render = r::RenderEngine::Instance();
     CHECK(render.Initialize().ok());

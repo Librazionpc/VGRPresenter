@@ -9,7 +9,6 @@
 #include <vector>
 
 namespace bps {
-
 struct PluginInfo {
     std::string id;
     Version version;
@@ -17,11 +16,6 @@ struct PluginInfo {
     int state = 0;   // 0 = Discovered, 1 = Loaded, 2 = Running, 3 = Quarantined
 };
 
-// Logical sandbox profile (09 §Sandbox). Enforcement is at the plugin API
-// boundary: the engine never lets a plugin reach core internals directly
-// (everything goes through IPlugin + resolved services), and CheckCapability()
-// gates declared capabilities against the profile. OS-level isolation
-// (seccomp / subprocess host) is the documented post-v1 extension (09 §12).
 struct SandboxProfile {
     std::string name;          // e.g. "default" / "lockdown"
     bool denyNetwork = false;
@@ -47,9 +41,6 @@ public:
     Result<void> Reload(std::string_view pluginId);
     Result<void> VerifySignature(std::string_view pluginId);   // v1 placeholder (09 §3)
 
-    // Update (09 §Update): stages a newer sidecar manifest (id must match,
-    // version must be strictly newer), unloads the old build, replaces the
-    // registry entry, and (re)loads the new library. Returns the new version.
     Result<Version> Update(std::string_view pluginId, std::string_view stagedManifestPath);
 
     // Sandbox (09 §Sandbox): per-plugin logical profiles + capability gate.
@@ -84,5 +75,4 @@ private:
     std::unordered_set<std::string> loading_;    // cycle guard for dependency resolution
     IsolationPolicy isolation_{IsolationPolicy::InProcess};
 };
-
 } // namespace bps

@@ -11,9 +11,7 @@
 #include <format>
 
 namespace bps::settings {
-
 namespace {
-
 constexpr const char* kModule = "DataProtection";
 constexpr std::string_view kSeparator = "__";
 
@@ -37,7 +35,6 @@ bool LooksLikeStamp(std::string_view s) {
         if (i != 8 && !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
     return s.size() == 15 || (s[15] == '-' && s.size() > 16);
 }
-
 } // namespace
 
 std::string NowStamp() {
@@ -70,9 +67,6 @@ Result<std::string> BackupStore::Create(std::string_view sourceFile, std::string
     std::string target = fs.Join(directory_, std::format("{}{}{}{}", stem, kSeparator, stamp, ext));
     for (int n = 2; fs.Exists(target); ++n)
         target = fs.Join(directory_, std::format("{}{}{}-{}{}", stem, kSeparator, stamp, n, ext));
-    // ATOMIC COPY: a plain copy interrupted halfway left a file with a real
-    // backup's name that could not be restored — a backup that fails exactly when
-    // it is needed. CopyAtomic proves the bytes landed before the name exists.
     if (auto copied = fs.CopyAtomic(sourceFile, target); !copied.ok()) return copied.error();
     return target;
 }
@@ -162,11 +156,6 @@ std::optional<RecoveryInfo> RecoveryStore::Info() const {
     if (!fs.IsRegularFile(Path())) return std::nullopt;
     RecoveryInfo info;
     info.path = Path();
-    // The show itself (unsaved-show.vgr) is the user's work and is listed as an
-    // offer no matter what the note beside it says. The NOTE is an internal
-    // document: unreadable or damaged, it is set aside as evidence and the offer
-    // stands with a generic name, so a crash-recovery offer can never be lost to
-    // a broken caption.
     const std::string note = fs.Join(directory_, "unsaved-show.json");
     if (fs.IsRegularFile(note)) {
         auto text = fs.ReadText(note);
@@ -195,9 +184,6 @@ Result<void> RecoveryStore::RestoreTo(std::string_view target) const {
         return Error::Make(Err::NotFound, kModule, "there is nothing to recover");
     if (fs.Exists(target))
         return Error::Make(Err::AlreadyExists, kModule, std::format("'{}' already exists", target));
-    // ATOMIC COPY: this writes the recovered show into place; the recovery file is
-    // cleared straight afterwards, so a copy interrupted halfway would destroy
-    // the only copy of the user's unsaved work.
     if (auto r = fs.CopyAtomic(Path(), target); !r.ok()) return r;
     return Clear();
 }
@@ -209,5 +195,4 @@ Result<void> RecoveryStore::Clear() const {
             if (auto r = fs.Remove(p); !r.ok()) return r;
     return {};
 }
-
 } // namespace bps::settings

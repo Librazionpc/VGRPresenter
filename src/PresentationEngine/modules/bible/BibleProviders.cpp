@@ -11,9 +11,7 @@
 #include <sstream>
 
 namespace bps::bible {
-
 namespace {
-
 using XmlNode = xml::Node;
 using xml::Collapse;
 using xml::Trim;
@@ -29,9 +27,6 @@ int ToInt(const std::string& s, int dflt = 0) {
     return i == 0 ? dflt : v;
 }
 
-// XML tags arrive in whatever case the source wrote them: Zefania writes every
-// tag uppercase (<XMLBIBLE>/<BIBLEBOOK>/<CHAPTER>/<VERS>), other tools write
-// lowercase. Compare case-insensitively so both shapes parse.
 bool TagIs(const XmlNode& n, std::string_view name) {
     if (n.tag.size() != name.size()) return false;
     for (size_t i = 0; i < name.size(); ++i)
@@ -188,10 +183,6 @@ public:
 
         for (const auto& bookNode : bible.children) {
             if (!TagIs(bookNode, "book") && !TagIs(bookNode, "biblebook")) continue;
-            // Canonical id: prefer the short id (bsname), then derive it from
-            // the full name or Zefania book number (bnum/bnumber) — real Zefania
-            // files carry bnumber="43" bname="John" with no bsname, and a numeric
-            // id would break reference resolution. Uppercase for consistency.
             std::string id;
             std::string bnum = AttrNoCase(bookNode, "bnum");
             if (bnum.empty()) bnum = AttrNoCase(bookNode, "bnumber");
@@ -200,10 +191,6 @@ public:
             if (!bookNode.Attr("bsname").empty()) {
                 id = bookNode.Attr("bsname");
             } else if (!bnum.empty()) {
-                // bnum/bnumber is the unambiguous canonical 1-66 ordering in
-                // Zefania; prefer it over the display name, which may be
-                // abbreviated ("Psalm", "1 Sam.") and not match the canonical
-                // table.
                 id = CanonicalIdFromNumber(ToInt(bnum));
                 if (id.empty()) id = bnum;
             } else if (!name.empty()) {
@@ -371,10 +358,6 @@ public:
         std::string bookId, bookName;
         int chapter = 0;
 
-        // Tokenize on '\' directives. Verse text accumulates until the next
-        // directive; footnotes (\f ... \f*) are captured and stripped. A
-        // section heading (\s) applies to the next verse created (USFM
-        // semantics: \s precedes the verses it heads).
         size_t i = 0;
         std::string verseText;
         int verseNum = 0;
@@ -629,7 +612,6 @@ public:
         return out;
     }
 };
-
 } // namespace
 
 std::shared_ptr<IBibleProvider> CreateXmlBibleProvider() {
@@ -647,5 +629,4 @@ std::shared_ptr<IBibleProvider> CreateOsisBibleProvider() {
 std::shared_ptr<IBibleProvider> CreatePlainTextBibleProvider() {
     return std::make_shared<PlainTextBibleProvider>();
 }
-
 } // namespace bps::bible

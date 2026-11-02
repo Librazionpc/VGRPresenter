@@ -1,10 +1,5 @@
 #pragma once
 
-// SessionManager (docs/specs/15 §Session Manager): tracks the current engine
-// session — id, user, active project, runtime statistics, temporary data — and
-// supports restoring the previous session after a crash (the RecoveryManager
-// uses the session record to detect unclean shutdowns).
-
 #include "core/config/Json.hpp"
 #include "interfaces/IService.hpp"
 
@@ -13,7 +8,6 @@
 #include <string>
 
 namespace bps::project {
-
 struct SessionInfo {
     std::string id;
     std::string user;
@@ -64,5 +58,4 @@ private:
     std::atomic<uint64_t> savesPerformed_{0};
     std::atomic<uint64_t> errorsEncountered_{0};
 };
-
 } // namespace bps::project

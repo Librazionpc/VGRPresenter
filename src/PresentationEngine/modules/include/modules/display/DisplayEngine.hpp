@@ -1,11 +1,5 @@
 #pragma once
 
-// DisplayEngine (docs/specs/18): the Phase 7 facade. Owns the provider
-// registry (IDisplayProvider), the device view, the output router, the profile
-// store and the display/output state machine. Routes one rendered frame to any
-// number of outputs; handles hot-plug detection, display removal recovery and
-// automatic assignment restore. Knows nothing about WinUI/HWND/XAML.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -25,7 +19,6 @@
 #include <vector>
 
 namespace bps::display {
-
 class DisplayEngine final : public IService {
 public:
     static DisplayEngine& Instance();
@@ -45,10 +38,6 @@ public:
     Result<void> RegisterProvider(std::shared_ptr<IDisplayProvider> provider);
     Result<void> UnregisterProvider(std::string_view name);
     std::vector<std::string> ProviderNames() const;
-    // The named provider ("Ndi", "Virtual", ...) — the seam a higher layer
-    // with its own frame feed (the presentation live loop) uses to push
-    // frames at a provider DIRECTLY (the NDI program sender), bypassing the
-    // output/device routing that physical displays ride. Null when absent.
     std::shared_ptr<IDisplayProvider> Provider(std::string_view name) const;
 
     // --- Device view (union across providers, refreshed by Probe) ---
@@ -75,9 +64,6 @@ public:
     Result<DisplayProfile> GetProfile(std::string_view name) const;
     std::vector<std::string> ProfileNames() const;
 
-    // --- Frame routing (18 §One rendered frame) ---
-    // Routes ONE frame to all enabled outputs bound to connected devices.
-    // `sink` receives each (output, destRect, scaledFrame) for delivery.
     void RouteFrame(const rendering::Frame& frame,
                     const OutputRouter::Sink& sink = nullptr);
 
@@ -90,9 +76,6 @@ public:
     size_t RunningOutputCount() const;
     std::string ProfileDir() const { return profileDir_; }
 
-    // --- Self-test (docs/specs/18 §Testing) ---
-    // Runs the full display self-test against the live engine: device
-    // connectivity, scaling math, frame delivery to every output, recovery.
     DisplayTestReport RunSelfTest();
 
 private:
@@ -124,5 +107,4 @@ private:
     std::atomic<uint64_t> framesRouted_{0};
     std::atomic<size_t> restoredCount_{0};
 };
-
 } // namespace bps::display

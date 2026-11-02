@@ -15,17 +15,11 @@
 
 #if defined(_WIN32)
 
-// D3D11 is a Windows system component (d3d11.dll) and the HLSL compiler ships
-// with Windows 10+ (d3dcompiler_47.dll): the two import libraries are the whole
-// link-time requirement. Every type here stays inside this translation unit —
-// nothing else in the engine includes <d3d11.h>; the seam is IGraphicsBackend.
-
 #include <d3d11.h>
 #include <d3dcompiler.h>
 
 namespace bps::rendering {
 namespace {
-
 // ---------------------------------------------------------------------------
 // Minimal COM ownership (no WRL dependency: this file builds with the same
 // MinGW toolchain as the rest of the engine).
@@ -60,9 +54,6 @@ public:
         p_ = nullptr;
         return p;
     }
-    // Takes a reference OF ITS OWN, for a raw pointer the caller also owns (the
-    // factory hands the device to the backend while still holding the local
-    // Com<>, so both must be able to release it).
     void AddRef() {
         if (p_)
             p_->AddRef();
@@ -80,11 +71,6 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// The shaders. One vertex shader places a unit quad from SV_VertexID (so there
-// is no vertex buffer and the input layout is legitimately empty) using the
-// command's constants; one pixel shader carries the command's mode, because the
-// command set is small and a branch on a constant costs less than a shader
-// switch per draw.
 // ---------------------------------------------------------------------------
 constexpr const char* kShaderSource = R"HLSL(
 cbuffer DrawCB : register(b0)
@@ -383,7 +369,6 @@ uint32_t Unpremultiply(uint32_t px) {
     return (a << 24) | (straight((px >> 16) & 0xFFu) << 16) | (straight((px >> 8) & 0xFFu) << 8) |
            straight((px >> 0) & 0xFFu);
 }
-
 } // namespace
 
 // ===========================================================================
@@ -428,18 +413,6 @@ public:
             return Error::Make(Err::Render_TextureNotFound, "D3D11", "no texture");
         if (image.empty() || !context_ || !it->second.tex)
             return Ok();
-        // A DIFFERENT SIZE IS A DIFFERENT TEXTURE, not an update of this one.
-        // UpdateSubresource copies into the texture's OWN subresource, while the
-        // source row pitch is the NEW image's — so a frame that changed size makes
-        // the driver read `newWidth*4 * oldHeight` bytes out of a buffer holding
-        // only `newWidth*4 * newHeight`. That is a read PAST the buffer whenever
-        // the picture got wider and shorter (a 1920x1080 media frame replaced by a
-        // 282x179 one, i.e. any second take). The D3D11 runtime cannot catch it
-        // (the pitch validates, the height does not), so the fault lands inside
-        // the GPU driver: the live "recovered from an unexpected shutdown —
-        // code=0xc0000005" crashes were all in igd10um64xe.dll, read at exactly
-        // this call. Recreate the texture and its view at the new size instead,
-        // which is what the frame needs anyway.
         if (it->second.cpu.width != image.width || it->second.cpu.height != image.height) {
             Texture fresh;
             if (!UploadTexture(image, fresh))
@@ -483,10 +456,6 @@ public:
         const uint32_t id = nextShader_++;
         shaders_[id] = std::string(source);
         (void)name;
-        // WHERE SUPPORTED: an HLSL source is compiled here, so what an object
-        // asks for is validated against the device it will run on. A source that
-        // does not compile (the engine also records plain descriptions) is still
-        // recorded, exactly like the software backend.
         if (!source.empty() && device_) {
             Com<ID3DBlob> blob;
             Com<ID3DBlob> errors;
@@ -525,22 +494,6 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!context_ || !rtv)
             return Error::Make(Err::Render_BackendUnavailable, "D3D11", "no render target");
-        // BIND THE TARGET HERE, not only in EnsureFrame.
-        //
-        // This function UNBINDS the render target when it returns (the frame
-        // must not be attached while it is read back), so the NEXT frame at the
-        // same size found it unbound: EnsureFrame only re-binds when the size
-        // CHANGED, and its early return is what a steady live session takes
-        // every single frame. The result was a frame that held nothing but its
-        // clear — ClearRenderTargetView takes the view directly and still
-        // landed, every Draw landed nowhere. It is the reported fault exactly:
-        // "when i turn on hardware acceleration the output becomes black", with
-        // the session's own log saying the command list was non-empty
-        //     render dispatch: [..._tpl-table_...] objects=5 cmds=122 glyph=118 shape=2
-        // while the frame read
-        //     output frame sanity: ... meanLuma=0.0 maxLuma=0 allBlack=yes
-        // and why the FIRST frames after a GO LIVE or a size change looked
-        // right: those are the renders EnsureFrame rebuilt and bound.
         ID3D11RenderTargetView* rtvs[1] = {rtv.Get()};
         context_->OMSetRenderTargets(1, rtvs, nullptr);
         for (const DrawCommand& cmd : commands)
@@ -585,10 +538,6 @@ public:
         return Ok();
     }
 
-    // Device + the fixed pipeline state, built once by the factory below. Every
-    // step reports WHY it failed (`why`), because the whole point of the factory
-    // is that the caller can log a real reason when it falls back to the CPU — a
-    // bare "no GPU" is not a diagnostic.
     bool InitPipeline(std::string* why) {
         if (!device_ || !context_) {
             if (why) *why = "no device";
@@ -650,9 +599,6 @@ public:
             return false;
         }
 
-        // 1:1 and missed texels: linear + clamp, which is an exact copy at the
-        // source's own size (the glyph atlas, a native-resolution image, a 1:1
-        // video) and a bilinear resample when a blit actually scales.
         D3D11_SAMPLER_DESC sd{};
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -678,10 +624,6 @@ public:
             return SUCCEEDED(device_->CreateBlendState(&desc, out.Put()));
         };
 
-        // ALPHA — the engine's straight-alpha composite in the one form a
-        // hardware blend unit can express: RGB accumulates premultiplied
-        // (src·a + dst·(1−a)), alpha straight (a + da·(1−a)). Readback
-        // un-premultiplies, so the frame handed out is straight RGBA8 again.
         if (!makeBlend(true, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD,
                        D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, blendAlpha)) {
             if (why) *why = "alpha blend state failed";
@@ -829,9 +771,6 @@ private:
         vp.MaxDepth = 1.0f;
         context_->RSSetViewports(1, &vp);
 
-        // BeginFrame zeroes the frame the way the software backend's fresh
-        // framebuffer is zeroed: without it a render that emits no Clear would
-        // composite onto the PREVIOUS frame (the GPU target is reused).
         const float transparent[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         ID3D11RenderTargetView* rtvs[1] = {rtv.Get()};
         context_->OMSetRenderTargets(1, rtvs, nullptr);
@@ -930,11 +869,6 @@ private:
         context_->Draw(4, 0);
     }
 
-    // A mode the fixed-function blend unit CANNOT express. Alpha, Additive and
-    // Multiply are hardware states (multiply through the inverted-source trick
-    // above); everything else in the CSS set is per-pixel maths over the
-    // BACKDROP — which the blend unit cannot read — so those take the shader's
-    // blend pass against a copy of the frame.
     static bool NeedsBlendPass(BlendMode m) {
         return m != BlendMode::Alpha && m != BlendMode::Additive && m != BlendMode::Multiply;
     }
@@ -950,9 +884,6 @@ private:
             DrawQuad(shape, rect, uv, color, radius, srv, BlendMode::Alpha, 0.0f, 0.0f);
             return;
         }
-        // ONLY THE QUAD'S OWN REGION is copied, not the whole frame: one
-        // picture per item is cheap, and a blended TEXT object (hundreds of
-        // glyphs a frame) must not cost a full-frame copy per glyph.
         const int x0 = std::clamp(static_cast<int>(rect.x), 0, frameWidth_);
         const int y0 = std::clamp(static_cast<int>(rect.y), 0, frameHeight_);
         const int x1 = std::clamp(static_cast<int>(rect.Right()), 0, frameWidth_);
@@ -1000,9 +931,6 @@ private:
         // Write only this quad's pixels; the backdrop everywhere else stays.
         SetScissor(rect);
         context_->Draw(4, 0);
-        // Hand the scissor back at the frame size — the commands that follow are
-        // entitled to the whole target, and none of them may rely on this pass
-        // having narrowed it.
         SetScissor(rect_full());
     }
 
@@ -1037,10 +965,6 @@ private:
             case DrawCommand::Type::DrawGlyph: {
                 auto it = textures_.find(cmd.texture.id);
                 if (it == textures_.end()) {
-                    // Same one-shot diagnostic the software path emits: a blit
-                    // whose texture this backend does not hold draws nothing, and
-                    // that silently turns a composed scene into background-only
-                    // pixels.
                     static std::once_flag once;
                     std::call_once(once, [] {
                         Logger::Instance().Warning(
@@ -1060,13 +984,6 @@ private:
                 uv.width /= static_cast<float>(src.width);
                 uv.height /= static_cast<float>(src.height);
 
-                // INTEGER DESTINATION, like the CPU path (it truncates the
-                // rect's four numbers too). The UVs are edge-aligned (u0 =
-                // srcRect.x / srcW) and the quad starts on a whole pixel, so the
-                // fragment at destination pixel centre dx+0.5 samples source
-                // texel sx0 + (dx - destX) + 0.5 EXACTLY: a 1:1 blit — the glyph
-                // atlas, a native-resolution image, a 1:1 video — stays a copy
-                // and never gets smeared by the filter.
                 const Rect dst(static_cast<float>(static_cast<int>(cmd.rect.x)),
                                static_cast<float>(static_cast<int>(cmd.rect.y)),
                                static_cast<float>(static_cast<int>(cmd.rect.width)),
@@ -1089,10 +1006,6 @@ private:
                 if (cmd.color.a <= 0.0f)
                     break;
                 SetScissor(full);
-                // SNAP THE EDGES, NOT THE SIZE — see SnapRectToPixelEdges. This
-                // is what removed the one-pixel video seam between two template
-                // bands that touch on the stage (they are authored flush; the
-                // old int-cast of y and height separately opened a hole).
                 const Rect r = SnapRectToPixelEdges(cmd.rect);
                 const BlendMode blend = static_cast<BlendMode>(cmd.blend);
                 const int shape = cmd.cornerRadius >= 0.5f ? 2 : 0;
@@ -1120,9 +1033,6 @@ private:
         }
     }
 
-    // One full-frame pass sampling `src`, writing back only the scissored region.
-    // `effect` follows EffectType; the standardised direction/radius pair drives
-    // the separable blur's one axis.
     void EffectPass(int effect, float param, float radius, float dirX, float dirY,
                     ID3D11ShaderResourceView* src) {
         DrawConstants cb{};
@@ -1217,14 +1127,12 @@ private:
     int frameHeight_ = 0;
     PendingEffect pending_;
 };
-
 } // namespace bps::rendering
 
 // ===========================================================================
 // Factory
 // ===========================================================================
 namespace bps::rendering {
-
 std::unique_ptr<IGraphicsBackend> CreateD3D11Backend(std::string* failureReason) {
     auto fail = [failureReason](std::string why) -> std::unique_ptr<IGraphicsBackend> {
         if (failureReason)
@@ -1232,10 +1140,6 @@ std::unique_ptr<IGraphicsBackend> CreateD3D11Backend(std::string* failureReason)
         return nullptr;
     };
 
-    // Device: hardware first, then WARP (Microsoft's software rasterizer, which
-    // still runs everything through the GPU pipeline and is the honest answer on
-    // a machine with no usable driver). Anything else means falling back to the
-    // CPU rasterizer, and the caller says so in the log.
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
                                         D3D_FEATURE_LEVEL_10_0};
     const D3D_DRIVER_TYPE types[] = {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
@@ -1270,19 +1174,16 @@ std::unique_ptr<IGraphicsBackend> CreateD3D11Backend(std::string* failureReason)
         "Graphics");
     return backend;
 }
-
 } // namespace bps::rendering
 
 #else   // !_WIN32
 
 namespace bps::rendering {
-
 std::unique_ptr<IGraphicsBackend> CreateD3D11Backend(std::string* failureReason) {
     if (failureReason)
         *failureReason = "this build has no D3D11 (not Windows)";
     return nullptr;
 }
-
 } // namespace bps::rendering
 
 #endif  // _WIN32

@@ -10,9 +10,7 @@
 #include <string>
 
 namespace bps::project {
-
 namespace {
-
 constexpr const char* kModule = "ShippedConfig";
 constexpr const char* kBaselineName = "kernel.shipped.json";
 // Where the applied fingerprint lives in the store. One document, one key: the
@@ -21,10 +19,6 @@ constexpr const char* kStateCollection = "config";
 constexpr const char* kStateKey = "shipped";
 
 std::string ContentFingerprint(const json::Value& collections) {
-    // FNV-1a 64 over the canonical text — Json objects are std::map, so the same
-    // content always hashes the same, and any change to a shipped entry changes
-    // it. Content-derived on purpose: a hand-kept revision number is a number
-    // somebody forgets to bump, which is exactly how the catalog revision drifted.
     const std::string text = collections.ToString();
     std::uint64_t hash = 1469598103934665603ull;
     for (const unsigned char c : text) {
@@ -39,7 +33,6 @@ std::string EntryId(const json::Value& entry) {
         return std::string(id->asString());
     return {};
 }
-
 } // namespace
 
 json::Value MergeShippedEntries(const json::Value& stored, const json::Value& shipped,
@@ -96,9 +89,6 @@ ShippedMergeReport ApplyShippedConfigurationFrom(const std::string& filePath) {
         return report;
     }
 
-    // The document's shape is {version, collections:{<name>:{<member>:...}}}, the
-    // same shape kernel.json uses, so the file can be read as what it is: a
-    // snapshot of the store this build ships.
     const json::Value* collections = parsed.value().Find("collections");
     if (collections == nullptr || collections->asObject() == nullptr) {
         Logger::Instance().Warning("shipped configuration has no collections object", kModule);
@@ -114,10 +104,6 @@ ShippedMergeReport ApplyShippedConfigurationFrom(const std::string& filePath) {
         }
     }
 
-    // Collections are merged member by member, LIST BY LIST. Only array members
-    // are merged (a roster, a profile list); a graph object is per-machine — this
-    // build's bus routing would be wrong on somebody else's hardware — so it is
-    // deliberately not touched here. Fresh installs still get the whole seed.
     for (const auto& [collection, shippedDocument] : *collections->asObject()) {
         const json::Value::Object* members = shippedDocument.asObject();
         if (members == nullptr) continue;
@@ -141,9 +127,6 @@ ShippedMergeReport ApplyShippedConfigurationFrom(const std::string& filePath) {
     state["added"] = json::Value::Number(static_cast<double>(report.added));
     state["refreshed"] = json::Value::Number(static_cast<double>(report.refreshed));
     (void)db.Put(kStateCollection, kStateKey, json::Value(std::move(state)));
-    // Persisted now, not at shutdown: the merge already happened, and a crash
-    // before the next flush would replay it (harmless) — but the record is what
-    // keeps every later boot from re-reading and re-hashing the file.
     (void)db.Flush();
 
     report.applied = true;
@@ -156,9 +139,6 @@ ShippedMergeReport ApplyShippedConfigurationFrom(const std::string& filePath) {
 }
 
 ShippedMergeReport ApplyShippedConfiguration() {
-    // Once per process: the file cannot change under a running install, and every
-    // roster read would otherwise parse and hash it again. The rosters are read
-    // from whichever thread hydrates first, so the answer is shared, not per-model.
     static std::once_flag once;
     static ShippedMergeReport report;
     std::call_once(once, [] {
@@ -168,5 +148,4 @@ ShippedMergeReport ApplyShippedConfiguration() {
     });
     return report;
 }
-
 } // namespace bps::project

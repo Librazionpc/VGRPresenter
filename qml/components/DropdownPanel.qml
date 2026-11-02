@@ -2,132 +2,39 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// A menu dropdown panel: optional header (title + subtitle), then a list of
-// items built from a plain data model. Each entry in `model` is one of:
-//   { divider: true }
-//   { label, trailing, danger }   // trailing = shortcut text, a submenu
-//                                    chevron ("›"), or any right-aligned hint
-//
-// `danger` items get red text always (a destructive action, e.g. "Emergency
-// Stop") — every other item is neutral text that only tints on hover, so no
-// row looks permanently "selected" the way the raw export baked in.
-//
-// SCROLLING: `maxHeight` (default 0 = size to content, the historical
-// behavior every existing menu relies on) caps the panel's height — past
-// the cap the item list becomes a Flickable with an AppScrollBar, so a long
-// option list (a device picker) scrolls instead of running off-screen.
-// That bar is PINNED (`scrollBarPinned`, default true): it draws whenever the
-// list overflows, instead of only while the wheel is moving — the FreeShow font
-// picker's always-there rounded thumb, which is what a long alphabetical list
-// needs to read as "there is more below". Short lists show no bar at all
-// (AppScrollBar's own `visible: scrollable`).
-//
-// FONT SAMPLE ROWS: a row may carry `fontFamily` — its label is then drawn in
-// that family, so the font-family picker previews each face instead of listing
-// names in one typeface — and `accent: true`, which paints the row's label in
-// the accent and tints its ground (the currently-chosen entry).
-//
-// WINDOW-RESPONSIVE: the cap is only an UPPER bound — the panel also fits
-// itself to the room it actually has. `openAt` measures the `bounds` rect
-// (the window, or the dialog a field lives in) around the anchor and
-// subtracts the space above the anchor's TOP edge, and additionally caps at the
-// caller's own `maxHeight`. A menu opened from a row near the window's bottom
-// used to size to content, land mostly off-screen, and clamp its own y so its
-// top hid under the anchor; now it shrinks and SCROLLS instead. Every
-// maxHeight: 0 consumer (menu bar, SelectField, …) gets this for free.
-//
-// FLYOUT (`openBeside`): a second open mode for a row that owns a long list
-// — the panel opens beside the row (right, or left when there is no room)
-// with the same fit-and-scroll behavior, and closes with its parent. Used by
-// the design library's "Move to …" row so a library with many categories
-// scrolls in a submenu instead of growing the parent menu past the window.
-//
-// Colors read the Theme singleton (panel/row ground, borders, text tones), so
-// a Light choice recolours every menu and dropdown with the app. This file
-// carried literal hex for a while because Theme resolved to undefined at the
-// time — the real cause was Theme being registered as an ORDINARY type rather
-// than a singleton, so `Theme.*` was undefined (fixed via
-// QT_QML_SINGLETON_TYPE in CMakeLists.txt), not any nesting/AOT limit.
 Rectangle {
     id: root
 
     property var model: []
     property string headerTitle: ""
     property string headerSubtitle: ""
-    // 0 = size to content; a positive value caps the height and turns the
-    // item list into a scrollable Flickable (see header comment). The room
-    // the panel was opened into caps it further (effMaxHeight).
     property int maxHeight: 0
     // Keep the list's scroll bar on screen whenever the list overflows (see
     // header comment). False restores AppScrollBar's own fade-out-on-idle.
     property bool scrollBarPinned: true
 
     // ---- measured open geometry (see _reposition) ---------------------------
-    // The rect the panel was opened into (the window, or a dialog a field
-    // lives in) and what the measurement found: the tallest/widest the panel
-    // may draw, and whether it flipped above its anchor.
     property Item openBounds: null
     property int roomCap: 0        // 0 = not measured
     property int widthCap: 0       // 0 = not measured
     property bool flipUp: false
-    // True for a panel opened as a FLYOUT beside a row rather than at a
-    // point (openBeside) — it aligns to the row and flips to the row's left
-    // instead of the anchor's right when the bounds have no room there.
     property bool isFlyout: false
     // Panel padding against the bounds' edges — a menu never touches the
     // window frame.
     readonly property int edgePad: 8
 
-    // THE APP SCALE (Main.qml's uiScale, via AppScale.qml). openAt/openBeside
-    // reparent this panel to the window's contentItem so nothing clips or scrolls
-    // it — which also means it CANNOT inherit the scale of the screen it was
-    // opened from, and has to apply the app scale itself. AppScale.cardScale
-    // subtracts any scale an ancestor does apply, so the rare panel that is never
-    // reparented is not scaled twice.
-    //
-    // Its top-left IS the anchor point openAt placed it at, so scaling about that
-    // corner makes the menu grow/shrink away from its own anchor exactly like the
-    // UI around it, instead of drifting off it.
     scale: AppScale.cardScale(root)
     transformOrigin: Item.TopLeft
 
-    // THE ROW IS PART OF THE SIGNAL: a picker whose rows carry a value (the
-    // Auto size menu's { label, key } entries) needs that value, and its handlers
-    // read it as a second argument. Only the label was emitted, so every one of
-    // those handlers threw "Cannot read property 'key' of undefined" the moment a
-    // row was clicked (the Edit screen's Auto size / border-style / font pickers).
-    // A handler that takes just the label keeps working — QML ignores extra args.
     signal itemActivated(string label, var item)
 
-    // --- autocomplete mode (opt-in) ------------------------------------------
-    // An inline suggestion list for a text field (the tab search box's live
-    // reference completions): picks carry an arbitrary payload, keyboard
-    // Up/Down moves a highlight, Enter/click accepts, and — when
-    // `dismissOnOutsideClick` is set — a click anywhere else closes it
-    // (AppMenuBar's menus close via the menu bar's own catcher, so the flag
-    // is off there and the behavior is unchanged for every existing menu).
     property bool dismissOnOutsideClick: false
     property int highlightedIndex: -1
     signal itemPicked(int index, var payload)
 
-    // While open, CLAIM the pointer (AppCursor.blocked): a PositionHoverArea
-    // beneath the panel — a design card, a list row — must not light up as
-    // though the pointer were on it. Hover is derived from pure geometry, so
-    // without this an open menu washed the surface behind it (the card's
-    // border lit and its action row appeared while the pointer was merely on
-    // the menu). The panel's OWN rows are descendants and stay exempt, so the
-    // menu keeps its row hover. Emits blockersChanged so the surfaces it
-    // covers settle at once, even under a stationary pointer.
     onVisibleChanged: {
         if (root.visible) {
             AppCursor.pushBlocker(root)
-            // Every menu opens at its FIRST row. `contentY` is scroll residue
-            // from the previous time this panel was open — the panel object is
-            // reused, and a long list (the font-family picker is the one menu
-            // you scroll before picking) kept its old offset, so reopening it
-            // started part-way down: "the scrollbar is not starting from the
-            // top". Reset on OPEN rather than on close, so a menu that is being
-            // dismissed keeps its place on screen while it goes away.
             itemFlick.contentY = 0
         } else {
             AppCursor.popBlocker(root)
@@ -135,14 +42,6 @@ Rectangle {
     }
     Component.onDestruction: AppCursor.popBlocker(root)
 
-    // Scroll the item list by `step` px (clamped) — the catcher calls this
-    // for wheels over the anchor control, so a wheel on the open combobox's
-    // box scrolls the MENU's options, never the dialog/page behind it.
-    // Sign convention (both callers): pass the RAW wheel delta per notch
-    // (angleDelta.y / 3, pixelDelta.y when the device gives pixels) —
-    // scrolling DOWN arrives negative and must move contentY toward the
-    // bottom, same as the standard `contentY -= angleDelta` idiom. The old
-    // extra negation here inverted every dropdown's scroll direction.
     function scrollList(step) {
         if (!itemFlick || itemFlick.contentHeight <= itemFlick.height)
             return
@@ -150,55 +49,17 @@ Rectangle {
         itemFlick.contentY = Math.max(0, Math.min(maxY, itemFlick.contentY - step))
     }
 
-    // Called by a FLYOUT's parent panel when the parent closes: a submenu
-    // must never outlive the menu that spawned it. (A binding on `visible`
-    // does the same thing; this is the imperative twin for hosts that show
-    // the flyout by a method call.)
     function closeFlyout() {
         if (root.visible)
             root.visible = false
     }
-    // Hover in/out of a non-divider row — `rowItem` is the row's own
-    // Rectangle, in THIS panel's coordinate space, so a consumer that wants
-    // to open a flyout submenu next to it can map from a known-good item
-    // instead of re-deriving the row's position from the model index.
-    // `index` is the row's model position (the autocomplete consumers relay it
-    // so the owner can find the row's payload; menu consumers ignore it).
     signal itemHovered(string label, bool hovering, var rowItem, int index)
 
-    // Opens the panel at (x, y) — coordinates in `sourceItem`'s local space —
-    // clamped to stay fully inside `bounds` (any common ancestor, usually
-    // the window root), so a menu opened near an edge can't land partly or
-    // fully off-screen.
-    //
-    // POSITIONING SPACE: the point is mapped into THIS PANEL'S PARENT's
-    // coordinate space (where root.x/root.y actually apply), NOT into
-    // `bounds` space. An earlier version mapped into bounds-space and
-    // assigned the result directly — correct only when the panel's parent
-    // sat at the window origin, and silently offset down-right by the
-    // parent's position otherwise (the AV board's context menu landed far
-    // from the cursor; the menu sits inside the settings modal there).
-    // Mapping to root.parent + converting the clamp rect with mapFromItem
-    // is correct for ANY parent, so no call site needs to know where its
-    // menu is declared. One implementation of the map + clamp dance
-    // instead of a copy per menu site.
-    // Remembered anchor so the open menu FOLLOWS its field: scrolling the
-    // page moves the box, and the menu tracks it (native combobox behavior)
-    // instead of floating detached — or being dismissed outright.
     property Item anchorItem: null
     property real anchorLocalX: 0
     property real anchorLocalY: 0
 
     // ---- which layer the panel pops into -----------------------------------
-    // The window's Controls OVERLAY, not the raw contentItem. Every modal card in
-    // the app parents itself to Overlay.overlay (see ModalCard.qml — that is what
-    // lets a dialog declared inside a Settings page dim the whole window), and the
-    // overlay is a layer ABOVE the content item. A panel reparented to contentItem
-    // was therefore a SIBLING BELOW the entire overlay: opening the Source field of
-    // a dialog drew its device list behind the open modal, so the list "was nowhere
-    // in sight" (user report). Sharing the modal's own layer puts the two in one
-    // stacking context, where root.z = 40000 sits just above a modal root's 30000.
-    // Falls back to contentItem when the overlay isn't mounted yet.
     function _layer(item) {
         const w = item ? item.Window : null
         if (!w)
@@ -208,11 +69,6 @@ Rectangle {
     }
 
     function openAt(sourceItem, x, y, bounds) {
-        // Pop-out reparenting: the panel lifts OUT of its declaration context (a
-        // clipped, scrolling dialog container) to the window's overlay. Parented
-        // in-place it was clipped by ancestor `clip` rects and scrolled with the
-        // dialog's Flickable — panels read as transparent/overdrawn garbage and
-        // fought the dialog's own scroller. Up there nothing clips it.
         root.isFlyout = false
         root.anchorItem = sourceItem
         root.anchorLocalX = x
@@ -224,19 +80,9 @@ Rectangle {
         root.z = 40000
         _reposition()
         root.visible = true
-        // The measurement above sizes the panel, but the FIRST pass reads the
-        // width/height it had BEFORE that sizing — so the clamp math (and a
-        // flip-up's y) is one layout late. Re-place once the panel has laid
-        // out, exactly as the old call site used to do by hand.
         Qt.callLater(function () { if (root.visible) root._reposition() })
     }
 
-    // Opens this panel as a FLYOUT beside `rowItem` — a row of another,
-    // already-open panel that owns this list (the design library's
-    // "Move to …" row). It sits at the row's right edge, or to its LEFT when
-    // the bounds have no room there, and fits/scrols exactly like openAt. It
-    // is a submenu, not an independent menu: the host binds its `visible` to
-    // the parent panel's, so the pair always comes and goes together.
     function openBeside(rowItem, bounds) {
         root.isFlyout = true
         root.anchorItem = rowItem
@@ -252,13 +98,6 @@ Rectangle {
         Qt.callLater(function () { if (root.visible) root._reposition() })
     }
 
-    // Sizes the panel to the room it has and places it at its anchor —
-    // called when it opens and again whenever the anchor moves or the window
-    // resizes (see the resize Connections below). A panel that doesn't fit
-    // below its anchor SCROLLS (the cap turns the list into a Flickable) and
-    // flips ABOVE the anchor when that side has more room, instead of being
-    // clamped into a position where part of it hangs off the window — the
-    // "dropdown isn't window responsive" bug.
     function _reposition() {
         const item = root.anchorItem
         if (!item || !root.parent)
@@ -268,13 +107,6 @@ Rectangle {
         let x = pt.x
         let y = pt.y
         const b = root.openBounds
-        // The clamps below are in WINDOW coordinates, while the panel's own
-        // width/height are DESIGN units and it is drawn at `scale` (see the scale
-        // property above). What it occupies on screen is width x scale, and the
-        // room caps it is measured against are window pixels — so both the size
-        // used for placement and the caps handed to the layout are converted here,
-        // once. (Clamping a scaled-down menu with its unscaled design size shoved
-        // it away from its anchor.)
         const s = root.scale > 0 ? root.scale : 1
         const drawnW = root.width * s
         const drawnH = root.height * s
@@ -296,11 +128,6 @@ Rectangle {
         const innerRight = bp.x + b.width - pad
         const roomBelow = innerBottom - pt.y
         const roomAbove = pt.y - innerTop
-        // The room the panel may draw in: the roomier side of the anchor. A
-        // menu (a click point for an anchor) flips ABOVE when there is no
-        // usable room below; a flyout (a ROW for an anchor) keeps its top at
-        // the row and shifts up instead, so it still reads as that row's
-        // submenu rather than detaching from it.
         if (root.isFlyout) {
             root.flipUp = false
             root.roomCap = capOf(Math.max(roomBelow, roomAbove))
@@ -336,10 +163,6 @@ Rectangle {
         root.y = y
     }
 
-    // Coalesced follow: when the anchor (or an ancestor scroller) moves,
-    // re-derive the window-space anchor point and re-place, clamped as at
-    // open. Throttled to the next frame — one wheel batch can move the
-    // anchor many times.
     Timer {
         id: anchorFollow
         interval: 0
@@ -357,9 +180,6 @@ Rectangle {
         function onYChanged() { anchorFollow.restart() }
     }
 
-    // The window resized under an open menu: re-measure and re-place, so a
-    // menu that was inside the old window can't be left hanging over (or
-    // past) the new edge — no menu open, no cost.
     Connections {
         enabled: root.visible
         target: root.Window.contentItem
@@ -375,29 +195,13 @@ Rectangle {
     // The rows sit on a 6px gutter inside the panel as soft rounded pills.
     readonly property int rowGutter: 6
 
-    // Per-instance overrides for a tighter row (the font-family picker's own
-    // ask: a long, font-sample-heavy list reads better packed closer than
-    // this component's normal menu row). -1 on either leaves EVERY existing
-    // consumer exactly as it was — insetPad and the fixed 34px row stay the
-    // default until a consumer opts in.
     property real rowInset: -1
     property real rowHeight: -1
 
-    // Content-fit width (opt-in): the panel hugs its widest row — how a
-    // native menu sizes itself — instead of the fixed 480 slab the menu
-    // bar's dropdowns used to render as (a "Save  Ctrl+S" row floating in
-    // 480 px of mostly empty panel). Off by default, so every existing
-    // consumer keeps 480; the AppMenuBar menus turn it on.
     property bool fitContentWidth: false
     // Floor for a fitted panel — narrower than this a menu reads as a chip.
     property real minFitWidth: 140
 
-    // Invisible measurement twins. The real rows ELIDE to the panel's width,
-    // so the needed width cannot be read off them; these render the same
-    // strings in the same fonts unelided, and fittedWidth reads their
-    // implicitWidths. A model rebuild recreates the Repeater's delegates
-    // (its children list is a binding dependency), so a menu whose contents
-    // change re-fits without anyone remembering to ask.
     Column {
         id: sizerCol
         visible: false
@@ -410,10 +214,6 @@ Rectangle {
                                                   || modelData.divider === true
                 readonly property bool hasTrailing: !isDivider && modelData.trailing !== undefined
                                                     && modelData.trailing !== ""
-                // What the row needs to show unelided: 16 left pad + label,
-                // then either 16 right pad (no trailing) or the trailing
-                // text + its own right pad + the row's fixed label↔trailing
-                // gap (8 + 26 = 34 from itemC's width formula, +4 slack).
                 readonly property real sizerWidth: isDivider ? 0 : Math.ceil(
                     labelSizer.implicitWidth
                     + (hasTrailing ? trailingSizer.implicitWidth + 54 : 32))
@@ -463,12 +263,6 @@ Rectangle {
                             16 + headerSubSizer.implicitWidth + 16)
         return Math.ceil(w)
     }
-    // A COMBOBOX menu matches the field it drops from — the anchor's own width —
-    // the way a native select's list does. Without this the panel was a fixed 480
-    // design px, so a 300px Category field opened a list half again as wide as the
-    // box it belonged to (user report: "the dropdown width is too much"). The
-    // anchor's width is in the same design units as this panel's own: both are
-    // drawn at the app scale, so it needs no conversion (the clamp still converts).
     property bool matchAnchorWidth: false
     // The width the contents want, before the window's own limit is applied.
     readonly property real naturalWidth: {
@@ -476,9 +270,6 @@ Rectangle {
             return root.anchorItem.width
         return (root.fitContentWidth || root.autoFit) ? root.fittedWidth : 480
     }
-    // A menu hugs its widest row (a native menu's size) unless it is an autocomplete
-    // list or previews typefaces — those keep the roomy slab. Before this, an
-    // "Edit / Duplicate / Delete" context menu opened 480px wide.
     readonly property bool autoFit: {
         if (root.dismissOnOutsideClick)
             return false
@@ -491,11 +282,6 @@ Rectangle {
         return true
     }
     width: root.widthCap > 0 ? Math.min(root.naturalWidth, root.widthCap) : root.naturalWidth
-    // What the panel wants to be, and the cap actually in force: the room
-    // `openAt`/`openBeside` measured and the caller's own `maxHeight`,
-    // whichever is smaller. A panel that was never measured (the menu bar's
-    // declaratively-positioned menus) falls back to the window itself, so no
-    // menu can ever be taller than the window it opens in.
     readonly property real contentHeight: headerCol.height + itemList.height + 16
     readonly property int effMaxHeight: {
         let cap = root.roomCap
@@ -509,10 +295,6 @@ Rectangle {
     }
     height: root.effMaxHeight > 0 ? Math.min(root.contentHeight, root.effMaxHeight)
                                   : root.contentHeight
-    // The viewport the item list scrolls within — everything inside the
-    // panel that isn't the 8px top/bottom padding or the header. Floored at
-    // 0: a window so short that the header alone fills the cap must not
-    // produce a negative Flickable height.
     readonly property real listViewport: Math.max(0, height - 16 - headerCol.height)
     radius: 12
     color: Theme.rowBg
@@ -551,9 +333,6 @@ Rectangle {
             Rectangle { width: parent.width; height: 1; color: Theme.border }
         }
 
-        // The item list — a Flickable whenever maxHeight caps it, so the cap
-        // scrolls instead of clipping. interactive only when it actually
-        // overflows, so short lists keep their native click feel.
         Flickable {
             id: itemFlick
             width: content.width
@@ -564,12 +343,6 @@ Rectangle {
             boundsBehavior: Flickable.StopAtBounds
             interactive: root.effMaxHeight > 0 && contentHeight > height
 
-            // Contained wheels: wheels over the list scroll THE LIST —
-            // anything the list can't take (fits without scrolling, or at
-            // its end) is absorbed here too, never forwarded to the
-            // dialog/page behind the popup. (The catcher keeps wheels that
-            // miss the menu from reaching the page; it must not inherit
-            // these.)
             WheelHandler {
                 enabled: root.visible
                 onWheel: (ev) => {
@@ -590,13 +363,6 @@ Rectangle {
                         required property var modelData
                         required property int index
                         width: itemList.width
-                        // Stale-row guard: the model rebuilds live (the
-                        // autocomplete box repopulates on every keystroke),
-                        // and a mouse release can land on a row whose model
-                        // entry is already gone — bare derefs threw
-                        // "Cannot read property 'payload' of undefined" live.
-                        // A detached row falls through to itemC and its own
-                        // alive guard renders/swallows it.
                         sourceComponent: modelData && modelData.divider === true ? dividerC : itemC
 
                         Component {
@@ -617,37 +383,13 @@ Rectangle {
                             id: itemC
                             Rectangle {
                                 id: itemRow
-                                // Self-test handle (VGR_SELFTEST scenarios hover a
-                                // menu row BY NAME — the logo menu's "Settings" row
-                                // is the one that flies out the section flyout).
-                                // Guarded exactly like `alive` below: a detached row
-                                // must not throw while naming itself.
                                 objectName: "selfTestDropdownRow_"
                                             + (typeof modelData !== "undefined" && modelData
                                                && modelData.label ? modelData.label : index)
                                 width: itemList.width
                                 height: root.rowHeight >= 0 ? root.rowHeight : 34
-                                // STALE-ROW GUARD — the click fix: a model
-                                // rebuild (autocomplete retyping, menu
-                                // re-opening) can leave a delegate clickable
-                                // for a beat after its data is gone, and the
-                                // click used to throw live ("Cannot read
-                                // property 'payload' of undefined", or
-                                // "root is not defined" when the creation
-                                // context was already torn down). A detached
-                                // row must render blank and swallow its
-                                // click. typeof (not truthiness) is the one
-                                // reference that cannot itself throw.
                                 readonly property bool alive: typeof modelData !== "undefined"
                                                               && modelData !== null
-                                // Disabled entries (e.g. capture modes a
-                                // device's max fps can't reach) sit greyed
-                                // with no hover wash and swallow activation.
-                                // Autocomplete mode draws the keyboard highlight (the row
-                                // Up/Down will accept) under the mouse hover, same wash.
-                                // The row itself is a transparent hit area; the visible
-                                // surface is the inset pill below (no zebra stripes: they
-                                // banded a 3-row context menu into dark/light slabs).
                                 color: "transparent"
 
                                 Rectangle {
@@ -667,9 +409,6 @@ Rectangle {
                                         ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing }
                                     }
 
-                                    // The MOUSE wash is the app's shared hover layer;
-                                    // the keyboard highlight above is state and stays
-                                    // on the pill itself.
                                     HoverGlow {
                                         anchors.fill: parent
                                         radius: parent.radius
@@ -692,11 +431,6 @@ Rectangle {
                                 Text {
                                     x: root.rowInset >= 0 ? root.rowInset : root.insetPad
                                     anchors.verticalCenter: parent.verticalCenter
-                                    // Autocomplete labels elide, but only when they genuinely
-                                    // don't fit: the label reserves the ACTUAL trailing-code
-                                    // width ("51-0501"), not a flat 40% of the row — the flat
-                                    // reserve truncated short titles long before the row edge
-                                    // (user call: the dropdown must show the full name).
                                     width: alive ? parent.width - (root.rowInset >= 0 ? root.rowInset : root.insetPad)
                                             - (modelData.trailing ? rowTrailing.implicitWidth + 26 : 0) - 8
                                                  : parent.width
@@ -706,32 +440,16 @@ Rectangle {
                                         : modelData.danger ? Theme.dangerLight
                                         : modelData.accent === true ? Theme.accent : Theme.textPrimary)
                                         : Theme.textMuted
-                                    // A row can preview its own typeface (the font-family
-                                    // picker) — see the header comment. Falls back to the
-                                    // app font for every ordinary menu row.
                                     font.family: alive && modelData.fontFamily ? modelData.fontFamily
                                                                               : Theme.fontFamily
                                     font.pixelSize: root.rowFont
                                     font.weight: modelData && modelData.accent === true ? Font.DemiBold : Font.Medium
                                 }
 
-                                // Position truth, not containsMouse — hover-exit
-                                // never delivers to MouseAreas in this build
-                                // (KNOWN_ISSUES.md), which is exactly why these
-                                // rows' hover effects felt dead. shownChain
-                                // (inside PositionHoverArea) is a binding over
-                                // every ancestor's visible/enabled, so a panel
-                                // closing also clears its rows' hover.
                                 PositionHoverArea {
                                     id: itemArea
                                     anchors.fill: parent
                                     onClicked: {
-                                        // Capture the row before emitting: a handler can
-                                        // synchronously replace the model or close/destroy
-                                        // this panel. Payload rows use itemPicked; ordinary
-                                        // menu rows use itemActivated. Emitting both made
-                                        // the second signal access a destroyed `root` after
-                                        // the first handler closed its owner.
                                         if (typeof modelData === "undefined" || !modelData || modelData.disabled
                                             || typeof root === "undefined")
                                             return
@@ -744,9 +462,6 @@ Rectangle {
                                         else
                                             root.itemActivated(pickedLabel, pickedRow)
                                     }
-                                    // Same stale-row guards as the click: a
-                                    // hover recompute can also fire on a row
-                                    // whose model entry is gone.
                                     onEntered: if (typeof modelData !== "undefined" && modelData)
                                                    root.itemHovered(modelData.label, true, itemRow, index)
                                     onExited: if (typeof modelData !== "undefined" && modelData)
@@ -759,10 +474,6 @@ Rectangle {
             }
         }
 
-        // Hides when the list doesn't overflow (AppScrollBar's own `visible`
-        // binding) and, unless the consumer unpins it, STAYS on screen while it
-        // does — a thumb inset from the panel's right edge with no visible
-        // track, so the list reads as scrollable without a bar cut into it.
         AppScrollBar {
             flickable: itemFlick
             autoHide: !root.scrollBarPinned
@@ -778,9 +489,6 @@ Rectangle {
         }
     }
 
-    // The dismissal catcher — only in autocomplete mode (menus are closed by
-    // the menu bar's own catcher; a second catcher there would eat the field's
-    // toggle click).
     MouseArea {
         enabled: root.visible && root.dismissOnOutsideClick
         parent: root.parent

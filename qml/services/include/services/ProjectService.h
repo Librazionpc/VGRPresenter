@@ -13,9 +13,6 @@ namespace bps::library { class ProjectLibrary; }
 class QQmlEngine;
 class QJSEngine;
 
-// The UI's window onto the ENGINE's projects (bps::library::ProjectLibrary - FreeShow's Projects panel): the folder / project tree, the
-// open project's items, the item on the centre page, and every change to them. The engine decides what a project may hold, what may
-// be dropped where and how items move; this hands that to QML and keeps which project and item are open.
 class ProjectService : public QObject
 {
     Q_OBJECT
@@ -86,9 +83,6 @@ signals:
 private:
     explicit ProjectService(QObject *parent = nullptr);
     void load();
-    // Opens the project recorded as "session.lastProject". NOT called at startup
-    // (see the definition): the app starts on the home screen with no project
-    // open, and a project opens when the operator opens one.
     void restoreLastProject();
     void refresh();
     void report(const QString &message) const;

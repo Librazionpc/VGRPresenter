@@ -2,12 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// A generic speedometer dial: a needle sweeping a 240-degree arc over the top,
-// quarter ticks at the rim, the value big under the hub and a caption beneath
-// it. Callers supply the value, the scale, the unit and the colour the dial
-// takes; every part of the SHAPE lives here, so the throttle and temperature
-// dials cannot drift apart. (Qt Quick Shapes — the same arc primitive
-// BusySpinner/AppHeader use — not an IconGlyph: this is instrument artwork.)
 Item {
     id: root
 
@@ -29,9 +23,6 @@ Item {
     readonly property real cx: root.width / 2
     readonly property real cy: root.height * 0.58
     readonly property real dialRadius: Math.max(24, Math.min(root.width / 2, root.height * 0.58) - 18)
-    // The dial runs from the lower-left over the top to the lower-right.
-    // PathAngleArc reports angles clockwise with 0 at 3 o'clock, so 150 + 240
-    // ends at 30 degrees.
     readonly property real dialStart: 150
     readonly property real dialSweep: 240
 

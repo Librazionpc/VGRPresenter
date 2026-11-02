@@ -33,11 +33,6 @@
 #endif
 
 namespace {
-
-// Set once on the GUI thread before any handler can fire, then only ever
-// read (never mutated) from the handler itself — the handler must not touch
-// QString/QStandardPaths, so the path is pre-resolved to a plain
-// std::string here.
 std::string g_crashLogPath;
 
 void AppendLine(FILE *f, const char *line)
@@ -46,12 +41,6 @@ void AppendLine(FILE *f, const char *line)
     std::fputc('\n', f);
 }
 
-// The GUI thread's last entered breadcrumb (services/CallTrace.h), reached
-// through guiChainRaw(): a crash handler may not allocate, lock or call into
-// Qt, so this reads a buffer the GUI thread already published. Empty is a
-// legitimate answer — the chain is "" until something instrumented runs — and
-// it is reported as such rather than left blank, so a reader knows the absence
-// is information (the fault is outside the traced entry points).
 void AppendBreadcrumb(FILE *f)
 {
     const char *chain = "";
@@ -64,9 +53,6 @@ void AppendBreadcrumb(FILE *f)
     AppendLine(f, buf);
 }
 
-// Shared by the signal path and the terminate handler. Same "signal=" record
-// shape the SEH/POSIX records use, so ConsumePendingCrashSummary() reads it
-// without knowing which door the crash came through.
 void WriteAbortRecord(const char *header, const char *detail, int sig)
 {
     if (g_crashLogPath.empty())
@@ -81,9 +67,6 @@ void WriteAbortRecord(const char *header, const char *detail, int sig)
     std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", std::localtime(&now));
     std::snprintf(buf, sizeof(buf), "signal=%d (%s) at=%s", sig, detail, ts);
     AppendLine(f, buf);
-    // The call the GUI thread was inside when the process died: a frame list
-    // only becomes a culprit once symbols are resolved offline, and an
-    // exception's frames say nothing at all about which QML call site it was.
     AppendBreadcrumb(f);
     std::fclose(f);
 }
@@ -99,9 +82,6 @@ void HandleAbort(int sig)
 void HandleTerminate()
 {
 #if defined(_WIN32)
-    // The exception's own stack: without it a terminate record names nothing
-    // ("signal=0") and the crash is unattributable. Same frame capture the
-    // SEH path uses — RIPs resolve to modules offline.
     auto AppendTerminateStack = []() {
         if (g_crashLogPath.empty())
             return;
@@ -120,9 +100,6 @@ void HandleTerminate()
 #else
     auto AppendTerminateStack = []() {};
 #endif
-    // An exception that escaped every handler (e.g. thrown from a slot or an
-    // engine thread) — the default terminate handler would abort() with no
-    // record at all.
     const char *what = "terminate";
     try {
         if (auto ex = std::current_exception())
@@ -142,14 +119,6 @@ void HandleTerminate()
 
 #if defined(_WIN32)
 
-// In-crash symbolization via dbghelp, loaded dynamically (never a hard
-// dependency): raw frame addresses are useless post-mortem — module layout
-// dies with the process — so the faulting MODULE + SYMBOL must be resolved
-// while the process still lives. Everything is GetProcAddress'ed; any
-// failure falls back to the raw-address records (previous behavior).
-// dbghelp is documented as not fully thread-safe, but the SEH filter runs
-// once on the faulting thread with the process already broken — the
-// accepted trade-off for a diagnosable crash over a silent one.
 struct CrashSym
 {
     BOOL initialized = FALSE;
@@ -175,9 +144,6 @@ struct CrashSym
             reinterpret_cast<void *>(GetProcAddress(dbg, "SymGetModuleInfo64")));
         if (symInit && symFromAddr && symModInfo)
             initialized = symInit(GetCurrentProcess(), nullptr, FALSE);
-        // invade=FALSE: SymInitialize(TRUE) walks every thread's stack, which
-        // can deadlock on the loader lock if the fault happened inside one —
-        // the cheap non-invasive init still resolves module/symbol names.
     }
 };
 
@@ -194,11 +160,6 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
             std::snprintf(buf, sizeof(buf), "code=0x%08lx address=%p at=%s",
                           static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode),
                           info->ExceptionRecord->ExceptionAddress, ts);
-            // EVERY line is flushed as it is written: if the process dies
-            // mid-handler (nested fault inside dbghelp, or the corruption
-            // spreading), stdio's buffer would otherwise take the evidence
-            // with it — the first instrumented run lost all frames exactly
-            // this way and left only the header.
             auto FlushLine = [&](const char *line) {
                 AppendLine(f, line);
                 std::fflush(f);
@@ -226,9 +187,6 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
                 FlushLine(buf);   // raw addresses FIRST — never lose them
             }
 
-            // Best-effort symbolization AFTER the raw record is durable: a
-            // driver-DLL crash (virtual cam) lands in a module we do not
-            // build, and that name alone ends the "whose bug is it" fight.
             CrashSym sym;
             if (sym.initialized) {
                 IMAGEHLP_MODULE64 faultMod{};
@@ -265,14 +223,6 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
                     }
                 }
             }
-            // FULL-THREAD MINIDUMP, written LAST (after the text record is
-            // durable): a heap-corruption detonation usually happens on an
-            // innocent thread — the corrupting write lives on another stack —
-            // and MiniDumpNormal carries every thread's stack + module map,
-            // the cross-thread evidence the text record cannot hold. It also
-            // occasionally faults inside the corrupted heap (observed once:
-            // 0-byte dump, symbolization already done), which is why it goes
-            // after everything else rather than before it.
             {
                 using FnMiniDump = BOOL(WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
                                                   PMINIDUMP_EXCEPTION_INFORMATION,
@@ -334,20 +284,11 @@ void HandleSignal(int sig)
     std::raise(sig);
 }
 #endif
-
 } // namespace
 
 #if defined(_WIN32)
 
 // ---- gdb self-attach (the symbolized stack, with no debugger installed) ----
-// A Windows minidump cannot be read by the MinGW gdb (it only understands ELF
-// core files, which is why `gdb app.exe -c x.dmp` answers "not a core dump"),
-// and the dist has no WinDbg. So instead of writing a dump and hoping someone
-// can open it, the app runs the very capture an agent would: it spawns gdb
-// ATTACHED TO ITSELF (-p <pid> suspends every thread, walks them, detaches).
-// The exe's MinGW/DWARF symbols are exactly what gdb resolves, so the resulting
-// file is a fully symbolized per-thread backtrace — on a target PC that has
-// only the app folder.
 
 // Where to find a gdb: an explicit override, then the gdb the portable dist
 // ships beside the exe (tools/gdb/gdb.exe), then whatever is on PATH.
@@ -376,19 +317,10 @@ std::string ResolveGdb()
     return {};   // no gdb on this machine — the text record + minidump remain
 }
 
-// ONE attach at a time, and not again inside this window. The attach SUSPENDS
-// EVERY THREAD while gdb walks them, so a stall that persists must not spawn a
-// fresh attach on every watchdog report — that converts one slow stall into a
-// run of them. Observed before this guard: five hang records minutes apart in a
-// single session (5.2 s, 20.4 s, 5.5 s, 5.2 s, 5.9 s), each one re-freezing the
-// very GUI thread it was trying to diagnose.
 std::atomic<bool> g_gdbCaptureInFlight{false};
 std::chrono::steady_clock::time_point g_lastGdbCapture{};
 constexpr auto kGdbCaptureCooldown = std::chrono::seconds(60);
 
-// A capture is only a capture if it has CONTENT. The file exists either way:
-// CreateFileA creates it before gdb is even launched, so an empty one is a
-// decoy, not evidence.
 bool GdbCaptureHasContent(const std::string &path)
 {
     WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -399,9 +331,6 @@ bool GdbCaptureHasContent(const std::string &path)
     return size > 0;
 }
 
-// Returns true only when gdb actually wrote a backtrace; false means the caller
-// got no symbolized stacks (gdb missing, unable to start, still running from a
-// previous hang, or inside the cooldown).
 bool SpawnGdbCapture(const std::string &outPath)
 {
     const std::string gdb = ResolveGdb();
@@ -447,19 +376,9 @@ bool SpawnGdbCapture(const std::string &outPath)
     si.hStdError = hOut;
     si.hStdInput = INVALID_HANDLE_VALUE;
     PROCESS_INFORMATION pi{};
-    // SEM_FAILCRITICALERRORS FOR THE SPAWN ONLY. A gdb that cannot load its own
-    // DLLs would otherwise raise a MODAL loader dialog ("The code execution
-    // cannot proceed because ... was not found") in the operator's face — which
-    // is exactly what a broken bundled gdb produced, instead of the hang
-    // capture it was spawned for, on top of the frozen UI it was meant to
-    // explain. The child inherits this process's error mode, so this makes the
-    // failure silent on its side; the log line below then reports it honestly.
     const UINT savedErrorMode = SetErrorMode(SEM_FAILCRITICALERRORS);
     if (CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr,
                        TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        // Bounded: gdb walks + loads the (large) symbol table, then detaches.
-        // The wait runs on the watchdog thread, which gdb suspends along with
-        // every other thread and resumes on detach, so this returns normally.
         WaitForSingleObject(pi.hProcess, 120000);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -473,11 +392,6 @@ bool SpawnGdbCapture(const std::string &outPath)
     return true;
 }
 
-// A HANG is not a crash: nothing faulted, so the SEH/signal handlers never run
-// and Windows eventually closes the ghosted window (Event Log Id 1002). The
-// only durable evidence is a snapshot taken WHILE the process is intact, from
-// the watchdog's own (healthy) thread — a full-thread minidump plus a text
-// record naming the stall. See CrashHandler.h.
 void WriteHangDump(const char *reason)
 {
     if (g_crashLogPath.empty())
@@ -489,9 +403,6 @@ void WriteHangDump(const char *reason)
     const char *chain = "";
     (void)calltrace::guiChainRaw(&chain);
 
-    // Text record FIRST: it is tiny and survives even if the (much larger)
-    // dump write fails on a corrupted heap — the same ordering rule the SEH
-    // path follows.
     char buf[768];
     if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a")) {
         AppendLine(f, "---- GUI HANG (watchdog) ----");
@@ -529,9 +440,6 @@ void WriteHangDump(const char *reason)
             if (HANDLE hDump = CreateFileA(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr,
                                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                 hDump != INVALID_HANDLE_VALUE) {
-                // MiniDumpNormal = every thread's stack + module list (what gdb
-                // needs to walk each thread); WithThreadInfo adds the TEB, so a
-                // reader can name which thread is the GUI one.
                 const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithThreadInfo);
                 wroteDump = miniDump(GetCurrentProcess(), GetCurrentProcessId(), hDump,
                                      type, nullptr, nullptr, nullptr) == TRUE;
@@ -546,9 +454,6 @@ void WriteHangDump(const char *reason)
         std::fclose(f);
     }
 
-    // The READABLE half: gdb attached to ourselves, writing symbolized
-    // per-thread backtraces beside the dump. This is what actually names the
-    // blocked call on a machine with no debugger — see SpawnGdbCapture.
     std::string gdbOut;
     bool captured = false;
     {
@@ -557,10 +462,6 @@ void WriteHangDump(const char *reason)
                                                            : std::string();
         gdbOut = dir + "hang-" + std::to_string(GetCurrentProcessId()) + "-gdb.txt";
         captured = SpawnGdbCapture(gdbOut);
-        // No capture → no artifact. Leaving the empty file behind is worse than
-        // leaving none: the old record reported "present=yes" on the strength of
-        // a file gdb had not written a byte to, so a session whose bundled gdb
-        // could not even start read as if the capture had worked.
         if (!captured)
             DeleteFileA(gdbOut.c_str());
     }
@@ -594,9 +495,6 @@ void WriteHangDump(const char *reason)
 
 QString ConsumePendingCrashSummary()
 {
-    // Delivered-exactly-once: read the crash log, summarize its LAST record,
-    // then rotate it aside so the next launch starts clean. Runs on the GUI
-    // thread at first QML access — normal file I/O is fine here.
     if (g_crashLogPath.empty())
         return {};
     FILE *f = std::fopen(g_crashLogPath.c_str(), "rb");
@@ -625,11 +523,6 @@ QString ConsumePendingCrashSummary()
         const size_t lineEnd = end == std::string::npos ? contents.size() : end;
         summary = QString::fromStdString(contents.substr(pos, lineEnd - pos));
         summary = summary.trimmed();
-        // The BREADCRUMB rides along with the summary. It is the one line that
-        // says which call the process died in, and the summary is what reaches
-        // the operator — the QML banner AND (see main.cpp) the engine log. The
-        // raw record keeps everything, but nobody reads a crash file unless
-        // they already know something went wrong.
         size_t callPos = contents.find("  last-call: ", lineEnd);
         if (callPos == std::string::npos)
             callPos = contents.find("  last-call: ", pos);
@@ -664,11 +557,6 @@ void InstallCrashHandler()
     g_crashLogPath = (dir + QStringLiteral("/crash.log")).toStdString();
 
 #ifdef _WIN32
-    // One boot line into the SAME crash log: the preferred module's runtime
-    // base address. Crash-record frame addresses minus this base = file
-    // offsets, so a raw-address-only record becomes symbolizable with
-    // `llvm-symbolizer`/`addr2line` later, even when the in-crash dbghelp
-    // path produced nothing.
     {
         HMODULE exeBase = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -685,9 +573,6 @@ void InstallCrashHandler()
     std::signal(SIGABRT, HandleAbort);
 
 #if defined(_WIN32)
-    // Reserve stack for the handler itself: after a stack overflow the filter
-    // otherwise runs on the exhausted stack and faults again with no record.
-    // Applies to the calling (GUI) thread.
     ULONG guarantee = 64 * 1024;
     SetThreadStackGuarantee(&guarantee);
     SetUnhandledExceptionFilter(HandleSEH);
@@ -699,33 +584,18 @@ void InstallCrashHandler()
 }
 
 // ---- startup self-check of the shipped forensics tooling --------------------
-// See CrashHandler.h. The point is that every failure here is SILENT until the
-// moment evidence is needed, so the check RUNS the chain instead of looking at
-// it. Each probe mirrors the real path deliberately: the gdb is chosen in the
-// same order ResolveGdb() chooses it, dbghelp is loaded the way the hang path
-// loads it, and the crash folder is opened for append the way the handlers open
-// it. If one of those moves, this must move with it.
 
 namespace {
-
 // The dist's layout, relative to the exe (what tools/make_portable.sh ships).
 constexpr const char *kGdbRel = "tools/gdb/gdb.exe";
 constexpr const char *kAnalyzeRel = "analyze.bat";
 
-// The folder the shipped tools sit in: beside the exe, or wherever
-// VGR_FORENSICS_DIR points (a packaged build with its tools elsewhere, or a
-// deliberately broken layout to exercise this check).
 QString ForensicsRoot()
 {
     const QString dir = qEnvironmentVariable("VGR_FORENSICS_DIR");
     return dir.isEmpty() ? QCoreApplication::applicationDirPath() : dir;
 }
 
-// Runs a candidate gdb ONCE and insists it ANSWERS — the same proof
-// tools/make_portable.sh runs before shipping one, because the failure it
-// catches is invisible otherwise: a gdb that cannot load its own runtime prints
-// no error, it dies at process start (and the capture spawn suppresses the
-// loader dialog that would otherwise say so). `why` always receives a reason.
 bool GdbAnswers(const QString &gdb, QString *why)
 {
     QProcess proc;
@@ -744,12 +614,6 @@ bool GdbAnswers(const QString &gdb, QString *why)
     }
     const QString out = QString::fromLocal8Bit(proc.readAll());
     if (!out.contains(QStringLiteral("GNU gdb"))) {
-        // An NTSTATUS (negative) exit code means the process never reached
-        // main() — the loader refused it, which on a packaged build is the
-        // broken-bundle failure and nothing else: gdb's own runtime DLL is
-        // missing (0xC0000135, STATUS_DLL_NOT_FOUND) or the copy in the bundle
-        // dir is not a usable image (0xC000007B/0xC0000020). Name it, because
-        // "gdb did not run" is not something a support log can act on.
         const int code = static_cast<int>(proc.exitCode());
         const QString hex = QStringLiteral("0x%1")
                                 .arg(static_cast<quint32>(code), 8, 16, QLatin1Char('0'));
@@ -761,9 +625,6 @@ bool GdbAnswers(const QString &gdb, QString *why)
     return true;
 }
 
-// Every problem at once, so ONE log line is enough to act on. Empty means the
-// tooling works (the healthy case, and also a dev tree that ships no tools —
-// the text record and minidump remain, which is a working configuration).
 QString ForensicsToolingProblems()
 {
     QStringList problems;
@@ -794,9 +655,6 @@ QString ForensicsToolingProblems()
             problems << QStringLiteral("no gdb: %1 is missing and none is on PATH, "
                                        "so a hang capture would produce no stack")
                             .arg(QString::fromLatin1(kGdbRel));
-        // A dev tree with no gdb is not a fault: the hang path falls back to the
-        // text record plus the minidump, which is exactly what it does on a
-        // machine with no debugger installed.
     } else if (!GdbAnswers(gdb, &why)) {
         problems << QStringLiteral("the gdb a capture would use (%1) %2, "
                                    "so a hang capture would produce no stack")
@@ -828,10 +686,6 @@ QString ForensicsToolingProblems()
 #endif
 
     // 4. The folder every artifact goes into. InstallCrashHandler() ignores
-    //    mkpath()'s result (a read-only profile or a denied folder is silent),
-    //    so probe it the way the handlers do — append-open. "a" creates the file
-    //    if it is absent, which is exactly what the first crash would do, and
-    //    nothing is discarded.
     if (!g_crashLogPath.empty()) {
         if (FILE *f = std::fopen(g_crashLogPath.c_str(), "a"))
             std::fclose(f);
@@ -843,7 +697,6 @@ QString ForensicsToolingProblems()
 
     return problems.isEmpty() ? QString() : problems.join(QStringLiteral("; "));
 }
-
 } // namespace
 
 void VerifyForensicsTooling()
@@ -851,23 +704,12 @@ void VerifyForensicsTooling()
     // An explicit off-switch, for a packaging/CI smoke launch that must not pay
     // a process spawn. The normal path never sets it.
     if (qEnvironmentVariableIsSet("VGR_SKIP_FORENSICS_CHECK")) {
-        // And SAY so, rather than leaving the UI on "checking" forever: an
-        // unasked question is a different answer from an unanswered one, and
-        // the Settings row shows them differently (see EngineBridge's
-        // crashToolingState property).
         EngineBridge::instance().publishCrashTooling(QStringLiteral("skipped"), QString());
         return;
     }
 
-    // On a WORKER: the gdb probe SPAWNS A PROCESS AND WAITS for it, which must
-    // not happen on the thread that draws (see tools/check_gui_thread_blocks.mjs).
-    // The lambda captures nothing — it must not touch this translation unit's
-    // state from another thread.
     QThread *worker = QThread::create([] {
         const QString problems = ForensicsToolingProblems();
-        // Answer from the INTERFACE thread: one line, on the thread (and in the
-        // log) everything else reports through. qApp is the context object, so
-        // Qt drops the call if the app is already tearing down.
         QMetaObject::invokeMethod(
             qApp,
             [problems] {
@@ -876,16 +718,8 @@ void VerifyForensicsTooling()
                                         QStringLiteral("crash tooling ready: a crash or hang from this run "
                                                        "can be captured and read"));
                 else
-                    // "warning", not "warn": EngineBridge::write() maps a level
-                    // it does not know down to Info, so the wrong word here
-                    // would bury the one line this check exists to produce.
                     EngineBridge::write(QStringLiteral("warning"), QStringLiteral("Forensics"),
                                         QStringLiteral("crash tooling is INCOMPLETE — ") + problems);
-                // The SAME verdict, to the UI (EngineBridge's crashTooling*
-                // properties): the log line is for whoever opens the log, and a
-                // crash that produced no evidence is read by nobody. Published
-                // here, on the interface thread, which is the only thread that
-                // touches those members (see the header).
                 EngineBridge::instance().publishCrashTooling(
                     problems.isEmpty() ? QStringLiteral("ready") : QStringLiteral("incomplete"),
                     problems.isEmpty() ? QString() : problems);

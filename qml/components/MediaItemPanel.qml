@@ -1,47 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Edit screen's MEDIA tab — the selected picture / video / audio item's own
-// values, in the place the TEXT tab puts a selected text item's. Modelled on
-// FreeShow's Media tool (InspirationOrResources/FreeShow-main/src/frontend/
-// components/edit/values/media.ts + MediaTools.svelte), which is the reference
-// for which values a placed file has and in what order:
-//
-//   Media          the file itself, with Change (swap it) and ✕ (take it off)
-//   Fit            Contain / Cover / Fill / Blur fill
-//   Blend mode     Normal / Screen / Multiply / Overlay / Soft Light / …
-//   Flip           horizontally / vertically
-//   Cropping       top / right / bottom / left, a percentage of the picture
-//   Filters        hue rotate, invert, blur, grayscale, sepia, brightness,
-//                  contrast, saturate
-//
-// WHAT OWNS THE VALUES. Fit is CanvasItemStyle.mediaFit (the field the canvas and
-// the ITEMS tab's Filters card already speak). Everything else is the item's own
-// `meta.media` bag, which is what makes it survive a save: the engine persists a
-// block's meta JSON verbatim, while its ContentStyle has no room for these.
-//
-//   meta.media = {
-//       blend:  "normal" | "screen" | …,           // FreeShow's own list
-//       flipH: bool, flipV: bool,
-//       crop:   { top, right, bottom, left },       // percent, 0–90
-//       filter: { hueRotate, invert, blur, grayscale, sepia, brightness,
-//                 contrast, saturate }              // the engine's units
-//   }
-//
-// Fit, the flips, cropping and the filter set are ALL honoured on both surfaces:
-// the canvas through the picture it draws, and the engine through SceneBuilder's
-// media branch (crop/flip/fit/filter on the decoded pixels), so the preview and
-// the HDMI/NDI frame are one picture.
-//
-// BLEND MODE is composited by the ENGINE: SceneBuilder puts the item's mode on
-// the image object it builds, and the rasterizer blends that picture against the
-// pixels already in the frame (the full CSS set — screen, multiply, overlay,
-// soft light, the dodge/burn pair, the four non-separable modes…). The QML
-// canvas keeps drawing the file plainly — a QQuickItem has no access to what is
-// beneath it without a compatibility Blend effect this Qt build does not ship —
-// so the canvas shows the picture unblended while the HDMI/NDI frame shows it
-// composited. The value rides the item so it saves with the show and every
-// output reads the same number.
 Column {
     id: root
 
@@ -73,12 +32,6 @@ Column {
         const slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))
         return slash >= 0 ? p.slice(slash + 1) : p
     }
-    // A WINDOW (a bus item) REUSES THIS TAB (EditScreen::primaryIsMedia): what a
-    // window shows is a picture in a box, so the same values describe it — Fit,
-    // Blend, Flip, Cropping and Filters all apply to the bus's feed on the canvas
-    // AND on the outputs. It has no FILE of its own, though: its source is the
-    // bus it names, so the Media row shows that bus (the host passes its current
-    // name in `busName`) and Change opens the BUS picker instead of a file picker.
     property string busName: ""
     readonly property bool isWindow: root.kind === "bus"
     readonly property string kindLabel: root.kind === "video" ? qsTr("Video")
@@ -93,10 +46,6 @@ Column {
     readonly property color mediaHue: "#97c7ff"
 
     // ---- the values themselves -------------------------------------------
-    // A picture (or a video's poster) is the only thing these draw settings can
-    // describe: an AUDIO item has no frame to fit, flip, crop or filter, so those
-    // sections are not drawn for it at all — the tab keeps the file row (which is
-    // the one thing an audio item has) and nothing else invented.
     readonly property bool isPicture: root.kind === "image" || root.kind === "video"
                                       || root.isWindow
     readonly property string mediaFit: root.style && root.style.mediaFit ? String(root.style.mediaFit) : "contain"
@@ -106,12 +55,6 @@ Column {
     readonly property var crop: root.mediaMeta.crop ? root.mediaMeta.crop : ({ top: 0, right: 0, bottom: 0, left: 0 })
     readonly property var filter: root.mediaMeta.filter ? root.mediaMeta.filter : ({})
 
-    // Named hasCropChanges/hasFilterChanges, not cropChanged/filterChanged:
-    // this file also declares SIGNALS named cropChanged/filterChanged below
-    // (a value the user just edited, for the host to apply) — a property and
-    // a signal cannot share one name (build: "Duplicate signal name: invalid
-    // override of property change signal or superclass signal", since every
-    // property also owns an implicit change-notify slot QML has to generate).
     readonly property bool hasCropChanges: (root.crop.top ?? 0) !== 0 || (root.crop.right ?? 0) !== 0
         || (root.crop.bottom ?? 0) !== 0 || (root.crop.left ?? 0) !== 0
     readonly property bool hasFilterChanges: (root.filter.hueRotate ?? 0) !== 0
@@ -120,10 +63,6 @@ Column {
         || (root.filter.brightness ?? 1) !== 1 || (root.filter.contrast ?? 1) !== 1
         || (root.filter.saturate ?? 1) !== 1 || (root.filter.opacity ?? 1) !== 1
 
-    // FreeShow's own fit list for an image (its mediaFitOptions: the blur fill
-    // is a real choice for a picture — the file fills the box, softened, and the
-    // sharp copy sits on top of it). The host turns the picked label back into
-    // the key the style holds (EditScreen's mediaFitMenu).
     readonly property string fitLabel: root.mediaFit === "cover" ? qsTr("Cover")
         : root.mediaFit === "fill" ? qsTr("Fill")
         : root.mediaFit === "blur" ? qsTr("Blur fill")
@@ -132,10 +71,6 @@ Column {
     // under it (the same hand-off TextItemPanel's weight/font fields make).
     readonly property alias fitFieldItem: fitField
 
-    // FreeShow's own blend list (its boxes.ts mediaBlendOptions), in its order.
-    // These keys are what SceneBuilder parses (rendering::ParseBlendMode) and
-    // what the rasterizer composites, so the list and the compositor cannot
-    // drift: a key here is a mode the engine can actually draw.
     readonly property var blendOptions: [
         { key: "normal", label: qsTr("Normal") },
         { key: "screen", label: qsTr("Screen") },
@@ -172,9 +107,6 @@ Column {
         { key: "left", label: qsTr("Left") }
     ]
 
-    // The eight filter rows, in FreeShow's order and with its ranges. `scale` is
-    // display = stored * scale, the same single conversion SlidePanel's own rows
-    // use, so a row can never disagree with the engine about units.
     readonly property var filterRows: [
         { key: "hueRotate", label: qsTr("Hue rotate (°)"), min: 0, max: 360, step: 5, scale: 1, decimals: 0 },
         { key: "invert", label: qsTr("Invert (%)"), min: 0, max: 100, step: 5, scale: 100, decimals: 0 },
@@ -184,9 +116,6 @@ Column {
         { key: "brightness", label: qsTr("Brightness (%)"), min: 0, max: 200, step: 5, scale: 100, decimals: 0 },
         { key: "contrast", label: qsTr("Contrast (%)"), min: 0, max: 200, step: 5, scale: 100, decimals: 0 },
         { key: "saturate", label: qsTr("Saturate (%)"), min: 0, max: 200, step: 5, scale: 100, decimals: 0 },
-        // FreeShow's filter list ends with opacity (its filters.ts filterSection) —
-        // the file's own transparency, separate from the item's Transform opacity
-        // in the ITEMS tab (that one fades the whole box, borders included).
         { key: "opacity", label: qsTr("Opacity (%)"), min: 0, max: 100, step: 5, scale: 100, decimals: 0 }
     ]
 
@@ -286,9 +215,6 @@ Column {
                     }
                 }
 
-                // The picture glyph — Change: a different file on this item, or
-                // a different BUS for a window (one row, two answers, because a
-                // window's "file" IS the bus it names).
                 Rectangle {
                     width: 24
                     height: 24
@@ -316,11 +242,6 @@ Column {
     }
 
     // ---- Fit -------------------------------------------------------------
-    // The shared FieldBox + the app's one DropdownPanel (the host owns the menu:
-    // see EditScreen's mediaFitMenu), the same pair every other value picker in
-    // this inspector uses. A plain labelled row, not a section card: the name is the
-    // label and the value sits under it; once the fit is not the default, a reset
-    // arrow says so.
     FieldBox {
         id: fitField
         width: parent.width
@@ -337,10 +258,6 @@ Column {
     }
 
     // ---- Blend mode ------------------------------------------------------
-    // FreeShow puts this directly under Fit, and so it is here. The value is
-    // persisted with the item (`meta.media.blend`) AND composited on air:
-    // SceneBuilder sets it on the picture object and the rasterizer blends that
-    // object against the frame underneath it.
     FieldBox {
         id: blendField
         width: parent.width
@@ -452,10 +369,6 @@ Column {
                 maxValue: 90
                 step: 1
                 decimals: 0
-                // The same field the Transform card's Opacity uses: typed value,
-                // a track to drag AND the ^ / v steppers — a crop edge is exactly
-                // the kind of value an operator sets by eye (FreeShow's own
-                // cropping rows are a slider with a number, not a bare box).
                 showSlider: true
                 onMoved: (v) => {
                     root.notifyUndo()

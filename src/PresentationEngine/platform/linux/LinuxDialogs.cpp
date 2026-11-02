@@ -6,11 +6,9 @@
 #include <sstream>
 
 namespace bps::platform {
-
 using namespace linux_backend;
 
 namespace {
-
 const char* kZenity = "zenity";
 
 Error NoDesktop(const char* tool) {
@@ -24,9 +22,6 @@ bool HasDisplay() {
 
 const char* DialogTool() { return CommandAvailable(kZenity) ? kZenity : "kdialog"; }
 
-// zenity's --file-filter wants "NAME | *.a *.b" (patterns after a pipe).
-// The callers pass the Qt-style "NAME (*.a *.b)" — rewritten here so the
-// filter actually matches files instead of being a name with no patterns.
 std::string ZenityFileFilter(const std::string& f) {
     size_t open = f.find('(');
     size_t close = f.find(')', open);
@@ -47,9 +42,6 @@ std::string ZenityFileFilter(const std::string& f) {
     return name + " | " + joined;
 }
 
-// Runs the zenity file-selection dialog; returns the picked path or nullopt on
-// cancel. File pickers are zenity-only (kdialog uses a different syntax); the
-// kdialog fallback is used for message/question boxes via DialogTool().
 Result<std::optional<std::string>> RunFileDialog(const std::string& args) {
     if (!HasDisplay()) return NoDesktop("dialogs");
     if (!CommandAvailable(kZenity)) return NoDesktop("zenity");
@@ -59,7 +51,6 @@ Result<std::optional<std::string>> RunFileDialog(const std::string& args) {
         return std::optional<std::string>{r.stdoutText};
     return std::optional<std::string>{};   // cancelled / timeout
 }
-
 } // namespace
 
 Result<std::optional<std::string>> LinuxDialogs::OpenFileDialog(
@@ -113,9 +104,6 @@ Result<bool> LinuxDialogs::QuestionDialog(std::string_view title, std::string_vi
 
 Result<std::optional<std::string>> LinuxDialogs::ColorPicker(std::string_view title,
                                                              std::string_view initialColor) {
-    // zenity --color-selection prints '#RRGGBB' on OK. Requires a desktop
-    // session + zenity; kdialog uses a different syntax so this is zenity-only
-    // (like the file pickers).
     if (!HasDisplay()) return NoDesktop("dialogs");
     if (!CommandAvailable(kZenity)) return NoDesktop("zenity");
     std::string cmd = std::string(kZenity) + " --color-selection --title=" + ShellQuote(title);
@@ -143,5 +131,4 @@ Result<std::optional<std::string>> LinuxDialogs::FontPicker(std::string_view tit
         font.pop_back();
     return std::optional<std::string>{font};
 }
-
 } // namespace bps::platform

@@ -2,29 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · General — a faithful rebuild of the two reference exports
-// (1BBTIwaya's VGRPresenter_Settings_General.qml and its _Scrolled state):
-// one scrollable page holding the Smart Config banner, the Appearance /
-// Startup two-card row, the Resource profile strip, then (scrolling, per
-// the _Scrolled reference) Preferences, Backups & recovery and
-// Notifications & logs. The page scrolls via the shared AppScrollBar —
-// deliberately NOT Qt's ScrollBar, same visual language as the rest
-// of the app.
-//
-// EVERY control here is live and drives the ENGINE (bps::settings::AppSettings, through SettingsService): what each setting is
-// called, what it defaults to, what it may be set to and what it does are the engine's. This page carries no state and no list
-// of options of its own - a toggle reads SettingsService.values[key] and writes SettingsService.setValue(key, ...), a
-// "pick one" is a SettingsChoice, and the engine refuses anything it does not allow. The app then acts on the change: the
-// accent recolours the interface, notifications, autosave, backups, crash recovery, start-up and tray behaviour follow the
-// switches, and the resource profile, Lock In Mode and log level are applied to the engine itself.
-//
-// Rooted in an Item (not a bare Flickable) so the scrollbar can sit fixed
-// at this screen's right edge while the content beneath it scrolls — a
-// scrollbar declared inside a Flickable would scroll away with the
-// content. ModalShell drops this whole Item into its content area.
-//
-// Theme tokens throughout, so it follows the Appearance > Theme choice with
-// the rest of the app.
 Item {
     id: root
 
@@ -44,13 +21,6 @@ Item {
     }
     function flip(key) { SettingsService.setValue(key, !root.values[key]) }
 
-    // What is DRAWING, for the line under the hardware switch — the ENGINE's
-    // answer (SettingsService.rendererInUse, read back from the backend that is
-    // really installed), never the switch's own position: on a machine with no
-    // usable GPU the switch reads ON and the frames are still drawn in software,
-    // and a row that repeated the switch back at the user would be the one thing
-    // this page must not do. Empty means the engine has not answered yet (the
-    // choice is pushed to it off the interface thread).
     function hardwareRenderingNote() {
         if (root.values["preferences.hardwareAcceleration"] !== true)
             return qsTr("Frames are drawn in software — it works on every machine, GPU or not.")
@@ -61,9 +31,6 @@ Item {
         return qsTr("No usable GPU was found — frames are drawn in software.")
     }
 
-    // A backup's engine stamp ("yyyymmdd-hhmmss") as a person reads a time, and
-    // a byte count as KB/MB. Shared by the open-show row and the all-shows
-    // browser below so both format identically.
     function backupStampText(stamp) {
         const s = String(stamp)
         if (s.length !== 15 || s.charAt(8) !== "-")
@@ -76,9 +43,6 @@ Item {
         const kb = Number(bytes) / 1024
         return kb < 1024 ? Math.max(1, Math.round(kb)) + qsTr(" KB") : (kb / 1024).toFixed(1) + qsTr(" MB")
     }
-    // A backup's category as a person reads it (the browser row's title and the
-    // restore dialogs). "show" is not a real category here — those rows name
-    // the show itself.
     function backupCategoryLabel(category) {
         return category === "settings" ? qsTr("Settings")
              : category === "overlays" ? qsTr("Overlays")
@@ -87,10 +51,6 @@ Item {
     }
 
     // ---- Backups: the answers all arrive asynchronously ----------------------
-    // Every backup action copies or lists FILES, so SettingsService runs them on
-    // a worker and answers with a signal (see the header's backups section).
-    // These three fields are how this screen tracks what it asked for, so the
-    // notice the user reads is about the action they took.
     property string restoreTarget: ""     // a show copy in flight (restoreFinished reports by target)
     property string restoreName: ""       // what that copy was named
     property string deletedBackupShow: "" // the row a Delete is waiting to answer for
@@ -110,12 +70,6 @@ Item {
     }
 
     // ---- What a crash on THIS machine would leave behind ----------------------
-    // The startup forensics probe's verdict (CrashHandler.h's
-    // VerifyForensicsTooling -> EngineBridge's crashTooling* properties), as the
-    // "Crash reports" row reads it. One place composes both halves of the row so
-    // the self-test asserts what is DRAWN rather than a second copy of the
-    // wording, and so the detail line is the probe's own sentence about what is
-    // broken instead of a summary of it.
     function crashToolingLabel() {
         const s = EngineBridge.crashToolingState
         if (s === "incomplete")
@@ -308,9 +262,6 @@ Item {
                 // instead of a short card hanging under a tall neighbour.
                 readonly property real pairHeight: Math.max(appearanceCol.height, startupCol.height) + 40
 
-                // Appearance card — two "pick one" rows, one toggle row, the
-                // accent swatches. Built explicitly (not a Repeater)
-                // because each row's right-hand control differs.
                 Rectangle {
                     objectName: "selfTestCardAppearance"   // inset self-test grab target
                     width: (parent.width - 16) / 2
@@ -619,9 +570,6 @@ Item {
                     width: parent.width - 40
                     spacing: 0
 
-                    // Header: the title on the left (eliding before it can touch
-                    // the controls), then the engine's recommendation, the
-                    // profile picks and the way into Smart Config on the right.
                     Item {
                         width: parent.width
                         height: 34
@@ -645,9 +593,6 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 18
 
-                            // ONE segmented control instead of three bordered buttons; the
-                            // engine's recommendation is the green dot on its segment (no
-                            // "RECOMMENDED · PERFORMANCE" line — Smart Config states it in full).
                             SegmentedControl {
                                 anchors.verticalCenter: parent.verticalCenter
                                 options: root.definitions["resources.profile"].choices
@@ -676,9 +621,6 @@ Item {
                         }
                     }
 
-                    // The three LIVE usage figures — the engine's Telemetry module (real frame
-                    // times, encoder load, output presents), not the profile's static budget —
-                    // as three stat tiles side by side.
                     Row {
                         width: parent.width
                         topPadding: 16
@@ -689,13 +631,6 @@ Item {
                         StatTile { label: qsTr("Output"); pct: TelemetryService.utilization.output; width: (parent.width - 24) / 3 }
                     }
 
-                    // The live loop's OWN rate over the last minute (see
-                    // LiveCurve.qml). The meters above say how busy the engine
-                    // is; this says whether the show is getting slower as the
-                    // service goes on — the shape the raw log used to have to be
-                    // mined for. It reads the same engine curve Telemetry keeps
-                    // and logs a summary line from, so the card and the log can
-                    // never tell two different stories.
                     LiveCurve {
                         width: parent.width
                         topGap: 16
@@ -710,12 +645,6 @@ Item {
                 property string title: ""
                 default property alias rows: sectionCol.data
                 width: layout.width
-                // The SAME 20px internal padding as the Appearance / Startup cards
-                // above, so every card on the page shares one set of insets: title
-                // at y: 20, rows at y: 51 (= 20 + the ~21px title + its 10px gap -
-                // exactly where those cards put their first row), and 20px under the
-                // last row. (It used to be 14px top and bottom, which read a step
-                // tighter than the two cards above it.)
                 height: sectionCol.height + sectionCol.y + 20
                 radius: Theme.radiusLg
                 color: Theme.card
@@ -751,9 +680,6 @@ Item {
                                        ? root.definitions[prefRow.key !== "" ? prefRow.key : prefRow.choiceKey].label : ""
                 property string sub: ""
                 property bool last: false
-                // parent = the SettingsSection's inner column this row is
-                // declared in (PrefRow can't see that column's id from its
-                // own definition scope).
                 width: parent.width
 
                 Item {
@@ -765,13 +691,6 @@ Item {
                         spacing: 2
 
                         Text {
-                            // Named too, and for a different reason than the toggle:
-                            // a row whose label came out EMPTY still has a toggle to
-                            // click, so a scenario that only grabs the switch cannot
-                            // tell "the row is showing" from "the row is a blank line
-                            // with a switch on it". The label comes from the setting's
-                            // own definition, so this is also the check that the new
-                            // setting really reached the interface.
                             objectName: prefRow.key !== "" ? "selfTestLabel_" + prefRow.key : ""
                             text: prefRow.label
                             color: Theme.textPrimary
@@ -790,10 +709,6 @@ Item {
 
                     SettingsToggle {
                         visible: prefRow.key !== ""
-                        // ONE name per row, derived from the setting's own key, so a
-                        // self-test scenario can click the row it means instead of a
-                        // coordinate that drifts with the layout (the reason every
-                        // other grab target in this app is named too).
                         objectName: prefRow.key !== "" ? "selfTestToggle_" + prefRow.key : ""
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
@@ -819,11 +734,6 @@ Item {
                 }
             }
 
-            // A label with a status pill on its right, and under it what that
-            // status MEANS ("Crash reports" below is its one user). Like PrefRow,
-            // but the right-hand side reports rather than controls, and the row
-            // grows with the detail: the probe's list of broken parts is a
-            // sentence, and a fixed row height clipped it.
             component StatusRow: Column {
                 id: statusRow
                 property string label: ""
@@ -869,9 +779,6 @@ Item {
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                         text: statusRow.status
-                        // The warning pair on a fault, a neutral chip otherwise:
-                        // "Checking…" is not a problem, and neither is "Not
-                        // checked" (nothing asked it).
                         tint: statusRow.fault
                         baseColor: Theme.warning
                         lightColor: Theme.warningLight
@@ -887,17 +794,11 @@ Item {
                 }
             }
 
-            // The OPEN SHOW's dated backups. The engine has always kept them (DataProtection's BackupStore)
-            // and could list them (SettingsService.backupsOf), but nothing ever showed one - they were
-            // write-only. This row is the read side: it lists them and hands one back as a NEW show.
             component BackupRow: Column {
                 id: backupRow
                 property bool last: false
                 width: parent.width
 
-                // Backups are keyed by the SOURCE FILE's name without its extension (the engine's
-                // completeBaseName) - NOT by the show document's title, which usually differs. Deriving it
-                // from the path is what makes the list actually find this show's copies.
                 readonly property string fileStem: {
                     const p = String(ShowService.showPath ?? "")
                     if (p === "")
@@ -915,9 +816,6 @@ Item {
                 // a timer, so there is no signal to bind to; reading on demand is always current).
                 property var backups: []
                 function refresh() {
-                    // The list is built on a worker and arrives on backupsListed
-                    // (below) — this only asks; the row is emptied first so the
-                    // previous show's copies are never shown against this name.
                     backupRow.backups = []
                     if (backupRow.fileStem !== "")
                         SettingsService.requestBackups(backupRow.fileStem)
@@ -941,9 +839,6 @@ Item {
                 // Stamp/size formatting lives on the root now (backupStampText /
                 // backupSizeText) — the all-shows browser formats the same way.
 
-                // Copies a backup out as a NEW library show; the show it came from is never touched.
-                // The copy runs on a worker, so the notice and the refresh follow
-                // when the engine reports it (onRestoreFinished on the screen root).
                 function restore(backupPath) {
                     const name = qsTr("%1 (backup)").arg(backupRow.title)
                     const target = ShowService.newLibraryShowPath("", name)
@@ -1067,14 +962,6 @@ Item {
                 PrefRow { choiceKey: "notifications.logLevel"; last: true }
             }
 
-            // Whether a crash or a hang on THIS machine can be written down and
-            // read afterwards (see crashToolingLabel above). It is a Settings
-            // fact — not a notice — because nothing is wrong with the app: what
-            // is missing is the tooling an installed build carries, and the one
-            // thing the user can do about it (reinstall, or run from a build
-            // that has it) is done from here. The verdict is probed at every
-            // launch on a worker, so this row reads "Checking…" for the first
-            // moments of a session and the truth from the moment it lands.
             SettingsSection {
                 objectName: "selfTestCardStability"   // inset self-test grab target
                 title: qsTr("Crash reports")
@@ -1087,14 +974,6 @@ Item {
                 }
             }
 
-            // A row with a label on the left and a small action button on the
-            // right. Column + a self-drawn divider (hidden with last: true),
-            // the same shape PrefRow uses — a row here can no longer be
-            // followed by a sibling with no divider between them just
-            // because whoever added the row forgot the manual Rectangle
-            // (user report: "Libraries" had none between its two rows,
-            // while "All backups" did — the SAME component, inconsistently
-            // wired at each call site instead of owning its own divider).
             component ActionRow: Column {
                 id: actionRow
                 property string label: ""
@@ -1167,11 +1046,6 @@ Item {
                 }
             }
 
-            // EVERY backup, not just the open show's (the row in "Backups &
-            // recovery" above): a show copy restores as a new show, a settings /
-            // overlays / templates copy rolls back over its live file — or any
-            // of them can be deleted. The list lives in the browser modal at the
-            // root, which reads it on open.
             SettingsSection {
                 title: qsTr("All backups")
                 ActionRow {
@@ -1179,16 +1053,10 @@ Item {
                     buttonText: qsTr("Browse…")
                     onActivated: backupsBrowser.open()
                 }
-                // The backups live outside the app's document folders, so the browser
-                // below is not the only way to reach them: hand the OS file manager
-                // the folder itself (SettingsService.backupDirectory()).
                 ActionRow {
                     label: qsTr("Open the backups folder")
                     buttonText: qsTr("Open")
                     onActivated: {
-                        // The folder is prepared on a worker and opened from
-                        // there; only a not-yet-ready engine (no data directory)
-                        // has nothing to open.
                         if (SettingsService.backupDirectory() === "")
                             EventBus.notify(qsTr("The backups folder is not ready yet."), "warning", qsTr("Backups"), "settings.backups.openFolder")
                         else
@@ -1244,11 +1112,6 @@ Item {
     }
 
     // ---- The all-shows backups browser --------------------------------------
-    // EVERY backup the engine holds (the modal the "All backups" card opens),
-    // newest first. Listed on each open and re-listed whenever the set changes
-    // (SettingsService.allBackupsListed / backupsChanged — the listing walks a
-    // folder, so it runs on a worker). Restore hands a copy back as a NEW show;
-    // Delete removes the copy after the confirm dialog below.
     ModalCard {
         id: backupsBrowser
         title: qsTr("Backups")
@@ -1268,10 +1131,6 @@ Item {
         function reload() { SettingsService.requestAllBackups() }
         onShownChanged: if (backupsBrowser.shown) backupsBrowser.reload()
 
-        // A category copy (settings / overlays / templates) rolls back OVER its
-        // live file, so it goes through the confirm dialog below. A show copy
-        // only ever ADDS a new show (the engine refuses to overwrite one), so it
-        // needs no confirm and restores straight away.
         function restore(row) {
             if (!row)
                 return
@@ -1305,19 +1164,12 @@ Item {
         function showInFolder(row) {
             if (!row)
                 return
-            // Best effort, and already off-thread: the reveal either happens of
-            // the file manager's own accord or not at all (there is no answer
-            // left to report — the existence check and the shell hand-off are
-            // the worker's and the OS's business now).
             SettingsService.showBackupInFolder(row.path)
         }
 
         function remove(row) {
             if (!row)
                 return
-            // The delete and the refill happen on workers: the notice fires when
-            // the list comes back shorter (onBackupsChanged below), and a
-            // refused delete reports itself through the engine's own message.
             root.deletedBackupShow = String(row.show)
             SettingsService.deleteBackup(row.path)
         }
@@ -1468,9 +1320,6 @@ Item {
         }
     }
 
-    // A settings/overlays/templates restore REPLACES the live file, so it is
-    // confirmed first. Driven off pendingRestore, same contract as the delete
-    // dialog below.
     ConfirmDialog {
         id: restoreCategoryConfirm
         shown: backupsBrowser.pendingRestore !== null

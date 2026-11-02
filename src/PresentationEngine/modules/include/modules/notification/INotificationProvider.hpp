@@ -1,10 +1,5 @@
 #pragma once
 
-// INotificationProvider (docs/specs/14 §Notification Providers): the Open/Closed
-// extension point for notification destinations. The NotificationService only
-// manages providers — it never creates a toast. Adding a destination (Discord,
-// Slack, Email, OBS…) = implement this interface + register. No engine changes.
-
 #include "modules/notification/Notification.hpp"
 #include "core/config/Json.hpp"
 
@@ -12,7 +7,6 @@
 #include <vector>
 
 namespace bps::notification {
-
 // What a provider can render. The dispatcher checks these before routing.
 struct ProviderCapabilities {
     bool supportsProgress = false;
@@ -46,5 +40,4 @@ public:
     // of the core service.
     virtual Result<void> Configure(const json::Value&) { return Ok(); }
 };
-
 } // namespace bps::notification

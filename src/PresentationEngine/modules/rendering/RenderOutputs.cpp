@@ -1,5 +1,6 @@
 #include "modules/rendering/RenderOutputs.hpp"
 
+#include "core/logging/ChangeGate.hpp"
 #include "core/logging/Logger.hpp"
 #include "modules/rendering/ImageScale.hpp"
 #include "core/services/ServiceManager.hpp"
@@ -16,19 +17,9 @@
 #include <string>
 
 namespace bps::rendering {
-
 namespace settings = bps::settings;
 
 namespace {
-
-// Resample a frame to the OUTPUT's size. This runs only when the scene was
-// built at another size than the output pushes (a mid-session resolution
-// change — see LiveOutputController's SetTargetSize), and the pixels are a
-// whole composed picture: a media frame or a background image inside it must
-// not lose its crispness on the way. The FILTER is the shared one
-// (ImageScale: bilinear when magnifying, box average when minifying) rather
-// than the nearest grab that used to live here — the same defect as the blit
-// path's, in the other place a picture gets resized.
 RgbaImage ScaleImage(const RgbaImage& src, int dstW, int dstH) {
     RgbaImage out;
     if (src.empty() || dstW <= 0 || dstH <= 0) return out;
@@ -49,29 +40,23 @@ RgbaImage ScaleImage(const RgbaImage& src, int dstW, int dstH) {
                 CombineTaps(src, xTaps[static_cast<size_t>(x)], yTaps[static_cast<size_t>(y)]);
     return out;
 }
-
 } // namespace
 
 namespace {
-
-// One-shot-per-output-per-STATE pixel sanity, the same idiom SceneBuilder's
-// own layer diagnostics use. Present() is the LAST place inside the engine that
-// sees an output's pixels, and it is what splits the two halves of "the outputs
-// are black": an all-black line here means the engine itself rasterized black,
-// while a real picture here with a black monitor means the frame was dropped
-// after this point (the send/present path). The QML-side provider cannot
-// answer this at all — it only sees buffers the UI happens to ask for, and a
-// live session can easily ask for none.
-std::mutex g_presentSanityMutex;
-std::map<std::string, std::string> g_presentSanity;
+logging::ChangeGate g_presentSanity;
 
 // Frame::pixels is PACKED 0xAABBGGRR (Color::Pack — red in the LOW byte), the
 // engine's own convention throughout the render path.
 void ReportPresentSanity(const std::string& name, const std::string& sceneId, int w, int h,
                          const std::vector<uint32_t>& pixels) {
     std::string state;
+    // What counts as a change is the frame's SHAPE — size, black or not, the scene on air.
+    // The mean luma of a static picture still moves by a rounding step between frames, and
+    // gating on it made this line fire once per frame (the bulk of a session's engine.log).
+    std::string signature;
     if (w <= 0 || h <= 0 || pixels.empty()) {
         state = "no pixels";
+        signature = "no pixels";
     } else {
         long long sum = 0;
         int count = 0;
@@ -94,36 +79,21 @@ void ReportPresentSanity(const std::string& name, const std::string& sceneId, in
             }
         }
         const double mean = count > 0 ? static_cast<double>(sum) / count : 0.0;
+        const char* black = maxLuma == 0 ? "yes" : "no";
         state = std::format("{}x{} meanLuma={:.1f} maxLuma={} maxAlpha={} allBlack={}",
-                            w, h, mean, maxLuma, maxAlpha,
-                            maxLuma == 0 ? "yes" : "no");
+                            w, h, mean, maxLuma, maxAlpha, black);
+        signature = std::format("{}x{} allBlack={}", w, h, black);
     }
-    // The SCENE id rides the line: a black frame is a different bug when it came
-    // from the styled scene (the renderer dropped the objects) than when it came
-    // from some placeholder/empty scene (the loop presented the wrong one).
     state += std::format(" scene='{}'", sceneId);
-    bool changed = false;
-    {
-        std::lock_guard<std::mutex> lock(g_presentSanityMutex);
-        std::string& last = g_presentSanity[name];
-        if (last != state) {
-            last = state;
-            changed = true;
-        }
-    }
-    if (changed)
+    signature += std::format(" scene='{}'", sceneId);
+    if (g_presentSanity.Changed(name, signature))
         Logger::Instance().Info(std::format("output frame sanity: '{}' {}", name, state),
                                 "RenderOutputs");
 }
-
 } // namespace
 
 Result<void> FrameBufferOutput::Present(const Frame& frame) {
     if (!enabled_.load()) return Ok();
-    // THE FEED HEARTBEAT (see IRenderOutput::LastPresentSteadyMs): stamped on
-    // every accepted present, INCLUDING the live loop's once-a-second copy of
-    // an unchanged frame — that is what makes "no stamp for seconds" a stall
-    // rather than "the slide is still".
     lastPresentMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count());
@@ -220,25 +190,15 @@ std::vector<std::shared_ptr<IRenderOutput>> OutputManager::All() const {
 }
 
 void OutputManager::Distribute(const Frame& frame) {
-    // Copy the output list under the lock, then Present outside it: Present may
-    // scale a large frame (expensive) and locks each output's own mutex — never
-    // hold the manager lock during that work (blocks Add/Remove/Get).
     std::vector<std::shared_ptr<IRenderOutput>> enabled;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         enabled.reserve(outputs_.size());
         for (const auto& o : outputs_)
-            // AcceptsDistributedFrames(): a per-output-pass buffer is written by
-            // its OWN styled pass every frame — letting the main pass write it
-            // too made the NDI/HDMI feed flip between the program scene and the
-            // output's scene (two writers, one buffer). Its pass owns it.
             if (o->Enabled() && o->AcceptsDistributedFrames()) enabled.push_back(o);
     }
     for (const auto& o : enabled) (void)o->Present(frame);
 
-    // Feed the Telemetry module's output meter: how many enabled outputs just
-    // received a frame. Best-effort include (never fails; a no-op before the
-    // module initializes).
     if (auto* t = bps::ServiceManager::Instance().Get<settings::Telemetry>(); t != nullptr)
         t->OnOutputPresented(static_cast<int>(enabled.size()));
 }
@@ -247,5 +207,4 @@ void OutputManager::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     outputs_.clear();
 }
-
 } // namespace bps::rendering

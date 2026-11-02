@@ -14,7 +14,6 @@
 namespace bl = bps::library;
 
 namespace {
-
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
 QVariantMap metaOf(const std::string &json)
@@ -38,7 +37,6 @@ QVariantMap projectMap(const bl::Project &p)
              { QStringLiteral("notes"), qstr(p.notes) }, { QStringLiteral("archived"), p.archived }, { QStringLiteral("sectionsLocked"), p.sectionsLocked },
              { QStringLiteral("sectionsCollapsed"), p.sectionsCollapsed }, { QStringLiteral("items"), items } };
 }
-
 } // namespace
 
 ProjectService &ProjectService::instance()
@@ -83,19 +81,8 @@ void ProjectService::load()
         report(tr("The projects could not be read (%1).").arg(qstr(loaded.error().message)));
     refresh();
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("Projects"), QStringLiteral("Project library loaded: %1 folders and projects (%2)").arg(tree_.size()).arg(qstr(platform.Paths().UserDataDir()) + "/projects.json"));
-    // NOTHING IS REOPENED AT LAUNCH. The last project used to come back here
-    // (via SettingsService::whenReady -> restoreLastProject), which meant every
-    // launch began with a project on screen whatever the operator had been doing
-    // — the report: "if I was in the edit canvas, or in Settings, or in a
-    // template edit before I quit, when I open it back it automatically opens
-    // [a project]". The library is loaded and ready; a project opens when the
-    // operator opens one (the Projects panel, a drop onto the tree), or through
-    // restoreLastProject() if some future action asks for it explicitly.
 }
 
-// Reopens the project that was open at the last exit (its id lives in the
-// settings store). A no-op when there was none, or it is gone from the library.
-// Deliberately NOT called at startup any more — see load().
 void ProjectService::restoreLastProject()
 {
     const QString last = SettingsService::instance().value(QStringLiteral("session.lastProject")).toString();

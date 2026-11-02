@@ -1,17 +1,13 @@
 #pragma once
 
-// macOS backend of the PAL. Structure is in place so `CreatePlatform()` links;
-// the subsystem implementations are pending (require a macOS host to develop
-// and verify — Conformance §15.24). Common backends (filesystem, timer) are
-// already OS-agnostic and would be reused as-is.
-
-#include "platform/IPlatform.hpp"
+#include "platform/PlatformAccessors.hpp"
 #include "platform/common/Filesystem.hpp"
 #include "platform/common/Timer.hpp"
 
 namespace bps::platform {
+class MacOSPlatform final : public PlatformAccessors<MacOSPlatform> {
+    friend class PlatformAccessors<MacOSPlatform>;
 
-class MacOSPlatform final : public IPlatform {
 public:
     const char* Name() const noexcept override { return "MacOSPlatform"; }
 
@@ -20,31 +16,9 @@ public:
     std::string OsVersion() const override;
     std::string Arch() const override;
 
-    IFilesystem& Filesystem() override { return filesystem_; }
-    IPaths& Paths() override { return paths_; }
-    ITimer& Timer() override { return timer_; }
-    IThreading& Threading() override { return threading_; }
-    IProcess& Process() override { return process_; }
-    ILibrary& Library() override { return library_; }
-    IMonitor& Monitor() override { return monitor_; }
-    IAudio& Audio() override { return audio_; }
-    IVideo& Video() override { return video_; }
-    INetwork& Network() override { return network_; }
-    IPower& Power() override { return power_; }
-    IClipboard& Clipboard() override { return clipboard_; }
-    IEnvironment& Environment() override { return environment_; }
-    ILocale& Locale() override { return locale_; }
-    ISocketFactory& Sockets() override { return sockets_; }
-    IInput& Input() override { return input_; }
-    IDialogs& Dialogs() override { return dialogs_; }
-    INotifications& Notifications() override { return notifications_; }
-
     Snapshot Sample() override;
 
 private:
-    // Every subsystem below returns Err::Unsupported until the macOS backend
-    // is implemented (see PAL.md §11). Only the OS-agnostic common backends are
-    // functional out of the box.
     FilesystemImpl filesystem_;
     TimerImpl timer_;
 
@@ -240,5 +214,4 @@ private:
     StubNotifications notifications_;
     StubSocket sockets_;
 };
-
 } // namespace bps::platform

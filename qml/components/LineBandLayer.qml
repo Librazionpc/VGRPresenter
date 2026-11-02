@@ -1,28 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// THE PER-LINE BACKGROUND BAND (FreeShow's `lineBg` + `lineRadius`) — the
-// highlight drawn behind EACH line of a text block, following the wrapping, as
-// opposed to the item's own background (one fill behind the whole box).
-//
-// TWO PAINTING MODES, both honouring the same colour and the same layout:
-//
-//   square (radius 0) — the band is painted by a TRANSPARENT rich-text copy of
-//     the same text: Qt paints a span's background per line FRAGMENT, so the
-//     bands wrap exactly as the glyphs do with no second wrap engine involved.
-//     This is the default and the cheapest path.
-//
-//   rounded (radius > 0) — rich text cannot round a span's background, so each
-//     line becomes a Rectangle. Its geometry comes from the label's OWN layout
-//     (contentHeight / lineCount give the line step) and from a greedy wrap
-//     measured with the same font through TextMetrics; the numbers were checked
-//     against Qt's own band painting in a standalone render before this file
-//     existed (band height = the font's natural line box, band top =
-//     (step − lineBox) / 2 into the line's step).
-//
-// The caller points `layout` at the very Text that paints the glyphs, so the
-// band can never disagree with the text about font, spacing, wrapping,
-// alignment or the box it fills.
 Item {
     id: root
 
@@ -34,17 +12,10 @@ Item {
     property string color: ""
     // Corner radius in the same px the label's box is measured in.
     property real radius: 0
-    // The typed text case, applied to the band's own string: the label draws
-    // its case through font.capitalization, which rich text ignores, and an
-    // upper-cased verse would otherwise band at lower-case widths.
     property string textCase: "none"
 
     readonly property bool active: root.layout !== null
                                    && root.color !== "" && root.color !== "transparent"
-    // Rounded needs LINE BOXES as well as a radius: if the measurer cannot be
-    // built (or the box has no width yet) `rows` is empty, and the band falls
-    // back to the rich-text path — square corners, still a band. A radius is a
-    // shape choice, never a reason for the highlight to disappear.
     readonly property bool rounded: root.wantsRounded && root.rows.length > 0
 
     readonly property string shownText: root.layout ? String(root.layout.text ?? "") : ""
@@ -52,9 +23,6 @@ Item {
     readonly property real padRight: root.layout ? (root.layout.rightPadding ?? 0) : 0
     readonly property real contentWidth: root.layout ? (root.layout.width - root.padLeft - root.padRight) : 0
 
-    // One line BOX — the font's natural height at the drawn size. The probe is a
-    // Text rather than TextMetrics because only a Text reports what Qt's layout
-    // actually uses (TextMetrics exposes no ascent/descent).
     readonly property real lineBox: probe.contentHeight
     readonly property real lineStep: (root.layout && root.layout.lineCount > 0)
                                      ? root.layout.contentHeight / root.layout.lineCount : root.lineBox
@@ -68,10 +36,6 @@ Item {
             return (root.layout.height - root.layout.contentHeight) / 2
         return 0
     }
-    // `wantsRounded` is the REQUEST (a radius with a band); `rounded` is what can
-    // actually be drawn (see below). Keeping them apart matters: asking `rows`
-    // whether it is rounded while `rounded` asks `rows` its length is a binding
-    // loop.
     readonly property bool wantsRounded: root.active && root.radius > 0
     readonly property var rows: (root.wantsRounded && root.contentWidth > 0)
         ? MetadataFields.lineBoxes(root.shownText, root.contentWidth, root.layout.font, root.textCase)

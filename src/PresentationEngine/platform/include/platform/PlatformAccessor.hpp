@@ -1,20 +1,10 @@
 #pragma once
 
-// Global PAL accessor (Phase 2). The Kernel installs the backend at boot
-// (PlatformAccessor::Install(CreatePlatform())); until then (and in unit tests
-// that do not install one) a lazily-created default backend is used so engine
-// systems can route through the PAL unconditionally.
-//
-// Managers that historically called OS APIs directly (PluginManager,
-// ModuleManager, DatabaseManager, ThreadPool) resolve the platform through this
-// accessor instead of threading a dependency through every constructor.
-
 #include "IPlatform.hpp"
 
 #include <memory>
 
 namespace bps::platform {
-
 class PlatformAccessor {
 public:
     // Returns the active backend; lazily creates it on first use. Never null
@@ -29,5 +19,4 @@ public:
 
     static bool Installed();
 };
-
 } // namespace bps::platform

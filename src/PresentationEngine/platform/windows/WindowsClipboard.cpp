@@ -9,31 +9,12 @@
 #include <vector>
 
 namespace bps::platform {
-
 namespace {
-// Plain Error, not Result<void> — this is returned from functions with
-// several different Result<T> return types (string, vector<string>, void),
-// and Error converts implicitly to any of them; a concrete Result<void>
-// would only convert to itself.
 Error ClipboardError(std::string_view op) {
     return Error::Make(Err::IoError, "Clipboard",
                        std::string(op) + " failed: " + win::LastErrorString(GetLastError()));
 }
 
-// Opening the clipboard is a LOAN, not a read: Windows hands it to one process at
-// a time, and every other program on the machine takes it whenever it copies. A
-// screenshot is the worst case — the snipping tool writes a bitmap of the whole
-// screen into it — and the owner holds the clipboard for as long as that write
-// takes, so a read that gives up on the first ERROR_ACCESS_DENIED fails on a
-// machine that is doing nothing wrong. Qt probes the same clipboard on every
-// change (that is what produced the app's amber "Retrying to obtain clipboard."
-// notice), and the Windows guidance for this is a bounded retry: keep asking for
-// about a second, which covers a screenshot's write, and return the honest error
-// when the clipboard is genuinely stuck (a hung owner never releases it).
-//
-// Sleeps are on the clipboard's own millisecond scale and hold no lock: this file
-// owns none (see tools/check_lock_scope.mjs, which fails the build on a lock held
-// across a wait).
 bool OpenClipboardRetrying(HWND owner) {
     constexpr int kAttempts = 12;   // 12 x 80 ms ≈ 1 s of patience
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
@@ -46,14 +27,6 @@ bool OpenClipboardRetrying(HWND owner) {
 }
 
 // ---- bitmaps --------------------------------------------------------------
-//
-// Windows moves bitmaps as DIBs: a BITMAPINFOHEADER (or a V4/V5 header — the
-// 40-byte one with the same geometry and extra colour fields trailing) followed
-// by the pixel rows. Rows are BOTTOM-UP unless the header's height is negative;
-// 24/32 bpp BI_RGB is BGR / BGRX; and a screenshot's 32-bit pixels usually
-// carry no alpha at all (Windows' screenshot path writes zero there, which
-// would paste fully transparent) — so an entirely zero alpha channel is read
-// back as opaque, which is what the picture actually is.
 uint32_t ReadU32(const uint8_t* p, size_t offset) {
     return static_cast<uint32_t>(p[offset]) | (static_cast<uint32_t>(p[offset + 1]) << 8)
         | (static_cast<uint32_t>(p[offset + 2]) << 16) | (static_cast<uint32_t>(p[offset + 3]) << 24);
@@ -346,5 +319,4 @@ Result<void> WindowsClipboard::SetFiles(const std::vector<std::string>& paths) {
     CloseClipboard();
     return Ok();
 }
-
 } // namespace bps::platform

@@ -13,7 +13,6 @@
 #include <vector>
 
 namespace bps {
-
 // Task classes (docs/specs/06 §3). Realtime first, Background throttled.
 enum class TaskClass : int { Realtime = 0, Foreground, Background };
 
@@ -102,14 +101,6 @@ private:
     void WorkerLoop();
     std::shared_ptr<Task> FindTask(TaskHandle id) const;
 
-    // Declared, not `static inline thread_local` — MinGW-w64's linker
-    // (binutils ld, PE/COFF) doesn't fold the compiler-generated TLS init
-    // thunk for an inline thread_local across translation units the way
-    // ELF linkers do, producing a real "multiple definition of TLS init
-    // function" link error the moment more than one .cpp using this class
-    // gets linked together. The single out-of-line definition in
-    // ThreadPool.cpp sidesteps it entirely (same fix shape as the
-    // pre-C++17 static-member-definition pattern, just for a TLS member).
     static thread_local std::shared_ptr<Task> tlsCurrentTask_;
 
     mutable std::mutex mutex_;
@@ -133,5 +124,4 @@ private:
     std::atomic<uint64_t> cancelled_{0};
     static constexpr size_t kMaxQueued = 100000;
 };
-
 } // namespace bps

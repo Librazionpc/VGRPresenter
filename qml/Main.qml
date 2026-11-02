@@ -1,10 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
-// The app's one keyboard binding type (see qml/shortcuts/Shortcut.qml). Imported
-// AFTER QtQuick so `Shortcut {}` here means the app's action-named binding; it
-// is a drop-in for QtQuick's (sequence/enabled/activated), so the bindings below
-// read `action: "…"` and the chord itself lives in qml/settings/Hotkeys.qml.
 import "shortcuts"
 import "components"
 import "screens"
@@ -14,17 +10,6 @@ import "screens/edit"
 ApplicationWindow {
     id: window
     // ---- the desktop this app opens on and scales to -------------------------
-    // The panel size comes from the ENGINE's platform layer (EngineBridge.
-    // primaryDisplay, filled by the PAL's IMonitor at boot and refreshed on every
-    // monitor hot-plug), not from Qt's Screen: Qt reports the DPI-SCALED logical
-    // size, so on a scaled display it does not say what panel the user actually
-    // has. Qt still supplies the WORK AREA (the screen minus the taskbar, which
-    // the engine does not report) and is the fallback before the engine has
-    // enumerated a display.
-    //
-    // Everything here is in the layout pixels Window.width/height use: the
-    // engine's real pixels divided by Qt's devicePixelRatio (Screen geometry is
-    // already in that unit).
     readonly property real pixelRatio: Screen.devicePixelRatio > 0 ? Screen.devicePixelRatio : 1
     readonly property var engineDisplay: EngineBridge.primaryDisplay
     readonly property real realDisplayWidth: (engineDisplay && engineDisplay.widthPx > 0)
@@ -35,99 +20,31 @@ ApplicationWindow {
                                           : (Screen.width > 0 ? Screen.width : 1440)
     readonly property real desktopHeight: realDisplayHeight > 0 ? realDisplayHeight
                                            : (Screen.height > 0 ? Screen.height : 900)
-    // What the window may fill: the work area (taskbar-aware, so no edge of this
-    // frameless window lands under the taskbar), capped by the real display — a
-    // logical geometry larger than the panel would otherwise open a window whose
-    // own edges sit off the screen.
     readonly property real availableScreenWidth: Math.min(window.desktopWidth,
                                                           Screen.desktopAvailableWidth > 0 ? Screen.desktopAvailableWidth : window.desktopWidth)
     readonly property real availableScreenHeight: Math.min(window.desktopHeight,
                                                            Screen.desktopAvailableHeight > 0 ? Screen.desktopAvailableHeight : window.desktopHeight)
-    // The app OPENS filling the desktop (minus a small margin), not at its
-    // 1440x900 design size: `uiScale` below then follows the window it opened in,
-    // so the whole app is drawn scaled to the screen it started on — up on a large
-    // display, down on a small one. The design size is the layout's UNIT, never
-    // the size the app opens at.
     width: Math.max(Math.min(820, availableScreenWidth), availableScreenWidth - 32)
     height: Math.max(Math.min(560, availableScreenHeight), availableScreenHeight - 64)
     minimumWidth: Math.min(820, availableScreenWidth)
     minimumHeight: Math.min(560, availableScreenHeight)
-    // Keep manual/native resizing inside the active display. The frameless
-    // window can otherwise be dragged larger than a lower-resolution screen,
-    // leaving the right-side controls and library search outside the visible
-    // area. Qt reports Screen geometry in the same device-independent units
-    // used by Window.width/height, including when DPI scaling is enabled.
     maximumWidth: Math.max(minimumWidth, availableScreenWidth)
     maximumHeight: Math.max(minimumHeight, availableScreenHeight)
 
     // ---- ONE app scale, enforced on every layer -------------------------------
-    // The app was laid out at 1440x900: every coordinate in it (screens, header,
-    // menus, drag chip, dialogs) assumes that space. Rather than reflow each
-    // surface into whatever room a smaller window leaves — which is what put
-    // icons on top of each other in General and Audio & Video — the whole UI keeps
-    // its design size and is scaled uniformly.
-    //
-    // `uiScale` is the single source of that scale. EVERY window-level layer reads
-    // it (screens, header, menu bar, drag layer, the Settings modal, the app-level
-    // dialogs, and the components that reparent to the window overlay); anything
-    // nested inside those layers inherits their transform and must NOT apply the
-    // scale again. tools/selftest/run_modal_fit_test.sh asserts that every layer
-    // reports the same scale, so a new layer that forgets it is caught.
-    //
-    // It does scale UP: the app opens filling the desktop (see above), so on a
-    // display bigger than the design the whole UI is drawn larger instead of
-    // leaving a strip of empty window around a 1440x900 island. Every layer is
-    // scaled by the same factor, so the design's proportions are preserved.
-    //
-    // Modals follow the same rule with one extra part: the CARD is scaled and the
-    // SCRIM behind it never is (AppScale.qml holds both the number and the
-    // helper) — a scaled scrim shrinks away from the window's edges, and the
-    // dialog loses the full-window black box that makes it read as modal.
-    //
-    // Two window-level items deliberately stay OUT of it, each for a reason:
-    // WindowResizeHandles (it IS the window's frame — scaling it would move the
-    // resize borders inward) and AppCursorCatcher (its whole point is to force a
-    // cursor shape from outside any transform).
     readonly property real designWidth: 1440
     readonly property real designHeight: 900
     // The user's text size (Settings · General · Appearance) multiplies the scale, so
     // every surface — text included — grows together.
     readonly property real textScale: (Number(SettingsService.values["appearance.textScale"]) || 120) / 100
     readonly property real uiScale: Math.min(window.width / designWidth, window.height / designHeight) * textScale
-    // The DESIGN CANVAS the window-level layers are drawn in: the window itself,
-    // expressed in design units (`window / uiScale`). Because uiScale is the
-    // SMALLER of the two ratios, each axis of the canvas is at least its design
-    // size — 1440 wide, 864 tall below the header (the design height minus the
-    // 48px the screens keep under the strip) — so the layout is never squeezed
-    // below what it was built for, while the scaled canvas still lands exactly on
-    // the window's own edges. A canvas pinned at the design size instead left the
-    // bottom library dock hovering ~26px above the window at 820x560 — "the
-    // project and bottom sidebar are not attached to the window".
-    //
-    // The screens sit BELOW the header strip (topMargin headerExtra), so it is the
-    // room UNDER that strip that the canvas has to match vertically.
     readonly property real canvasWidth: window.width / (uiScale || 1)
     readonly property real canvasHeight: (window.height - window.headerExtra) / (uiScale || 1)
-    // A screen's own top 48px is designed to sit UNDER the header strip, so the
-    // strip's scaled height (design height x uiScale) is what pushes a screen down:
-    // headerExtra is that height minus the 48px the screen already accounts for.
-    // In design units (what the layout math below uses), the screens are offset by
-    // the strip's design height minus 48.
     visible: true
     flags: Qt.Window | Qt.FramelessWindowHint
-    // (The taskbar/alt-tab icon is set from C++ — main.cpp grabs this window
-    // after load and calls QWindow::setIcon(). A QQuickWindow does NOT
-    // reliably adopt QGuiApplication::setWindowIcon() on Windows, and there
-    // is no Window.icon property in the QML API to do it from here — the
-    // exe's own icon (RC_ICONS) is not what the RUNNING taskbar button shows.
-    // This window is frameless, so the taskbar button is its only OS chrome.)
-    // The open show's name, with a dot while it has unsaved changes.
     title: (ShowService.hasShow ? ShowService.showName + (ShowService.showDirty ? " •" : "") + " — " : "") + "VGRPresenter"
     color: Theme.windowBg
 
-    // The devices this app is SET UP with, gathered from the three rosters that
-    // own them. Anything a device picker can reach is deliberately NOT in here:
-    // those pickers ask for the full machine themselves when they open.
     function requestBootDevices() {
         const audio = []
         for (let i = 0; i < AudioInputListModel.rowCount(); ++i) {
@@ -156,25 +73,10 @@ ApplicationWindow {
     }
 
     // ---- The engine boot report (see Component.onCompleted) ------------------
-    // One notice per launch, and only once the device rosters are actually in:
-    // the summary is a pull, and the enumeration that fills it lands asynchronously.
-    // The gate is "the rosters have something in them", NOT "a devicesChanged
-    // arrived" — the signal also fires for refreshes that carry no new roster
-    // (and one of those lands before the async sweep does), and latching on it
-    // printed exactly what this is here to fix: "· 0 audio device(s):". Every
-    // later enumeration calls back and is a no-op once the toast has gone out
-    // (the flag), so a hot-plug still can't re-announce boot.
     property bool bootReportShown: false
     function reportBoot(force) {
         if (window.bootReportShown)
             return
-        // The gate is the BRIDGE's word that the sweep which carried this app's
-        // own device set has landed (bootSweepDone) — the engine enumerates
-        // once while booting, before QML has said which hardware this setup
-        // uses, and a summary read off THAT says "0 audio device(s)". The old
-        // "the rosters have something in them" test passed on it as soon as the
-        // primary display turned up, which is exactly how the startup toast
-        // ended up reporting zero devices for a machine full of them.
         if (!EngineBridge.bootSweepDone && !force)
             return
         const haveRosters = EngineBridge.audioDevices.length > 0
@@ -187,38 +89,12 @@ ApplicationWindow {
             return
         window.bootReportShown = true
         if (boot !== "") {
-            // Also one line in the engine log: the toast is gone in a few
-            // seconds, and "the engine found no audio devices" is exactly the
-            // kind of claim that has to stay answerable afterwards.
             EngineBridge.log("info", "Engine", boot)
-            // Its crux is WHICH hardware is in use: those names are what the eye
-            // needs to catch in a five-second toast (the rest of the sentence is
-            // context), so they are handed over to be drawn bold.
             EventBus.notify(boot, "success", qsTr("Engine"), "engine.boot",
                             EngineBridge.bootInUseDevices())
         }
     }
     // ---- A recovered crash, and whether this machine could report one -------
-    // "Recovered from an unexpected shutdown last run — details were written to
-    // the crash log" is only half the story on a machine where the tooling that
-    // writes those details cannot run: the operator is being sent to a file with
-    // nothing in it, and nobody ever finds that out, because a crash that leaves
-    // no trace leaves nothing to find. So the startup forensics probe's verdict
-    // (CrashHandler.h's VerifyForensicsTooling, published through EngineBridge's
-    // crashTooling* properties) is delivered as a note beside the report it
-    // qualifies.
-    //
-    // The probe runs on a WORKER — it STARTS the debugger a real capture would
-    // attach and waits for it to answer — so its verdict is never in by the time
-    // the recovery notice goes out. Both orders are real, and both end in the
-    // same single note:
-    //   * verdict already known broken → noteCrashTooling() right after the
-    //     recovery notice below;
-    //   * verdict lands later (the usual one) → the Connections handler fires it
-    //     when it does.
-    // A session that recovered nothing says nothing: tooling that cannot capture
-    // a crash is a fact for Settings · General · Crash reports, not a warning to
-    // interrupt a launch with.
     property bool crashRecoveryReported: false
     property bool crashToolingNoted: false
     // The note's text, in one place: the notice that carries it and the self-test
@@ -233,10 +109,6 @@ ApplicationWindow {
         if (EngineBridge.crashToolingState !== "incomplete")
             return
         window.crashToolingNoted = true
-        // "error", the level its sibling above carries — deliberately. A user who
-        // turned notices off (only errors interrupt then) is told their previous
-        // run crashed; leaving the note at warning level would drop the half of
-        // that story that says the report has nothing in it.
         EventBus.notify(window.crashToolingNoteText(), "error", qsTr("Stability"), "ui.crash.tooling")
     }
     Connections {
@@ -245,18 +117,6 @@ ApplicationWindow {
     }
 
     // ---- Startup-forensics verdict self-test (VGR_FORENSICS_TEST=1) ----------
-    // The two surfaces that verdict reaches, read back as the user meets them:
-    //   * the Settings · General "Crash reports" row — the pill's own text and
-    //     the detail LINE as drawn (looked up in the item tree, so a row that
-    //     binds the wrong property fails), and
-    //   * the note that rides a recovered crash — delivered at all, and present
-    //     in the notification centre, which is where the user reads it.
-    // The runner forces a broken tooling layout (VGR_FORENSICS_DIR at a folder
-    // with an empty analyze.bat beside it) and seeds one crash record, so both
-    // halves run the real probe and the real recovery path; state=/problem=/row=
-    // are printed as facts for the script to judge.
-    // Armed only with BOTH VGR_SELFTEST=1 and VGR_FORENSICS_TEST=1: a plain
-    // VGR_SELFTEST=1 run must never open Settings or quit early.
     property int forensicsTries: 0
     property int forensicsNoteTries: 0
     property bool forensicsNoteSeen: false
@@ -266,23 +126,13 @@ ApplicationWindow {
         interval: 700
         repeat: true
         onTriggered: {
-            // A notice is on screen for a few seconds and then DISMISSED, so the
-            // note has to be caught while it is in the centre — the same place,
-            // and the same window of time, the user has to catch it in.
             const note = window.crashToolingNoteText()
             const items = NotificationCenter.items
             for (let i = 0; i < items.length; ++i)
                 if (items[i].message === note)
                     window.forensicsNoteSeen = true
-            // The probe STARTS a debugger on a worker, so the verdict is not in
-            // by the first frame: wait for it to stop saying "checking" (bounded
-            // — the probe itself is bounded).
             if (EngineBridge.crashToolingState === "checking" && window.forensicsTries++ < 20)
                 return
-            // The note is delivered with the verdict, so give it a beat to be in
-            // the centre. It is only ever delivered in a session that recovered
-            // a crash, so a broken verdict without one waits this beat out and
-            // reports noted=false — which is the truth the script reads.
             if (EngineBridge.crashToolingState === "incomplete"
                 && !window.forensicsNoteSeen && window.forensicsNoteTries++ < 6)
                 return
@@ -305,11 +155,6 @@ ApplicationWindow {
                         + " recovered=" + window.crashRecoveryReported
                         + " noted=" + window.crashToolingNoted
                         + " inToast=" + window.forensicsNoteSeen)
-            // ...and the card itself for the human: the row is the deliverable,
-            // and a passing run should leave something to look at rather than a
-            // line of text about it.
-            // Named after the state it drew, so both runs' pictures survive
-            // (the healthy case would otherwise overwrite the broken one).
             SelfTest.grab("selfTestCardStability", "forensics_card_" + EngineBridge.crashToolingState + ".png")
             // Let the grab's saveToFile() land before the process goes away.
             selfTestForensicsDone.restart()
@@ -322,20 +167,6 @@ ApplicationWindow {
     }
 
     // ---- The missing-device notice (the other half of the boot sweep) -------
-    // A device this setup was remembered with that is NOT on the machine this
-    // time is worth saying out loud: the row that names it meters nothing /
-    // previews black, and "why is that input dead?" is not something the user
-    // should have to open Settings to answer.
-    //
-    // It is published here rather than by the engine bridge for one reason:
-    // ORDER. The bridge knows a device is missing at the moment its sweep
-    // completes, which is the same moment the boot toast goes out — and a toast
-    // published before that one would sit ABOVE it in the overlay (toasts stack
-    // oldest first). So the bridge leaves the answer on missingUsedDevices()
-    // and this runs immediately AFTER reportBoot(), which is what "after the
-    // engine boot toast" means on screen. One notice per launch (the flag).
-    // The rosters that own the devices the boot sweep is asked for. Any change
-    // in them re-states the used set (see requestBootDevices).
     Connections {
         target: AudioInputListModel
         function onRowsInserted() { window.requestBootDevices() }
@@ -391,9 +222,6 @@ ApplicationWindow {
     }
     Timer {
         id: bootReportFallback
-        // The safety net: if the sweep never lands (no platform backend, an
-        // enumeration that fails), the toast still reports what the engine
-        // knows instead of staying silent forever.
         interval: 6000
         onTriggered: {
             window.reportBoot(true)
@@ -402,23 +230,10 @@ ApplicationWindow {
     }
 
     property string settingsSection: "general"
-    // A screen row to open for editing as soon as Settings · Screens appears —
-    // set by the Routing canvas's card menu, which knows WHICH row it right-
-    // clicked but not how to edit it (that editor is the Screens page's).
     property int pendingScreenEdit: -1
     // The Hotkeys scope Settings pushes while it is open (Esc closes it) — see
     // the settingsScrim's onVisibleChanged and qml/settings/Hotkeys.qml.
     property int settingsHotkeyScope: 0
-    // The header is now two rows — the title bar (logo, menu, window buttons), a
-    // separator line, then the Show / Edit / Stage tabs. The screens were designed
-    // around a 48 px header, so they are pushed down by however much taller it is
-    // (their own top 48 px sits underneath the header, hidden).
-    // The header strip is chrome BUT it is part of the same design: it was laid
-    // out at 1440 too (logo, menu, centred tabs, gear, GO LIVE), so it is scaled
-    // with the screens rather than left to crowd. The screens' offset and the
-    // offset the app pushes them by are therefore both in SCALED units: a screen's
-    // own top 48px must sit under the scaled header, which is what makes the two
-    // line up at any scale (at scale 1 the numbers are exactly what they were).
     readonly property int headerHeight: Math.round(appHeader.height * window.uiScale)
     readonly property int headerExtra: Math.round((appHeader.height - 48) * window.uiScale)
     // "show" | "edit" | "stage" — Stage has no screen yet, so its tab click
@@ -427,39 +242,18 @@ ApplicationWindow {
     // The window-level layer that carries a drag between panes (DragSource / DropArea); see DragLayer.qml.
     readonly property var dragLayer: dragLayerItem
 
-    // Previous-run crash report, delivered on the standard notification
-    // pipeline the moment QML is alive. (See main.cpp: the CrashHandler can
-    // only leave a log file from inside a dying process — publishing to the
-    // bus it may have crashed is unsafe by design — so this is the UI half
-    // of that contract. Rotation in ConsumePendingCrashSummary makes it
-    // exactly-once per crash.)
     Component.onCompleted: {
         // Set the saved Outputs-page media-fit default before any take can
         // fall back to the service's startup default.
         LiveOutputService.setDefaultMediaFit(
             String(SettingsService.value("outputs.defaultMediaFit") ?? "contain"))
-        // THE STYLE ROSTER HAND-OVER, first thing: QML constructs its own
-        // StyleListModel (the engine does not call that class's static create()
-        // factory — see OutputListModel::adoptStyleRoster), so the object the
-        // Styles screen edits and the one every C++ reader resolves styles
-        // through are TWO rosters unless they are joined. Joined here, the
-        // tiles, the output windows and the style spec pushed into the engine
-        // all follow the live edit instead of the copy that only re-hydrates
-        // from the store at boot.
         try {
             OutputListModel.adoptStyleRoster(StyleListModel)
             console.log("[SELFTEST-STYLEBG] style roster hand-over done")
         } catch (e) {
             console.log("[SELFTEST-STYLEBG] style roster hand-over FAILED: " + e)
         }
-        // The app scale's one source (see AppScale.qml): a modal card cannot read
-        // the scale off a scaled ancestor (its root sits above one), so it reads
-        // it from the window registered here.
         AppScale.register(window)
-        // One-shot layout truth for the log: which display the app sized itself
-        // against, what the engine reported for it, and the scale that came out.
-        // (A wrong/absent engine display shows up here instead of only as a
-        // vaguely-too-small window.)
         EngineBridge.log("info", "Layout",
             "desktop " + Math.round(window.desktopWidth) + "x" + Math.round(window.desktopHeight)
             + " (engine " + (window.realDisplayWidth > 0
@@ -474,52 +268,21 @@ ApplicationWindow {
                 qsTr("Recovered from an unexpected shutdown last run (%1). Details were written to the crash log.")
                     .arg(pendingCrashSummary),
                 "error", qsTr("Stability"), "ui.crash.recovered")
-            // ...and, if the machine cannot capture a crash, say so with it (see
-            // noteCrashTooling): "details were written to the crash log" is not
-            // true where nothing is.
             window.noteCrashTooling()
         }
-        // Boot report with REAL platform facts. The device sweep is
-        // ASYNCHRONOUS — the PAL's WASAPI / Media Foundation enumeration must not
-        // block the first frame — so at this instant the rosters are still empty
-        // and the summary reads "0 audio device(s):  · 0 display(s): ". That is
-        // exactly what the startup toast kept printing on every launch. The
-        // notice now goes out on the first enumeration instead (reportBoot),
-        // with the fallback timer below covering a machine that genuinely has no
-        // devices at all.
         if (EngineBridge.bootError.length > 0)
             EventBus.notify(EngineBridge.bootError, "error", qsTr("Engine failed to boot"), "engine.boot")
         else
             window.reportBoot(false)
         bootReportFallback.restart()
 
-        // The engine's boot device sweep is limited to what this setup USES
-        // (see requestUsedDevices): every audio input row's endpoint, every
-        // video source's camera (and its window/monitor pick), and the display
-        // each output is bound to. All of those are restored from the store by
-        // now, so this is the moment the app can say which hardware it needs —
-        // and the engine stops probing every endpoint, camera and window on the
-        // machine to find it. A device picker opening later calls
-        // refreshDevices()/refreshAudioDevices(), which enumerate the machine in
-        // full again (that is where a NEW pick comes from), and a device that
-        // was used last session but is gone now is announced by the engine.
         requestBootDevices()
-
-        // ...and AGAIN whenever one of those rosters is restored or edited. The
-        // models hydrate at their own pace (the AV board's video roster lands
-        // after this window completes), so the call above legitimately knows
-        // nothing yet on a cold start — the engine is told again as soon as
-        // there is something to tell it, and a targeted sweep costs nothing to
-        // re-run (a device nobody named is never touched).
 
         // Search: the Bible files are read into the engine (background thread) so verses
         // can be found.
         SearchService.loadBibles()
     }
 
-    // Screens first (opaque, fill the window), then the shared header strip
-    // and the menu layer on top — AppMenuBar must sit above AppHeader because
-    // its logo/menu labels are drawn inside the title row of the same header.
     VGRPresenterMainScreen {
         id: showScreen
         objectName: "selfTestMainScreen"
@@ -545,9 +308,6 @@ ApplicationWindow {
         // The app-wide search (the splash's "Quick search" button).
         onSearchRequested: quickSearch.openSearch()
         onImportRequested: importDialog.open = true
-        // A card's Edit action in the Overlays / Templates tab: the Edit screen edits that overlay / template.
-        // Unknown id (a deleted design, a stale pick): say so — the silent no-op here once made a broken
-        // edit button look exactly like an unresponsive one.
         onDesignEditRequested: (kind, id) => {
             if (editScreen.openDesign(kind, id))
                 window.currentView = "edit"
@@ -608,30 +368,17 @@ ApplicationWindow {
     // rememberSettingsPage): the newest section is the one a resume comes back to.
     onSettingsSectionChanged: window.rememberSettingsPage()
 
-    // Which page inside Settings the session is on, remembered for "Resume last
-    // session" — and "" the moment the dialog closes, so a session that ended with
-    // Settings shut can never come back into a dialog the user had already
-    // dismissed. Written only after the app has STARTED (behaviors.started): the
-    // store loads after this window is built, and a write at load time would
-    // overwrite the remembered page with the empty value of a dialog nobody had
-    // opened yet.
     function rememberSettingsPage() {
         if (!behaviors.started)
             return
         const at = settingsScrim.visible ? window.settingsSection : ""
         if (at !== String(SettingsService.values["session.lastSettingsSection"] ?? "")) {
             SettingsService.setValue("session.lastSettingsSection", at)
-            // Logged like every other navigation step ("Screen: edit"): the page
-            // a resume will come back to is exactly the kind of state that has to
-            // stay answerable afterwards — "why did it open Settings · Outputs?"
             EngineBridge.log("info", "Navigation",
                              at === "" ? qsTr("Settings closed") : qsTr("Settings page: ") + at)
         }
     }
 
-    // Opens the Settings dialog — the one entry point both the header's
-    // gear button and the menu bar's Settings/Preferences items funnel
-    // into, so a future keyboard shortcut (Ctrl+,) only ever calls this.
     function openSettings(section) {
         if (section !== undefined)
             window.settingsSection = section
@@ -648,29 +395,10 @@ ApplicationWindow {
         transformOrigin: Item.Top
         scale: window.uiScale
         activeTab: window.currentView
-        // Edit opens a SHOW — one picked in the centre preview, or the one
-        // already open in the editor. With neither, the tab is greyed and does
-        // nothing: pressing it used to take the operator into an editor holding
-        // an untitled show nobody asked for (and the recovery store then tried
-        // to write it, which is where "cannot open for writing: …unsaved-show.vgr.tmp"
-        // came from). A new show is made with New show, deliberately.
-        // Truthy, not `!== null`: centerItem starts as undefined, and `undefined
-        // !== null` is true — which then read `.type` off it and put a TypeError
-        // in the log on the first evaluate.
         editAvailable: ShowService.hasShow
             || !!(showScreen.centerItem && showScreen.centerItem.type === "show")
         onTabSelected: (tab) => {
-            // Edit means "edit what I'm looking at": a show clicked open in
-            // the Show screen's centre preview (ShowCenter) is what Edit
-            // should load — switching the tab alone used to leave the Edit
-            // screen on whatever it already had (often nothing), ignoring
-            // the show right there on screen. Only reload when it's a
-            // DIFFERENT show than what's already open, so flipping back and
-            // forth while actively editing doesn't reset undo history.
             if (tab === "edit") {
-                // Nothing to edit: stay put (the tab is greyed too — this is the
-                // guard for a click that got through anyway, a keyboard path, or
-                // the last show being closed while the editor held it).
                 const item = showScreen.centerItem
                 if (!ShowService.hasShow && !(item && item.type === "show"))
                     return
@@ -687,10 +415,6 @@ ApplicationWindow {
     QuickSearchDialog {
         id: quickSearch
         objectName: "selfTestQuickSearch"
-        // The app scale goes on the dialog's CARD, never on this root: the root IS
-        // the dialog's dim backdrop, and scaling it shrinks the backdrop away from
-        // the window's own edges (the dialog loses its black box). ModalCard does
-        // that through the AppScale singleton.
         onResultChosen: (result) => window.openSearchResult(result)
     }
 
@@ -700,10 +424,6 @@ ApplicationWindow {
         const openT0 = Date.now()
         switch (r.kind) {
         case "show":
-            // Same landing as clicking the row in the library: the centre
-            // preview, not straight into Edit (this used to jump the
-            // search result directly into editing, unlike every other way
-            // of reaching a show).
             showScreen.centerItem = { type: "show", ref: r.path, name: r.title, category: r.category ?? "", layout: "" }
             window.currentView = "show"
             break
@@ -721,9 +441,6 @@ ApplicationWindow {
             showScreen.showInLibrary("media", r.title)
             break
         case "table": {
-            // Straight to the sermon AT its paragraph — the hit carries bookId/chapter/verse.
-            // (Pasting the title into the pane's citation search matched nothing: the
-            // title is a scripture-shaped label, the pane searches citation lines.)
             window.currentView = "show"
             showScreen.openSermonAt(r.bookId, r.chapter, r.verse, quickSearch.query)
             EventBus.notify(qsTr("Opened %1 in The Table.").arg(r.title), "success", qsTr("The Table"), "search.table.opened")
@@ -749,25 +466,6 @@ ApplicationWindow {
                          "openSearchResult kind=" + r.kind + " took " + (Date.now() - openT0) + "ms")
     }
     // ---- Esc = cancel, Enter = accept -------------------------------------
-    // The app's two keys, owned HERE and nowhere else: which surface answers
-    // is the Hotkeys scope stack (qml/settings/Hotkeys.qml) — a dialog pushes
-    // what cancel/accept mean while it is up, so the one the operator is
-    // looking at is the one that answers, and an open confirm beats the dialog
-    // it sits on. With nothing open, Esc and Enter reach whatever has focus
-    // exactly as they always did (a canvas item, a rename field, a search box).
-    //
-    // ESC ALSO CLOSES, the way the “…” menu's Close row does. Below every
-    // dialog, Esc backs out one level and the last level is the home splash:
-    //   * Preview with a show (or project item) open → that page closes
-    //     (ShowCenter's own Close: `centerItem = null`, the splash returns);
-    //   * the Edit screen, with nothing selected and nothing being typed →
-    //     back to Preview, home splash, without closing the show it holds (the
-    //     same landing as the tabs, so Edit returns to the document).
-    // Still ahead of it, deliberately: an open dialog/picker/panel (a Hotkeys
-    // scope — the two never both fire), a text field or a canvas label being
-    // typed into (Esc ends the typing, it does not leave the screen), and the
-    // canvas' own selection (mCanvas clears that first — see escapeAvailable,
-    // which is off while something is selected, so the key reaches the canvas).
     readonly property bool escapeAvailable: !showScreen.typingInField
         && !editScreen.anyTextEditing
         && (window.currentView === "edit"
@@ -802,19 +500,8 @@ ApplicationWindow {
         onActivated: quickSearch.openSearch()
     }
 
-    // THE READING STEP USED TO LIVE HERE (Alt+Down / Alt+Up). The walk is now
-    // driven by the wall's own transport: its Scroll mode (the repurposed
-    // Transition slot, selfTestWallScrollMode) makes ‹ › step LINES of the
-    // passage instead of slides, so the same two arrows serve both features and
-    // there is no second, invisible chord to learn. LiveOutputService::lineStep
-    // is unchanged — it is what those arrows call in Scroll mode.
-
     AppMenuBar {
         id: appMenuBar
-        // Same scaled space as the header it draws in. Sized so that, once scaled,
-        // it still covers the whole window: this layer is also what catches a
-        // click that closes an open menu, so an uncovered strip at a small window
-        // would leave menus stuck open.
         readonly property real layerScale: window.uiScale > 0 ? window.uiScale : 1
         width: window.canvasWidth
         height: window.canvasHeight
@@ -845,11 +532,6 @@ ApplicationWindow {
         }
     }
 
-    // Ctrl+I: File > Import — EXCEPT while the edit canvas is styling a text
-    // item, where Ctrl+I is italic (see EditScreen's textStyleKeysLive and
-    // Hotkeys' italicText). Two live window bindings on one sequence are
-    // ambiguous and Qt then fires neither, so this yields the chord outright
-    // for that state instead of competing for it.
     Shortcut {
         action: "importShow"
         enabled: !editScreen.textStyleKeysLive
@@ -891,19 +573,6 @@ ApplicationWindow {
         onActivated: editScreen.saveShowAs()
     }
 
-    // The live GROUP shortcuts (Settings · Look & Feel's "Manage groups"):
-    // one dynamic binding per group that has a letter assigned — press it to
-    // jump to the NEXT slide carrying that group (cycling), the same
-    // FreeShow behavior "press V to walk verse 1, 2, 3...". Dynamic (not
-    // named in Hotkeys.bindings): these chords are DATA, picked per group by
-    // whoever is running the show, not a fixed action this app ships with.
-    //
-    // Gated to live AND to no text field owning focus — a bare letter chord
-    // competing with normal typing (a rename field, the search box, a canvas
-    // text edit) is exactly the kind of collision this app's own `addText`
-    // shortcut avoids by requiring the canvas's own activeFocus; group
-    // shortcuts have no one owning Item to ask instead, so they ask the
-    // window's focus item directly.
     readonly property bool textFieldFocused: window.activeFocusItem !== null
         && (window.activeFocusItem instanceof TextInput || window.activeFocusItem instanceof TextEdit)
     Repeater {
@@ -921,11 +590,6 @@ ApplicationWindow {
         }
     }
 
-    // Settings · Appearance & Actions' own registry — one real
-    // LiveOutputService capability per action (ActionListModel.catalogEntries),
-    // bound the same way a group's letter is. ONE dispatcher (runEffect)
-    // instead of a switch at every call site, so a catalog addition is a
-    // single line in ActionListModel.cpp and nothing here changes.
     function runEffect(effectId, effectValue) {
         switch (effectId) {
         case "go_live": LiveOutputService.goLive(); return
@@ -968,9 +632,6 @@ ApplicationWindow {
             required property var modelData
             sequence: modelData.key
             context: Qt.ApplicationShortcut
-            // "go_live"/"stop" are legal off-air too (that IS the action);
-            // every other effect needs a live session to act on, same as
-            // the group jump above.
             readonly property var action: {
                 void ActionListModel.rosterChanged
                 const row = ActionListModel.rowForId(modelData.actionId)
@@ -988,9 +649,6 @@ ApplicationWindow {
     // "Save changes?" over any screen; the show session asks through it.
     UnsavedChangesDialog {
         id: unsavedDialog
-        // function(then): the save is a QUEUED document job (ShowService), so the
-        // dialog is answered when the verdict lands rather than when the call
-        // returns — `then(saved)` is what tells it to proceed or stay put.
         saveAction: function (then) { editScreen.saveShow(then) }
         // The show session asks through this dialog (a function-valued property
         // cannot be bound with Binding, so it is handed over once).
@@ -1017,34 +675,13 @@ ApplicationWindow {
         })
     }
 
-    // Resize borders for the frameless window (the OS handles the resize itself).
-    // Deliberately NOT scaled (see uiScale): these ARE the window's frame, so
-    // scaling them would pull the resize borders inward, away from the edges the
-    // user drags.
     WindowResizeHandles {
         anchors.fill: parent
-        // The caption buttons are the one rect the frame leaves alone — see the
-        // class comment: these grips don't scale with the app while the buttons
-        // inside the scaled header do, so an 8px strip that merely grazed them at
-        // full size covers nearly half of an 18px-tall close button once the
-        // window scales down (resize cursor over the buttons, clicks resizing
-        // instead of closing). Scaled here because the header's own size is in
-        // design units and the reserve has to be in window pixels.
         captionReserveWidth: appHeader.captionClusterWidth * window.uiScale
         captionReserveHeight: appHeader.captionClusterHeight * window.uiScale
     }
 
-    // Topmost cursor layer — renders the AppCursor override stack's shape
-    // while any gesture (canvas move/resize, AV line-drag) has one pushed;
-    // inert the rest of the time. Declared LAST so it z-orders above every
-    // screen, the menu bar, and all modals. Also the app's single pointer-
-    // position truth source: every position-driven hover (PositionHoverArea)
-    // reads AppCursor's point, so this must never be hidden or disabled.
     AppCursorCatcher { }
-
-
-
-
 
     // ---- Settings overlay ----
     // Shared ModalScrim: traps outside clicks and consumes wheel events so a
@@ -1053,24 +690,11 @@ ApplicationWindow {
         id: settingsScrim
         z: 30000
         visible: false
-        // The page layer, from ModalStack's one shared definition (see its
-        // own comment) — Settings is the base of the whole dialog stack, so
-        // it always blurs the real page, never something nested above it.
         blurSource: ModalStack.pageLayer ? ModalStack.pageLayer() : null
         Component.onCompleted: ModalStack.pageLayer = function() {
             return window.currentView === "edit" ? editScreen : showScreen
         }
-        // NOT scaled (see uiScale): this rectangle IS the modal's black box — the
-        // full-window dim that makes the dialog read as modal. Scaling the overlay
-        // shrank the backdrop away from the window's own edges, so the card floated
-        // over an undimmed app. The CARD below carries the app scale; anything
-        // nested inside it inherits that and must not scale again.
-        // ModalScrim's #99000000 is exactly the 0.6 black this overlay
-        // always used — no visual change, just the shared behavior.
         onDismissed: settingsScrim.visible = false
-        // Esc closes Settings — the same meaning the card's X has, pushed as a
-        // Hotkeys scope for as long as the card is up. There is no accept: the
-        // sections apply as they are edited and this shell ships no footer.
         onVisibleChanged: {
             // Opening and closing Settings is part of "where you were" (see
             // rememberSettingsPage): open records the page on screen, closed clears it.
@@ -1092,13 +716,7 @@ ApplicationWindow {
             // The hook this card's fit scenario grabs (ModalShell has no
             // objectName of its own — the shell is the app's only one).
             objectName: "selfTestSettingsShell"
-            // Published once so a dialog opened FROM WITHIN Settings
-            // (Manage groups/actions) can blur THIS instead of Show/Edit —
-            // see ModalStack.settingsShell's own comment.
             Component.onCompleted: ModalStack.settingsShell = settingsShell
-            // The app scale (see uiScale), on the CARD rather than on the scrim
-            // above it. Centred, so scaling about the centre leaves it where it
-            // was, in proportion with the screens behind it.
             scale: window.uiScale
             transformOrigin: Item.Center
             anchors.centerIn: parent
@@ -1178,21 +796,11 @@ ApplicationWindow {
         AudioVideoScreen { objectName: "audioVideoScreen" }
     }
 
-    // Settings · Routing — the four-layer routing canvas (Buses | Screens |
-    // Styles | Outputs). The engine's routing model is what this binds to; the
-    // canvas itself is RoutingScreen.qml.
     Component {
         id: routingScreenComponent
         RoutingScreen {
             objectName: "routingScreen"
-            // A node on the canvas links OUT to the one editor its layer already
-            // has: a bus to Audio & Video (sources, levels, channel trim), a
-            // screen to Screens (display binding, resolution, stay-on-top), a
-            // style to Styles. The canvas wires; it does not host three editors.
             onSectionRequested: (key) => window.settingsSection = key
-            // "Edit screen" from a screen card: switch to Screens AND ask it to
-            // open that row's editor, instead of leaving the operator to find
-            // the row again.
             onScreenEditRequested: (row) => {
                 window.pendingScreenEdit = row
                 window.settingsSection = "outputs"
@@ -1212,10 +820,6 @@ ApplicationWindow {
         }
     }
 
-    // Carries a drag from one pane to another, above everything. In the SAME
-    // scaled design space as the screens, so the chip it carries is drawn at the
-    // scale of the pane the row came from (DragLayer converts the pointer's window
-    // position into that space itself — see its move()).
     DragLayer {
         id: dragLayerItem
         width: window.canvasWidth
@@ -1227,20 +831,11 @@ ApplicationWindow {
         scale: window.uiScale
     }
 
-    // The window-level hover tooltip (TipService publishes the text, this draws
-    // it). Deliberately in WINDOW space, NOT the screens' scaled design canvas
-    // the drag layer above uses: a tip is text, and the window edge it has to
-    // stay inside is a window-space fact (the layer measures an owner inside a
-    // scale transform through mapToItem itself).
     ToolTipLayer {
         id: toolTipLayer
         anchors.fill: parent
     }
 
-    // GO LIVE's real destination(s) — a borderless window per Output bound
-    // to a physical/HDMI screen in Settings > Outputs. Top-level Windows,
-    // not part of this window's visual tree (Instantiator, not a visible
-    // child item) — see OutputWindowManager.qml.
     OutputWindowManager {}
 
     // File > Import: every format the engine reads (FreeShow's Import screen). Above the screens and the Settings overlay, below the toasts.
@@ -1252,10 +847,6 @@ ApplicationWindow {
         onClosed: importDialog.open = false
     }
 
-    // "New show" — FreeShow's own New-show popup (Name, Category, Quick
-    // lyrics/Web search/Empty show). "New show" from the Show screen's CTAs
-    // and the File menu both open this instead of resetting straight to a
-    // blank canvas.
     NewShowDialog {
         id: newShowDialog
         objectName: "selfTestNewShowDialog"
@@ -1271,11 +862,6 @@ ApplicationWindow {
         }
     }
 
-    // Declared LAST (after the Settings overlay) so a crash/error toast
-    // always z-orders above an open modal, not just the screens underneath.
-    // Scaled by the app scale (see uiScale) about its own BOTTOM-RIGHT corner: a
-    // toast shrinks with the rest of the UI while the corner it is pinned to (the
-    // window's, plus the usual margin) stays exactly where it was.
     NotificationOverlay {
         // Hook for the modal-fit scenario's toast step (see the sweep below).
         objectName: "selfTestToast"
@@ -1284,32 +870,10 @@ ApplicationWindow {
         anchors.margins: Theme.space5
         scale: window.uiScale
         transformOrigin: Item.BottomRight
-        // Keep transient notices in the lower-right corner, away from the
-        // monitor wall that occupies the upper-right workspace.
-        //
-        // ABOVE EVERY MODAL TIER, which is the whole point of a toast over a
-        // dialog: the Settings scrim and the modal cards sit at 30000, nested
-        // confirm dialogs a step above them (30010), the pickers at 31000 — so
-        // this overlay has to be above all of them or a refusal/notice raised
-        // from INSIDE a dialog (the routing board's refused drop, an import
-        // error) is drawn behind the very dialog that caused it. At 10000 it
-        // was under every one of them (NotificationOverlay's own comment has
-        // always claimed otherwise).
         z: 40000
     }
 
     // ---- Settings-inset self-test (VGR_SELFTEST=1 only) ----------------------
-    // Renders Settings · General and grabs each section card to a PNG, so
-    // tools/selftest/measure_insets.py can assert every card shares one set of
-    // insets (the 20px padding the Appearance / Startup cards define). This is
-    // the automated guard against the layout drift that let the Settings
-    // sections slip to 14px - screenshot truth, not a property trace, because
-    // a padding mistake is invisible to every geometry-independent check.
-    //
-    // Armed only when main.cpp exported SelfTestInsets true (VGR_ENABLE_SELFTEST
-    // build + BOTH VGR_SELFTEST=1 and VGR_INSETS_TEST=1): a plain VGR_SELFTEST=1
-    // run (the NDI probes) never opens Settings or quits early, and a normal
-    // launch never runs a single stage.
     Timer {
         id: selfTestInsetsOpen
         running: typeof SelfTestInsets !== "undefined" && SelfTestInsets
@@ -1328,16 +892,6 @@ ApplicationWindow {
                            "selfTestCardPreferences", "selfTestCardBackups",
                            "selfTestCardNotifications", "selfTestCardLibraries",
                            "selfTestCardReset"]
-            // (selfTestCardStability — Settings · General's "Crash reports" card —
-            // is deliberately NOT in this set. The checker compares each card's
-            // RIGHT inset, and it does not measure like for like across control
-            // shapes: a right-anchored TOGGLE comes back at 25 while a
-            // right-anchored CHIP — an ActionRow button, or a pill — comes back
-            // at 40-47. That is why Libraries and Reset already fail here, and
-            // adding this card would only add a third line for the same reason.
-            // The row's own text and wording are covered instead by
-            // tools/selftest/run_forensics_test.sh, which reads them off the
-            // live item tree.)
             console.log("[SELFTEST-INSETS] grabbing", cards.length, "section cards")
             for (let i = 0; i < cards.length; ++i)
                 SelfTest.grab(cards[i], "insets_" + cards[i] + ".png")
@@ -1354,18 +908,6 @@ ApplicationWindow {
     }
 
     // ---- SCROLL MODE / SLIDE MODE: the switch every reading walk lives behind --
-    // The reading walk is no longer its own chord. Alt+Down / Alt+Up are gone; the
-    // walk is the wall's ‹ › and WHAT THOSE ARROWS DO is MonitorWall's transport
-    // switch: Scroll mode walks the passage a line at a time
-    // (LiveOutputService.lineStep), Slide mode changes slides. The mode is not a
-    // cosmetic tint — only Scroll attaches a passage to the slide at all
-    // (LiveOutputService::setSlideReadingFlow, and stageSlideSet's first-page copy,
-    // are both gated on scrollMode_), so a walk that starts in Slide mode measures
-    // a slide change and every number the scenarios below report is meaningless.
-    // Each one therefore turns Scroll ON first, through the wall's own button — the
-    // control the operator presses — and prints which way it ran: `by=button` when
-    // the synthetic press landed, `by=service` when it did not (the driver's clicks
-    // need window-foreground luck, so a miss must not read as a broken switch).
     function setReadingScrollMode(want, scenario) {
         const on = !!want
         let by = "already"
@@ -1387,42 +929,9 @@ ApplicationWindow {
     }
 
     // ---- Reading-step self-test (VGR_LINESTEP_TEST=1 only) --------------------
-    // The numbers every "it blinks / it jumps back" report comes down to: what do
-    // the stepper's own counters do when it walks a multi-page pick? The scenario
-    // stages a synthetic pick through the REAL stageSlideSet, then presses the
-    // ordinary reading step (the same LiveOutputService.lineStep the wall's › calls
-    // in Scroll mode, which this scenario switches ON first — see
-    // setReadingScrollMode), logging the run's offset, the passage length, the
-    // mode, the page's block count and its position in the pick each time.
-    //
-    // WHAT IT MUST SHOW
     //  1. the position in the PICK (`abs`, see readingAbsoluteLine) grows by
-    //     exactly 1.0 per press, never backwards, and the passage length stays
-    //     CONSTANT while the pick lasts — a stepper that re-based its run per page
-    //     would reset the offset at the boundary and swap the passage;
     //  2. THE WALL IS ON THE PAGE THE WALK IS ON. Every monitor tile's own
-    //     composition is read as it draws it and matched against the staged pages,
-    //     and its words are checked against the passage the service is drawing —
-    //     the reported "metadata is not updating the para values" / "the left is
-    //     still showing while the right has finished" are exactly a tile whose
-    //     composition has been left behind;
     //  3. NO SKIPPING: the position is sampled every 16 ms through the glide, and
-    //     a sample that moves by half a line or goes the wrong way is printed.
-    //     That is what a "little skip" IS, at the only place it exists — the one
-    //     number every surface draws from.
-    //
-    // The pick is LONGER THAN THE RUN'S WINDOW on purpose (24 pages against the
-    // 4-pages-each-way run): the window then SLIDES while the reader walks, which
-    // is the case the earlier 6-page version could never reach — the 6-page pick
-    // fitted the window, so it neither slid nor let a tile's frozen composition
-    // fall out of the passage.
-    //
-    // Then it walks BACK up (direction -1) over the same boundaries and must come
-    // down by exactly 1.0 a press: the same base arithmetic drives both ways, and
-    // the report was about a boundary, not about going forward.
-    // The press counter runs ACROSS both passes (it is not reset when the walk
-    // turns around): every press number is unique, which is what lets the wall's
-    // own lines be matched to the press they were read on.
     property int selfTestLineStepPress: 0
     property bool selfTestLineStepBack: false
     property int selfTestLineStepBackPress: 0
@@ -1433,12 +942,6 @@ ApplicationWindow {
     property real selfTestLsGlideWorst: 0
     property int selfTestLsGlideSkips: 0
     property string selfTestLsGlideSkipAt: ""
-    // THE LONGEST TEXT BLOCK OF A TILE'S OWN COMPOSITION — the same "longest
-    // text is the reading block" rule DesignPreview uses, read off the tile as it
-    // draws (not re-derived from the raw slide), so this sees what the operator
-    // sees.
-    // The longest text block of a COMPOSITION (the same rule DesignPreview uses
-    // to find the reading block), and the same for a tile's own composition.
     function lsCompText(comp) {
         const bs = (comp && comp.blocks) ? comp.blocks : []
         let best = ""
@@ -1455,12 +958,6 @@ ApplicationWindow {
     function lsTileText(tile) {
         return window.lsCompText(tile ? tile.onAirSlide : null)
     }
-    // EVERY BLOCK'S TEXT, in order — the whole composition's signature. Two
-    // compositions that agree on this draw the same things in the same places as
-    // far as any text goes, so comparing a tile's own against one composed NOW is
-    // the content-free way to ask "is this surface stale?" (which is what a walk
-    // that leaves the wall behind on an older page looks like, whatever the page
-    // says — the harness runs it against synthetic probes and a real passage).
     function lsCompSig(comp) {
         const bs = (comp && comp.blocks) ? comp.blocks : []
         let s = ""
@@ -1468,9 +965,6 @@ ApplicationWindow {
             s += String(bs[i].text ?? "") + "\u0001"
         return s
     }
-    // WHICH PAGE OF THE PICK A TILE IS DRAWING, or -1 when its composition holds
-    // none of them (which is itself the finding: a tile that is not on any page
-    // has been left behind by the walk).
     function lsTileShowsPage(tile) {
         const text = window.lsTileText(tile)
         if (text === "")
@@ -1482,10 +976,6 @@ ApplicationWindow {
         }
         return -1
     }
-    // One line per wall tile per press: which page it shows, whether it is still
-    // drawing the live passage (see DesignPreview's drawsFlow — the containment
-    // test the tile's own gate uses), and its own text, so a mismatch is readable
-    // rather than inferred.
     function lsWallLines(press) {
         const wall = SelfTest.findItem("selfTestMonitorWall")
         if (!wall)
@@ -1500,12 +990,6 @@ ApplicationWindow {
                 continue
             }
             const text = window.lsTileText(tile)
-            // `flow` is "this tile's own words are part of the passage the service is
-            // drawing". tileLen/flowLen/flowHead are the evidence for that verdict:
-            // the two strings' lengths and where the passage it was compared
-            // against begins, so a false is readable instead of inferred (a window
-            // that slid one page and a tile that kept the old words look identical
-            // in a bare boolean).
             lines.push("[SELFTEST-LINESTEP] press=" + press + " tile=" + i
                        + " shows=" + window.lsTileShowsPage(tile)
                        + " flow=" + (text !== "" && flow.indexOf(text) >= 0)
@@ -1521,10 +1005,6 @@ ApplicationWindow {
         running: typeof SelfTestLineStep !== "undefined" && SelfTestLineStep
         interval: 2600          // let the first frame land
         onTriggered: {
-            // SCROLL MODE FIRST: the walk below is `lineStep`, which is what the
-            // wall's › does in Scroll mode. In Slide mode the slide carries no
-            // passage for the outputs to scroll, so a walk started here would
-            // measure a picture that is not supposed to move.
             if (!window.setReadingScrollMode(true, "linestep"))
                 console.log("[SELFTEST-LINESTEP] FAIL not-scroll — the walk needs Scroll mode")
             const words = ["alpha", "bravo", "charlie", "delta", "echo",
@@ -1533,11 +1013,6 @@ ApplicationWindow {
             // 24 pages: more than the run's own window (4 pages each way), so the
             // walk makes the window SLIDE — see this scenario's header comment.
             for (let p = 0; p < 24; ++p) {
-                // EVERY PAGE'S TEXT IS UNIQUE, and unique EARLY: the runner reads
-                // a tile's own composition back and says WHICH page it is holding
-                // by matching the page's leading words, so two pages that shared
-                // their opening words would make a tile showing page 10 read as
-                // page 0 (the word list cycles every 10).
                 let body = "p" + (p + 1) + " "
                 for (let i = 0; i < 12; ++i)
                     body += words[(i + p) % words.length] + " "
@@ -1552,22 +1027,9 @@ ApplicationWindow {
             selfTestLineStepSample.restart()
         }
     }
-    // THE SKIP TRACE: sample the position in the pick every 16 ms (≈ one frame) for
-    // as long as the walk runs. A line takes ~190 ms, so a sample should advance
-    // ~0.08 lines.
-    //
-    // WHAT COUNTS AS A SKIP: a move against the press's direction, or a whole LINE
-    // between two samples. A full line cannot come from a late sample — the glide
-    // is time-based and at its fastest (the middle of the easing) covers about
     // 0.02 lines per millisecond, so even a sample delayed by 50 ms by a busy
-    // interface thread stays under half a line. Half a line as the threshold
-    // therefore reports that jitter as a skip, which is noise: the measured
-    // defects are whole-page jumps, an order of magnitude over it.
     Timer {
         id: selfTestLineStepSample
-        // BOTH walks sample: the synthetic pick and the real passage. The skip
-        // trace is the same measurement either way — it reads the one number every
-        // surface draws from.
         running: (typeof SelfTestLineStep !== "undefined" && SelfTestLineStep)
                  || (typeof SelfTestTableWalk !== "undefined" && SelfTestTableWalk)
         interval: 16
@@ -1582,9 +1044,6 @@ ApplicationWindow {
                 if (backward || Math.abs(d) > 1.0) {
                     ++selfTestLsGlideSkips
                     if (selfTestLsGlideSkipAt === "")
-                        // Deliberately NOT "key=value": the runner parses this
-                        // line's own fields by name, and a nested `abs=` inside
-                        // this string would be read as the press's own.
                         selfTestLsGlideSkipAt = "frame " + selfTestLineStepPress
                             + " moved " + d.toFixed(3) + " to " + abs.toFixed(2)
                 }
@@ -1594,9 +1053,6 @@ ApplicationWindow {
     }
     Timer {
         id: selfTestLineStepTick
-        // Longer than the glide's own maximum (reading.stepMs is bounded to
-        // 600ms), so the offset a press reports as `from` is the SETTLED one the
-        // previous press left on screen — that sequence is what has to climb by
         // 1.0 and never restart.
         interval: 700
         repeat: true
@@ -1660,29 +1116,10 @@ ApplicationWindow {
     }
 
     // ---- REAL-PASSAGE reading walk (VGR_TABLEWALK_TEST=1 only) ---------------
-    // The synthetic-pick harness above proves the arithmetic; this one proves the
-    // THING THE OPERATOR WAS LOOKING AT. It drives the app's own app-wide search to
-    // a real sermon passage (VGR_TABLEWALK_QUERY, default the reported
-    // "47-1100X"), takes it the way the pane's own Enter does (playPicked), then
-    // puts the wall in SCROLL mode and walks it with the ordinary reading step —
-    // the same call the wall's › makes in that mode — over several PARAGRAPH
-    // boundaries, printing per press. The pass ENDS by flipping the wall's switch
-    // back to Slide mode and then to Scroll again, so the mode's own contract is
-    // measured too: the passage leaves the slide in Slide mode and comes back in
-    // Scroll (see selfTestTableWalkMode).
-    //   * the wall: each tile's own composition against one composed NOW (stale=),
-    //     and whether it is still drawing the live passage (flow=);
-    //   * the pane: its own reference text and selected rows — the "para values"
-    //     the report said were not updating — plus the pick's name it owns;
-    //   * the walk itself: page, position in the pick, and the per-frame skips.
-    // Read-only apart from the search and the staging every pick already does.
     readonly property string twQuery: (typeof SelfTestTableWalkQuery !== "undefined")
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
     property int twTries: 0
     property int twPress: 0
-    // The staged-jump phase's own counter (a declared property: assigning an
-    // undeclared one on the root throws every tick, which is how the first
-    // version of that phase spun instead of finishing).
     property int twJump: 0
     // The rewind's own counter (see selfTestTableWalkRewind), declared for the same
     // reason: an undeclared property on the root throws on every write.
@@ -1707,16 +1144,9 @@ ApplicationWindow {
             + " previewIndex=" + pane.previewSlideIndex
             + " ownerRef=" + JSON.stringify(String(pane.lineStepOwnerRef))
     }
-    // Opens the app-wide search, then re-asks until the sermon index answers (it
-    // builds in the background for ~40s after boot, exactly as the click-to-open
-    // scenario records) and takes the first result — the real "search a citation,
-    // open it" path, not a hand-built pick.
     Timer {
         id: selfTestTableWalkOpen
         running: typeof SelfTestTableWalk !== "undefined" && SelfTestTableWalk
-        // 70s, not 45: the background sermon index this machine builds for its
-        // 1,206 documents finishes at ~58s (engine.log: "indexing progress:
-        // 1206/1206"), so a query issued at 45s scans a half-built corpus.
         interval: 70000
         onTriggered: {
             console.log("[SELFTEST-TABLEWALK] query=" + JSON.stringify(window.twQuery))
@@ -1729,13 +1159,6 @@ ApplicationWindow {
         interval: 3000
         repeat: true
         onTriggered: {
-            // ASK, THEN ONLY LISTEN. Every refresh() bumps the search token and
-            // cancels the query already in flight, so re-asking every tick meant
-            // each retry killed the previous one and no answer ever landed (the
-            // corpus-wide Table scan takes longer than a tick): the harness
-            // reported "no-results" against a library that has 1,206 sermons.
-            // One ask, then poll; a re-ask every 5th tick gives each attempt a
-            // 15s window and still survives an index that is not ready yet.
             if (window.twTries === 0 || window.twTries % 5 === 0) {
                 quickSearch.query = window.twQuery
                 quickSearch.refresh()
@@ -1772,39 +1195,13 @@ ApplicationWindow {
                 SelfTest.quit()
                 return
             }
-            // SCROLL MODE BEFORE THE WALK: playPicked stages the passage, and the
-            // passage only reaches the slide in Scroll mode (setSlideReadingFlow).
-            // A pick staged in Slide mode is a page the outputs draw whole, which
-            // is what the walk would then be pressing at.
             if (!window.setReadingScrollMode(true, "tablewalk"))
                 console.log("[SELFTEST-TABLEWALK] FAIL not-scroll — the walk needs Scroll mode")
             pane.playPicked()
-            LiveOutputService.goLive() // CMP-TEMP
-            // REWIND TO THE PICK'S FIRST LINE FIRST, so the walk always crosses the
-            // same boundary sequence whatever this machine's stored pane selection
-            // was. The pane stages the passage with the SELECTED paragraph already at
-            // the top, so a run that just started pressing had only the pages after it
-            // left to walk — measured: 12 moves against a 71-line passage, and the
-            // several paragraph boundaries this check is about were never reached.
-            // Backward steps are the same LineWalk path (lineStep(-1)), so this
-            // exercises them too.
-            // ONE STEP PER EVENT-LOOP TURN, NOT A LOOP OF PRESSES. `lineStep`
-            // needs a turn between presses: the previous press's offset is committed
-            // by the restage it triggered, and the passage's line count is only known
-            // once that has run. 400 presses inside this handler therefore could not
-            // move at all — each one was OWED instead (see lineStep's own comment),
-            // and the service then played that debt out backwards AFTER the rewind,
-            // against every forward press of the walk. Measured on this scenario:
-            // press 0 abs=61, then 59, 56, 54, 52 … on lineStep(+1), with every tile
-            // agreeing with the number. The rewind is its own timer so each press
-            // lands on a settled picture.
             window.twRewound = 0
             selfTestTableWalkRewind.restart()
         }
     }
-    // THE REWIND (see the settle timer above): one backward step per turn, until
-    // the passage's first line refuses to move or the cap is reached — then the
-    // walk starts from a settled position.
     Timer {
         id: selfTestTableWalkRewind
         interval: 120
@@ -1819,12 +1216,6 @@ ApplicationWindow {
                         + " page=" + LiveOutputService.readingPage
                         + " abs=" + Number(LiveOutputService.readingAbsoluteLine).toFixed(2)
                         + " lines=" + LiveOutputService.readingRunLineStarts(String(OutputListModel.activeStyleId)).length)
-            // THE SKIP TRACE STARTS WITH THE WALK. Opening the passage re-bases
-            // the position (a new pick starts at its own first line), and the
-            // sampler has been running since boot — so without this its first
-            // sample compares the NEW pick's position against the OLD one's and
-            // reports a whole-line skip at press 0 that no picture ever made. -1
-            // means "no previous sample yet".
             window.selfTestLsPrevAbs = -1
             window.selfTestLsGlideWorst = 0
             window.selfTestLsGlideSkips = 0
@@ -1838,23 +1229,9 @@ ApplicationWindow {
         interval: 700
         repeat: true
         onTriggered: {
-            // THE PRESS IS COUNTED FIRST, AND THE DIAGNOSTIC IS FENCED. This timer
-            // reports more than any other scenario in this file, so a mistake in a
-            // LOG LINE must never be able to stop the walk: `activeStyleId` read as
-            // a call instead of a property threw inside this handler, which skipped
-            // the counter's own increment — the walk never reached its limit, never
-            // logged its "done", and the harness waited out its whole timeout with
-            // the app still stepping (five such runs interleaved in one log). The
-            // counter and the stop check are therefore outside the try, and anything
-            // the fenced part throws is reported instead of silently ending the run.
             const press = window.twPress
             window.twPress = press + 1
             window.selfTestLineStepPress = press
-            if (press === 14 || press === 30) { // CMP-TEMP: tile + engine frames at the same settled moment
-                SelfTest.grab("selfTestMonitorTile0", "cmp_tile0_p" + press + ".png")
-                SelfTest.grab("selfTestMonitorTile1", "cmp_tile1_p" + press + ".png")
-                LiveOutputService.debugDumpOutputs("p" + press)
-            }
             try {
                 const absFrom = Number(LiveOutputService.readingAbsoluteLine)
                 const moved = LiveOutputService.lineStep(1)
@@ -1872,10 +1249,6 @@ ApplicationWindow {
                 for (let w = 0; w < wall.length; ++w)
                     console.log(wall[w])
                 console.log(window.twPaneLine(press))
-                // THE PICTURE, not only the numbers: both outputs' tiles at the
-                // jump and once the walk is well inside the passage. A page turn
-                // must leave the type size exactly where it was, so these two
-                // grabs are the visual half of "it stopped shrinking".
                 if (press === 0 || press === 30)
                     window.twGrab("press" + press)
             } catch (err) {
@@ -1883,20 +1256,12 @@ ApplicationWindow {
             }
             window.selfTestLsGlideWorst = 0
             window.selfTestLsGlideSkips = 0
-            // 120, not 30: a real sermon's paragraphs are LONG (the reported
-            // passage's first one runs 9 lines, the next 20+), so 30 presses
-            // stopped inside the second paragraph and never crossed the several
-            // boundaries this check is about.
             if (window.twPress > 120) {
                 selfTestTableWalkPress.stop()
                 selfTestTableWalkJump.restart()
             }
         }
     }
-    // A PNG of every output's monitor tile (same item names the tile-facts
-    // scenario grabs), so the fit the service logs can be checked against the
-    // picture the operator actually sees — the report is about what fills the
-    // text area, which no property answers.
     function twGrab(phase) {
         const count = OutputListModel.rowCount()
         for (let i = 0; i < count; ++i) {
@@ -1904,13 +1269,6 @@ ApplicationWindow {
             console.log("[SELFTEST-TABLEWALK] grab phase=" + phase + " tile=" + i + " ok=" + ok)
         }
     }
-    // THE TWO GESTURES THE REPORT NAMED, after the walk: the ‹ › arrows, which
-    // deliberately STAGE the passage they land on (the pane's own stepAndPlay),
-    // and then a fresh pick through the pane's play — the double-click's body.
-    // Each stage must re-solve every output's page size for the page it lands
-    // on: the latch that holds ONE size during a walk is keyed on
-    // readingStageSerial, so a jump has to move it. This phase is one grab per
-    // tick, taken a full tick AFTER the stage, so the layout has settled.
     Timer {
         id: selfTestTableWalkJump
         interval: 2500
@@ -1943,16 +1301,6 @@ ApplicationWindow {
             }
         }
     }
-    // THE SWITCH'S OWN CONTRACT, after the walk. Turning Scroll OFF must take the
-    // passage off the slide the outputs are drawing — that is what makes the arrows
-    // change slides over the page as authored — and turning it back ON must put the
-    // passage back, at the position the walk left. Read off the slide the outputs
-    // draw (`flowText` is the field the engine raster and the QML previews scroll,
-    // see LiveOutputService::setSlideReadingFlow), never off the button's tint: a
-    // switch whose only effect is its own highlight is the report this covers.
-    //
-    // ONE MODE PER BEAT: the restage a mode change triggers lands on the next tick,
-    // so each reading is taken a beat AFTER the switch it belongs to.
     Timer {
         id: selfTestTableWalkMode
         interval: 2000
@@ -1967,9 +1315,6 @@ ApplicationWindow {
             })()
             const flow = (raw && raw.flowText !== undefined) ? String(raw.flowText) : ""
             const step = selfTestTableWalkMode.step
-            // 0 -> Slide mode, 1 -> photograph Slide, 2 -> Scroll again,
-            // 3 -> photograph Scroll, then done. Each photograph is taken a beat
-            // after its own switch, never in the same tick as the write.
             if (step === 1 || step === 3) {
                 console.log("[SELFTEST-TABLEWALK] mode="
                             + (LiveOutputService.scrollMode ? "scroll" : "slide")
@@ -2004,25 +1349,6 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
-    // WHAT A GIVEN STYLE DRAWS AT THE TOP OF ITS BOX — the CONVERSION, not the
-    // walk's line number read into another grid.
-    //
-    // The first version of this read `readingRunLinesForStyle(styleId)[floor(
-    // readingScroll)]`: the reference grid's LINE INDEX indexed into the style's
-    // own lines. That is a different word in every grid that wraps differently,
-    // so the two outputs it was meant to compare could not be compared by it —
-    // each was asked "what is on MY line 7", which is exactly the bug (a line
-    // number is only the same words if the grids agree). This asks the question
-    // the surfaces ask: the passage's character offset (readingChar), converted
-    // by that style (readingLineForStyle) into that style's own line, whose
-    // words are then the truth about what that output is showing.
-    //
-    // `char` is the offset of the top line's first character in the RUN's text (the
-    // number the surface draws with), `pchar` the same position in the PICK's whole
-    // passage (char + the run's own origin) — the coordinate that stays monotonic
-    // when the run's window slides, and therefore the one a drift check must use.
-    // `span` is the longest line in that grid: the most two grids can legitimately
-    // differ by (a difference that GROWS past it is drift).
     function twStyleView(styleId) {
         const starts = LiveOutputService.readingRunLineStarts(styleId)
         const flow = String(LiveOutputService.readingFlowText ?? "")
@@ -2081,21 +1407,6 @@ ApplicationWindow {
     }
 
     // ---- Popup-modal fit self-test (VGR_MODALFIT_TEST=1 only) ----------------
-    // EVERY popup in this app is a card laid over the app, and the window it
-    // opens in is frameless and bounded to the active screen (Main.qml lets it
-    // be dragged down to 820x560). A card that does not shrink hangs off both
-    // edges — its nav rail and its right-hand controls outside the window —
-    // which is what "the Settings modal is not responsive" looked like.
-    //
-    // This sweep opens each popup at the SMALLEST window size, measures its
-    // CARD (never the modal root: that always fills the window, so its bounds
-    // prove nothing) against the window, grabs it to a PNG for the human, closes
-    // it again, and prints one line per popup. The script's grep of `fits=` is
-    // the whole checker. Nothing here presses Save/Add, so no roster, show or
-    // category is created by a run.
-    //
-    // Armed only with BOTH VGR_SELFTEST=1 and VGR_MODALFIT_TEST=1: a plain
-    // VGR_SELFTEST=1 run (how the NDI probes launch the app) never runs this.
     function modalFitCard(rootName) {
         const named = SelfTest.findItem(rootName + "_card")   // ModalCard names its own card
         if (named)
@@ -2103,9 +1414,6 @@ ApplicationWindow {
         const root = SelfTest.findItem(rootName)
         if (!root || root.width === undefined)
             return null
-        // A modal ROOT fills the window: its card is the largest child that does
-        // NOT fill it (the scrim does), which covers the dialogs built on their
-        // own card instead of ModalCard.
         let best = null
         const kids = root.children
         for (let i = 0; i < kids.length; ++i) {
@@ -2119,34 +1427,15 @@ ApplicationWindow {
         }
         if (best)
             return best
-        // No child smaller than the root: the root IS the card (ModalShell's
-        // shape) only when its own mapped rect is smaller than the window in at
-        // least one direction. A root that FILLS the window and hides its card is
-        // reported as unmeasurable rather than passing on the window's own
-        // bounds — a trivially-true "fits" is worse than no measurement at all.
         const r = modalFitRect(root)
         const smaller = r.w < window.width * 0.98 || r.h < window.height * 0.98
         return smaller ? root : null
     }
-    // An item's rect in WINDOW coordinates. Measured from its mapped corners, not
-    // from x/y/width/height: a card inside a scaled parent (the Settings card is
-    // scaled to fit small windows) is smaller on screen than its own width, and
-    // comparing local sizes against window bounds would read every scaled card as
-    // clipped.
     function modalFitRect(item) {
         const p0 = item.mapToItem(null, 0, 0)
         const p1 = item.mapToItem(null, item.width, item.height)
         return { x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y }
     }
-    // The AV routing board is three columns laid out by hand (audio inputs,
-    // buses, video), inside a Flickable that never scrolls horizontally — so a
-    // board wider than its room pushes the right-hand column out of sight with
-    // no way to reach it. Printed next to the popup measurements because that is
-    // the same failure shape: "covered the video bus".
-    // Proves the ENFORCED half of the app scale: every window-level layer must
-    // carry the same scale (window.uiScale), and nothing nested may apply it a
-    // second time. A layer that forgets it, or a component that scales itself
-    // twice, shows up here as a different number — the script fails on that.
     function reportUiScales() {
         const rows = []
         const add = (name, item) => rows.push(name + "=" + (item && item.scale !== undefined ? item.scale.toFixed(3) : "?"))
@@ -2156,24 +1445,12 @@ ApplicationWindow {
         add("header", appHeader)
         add("menubar", appMenuBar)
         add("drag", dragLayerItem)
-        // ...and the modal CARDS. Only the card is scaled: the scrim behind it has
-        // to stay window-sized or the dialog loses its black box (checked next, in
-        // reportScrims).
         add("settings", settingsShell)
         add("quicksearch", SelfTest.findItem("selfTestQuickSearch_card"))
         add("import", SelfTest.findItem("selfTestImportDialog_card"))
         add("newshow", SelfTest.findItem("selfTestNewShowDialog_card"))
         console.log("[SELFTEST-UISCALE] uiScale=" + window.uiScale.toFixed(3) + " " + rows.join(" "))
     }
-    // The other half of the modal rule: EVERY window-level scrim must still be the
-    // whole window, unscaled. This is the measurement behind "the popup has no
-    // black box around it" — a scrim that inherited a layer's scale reports a rect
-    // smaller than the window, and the script fails on that line.
-    // One scrim measurement. For a ModalCard the root itself IS the scrim; the
-    // hand-rolled dialogs fill their root with one — either way the root's rect is
-    // the backdrop, and it must be the WHOLE window: a scrim that covered only the
-    // page a dialog was declared in left the Settings card's nav rail (or the
-    // header) lit, which is what "the black box only covers one side" looked like.
     function reportScrim(label, item) {
         if (!item) {
             console.log("[SELFTEST-SCRIMS] " + label + " MISSING covers=false")
@@ -2188,10 +1465,6 @@ ApplicationWindow {
                     + " scale=" + (item.scale !== undefined ? item.scale.toFixed(2) : "?")
                     + " covers=" + covers)
     }
-    // The window-level modals, reportable at any point in the sweep (they all exist
-    // from load). The dialogs declared inside a Settings PAGE are checked by the
-    // step that opens them instead (a step's `scrim:` name): the page — and so the
-    // dialog — does not exist yet when this runs.
     function reportScrims() {
         reportScrim("settings", settingsScrim)
         reportScrim("quicksearch", quickSearch)
@@ -2199,15 +1472,6 @@ ApplicationWindow {
         reportScrim("newshow", newShowDialog)
     }
 
-    // The screens are drawn at the design canvas and scaled as a whole, so "does
-    // it fit" is only half the story: the scaled screen must also REACH the
-    // window's own edges. A design-sized canvas left the bottom dock ~26px above
-    // the window at 820x560 — nothing hung outside, but the project pane and the
-    // library dock visibly detached from the window.
-    //
-    // The TOP is the one edge a screen does not touch by design: it is pushed down
-    // by headerExtra so its own first 48px sit under the header strip. Left,
-    // right and bottom are the edges whose attachment the user sees.
     function reportScreenCoverage() {
         const r = modalFitRect(showScreen)
         const fits = r.x >= -0.5 && r.y >= -0.5
@@ -2224,13 +1488,6 @@ ApplicationWindow {
         SelfTest.grab("selfTestMainScreen", "modal_fit_main-screen.png")
     }
 
-    // The desktop the app sized itself to at startup, and whether it did: the
-    // window must fill the work area (minus the small margin Main.qml opens it
-    // with), so the app is scaled to the screen it started on rather than to its
-    // 1440x900 design size. `engine` is the panel the ENGINE reported (its real
-    // pixels divided by Qt's devicePixelRatio — the same unit as `desktop`), and
-    // 0x0 means the engine had no display yet and Qt's Screen was the fallback.
-    // Measured at the LAUNCH size, before the sweep shrinks the window.
     function reportDesktop() {
         const fills = window.width >= window.desktopWidth - 32 - 0.5
                     && window.height >= window.desktopHeight - 64 - 0.5
@@ -2242,13 +1499,6 @@ ApplicationWindow {
                     + " fills=" + fills)
     }
 
-    // Card anatomy, printed for the dialog the sweep just measured. It exists
-    // because the card's height is DERIVED (header + a capped Flickable + the
-    // footer), so a dialog can measure as "fits the window" while its content
-    // viewport has collapsed to nothing — the "Add Source is cleared" face of a
-    // broken binding. `blank=` is that verdict: a card with real content but no
-    // viewport height. The height chain is printed next to it so the failing
-    // link (flick, headerItem, footer) is visible in the log, not guessed at.
     function reportCardTree(name) {
         const card = SelfTest.findItem(name + "_card")
         if (!card) {
@@ -2275,18 +1525,9 @@ ApplicationWindow {
                     // "?" means the property did not come back readable through the
                     // driver's item handle — the footer's real box is in kids= above.
                     + " footerH=" + (isFinite(card.footerHeight) ? Math.round(card.footerHeight) : "?")
-                    // Content that exists with no viewport to show it in: the card
-                    // renders as an empty shell. Nothing else in the sweep catches
-                    // it, because an empty card still "fits the window".
                     + " blank=" + (contentH > 1 && flickH < 1)
                     + " kids=[" + out.join(" ") + "]")
     }
-    // Where an open dropdown is STACKED, printed for the Source menu the sweep just
-    // took down. A device list that pops into the window's contentItem instead of
-    // the Controls overlay shares no stacking context with a modal (every modal card
-    // parents itself to Overlay.overlay), so it draws BEHIND the open dialog — the
-    // list "is nowhere in sight" while every geometry check still passes. `layer=`
-    // is that verdict: the panel and the modal in the same layer, panel above it.
     function reportDropdown(where, avName) {
         const menu = SelfTest.findItem("selfTestAddSourceSourceField_menu")
         const av = SelfTest.findItem(avName)
@@ -2303,12 +1544,6 @@ ApplicationWindow {
                     + " layer=" + (sameLayer && menu.z > modal.z))
     }
 
-    // A notice. It takes the app scale — scaled about its own bottom-right corner,
-    // so it shrinks with the rest of the UI AND stays pinned to the window's corner
-    // — and its text is plain UTF-8 end to end (the engine's own strings used to
-    // carry an em dash that had been UTF-8 encoded twice, which the toast rendered
-    // as "â"-style garbage). Measured from the card itself, in window coordinates:
-    // a 320px toast at uiScale 0.569 must come back ~182px wide, inside the window.
     function reportToast() {
         const card = SelfTest.findItem("selfTestToastCard")
         if (!card) {
@@ -2329,10 +1564,6 @@ ApplicationWindow {
                     + " fits=" + (inside && scaled))
     }
 
-    // The notices must COALESCE, not stack: the toast step above pushes the same
-    // text six times (the shape a settings write raises when the engine is not
-    // running — one notice per attempt), and six copies used to become six cards.
-    // One card standing for all six is the pass.
     function reportToastDedup() {
         const items = NotificationCenter.items
         const cards = items.length
@@ -2341,18 +1572,6 @@ ApplicationWindow {
                     + " groupCount=" + count
                     + " dedupe=" + (cards === 1 && count === 6))
     }
-    // The notice's CRUX has to land ON SCREEN, not just sit in a property: the
-    // names it is about (a device, a source) ride the payload as `crux` and the
-    // card must hand the renderer a <b> run around each one, with the rest of
-    // the sentence plain and unchanged. `emphasis=` is that verdict — a card
-    // drawn in plain text is exactly the complaint this step answers. The card
-    // is grabbed too, so a passing run still leaves something to look at.
-    // The notice's one click: the card draws a button from the notice's action
-    // (its id and label) and pressing it has to run what that id was registered
-    // for — the whole point of the crash-recovery offer, whose only way to open
-    // the recovered show is this button. Driven as a REAL click at the button's
-    // centre, with the registry called directly as the documented fallback when
-    // the synthetic click misses, and `by=` says which of the two answered.
     property bool toastActionRan: false
     function reportToastAction() {
         const button = SelfTest.findItem("selfTestToastAction")
@@ -2382,9 +1601,6 @@ ApplicationWindow {
         for (let i = 0; i < spans.length; ++i)
             if (html.indexOf("<b>" + card.escapeHtml(spans[i]) + "</b>") !== -1)
                 ++bolded
-        // Take the tags back off the rendered markup — never escape it twice —
-        // and what is left has to BE the escaped message the card was handed,
-        // i.e. bolding never changed a character of the text.
         const stripped = html.replace(/<\/?b>/g, "")
         const rich = label.textFormat === Text.RichText
         const kept = card.escapeHtml(card.message) === stripped
@@ -2410,15 +1626,6 @@ ApplicationWindow {
                     + " overflow=" + Math.round(Math.max(0, right - b.width)) + "px"
                     + " fits=" + (right <= b.width + 1))
     }
-    // The reported bug this step exists for: a source card's Delete left its
-    // curved line drawn ("delete the card first and the line refuses to be
-    // deleted"), while removing the line by its own click first made the delete
-    // clean. The line IS a connector pair — the board draws one per route its
-    // buses report — so the check routes a row on the real board, deletes it
-    // through the SCREEN's own removal path (the function the card's context
-    // menu and the Edit dialog's Delete button both call), and reads the board
-    // back: the pair must be gone, the row gone, and the bus must have lost
-    // exactly that one route (the count it had before the route was added).
     property int edgeBus: -1            // the bus this step created itself (if any)
     property int edgeRoutesBefore: -1
     function reportEdgeRemoval() {
@@ -2485,17 +1692,8 @@ ApplicationWindow {
         SelfTest.grab(grabName, "modal_fit_" + label + ".png")
     }
 
-    // The sweep. Each entry: `open()` it, then next tick measure `card` (an
-    // objectName; "" skips the measurement for a pure setup/teardown step),
-    // grab it, `close()` it. The two section-switch steps exist because a page's
-    // controls only exist once the Loader has built them.
     readonly property var modalFitSweep: [
         {
-            // The Show screen itself, at the smallest size: the screens are drawn
-            // at the design canvas and scaled as a whole, so the checks are that
-            // the scaled screen lands inside the window (nothing inside it can
-            // overflow the way a reflowed layout could) AND that it covers it —
-            // see reportScreenCoverage for why "covers" is the attachment check.
             label: "main-screen", card: "",
             open: function () { },
             close: function () { },
@@ -2521,15 +1719,6 @@ ApplicationWindow {
             close: function () { reportAvBoard() }
         },
         {
-            // Deleting a source CARD has to take its curved LINE with it: the
-            // report was "delete the card first and the line refuses to be
-            // deleted" (its own click resolves a roster ROW to a graph node, and
-            // a row that is already gone has none — so the line's own removal
-            // had nothing left to act on). Proved on the real board: route a
-            // row, delete it through the screen's own removal path (exactly what
-            // the card's menu and the Edit dialog's Delete button call) and read
-            // the board back — the line is a connector pair, so "no pair names
-            // it" is "no line is drawn for it".
             label: "av-edge-delete", card: "",
             open: function () { },
             close: function () { },
@@ -2551,11 +1740,6 @@ ApplicationWindow {
             }
         },
         {
-            // The dialog's SOURCE field, opened for real: the popup it opens is a
-            // window-level layer (SelectField reparents it to the window), so the
-            // check is that it appears at all, lands inside the window and is drawn
-            // at the app scale. This is the "clicked Source and nothing appeared"
-            // case — the popup is measured, not just the dialog around it.
             label: "av-source-drop-open", card: "",
             open: function () { SelfTest.clickItem("selfTestAvAddVideo") },
             close: function () { }
@@ -2564,13 +1748,6 @@ ApplicationWindow {
             label: "av-source-drop", card: "selfTestAddSourceSourceField_menu",
             scrim: "selfTestAddSourceDialog",
             open: function () { SelfTest.clickItem("selfTestAddSourceSourceField_box") },
-            // The camera roster is enumerated OFF the GUI thread, and since the
-            // boot sweep asks only for the devices the setup uses (see
-            // EngineBridge::requestUsedDevices), opening this dialog starts a
-            // real full sweep that finishes a moment later. A synthetic click
-            // lands in the same frame and would measure an EMPTY picker — a
-            // false "clicked Source and nothing appeared". Wait, bounded, for
-            // the roster this step is about to inspect.
             waitFor: function () {
                 const av = SelfTest.findItem("audioVideoScreen")
                 return !av || av.engineVideoDevices.length > 0
@@ -2629,42 +1806,14 @@ ApplicationWindow {
             close: function () { const d = SelfTest.findItem("selfTestCategoryNameDialog"); if (d) d.close() }
         },
         {
-            // The notices: they take the app scale now (scaled about their own
-            // bottom-right corner, so they shrink with the UI but stay pinned to
-            // the window's corner). Pushed with the punctuation the engine's own
-            // and UI strings actually use — the toast text used to render a
-            // double-encoded em dash as "â"-style garbage.
-            // Pushed SIX times with one identical text on purpose: that is the
-            // reported shape — a settings write that cannot reach the engine
-            // raises the same notice once per attempt, and six attempts stacked
-            // six toasts the operator could not read. One card must stand for
-            // all six (groupCount), and reportToastDedup() is the check.
-            // Its text is the missing-device notice the app really raises, crux
-            // and all, so this single step covers the geometry, the coalescing
-            // AND the bolding the operator complained was missing
-            // (reportToastCrux).
             label: "toast", card: "",
             open: function () {
                 const text = "Not connected this time: WindowsClipboard.cpp - WindowsUI - Visual Studio Code — the inputs that use them read no signal until “Camera 1” is back (Settings · Audio & Video)."
-                // The names the notice is ABOUT, the same shape the boot and
-                // missing-device notices use as their crux: the toast has to
-                // draw the device name bold inside the sentence, with the quoted
-                // source name bold too (see reportToastCrux).
                 const crux = ["WindowsClipboard.cpp - WindowsUI - Visual Studio Code"]
-                // ...and with a ONE-CLICK ACTION, the shape the crash-recovery
-                // offer uses: the id is registered here, the notice carries only
-                // its name and label, and the card's button has to run it (see
-                // reportToastAction).
                 window.toastActionRan = false
                 NotificationCenter.registerAction("ui.selftest.toastAction",
                                                    function() { window.toastActionRan = true })
                 const action = { id: "ui.selftest.toastAction", label: qsTr("Open recovered show") }
-                // Pushed through the SAME door the app's real notices use —
-                // EventBus.notify, crux and action as its last arguments — so this
-                // step covers the production path end to end (payload "crux" ->
-                // NotificationCenter -> the card's <b> runs, and payload "action"
-                // -> the card's one button), not just the card's own rendering of
-                // a hand-passed pair.
                 for (let i = 0; i < 6; ++i)
                     EventBus.notify(text, "warning", qsTr("Devices"), "ui.selftest.toast", crux, action)
             },
@@ -2672,12 +1821,6 @@ ApplicationWindow {
             report: function () { reportToast(); reportToastDedup(); reportToastCrux(); reportToastAction() }
         },
         {
-            // Last, back at the size the app opened at with the AV page up: the
-            // board's columns must be EXACTLY where they were before the fit work
-            // (they are, since a card with room keeps its design size and its scale
-            // of 1), so a small-window repair cannot quietly re-space the normal
-            // layout. This is also the control reading for the AVBOARD line: the
-            // one above it is the cramped case.
             label: "settings-av-design-size", card: "selfTestSettingsShell",
             open: function () {
                 window.width = modalFitLaunchW
@@ -2690,9 +1833,6 @@ ApplicationWindow {
     ]
     property int modalFitStep: -1
     property bool modalFitOpened: false
-    // How many ticks the CURRENT step has spent waiting on its own `waitFor`
-    // predicate (see modalFitAdvance) — bounded so a roster that never arrives
-    // fails the step instead of hanging the scenario.
     property int modalFitWaitTries: 0
     readonly property int modalFitWaitMax: 12   // ~16 s at modalFitDelay's tick
     property real modalFitLaunchW: 1440
@@ -2715,10 +1855,6 @@ ApplicationWindow {
             modalFitOpened = true
             modalFitWaitTries = 0
         } else {
-            // A step whose subject is ASYNCHRONOUS declares `waitFor`: the step
-            // repeats (open already happened) until it answers true, or the
-            // bounded budget runs out and the step measures what it has — which
-            // fails loudly in the report rather than passing on an empty roster.
             if (s.waitFor !== undefined && !s.waitFor()) {
                 modalFitWaitTries++
                 if (modalFitWaitTries <= modalFitWaitMax) {
@@ -2732,9 +1868,6 @@ ApplicationWindow {
                 s.report()
             else if (s.card !== "")
                 reportModalFit(s.label, s.card)
-            // A step that names a `scrim` also proves the dialog's dim covers the
-            // whole window, measured while it is open (the settings-page dialogs
-            // only exist once their page has been built).
             if (s.scrim !== undefined)
                 reportScrim(s.label + "-scrim", SelfTest.findItem(s.scrim))
             s.close()
@@ -2778,13 +1911,6 @@ ApplicationWindow {
     }
 
     // ---- sidebar split drag (VGR_SPLIT_TEST=1) -------------------------------
-    // Proves a dragged sidebar width is actually REMEMBERED, end to end: press the
-    // Projects divider, drag it, release, then read the value back out of the store
-    // after the pane's own 500ms save timer has had time to run. It is the guard for
-    // the whole class of bug around this save path — a timer that fires without a
-    // change (which wrote the untouched columns back on every launch) and a timer
-    // that never fires at all both fail a check like this, while the store's own
-    // value is what the UI binds to, so "after" is the honest reading.
     property real splitBefore: -1
     Timer {
         id: selfTestSplitDrag
@@ -2799,9 +1925,6 @@ ApplicationWindow {
             }
             window.splitBefore = Number(SettingsService.values["session.projectsColumnWidth"] ?? -1)
             const h = SelfTest.itemCenter("selfTestProjectSplit")
-            // Park the pointer well away first: QCursor::setPos generates NO WM_MOUSEMOVE
-            // when the cursor is already where it is asked to go, so a drag that starts
-            // near where the last one ended can lose its very first step.
             SelfTest.move(8, 8)
             SelfTest.press(h.x, h.y)
             SelfTest.move(h.x + 20, h.y)
@@ -2825,16 +1948,6 @@ ApplicationWindow {
     }
 
     // ---- Media pane L/R pills (VGR_PILL_TEST=1) ------------------------------
-    // The report: "if i click on the L or R it closes all". The Media pane's Inputs
-    // section is the BUSES (the audio-input and video-source rosters moved out of
-    // the pane and back to the Settings - Audio & Video board that owns them), so
-    // the scenario drives the bus card: it opens the pane's Inputs roster, clicks
-    // the L pill (a real synthetic click at the pill's centre — the pill's own
-    // toggled() is the documented fallback when that click misses), then reads BOTH
-    // sides back out of the model. The clicked side must be closed and the OTHER
-    // side must still be open. Trims and any row it added are put back, so the
-    // roster reads as it did before. (The video cards' identical pair left with
-    // them: the ChannelPill control now has exactly one roster to serve here.)
     property var pillCases: [{ name: "bus" }]
     property int pillCase: 0
     property int pillStep: 0        // 0 set up, 1 click, 2 read, 3 read the fallback
@@ -2848,11 +1961,6 @@ ApplicationWindow {
     property bool pillCleaning: false
     property var pillBefore: [1, 1]
     property var pillResults: ({})
-    // The pane must be SHOWING the case's roster before a pill's centre means
-    // anything: while the tab is hidden its cards are unpositioned (their items
-    // report (0,0)), so a click at that point lands on whatever else is there.
-    // Returns true once the pane is up on the buses — the caller only clicks a
-    // pill after that.
     function pillOpenPane() {
         SelfTest.activate()
         const pane = SelfTest.findItem("selfTestMediaPane")
@@ -2863,9 +1971,6 @@ ApplicationWindow {
             if (window.pillSetupTries <= 2) {
                 SelfTest.clickItem("selfTestTab_media")       // the real path
             } else {
-                // The click never took (the dock tab is off the laid-out row on
-                // this geometry): set the tab bar's own state — the same value
-                // the click writes — and say which path opened the pane.
                 const bar = SelfTest.findItem("selfTestLibraryTabBar")
                 const tabs = bar && bar.tabs ? bar.tabs : []
                 for (let i = 0; i < tabs.length; ++i)
@@ -2897,9 +2002,6 @@ ApplicationWindow {
         window.pillSet(0, window.pillBefore[0])
         window.pillSet(1, window.pillBefore[1])
     }
-    // Waits out boot AND the rosters' own restore (which retries on the event loop
-    // and would otherwise land between the add and the cleanup, leaving the row
-    // indices pointing at the user's own rows).
     Timer {
         id: selfTestPillBoot
         running: typeof SelfTestPill !== "undefined" && SelfTestPill
@@ -2913,13 +2015,6 @@ ApplicationWindow {
         repeat: true
         onTriggered: {
             if (window.pillCase >= window.pillCases.length) {
-                // Leave the rosters as the scenario found them, and let the model's
-                // debounced roster write (400 ms) land BEFORE quitting: quitting
-                // first left a removed row in settings.json, which is how a
-                // "SelfTest Pill Media" row survived in the user's own roster. A
-                // row is removed only if it is still the row this scenario ADDED —
-                // the index is checked against its own name first, so a shifted
-                // roster can never cost the user a bus or a source.
                 if (!window.pillCleaning) {
                     if (window.pillAddedVideo >= 0
                             && VideoSourceListModel.getSource(window.pillAddedVideo).name
@@ -2952,21 +2047,11 @@ ApplicationWindow {
                 }
                 if (!window.pillOpenPane())
                     return              // next tick: the pane is coming up
-                // The pane's Inputs section is the BUSES (the video source and audio
-                // input rosters — and with them those cards' pill pairs — live on the
-                // Settings - Audio & Video board), so the bus card is the scenario.
                 if (BusListModel.rowCount() === 0) {
                     BusListModel.addBus("SelfTest Pill Bus", "audio")
                     window.pillAddedBus = BusListModel.rowCount() - 1
                 }
                 window.pillRow = BusListModel.rowCount() - 1
-                // THE CARD'S OWN GESTURE, driven too: the monitor click is what
-                // starts the meter taps (the pair's glow) and the video preview,
-                // and it is the path that silently threw "meterAudio is not
-                // defined" while the card just looked inert. Opened and released
-                // again here (both synchronous) so the taps do not outlive the
-                // probe; the report names which bus it took, how many taps, and
-                // whether the release closed it.
                 {
                     const pane = SelfTest.findItem("selfTestMediaPane")
                     if (pane) {
@@ -2984,9 +2069,6 @@ ApplicationWindow {
                         }
                     }
                 }
-                // The pill must be LAID OUT before its centre is a real point on
-                // it: an unpositioned pill reports (0,0) and the click would land
-                // on the first card's corner instead.
                 if (!SelfTest.itemVisible(window.pillItemName(0)))
                     return
                 window.pillBefore = [window.pillGain(0), window.pillGain(1)]
@@ -3024,17 +2106,10 @@ ApplicationWindow {
                     return
                 }
                 if (window.pillClickTries < 3) {
-                    // A click that did not move the model gets another go before
-                    // the fallback: the first one can still be swallowed while
-                    // the window is coming to the foreground.
                     window.pillStep = 1
                     return
                 }
                 if (window.pillBy === "click") {
-                    // Every click missed even though the window was foreground and
-                    // the pill was on screen (three tries) — emit the pill's OWN
-                    // toggled(), the very handler its MouseArea calls, and say so
-                    // in the report, so a silent miss can never read as a pass.
                     const pill = SelfTest.findItem(window.pillItemName(0))
                     window.pillBy = "toggled()"
                     if (pill) {
@@ -3058,14 +2133,6 @@ ApplicationWindow {
     }
 
     // ---- "New bus" needs its source (VGR_NEWBUS_TEST=1) ----------------------
-    // The rule the dialog exists for: a bus is created WITH the source the
-    // operator picked, so Create can never leave behind a bus that feeds nothing
-    // (a card that can never light, and a signal path nothing should open a
-    // device for). This drives the real button and the real cards: open
-    // Media · Inputs, click the New bus FAB, click Create with NOTHING picked (the
-    // roster must not grow), click the first source card, click Create (a bus must
-    // appear with its route already made and NO tap opened), grab the dialog for
-    // the design review, and remove the row again.
     property int newBusStep: 0
     property int newBusTries: 0
     property int newBusBefore: 0
@@ -3108,13 +2175,6 @@ ApplicationWindow {
     }
 
     // ---- what each SOURCE CARD's light claims ------------------------------
-    // Read off the card itself (`lightState` for the colour's answer,
-    // `lightRouted` for the dot-vs-ring form) and checked against the very probe
-    // that answers it (LiveOutputService.inputAvailable/inputDelivery — the same
-    // call the bus cards in the pane use). A click-through flow passes with every
-    // card painted one flat colour; this is the half that says the colour MEANS
-    // something. "The probe light is not showing correct state" is exactly a card
-    // disagreeing with its own probe.
     function newBusCheckLights() {
         let state = ""
         window.newBusLightChecked = 0
@@ -3125,10 +2185,6 @@ ApplicationWindow {
             const alive = LiveOutputService.inputAvailable(label, sourceKind)
             const starved = LiveOutputService.inputDelivery(label, sourceKind) === "starved"
             const routed = card ? card.alreadyFed === true : false
-            // THE COLOUR IS THE PROBE'S, ALWAYS — routed or not. "Connected" vs
-            // "not routed" is the light's FORM (`lightRouted`: a filled dot vs a
-            // hollow ring), so an unrouted card must still answer with its device's
-            // state and a gone camera must never read like a healthy one.
             const wanted = label === "" ? "none"
                          : (!alive ? "offline" : (starved ? "starved" : "connected"))
             const formOk = card ? card.lightRouted === routed : false
@@ -3181,9 +2237,6 @@ ApplicationWindow {
         return true
     }
 
-    // The first source card the dialog can offer, as { kind, row } — the rosters
-    // the dialog itself reads (a source with no device named is skipped: it has
-    // nothing for the tap to resolve).
     function newBusFirstPick() {
         for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
             const v = VideoSourceListModel.getSource(i)
@@ -3261,14 +2314,6 @@ ApplicationWindow {
             window.newBusPickRow = pick.row
             const name = "newBusPicker_row_" + pick.kind + "_" + pick.row
             if (!SelfTest.itemVisible(name)) {
-                // Diagnose BEFORE failing: the name is carried by BOTH instances
-                // of this picker (the Media pane's and the Edit screen's), so a
-                // resolution that lands on the other instance's card reports the
-                // wrong thing — and "not laid out" would be the wrong sentence
-                // for it. No duplicate names, no ambiguity: see the objectName
-                // in BusSourceModal (the name follows the MODE, and only one
-                // caller ever opens the create mode at a time... except that the
-                // Edit instance is built at boot in create mode too).
                 const c = SelfTest.findItem(name)
                 console.log("[SELFTEST-NEWBUS] pick card probe " + name
                             + " found=" + (c !== null)
@@ -3306,9 +2351,6 @@ ApplicationWindow {
         window.newBusRouted = window.newBusKind === "audio"
             ? (bus.routedAudioInputs && bus.routedAudioInputs.length > 0)
             : (bus.routedVideoSources && bus.routedVideoSources.length > 0)
-        // The drain this dialog exists to avoid: creating a bus must not open a
-        // device. No card preview, no output take, no meter — the route is a
-        // graph edge, nothing more.
         const pane = SelfTest.findItem("selfTestMediaPane")
         const meters = pane && pane.meteredLabels ? pane.meteredLabels.length : 0
         window.newBusTapsClean = meters === 0 && LiveOutputService.inputLabel === ""
@@ -3322,12 +2364,6 @@ ApplicationWindow {
     }
 
     // ---- the picker, cancelled -------------------------------------------
-    // Steps 8-10: open it again and click Cancel. This is the half a successful
-    // Create does not cover: the modal reports `cancelled()` and does NOT close
-    // itself (its other caller binds `open` to its own flag), so a caller that
-    // forgot the handler left the picker on screen with Cancel, Esc and the scrim
-    // all doing nothing — "the buttons are not working". Esc goes through the
-    // same `cancelled()` (Hotkeys), so this covers both key and button.
     function newBusCancelPhase() {
         if (window.newBusStep === 8) {
             if (window.newBusRow >= 0)
@@ -3355,13 +2391,6 @@ ApplicationWindow {
     }
 
     // ---- the Edit + ring's Bus chip uses the SAME picker -------------------
-    // The ring's Bus chip used to open a list of EXISTING buses, so a slide could
-    // carry a bus that feeds nothing (a window painting a hole). It opens the very
-    // picker Media › Inputs' "New bus" uses now, in its create mode: pick the
-    // SOURCE, the bus is made with that route already in it. This phase proves the
-    // WIRING (the chip reaches that picker, in that mode, and Cancel closes it)
-    // without creating anything, because creating here would add a canvas item to
-    // whatever show the operator has open.
     property bool newBusEditPicker: false
     property bool newBusEditCancelClosed: false
 
@@ -3386,9 +2415,6 @@ ApplicationWindow {
             return
         }
         if (window.newBusStep === 14) {
-            // The canvas's Bus chip must NOT offer to create a bus: its picker is the
-            // pick-an-existing-bus one, so the create dialog's card never appears and
-            // no bus is made by opening it. (The create picker is the Media pane's.)
             window.newBusEditPicker = !SelfTest.itemVisible("editBusPicker_card")
                                       && BusListModel.rowCount() === window.newBusBefore
             console.log("[SELFTEST-NEWBUS] editRing noCreate=" + window.newBusEditPicker)
@@ -3436,36 +2462,14 @@ ApplicationWindow {
     }
 
     // ---- Bus status light (VGR_BUSLIGHT_TEST=1) ------------------------------
-    // The report, verbatim: "i thought i said we should give the status light
-    // access to check if [the] device in the source is bringing data … so i
-    // expect to see all green". Two things can pin that light amber while every
-    // device is present: a roster that never carried the source's device (the
-    // used-device sweep is TARGETED — a source whose label never reached it is
-    // invisible to every reader), and a binding with nothing to re-evaluate it
-    // when the sweep that does carry it lands (Q_INVOKABLE row lookups are not
-    // tracked by QML, so the light kept whatever answer it got at construction).
-    // This drives the real pane on the real roster: it opens Media · Inputs,
-    // waits for the light's own ping + re-enumeration to settle, then reads each
-    // bus card's own `busStatus` (the property its colour is drawn from) and
-    // prints the routing behind it. Verdict = the user's sentence: every bus
-    // with a routed source reads "connected".
     property int busLightStep: 0
     property int busLightTries: 0
     property var busLightLines: []
     property int busLightGreen: 0
     property int busLightRouted: 0
-    // The source this run HOLDS a real tap on (see the delivery phase): one of the
-    // buses' own video sources, taken with the card's own monitor gesture and
-    // released before the run ends. Candidates are collected while the cards are
-    // read (cameras first) — a hold that does not take moves to the next one.
     property var busLightHold: ({ bus: -1, label: "", kind: "" })
     property var busLightCandidates: []
     property string busLightDelivery: ""
-    // ...and the AUDIO half of the same reading (see the audio hold): an
-    // audio-only bus's monitor gesture takes its input meters, which is a tap
-    // that really does deliver levels — the positive case this run needs, since a
-    // camera pointed at a wall may honestly deliver nothing but a meter always
-    // hands over data (silence included).
     property var busLightAudioHold: ({ bus: -1, label: "" })
     property string busLightAudioDelivery: ""
     property string busLightAudioStatus: ""
@@ -3480,18 +2484,9 @@ ApplicationWindow {
             : (window.busLightDelivery === "" ? "<none>" : window.busLightDelivery)
         const audioDelivery = window.busLightAudioHold.bus < 0 ? "n/a"
             : (window.busLightAudioDelivery === "" ? "<none>" : window.busLightAudioDelivery)
-        // THE LIGHT'S OWN ANSWER, checked against what the taps say. The bridge
-        // answering correctly is one fact; the CARD actually consuming that answer
-        // is a different one, and it is the one the user sees. A delivery of
-        // "starved" has to paint the card amber; "ok" — and "" (nobody is
-        // watching that tap, so there is no live evidence) — leave the presence
-        // answer standing, which is what keeps an unwatched bus green.
         const videoWanted = window.busLightDelivery === "starved" ? "starved" : "connected"
         const videoConsistent = window.busLightHold.bus < 0
             || window.busLightHoldStatus === videoWanted
-        // The POSITIVE case: a meter tap that is handing data over must read ok,
-        // and its card must read connected. Without this the run could pass with
-        // every light amber off taps that never delivered anything.
         const audioOk = window.busLightAudioHold.bus >= 0
             && window.busLightAudioDelivery === "ok"
             && window.busLightAudioStatus === "connected"
@@ -3533,9 +2528,6 @@ ApplicationWindow {
                     return
                 }
                 if (!pane.visible) {
-                    // The real path first (the dock tab's click), then the tab
-                    // bar's own state if the click never took — same two-step the
-                    // pill scenario uses, so the pane comes up either way.
                     SelfTest.clickItem("selfTestTab_media")
                     const bar = SelfTest.findItem("selfTestLibraryTabBar")
                     const tabs = bar && bar.tabs ? bar.tabs : []
@@ -3548,9 +2540,6 @@ ApplicationWindow {
                 window.busLightTries = 0
                 return
             }
-            // Two phases share the settle: the presence reading (step 1) and the
-            // delivery reading (step 2, after a real tap has had longer than the
-            // engine's warm-up grace to produce frames). Three ticks is ~7 s each.
             if (++window.busLightTries < 3)
                 return
             window.busLightTries = 0
@@ -3558,9 +2547,6 @@ ApplicationWindow {
                 window.busLightReadDelivery()
                 return
             }
-            // Camera candidates before screen/NDI ones: a camera delivers frames
-            // regardless of what is on top of it, and this run needs a tap that
-            // really feeds (see the hold below).
             window.busLightCandidates = []
             const n = BusListModel.rowCount()
             for (let i = 0; i < n; ++i) {
@@ -3587,9 +2573,6 @@ ApplicationWindow {
                 const status = String(card.busStatus || "")
                 if (routed > 0) window.busLightRouted++
                 if (routed > 0 && status === "connected") window.busLightGreen++
-                // The first bus that carries a video source is the one this run
-                // HOLDS (see the delivery phase) — picked here, taken after the
-                // whole roster has been read, so nothing changes under the reading.
                 if (routedVideo > 0 && video !== "")
                     window.busLightCandidates.push({ bus: i, label: video, kind: vkind })
                 window.busLightLines.push("bus=" + i + " name=\"" + name + "\" type=" + type
@@ -3601,21 +2584,9 @@ ApplicationWindow {
                     + " audioAlive=" + (routedAudio > 0
                         ? LiveOutputService.inputHealthy(audioLabel, "audio") : "n/a"))
             }
-            // THE PING ITSELF — the half of this that the user asked for by name
-            // ("give them access to ping"). Every bus above answered from the
-            // rosters, which is the good case but proves nothing about a source
-            // whose device the rosters do NOT carry. A label no device and no
-            // window has must take the ping path: one diagnostic line, one queued
-            // targeted sweep that names it, and a false answer. The runner reads
-            // that line out of the engine log, so a light that can only ever
-            // answer from a cache it never refreshes is caught here.
             const ghostKind = "screen"
             const ghost = "selftest-buslight-ghost-window"
             const ghostAlive = LiveOutputService.inputAvailable(ghost, ghostKind)
-            // ...and the same label asked with the WRONG kind must still answer
-            // from the roster that does know it (the kind-agnostic fallback): a
-            // kind string that failed to travel must not pin a real source's
-            // light amber for good.
             const bus1Video = String((SelfTest.findItem("selfTestBusCard_1") || {}).busVideoLabel || "")
             const wrongKindAlive = bus1Video !== ""
                 ? LiveOutputService.inputHealthy(bus1Video, "window") : "n/a"
@@ -3623,30 +2594,9 @@ ApplicationWindow {
                 + " alive=" + ghostAlive)
             window.busLightLines.push("wrongkind label=\"" + bus1Video
                 + "\" kind=window alive=" + wrongKindAlive)
-            // ...and a PNG of the pane as it stands, because the report this
-            // guards is a picture: the lights' colour and the middle of the card
-            // being empty are both things a property dump cannot state. The grab
-            // is ASYNCHRONOUS (QQuickItemGrabResult::ready -> saveToFile), so the
-            // run waits one more tick before quitting — quitting in the same tick
-            // dropped the file while still reporting the request as accepted,
-            // which is exactly how a "no screenshot" can read as a pass.
             // ---- THE LIVE HALF, MEASURED ON A REAL TAP ----------------------
-            // The delivery verdict is only ever about a tap the app holds, so the
-            // run takes one: the chosen bus's video source, through the card's own
-            // monitor gesture (the same call the operator's click makes). Phase 2
-            // then waits PAST the engine's warm-up grace before reading it, so "ok"
-            // can only be true because frames actually arrived — a tap that opened
-            // and produced nothing reads "starved", and the light must not call it
-            // connected. Nothing is left held: phase 2 releases it.
             const pane = SelfTest.findItem("selfTestMediaPane")
             if (pane) {
-                // ENSURE, don't assume, and take a source that really feeds: the
-                // pane holds ONE video monitor, a toggle that lands on the bus it is
-                // already monitoring RELEASES it, and a window capture can refuse to
-                // open at all (an occluded window) — so the candidates are tried in
-                // order (cameras first: a camera delivers frames whatever is on top
-                // of it) until the pane reports it is monitoring one. Whichever took
-                // is the tap phase 2 reads.
                 const wants = window.busLightCandidates.slice()
                 wants.sort((a, b) => (a.kind === "camera" ? 0 : 1) - (b.kind === "camera" ? 0 : 1))
                 for (let c = 0; c < wants.length; ++c) {
@@ -3668,12 +2618,6 @@ ApplicationWindow {
                 }
                 if (window.busLightHold.bus < 0)
                     window.busLightDelivery = "nothold"
-                // THE AUDIO HALF, on the same footing: an AUDIO-ONLY bus's monitor
-                // gesture takes that bus's input meters (the pane's own call), and
-                // a meter hands over LEVELS — real data, silence included — so this
-                // is the tap that can be relied on to answer "ok". A bus that also
-                // carries video is skipped: the pane holds ONE video monitor, and
-                // taking the audio bus's monitor would have to move it.
                 for (let i = 0; i < n; ++i) {
                     const card = SelfTest.findItem("selfTestBusCard_" + i)
                     if (!card || String(card.busType || "") !== "audio")
@@ -3697,10 +2641,6 @@ ApplicationWindow {
                     break
                 }
             }
-            // ONE reading, then the delivery phase: without this the whole
-            // reading ran again on every tick — and its hold is a pane TOGGLE,
-            // so a repeat took, released, took the same tap forever (the live
-            // half could never be read and the run never ended).
             window.busLightStep = 2
         }
     }
@@ -3724,19 +2664,8 @@ ApplicationWindow {
         const status = card ? String(card.busStatus || "") : ""
         window.busLightDelivery = delivery
         window.busLightHoldStatus = status
-        // The tap's own bookkeeping is reported beside the verdict, so a failed
-        // run says WHICH half was missing: no `devId` means the engine never
-        // resolved the label to a device (nothing to deliver from), no
-        // `cardPreviews` entry means the service let the hold go, and a held tap
-        // with no verdict means the frames never stamped.
         const heldCards = LiveOutputService.cardPreviews.indexOf(held.label) >= 0
         const devId = String(EngineBridge.resolvedPreviewDeviceId(held.label) || "")
-        // THE TWO OTHER HALVES OF THE SAME FACT, so a "starved" says WHICH one
-        // broke: `producing` is the pane's own evidence that frames arrived (the
-        // service's first-frame detection on the very pulls this light reads),
-        // and `failure` is the platform's own reason for a tap that cannot
-        // produce (a busy device, a type the tap cannot consume). A verdict that
-        // disagrees with `producing` is the wiring bug this half exists to catch.
         const producing = LiveOutputService.inputProducing(held.label)
         const failure = String(LiveOutputService.inputFailure(held.label, held.kind) || "")
         window.busLightLines.push("delivery label=\"" + held.label + "\" kind=" + held.kind
@@ -3744,10 +2673,6 @@ ApplicationWindow {
             + " producing=" + producing
             + " failure=\"" + failure + "\""
             + " cardPreviews=" + heldCards + " devId=\"" + devId + "\""
-            // WHICH HALF OF THE TAP the verdict came from: a card whose state
-            // window is not asking for frames (stateWin=false) is not being
-            // watched, and its silence proves nothing — that is the difference
-            // this line exists to make readable.
             + " stateWin=" + (card && card.stateWinImage
                               ? (card.stateWinImage.visible + "/status" + card.stateWinImage.status) : "n/a")
             + " producing=" + producing
@@ -3760,9 +2685,6 @@ ApplicationWindow {
             catch (e) { window.busLightLines.push("release threw: " + e) }
         }
         window.busLightLines.push("released bus=" + held.bus)
-        // ...and the audio half, read and released the same way (see the audio
-        // hold): its verdict is "ok" when the meter tap really is live, and the
-        // card must be showing that as connected.
         const ahold = window.busLightAudioHold
         if (ahold.bus >= 0) {
             const agot = String(LiveOutputService.inputDelivery(ahold.label, "audio"))
@@ -3802,30 +2724,6 @@ ApplicationWindow {
     }
 
     // ---- Media rows' own audio meters (VGR_MEDIAMETER_TEST=1) ----------------
-    // The report: a media row's level bar on Settings · Audio & Video "is still
-    // stuck", and it "shows the opposite in edit" — the bar on the card drew the
-    // row's STORED volume (a setting: a fixed fill that tracked the Volume
-    // slider and never moved), while the Edit dialog for the SAME row draws the
-    // bridge's stream tap (the actual audio — a flat -inf dB strip when the file
-    // is gone, which is the roster this was reported from). One row, two
-    // readings that could never agree.
-    //
-    // This measures both halves through the app's own UI, with the user's own
-    // case in it: it adds a media row pointed at a REAL audio file and one
-    // pointed at a file that is not there, opens Settings · Audio & Video, and
-    // reads each row's LevelTrack `value` — the number its fill is drawn from —
-    // across several meter-pump ticks.
-    //   * the LIVE row's bar must MOVE (nonzero, off the stream tap)
-    //   * the SILENT row's bar must read 0 even though its stored level is 4
-    //     (≈53% of the bar's own scale — the fill the stored-volume binding
-    //     drew, frozen, which is the reported screenshot)
-    //   * and each bar must match what the DIALOG side reports for that row,
-    //     read off the screen object the Edit dialog's strips bind, so
-    //     "the card agrees with the dialog" is measured, not assumed.
-    // Both rows are removed again, and the removal gets its own tick to land in
-    // settings.json before quitting (the roster write is debounced) — the lesson
-    // the pill scenario learned the hard way, when a leftover row survived in
-    // the user's own roster.
     property int mediaMeterPhase: 0
     property int mediaMeterLiveRow: -1
     property int mediaMeterSilentRow: -1
@@ -3864,10 +2762,6 @@ ApplicationWindow {
                 out.push(window.mediaMeterFiles[i])
         return out
     }
-    // The AudioVideoScreen that owns this board: the bar and the dialog's strips
-    // must report the same row the same way, and the honest way to check that is
-    // to read the DIALOG's own helper off the screen object rather than to
-    // re-derive it here.
     function mediaMeterScreen() {
         let it = SelfTest.findItem("selfTestAvBoard")
         for (let hop = 0; it && hop < 6; ++hop) {
@@ -3906,13 +2800,6 @@ ApplicationWindow {
         onTriggered: {
             const files = window.mediaMeterFileList()
             if (window.mediaMeterPhase === 0) {
-                // Sweep rows an EARLIER run left behind before adding this
-                // run's — this scenario adds and removes rows in the user's own
-                // roster, so it must be idempotent: a run that hung (or was
-                // killed mid-flight) never reached its cleanup, and three of
-                // those otherwise leave six test rows on the board forever.
-                // Matched by NAME, walking from the end down, so a removal can
-                // never shift an index not yet looked at.
                 for (let r = VideoSourceListModel.rowCount() - 1; r >= 0; --r) {
                     const n = VideoSourceListModel.getSource(r).name
                     if (n === "SelfTest Meter Live" || n === "SelfTest Meter Silent")
@@ -3933,9 +2820,6 @@ ApplicationWindow {
                 return
             }
             if (window.mediaMeterPhase === 1) {
-                // The bar exists only once the screen is up AND the board has the
-                // new rows (modelsRev → the row roster rebuilds). An item that is
-                // not there has no value to read yet.
                 if (!SelfTest.findItem("selfTestAvBoard"))
                     return
                 if (window.mediaMeterBar(window.mediaMeterLiveRow) < 0
@@ -3967,12 +2851,6 @@ ApplicationWindow {
                         window.mediaMeterSilentDialogMax = dSilent
                 }
                 window.mediaMeterSamples++
-                // A system sound ENDS and parks its tap (the PAL publishes a
-                // zeroed window so meters read silence, not a freeze). Keep a
-                // fresh decode running by moving the row to the next real file —
-                // the label IS the tap key, so the screen re-points the stream
-                // tap with it — so "the bar never got a chance to move" can never
-                // be mistaken for a broken binding.
                 if (window.mediaMeterLiveMax === 0 && window.mediaMeterSamples % 3 === 0
                         && window.mediaMeterSamples < 15) {
                     window.mediaMeterFilePick = (window.mediaMeterFilePick + 1) % files.length
@@ -3990,9 +2868,6 @@ ApplicationWindow {
             }
             if (window.mediaMeterPhase === 3) {
                 const live = window.mediaMeterLiveMax > 0 ? "PASS" : "FAIL"
-                // The reported case: a nonzero stored level beside silence. The
-                // fill the OLD binding drew from it is printed too — the number
-                // that made this read as "a stuck animation" rather than a meter.
                 const silent = window.mediaMeterSilentMax === 0
                                && window.mediaMeterMissingLevel > 0 ? "PASS" : "FAIL"
                 let agree = "SKIP"
@@ -4017,9 +2892,6 @@ ApplicationWindow {
                 return
             }
             if (window.mediaMeterPhase === 4) {
-                // Removed only if the row still wears the scenario's own name, so
-                // a shifted roster can never cost the user a source. The higher
-                // index goes first: removing it must not shift the other one.
                 if (window.mediaMeterSilentRow >= 0
                         && VideoSourceListModel.getSource(window.mediaMeterSilentRow).name
                            === "SelfTest Meter Silent")
@@ -4037,18 +2909,10 @@ ApplicationWindow {
     }
 
     // ---- click-to-open timing (VGR_OPEN_TEST=1) ------------------------------
-    // The user report: picking a sermon in the app-wide search "takes time to
-    // take me to open The Table". This scenario drives that exact path — open
-    // the dialog, type a citation, pick the first result — and logs the cost of
-    // each step, so a slow pick is measured instead of guessed at.
     property real openTestT0: 0
     Timer {
         id: selfTestOpenDialog
         running: typeof SelfTestOpen !== "undefined" && SelfTestOpen
-        // Waits out boot (QML load is ~14s here) AND the background sermon
-        // indexing (~35s after the event loop starts): before it finishes, the
-        // sermon search can answer empty and the library lock is contended, so
-        // an earlier query measures an indexing race instead of the real click.
         interval: 45000
         onTriggered: {
             const t0 = Date.now()
@@ -4057,9 +2921,6 @@ ApplicationWindow {
             selfTestOpenQuery.restart()
         }
     }
-    // Re-asks until the sermon search answers: the background sermon indexing takes
-    // ~40s after boot, and a query issued while it runs can come back empty — the
-    // measurement must be the steady-state click, not an indexing race.
     property int openTestTries: 0
     Timer {
         id: selfTestOpenQuery
@@ -4100,18 +2961,6 @@ ApplicationWindow {
     }
 
     // ---- exact-word lock (VGR_EXACT_TEST=1) ---------------------------------
-    // The padlock at the dialog field's far end promises "exact word search".
-    // This scenario proves it in the RUNNING app: type a word, read the rows,
-    // CLICK the lock, read them again — and check the invariant that defines the
-    // feature: every sermon row the LOCKED search returns must carry the typed
-    // word as a WHOLE word. Loose mode legitimately returns the word-extension
-    // matches too ("friends" for "friend"), so the pair of counts is the proof
-    // that the lock changed the answer rather than merely staying quiet.
-    // Two probes, because one word can only prove half the feature:
-    //   "frien"  — NOT a word: loose search finds the paragraphs that say "friend"/
-    //              "friends" (substring/completion), the LOCK must answer fewer;
-    //   "friend" — a real word: the LOCK must still find it, and every row it
-    //              returns must carry it WHOLE.
     readonly property string exactProbeWord: "frien"
     readonly property string exactRealWord: "friend"
     property int exactFilteredLocked: -1
@@ -4119,17 +2968,11 @@ ApplicationWindow {
     function exactSermonRows() {
         return quickSearch.results.filter((r) => r.kind === "table")
     }
-    // The sentence the lock promises: the query's words IN ORDER, next to each
-    // other (only punctuation/whitespace between them), each appearing whole.
-    // One word is just a whole word.
     function exactPhraseRe() {
         const words = String(quickSearch.query).trim().toLowerCase().split(/\s+/).filter((w) => w !== "")
         const esc = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
         return new RegExp("\\b" + esc.join("[\\s,;:.!?“”'\\-—]+\\b") + "\\b", "i")
     }
-    // The paragraph text a row stands for (the fetched paragraphs, not the capped
-    // snippet), and how many of `rows` do NOT carry the query's sentence. Locked
-    // mode must report 0 — that is the whole promise of the padlock.
     function exactRowText(r) {
         if (typeof TheTableService !== "undefined" && r.bookId !== undefined && Number(r.verse) > 0)
             return TheTableService.paragraphPair(r.bookId, r.chapter, r.verse, r.spanned === true ? 2 : 1)
@@ -4180,11 +3023,6 @@ ApplicationWindow {
             selfTestExactPoll.restart()
         }
     }
-    // One poll in two phases, so the comparison is steady-state against
-    // steady-state: an EMPTY loose answer (the sermon indexing holds the library
-    // lock for the first ~40s) proves nothing beside a locked answer — the loose
-    // read is retried until the library actually answers, then the lock is
-    // clicked and the locked read is given its own moment to land.
     Timer {
         id: selfTestExactPoll
         interval: 2000
@@ -4202,23 +3040,11 @@ ApplicationWindow {
                             + " violations=" + window.exactViolations(rows)
                             + " all=" + quickSearch.results.length
                             + window.exactDiag(rows))
-                // Click the padlock for real, through the OS input path. Whether
-                // that click LANDS is logged: this harness can only synthesize
-                // clicks and the driver's own note says they "need window-foreground
-                // luck", so a miss is reported and the scenario then drives the
-                // toggle through the very function the control's click calls —
-                // everything after that (dialog -> SearchService -> the library's
-                // exact filter -> the rows) is the real production path either way.
                 SelfTest.clickItem("selfTestSearchExactLock")
                 window.exactPhase = 1
                 window.exactTries = 0
                 return
             }
-            // Each click's own search runs async: wait for its rows (the stale
-            // previous list is still standing for the first ticks). The toggle
-            // rescue below is phase 1's alone: later phases also idle two ticks
-            // here, and a stray toggleExact() among them would silently flip the
-            // mode the phase under test had just set up.
             if (window.exactTries < 2) {
                 if (window.exactTries === 1 && window.exactPhase === 1) {
                     if (quickSearch.exact)
@@ -4252,12 +3078,6 @@ ApplicationWindow {
                             + " rows=" + rows.length + " violations=" + bad
                             + " all=" + quickSearch.results.length
                             + " lockedProbe=" + window.exactFilteredLocked)
-                // The SENTENCE probe (user call: "prioritize the sentence first;
-                // ... no individual words, the next available word combination"):
-                // a multi-word query with the lock on must come back with
-                // paragraphs that carry the words TOGETHER — exactViolations is a
-                // phrase check here (exactPhraseRe), so a row that merely
-                // sprinkles the words fails.
                 window.exactPhase = 3
                 window.exactTries = 0
                 quickSearch.query = window.exactSentenceWord
@@ -4277,31 +3097,18 @@ ApplicationWindow {
                             + " rows=" + rows.length + " violations=" + sentBad
                             + " all=" + quickSearch.results.length
                             + window.exactDiag(rows))
-                // Phase 4 - THE TYPO UNDER THE LOCK (user call: "i was supposing
-                // to see the yellow auto correct show under"): a misspelled word
-                // with the lock on keeps the engine's gold correction line (it
-                // is how a locked search recovers - Tab takes the fix and re-runs
-                // locked).
                 window.exactPhase = 4
                 window.exactTries = 0
                 quickSearch.query = window.exactTypoWord
                 quickSearch.refresh()
                 return
             }
-            // phase 4 — THE TYPO UNDER THE LOCK. A SIBLING of phase 3's block, not
-            // its tail: these two handlers were indented after phase 3's
-            // unconditional `return`, so no tick ever reached them — the hint and
-            // group-order phases never logged a line and the run hung waiting for
-            // an app that no scenario step would ever quit.
             if (window.exactPhase === 4 && !window.exactDone2 && window.exactTries >= 2) {
                 window.exactDone2 = true
                 const h = SelfTest.findItem("selfTestSearchHint")
                 window.exactHint = h && h.text !== undefined ? String(h.text) : "(no hint item)"
                 console.log("[SELFTEST-EXACT] hint locked=" + (quickSearch.exact === true)
                             + " text=" + JSON.stringify(window.exactHint))
-                // Phase 5 — WHICH KIND LEADS (user report: a sentence The Table has
-                // word-for-word sat under the Bible's looser rows). Unlocked, the
-                // user's own sentence: a kind carrying it as a phrase must lead.
                 window.exactPhase = 5
                 window.exactTries = 0
                 if (quickSearch.exact)
@@ -4315,12 +3122,6 @@ ApplicationWindow {
                     return
                 window.exactDone3 = true
                 const first = quickSearch.results.length > 0 ? quickSearch.results[0].kind : "-"
-                // The words production ranking sees: unlocked, the highlight source
-                // IS the resolved query ("recieve" -> "receive"), and the gaps are
-                // the same bounded fillers the dialog's phraseHitOf tolerates (the
-                // "and" between "compelling" and "compulsory"). The FULL paragraph
-                // (exactRowText), not the capped snippet, is what "The Table has
-                // the sentence" means.
                 const srcWords = String(quickSearch.highlightSource).trim().toLowerCase()
                     .split(/\s+/).filter((w) => w !== "")
                 const esc = srcWords.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
@@ -4332,12 +3133,6 @@ ApplicationWindow {
                 console.log("[SELFTEST-EXACT] order locked=" + (quickSearch.exact === true)
                             + " first=" + first + " tablePhrase=" + tablePhrase
                             + " kinds=" + JSON.stringify(quickSearch.results.slice(0, 5).map((r) => r.kind)))
-                // Then the OTHER search box — the pane's pill (The Table's "Search
-                // in the sermons"), whose padlock drives ReferencePane -> adapter ->
-                // TheTableService -> the library. No synthetic click here: the
-                // pill's lock is the same PositionHoverArea control the dialog's
-                // click path already exercised, so what is at stake is the pane's
-                // own wiring.
                 quickSearch.close()
                 window.currentView = "show"
                 showScreen.showInLibrary("table", "")
@@ -4386,22 +3181,7 @@ ApplicationWindow {
     }
 
     // ---- chapter lock (VGR_SCOPELOCK_TEST=1) --------------------------------
-    // The book pill beside the padlock promises: with a passage OPEN, the tab's
-    // search covers that passage — user call: "add a chapter lock search ... if i
-    // turn the lock for the book all my search goes against that book alone and
-    // not all the books". Proved in the RUNNING app on both tabs that offer it:
-    // a word is searched across the library first (it lands in many sermons),
-    // then the pill is CLICKED, and every locked row must sit inside the open
-    // passage — fewer rows, one place, none from outside, where "outside" is
-    // counted against the pane's own book id + chapter number (so the check does
-    // not trust the lock, it re-derives the scope from what the tab has open).
-    // The pill is clicked for real; `by=` says whether the OS click landed or the
-    // control's own handler did the toggle (a synthetic click can miss).
     readonly property string scopeWord: "faith"
-    // Scripture's probe word: one that IS in the passage the scenario opens
-    // (Genesis 1:1 "In the beginning ...") so a zero-row locked answer can only
-    // mean the scope is wrong, and one that appears all over the Bible so the
-    // loose pass really does span places.
     readonly property string scopeScriptureWord: "beginning"
     property var scopeLoose: ({ rows: -1, outside: -1, places: -1 })
     property var scopeLocked: ({ rows: -1, outside: -1, places: -1 })
@@ -4411,9 +3191,6 @@ ApplicationWindow {
     property var scopeScriptureLocked: ({ rows: -1, outside: -1, places: -1 })
     property string scopeScriptureBy: ""
     property string scopeScriptureOpen: ""
-    // Rows / how many of them fall OUTSIDE the passage the pane has open / how
-    // many distinct places the rows came from. `places` > 1 on the loose pass is
-    // what makes the locked pass (places === 1) mean something.
     function scopeMeasure(rows, bookId, chapter) {
         const places = ({})
         let outside = 0
@@ -4557,20 +3334,6 @@ ApplicationWindow {
     }
 
     // ---- a mark on a verse (VGR_MARK_TEST=1) --------------------------------
-    // WHAT A NOTE OR HIGHLIGHT COSTS THE OPERATOR, measured in the RUNNING app.
-    // setNote/setHighlighted are Q_INVOKABLE on a QML singleton, so their cost is
-    // the INTERFACE thread's — and that path used to be a whole-corpus rewrite:
-    // read bibles.json, parse it, write it back, all under the engine lock every
-    // scripture read takes (a real dev store is 5.8 MB for one Bible). The engine
-    // tests pin the cheap half (one small sidecar file, corpus byte-identical)
-    // and put a number on it on a synthetic corpus; this drives the REAL app on
-    // the operator's OWN store, through the pane's own handlers:
-    //   * the star button's toggleHighlight(), timed on and off again;
-    //   * the note editor's saveNoteDraft(), timed added and removed again.
-    // A verse with NO mark on it is chosen, so undoing the marks restores exactly
-    // the state the scenario found — the store afterwards is the store before,
-    // which tools/selftest/run_mark_sidecar_test.sh checks byte for byte and
-    // counts against the engine log (sidecar writes up, corpus writes zero).
     readonly property string markNoteText: "selftest mark note (removed again)"
     property var markMs: ({ on: -1, off: -1, note: -1, noteOff: -1 })
     property int markVerse: 0
@@ -4709,27 +3472,7 @@ ApplicationWindow {
     }
 
     // ---- the list is divided BEFORE it is clicked (VGR_PRESPLIT_TEST=1) -----
-    // User call: "now the app should split not waiting until it click before
-    // spliting so it doesnt give the gui thread unnessry job during pressure time
-    // when presenting in church". The paragraph list used to be divided only for
-    // the passage the operator had ALREADY picked — the rows were built from the
-    // pick's own preview — so a long sermon paragraph read as one long line until
-    // it was clicked, and the division it needed landed on the interface thread at
-    // the exact moment the operator was presenting.
-    //
-    // Proved in the RUNNING app, with NO row clicked first: a sermon is opened, the
-    // pick is then EMPTIED (the state in which no pick can explain any row), and the
-    // rows the list actually renders (mainRows — the verse list's own model) must
-    // still carry the continuations the chapter was cut into: some paragraph shown as
-    // its own rows ("7", "7-1", "7-2"). Then one of those continuation rows is
-    // CLICKED for real, and the piece it names must be the piece the pane's preview
-    // moves to — the row the operator sees before touching anything and the row they
-    // get when they do have to be the same division, or one of the two is lying.
     property var preSplitOpenRow: null
-    // Has the row to be clicked been brought on screen yet? The paragraph list is
-    // VIRTUALIZED (see ReferencePane's ListView): a row that is off screen is not
-    // built, so it has no center to click — the reveal below scrolls it there, the
-    // click waits for it to arrive, and only then is a click sent.
     property bool preSplitRowReady: false
     property var preSplitFacts: ({ rows: -1, split: -1, hadPick: false, openMs: -1 })
     property var preSplitRestore: ({})
@@ -4737,18 +3480,12 @@ ApplicationWindow {
     property int preSplitTries: 0
     property int preSplitClickTries: 0
     property int preSplitWaitTicks: 0
-    // The row's own name (see ReferencePane's delegate): its label, spelled the same
-    // way, so a scenario can address the continuation row the operator is looking at
-    // rather than the first row that happens to carry the paragraph.
     function preSplitRowName(row) {
         if (!row)
             return ""
         return "selfTestVerseRow_" + Number(row.number)
                 + (row.continuation === true ? "-" + Number(row.partIndex) : "")
     }
-    // The settings this run changed, put back exactly as they were found (the tab
-    // divides long paragraphs only when it is asked to — the shipped default is off,
-    // and the operator's own profile is not this scenario's to rewrite).
     function preSplitRestoreSettings() {
         if (window.preSplitRestore.split === undefined || window.preSplitRestore.words === undefined)
             return
@@ -4762,14 +3499,6 @@ ApplicationWindow {
         // waits them out.
         interval: 45000
         onTriggered: {
-            // THE PANE ON SCREEN FIRST. The dock shows one library tab at a time
-            // (`visible: media_tab_bar.currentPane === "table"`), and a pane that is not
-            // on screen has no VISIBLE row to click — while its model answers every
-            // question anyway, which is how this scenario once reported a fully divided
-            // list and then waited a minute for a row that was never on screen. The
-            // launch state is not the scenario's to rely on (it is whatever tab the
-            // operator left the dock on), so it puts the tab up itself, the way the
-            // quick-search scenarios do, and lets the pane lay out before opening.
             window.currentView = "show"
             showScreen.showInLibrary("table", "")
             selfTestPreSplitOpened.restart()
@@ -4795,20 +3524,10 @@ ApplicationWindow {
             SettingsService.setValue("table.wordsPerSlide", 20)
             p.searching = false
             window.preSplitOpenAt = Date.now()
-            // A COLLECTION THE APP DID NOT RESTORE, deliberately: the dock comes back on
-            // whatever passage was last open, and that one is already read and cut (it is
-            // held from the boot). Opening IT would measure a lookup, not an open — the
-            // cold path is the one an operator takes when they click a different sermon,
-            // and it is the path with the head's cut, the remainder behind it and the
-            // neighbours to read. The report prints which book it landed on.
             p.openBook(p.bookIndex === 0 ? 1 : 0, 1)
             selfTestPreSplitPoll.restart()
         }
     }
-    // Wait for the rows to actually BE there: the chapter read is asynchronous, and the
-    // list builds its rows when it lands. The wait doubles as the measurement this whole
-    // report is about — how long after the open the rows are on screen, with nothing
-    // clicked — so the number in the log is the operator's own, not a timer's.
     Timer {
         id: selfTestPreSplitPoll
         interval: 25
@@ -4822,22 +3541,11 @@ ApplicationWindow {
             if (p.chapterLoading || p.chapterVerses.length === 0
                     || !SelfTest.findItem("selfTestVerseRow_1"))
                 return
-            // THE CUT ARRIVES IN TWO PIECES (SlideBuilder's head/remainder block): the head
-            // with the open — which is what the first number below measures — and the rest
-            // of the sermon a beat later, which is the half that divides a paragraph BELOW
-            // the fold (the reported bug, one screen down). So the division is allowed to
-            // settle before it is judged, and both readings are reported: what the operator
-            // saw the moment the sermon appeared, and what the whole list ended up as.
             const splitNow = p.mainRows.filter((r) => r.continuation === true).length
             if (window.preSplitFacts.openMs < 0) {
                 window.preSplitFacts.openMs = Date.now() - window.preSplitOpenAt
                 window.preSplitFacts.openSplit = splitNow
             }
-            // Settled = the division has not moved for a comfortable beat, and the beat is
-            // longer than the second half takes to arrive (the remainder's own cut is tens
-            // of ms for a whole sermon, plus its delivery). Judging it the instant it stops
-            // changing for one tick would judge the HEAD, which is exactly the half that is
-            // not the whole story.
             if (splitNow !== window.preSplitFacts.lastSplit) {
                 window.preSplitFacts.lastSplit = splitNow
                 window.preSplitFacts.lastChangeAt = Date.now()
@@ -4851,9 +3559,6 @@ ApplicationWindow {
             window.preSplitFacts.settledMs = Date.now() - window.preSplitOpenAt
             selfTestPreSplitPoll.stop()
             window.preSplitFacts.hadPick = p.selected.length > 0
-            // THE PICK IS EMPTIED FIRST, deliberately: it is the one state in which a
-            // pick cannot be what put the continuations on screen. (openBook selects
-            // the first paragraph, as clicking it would.)
             p.selected = []
             p.previewSlideIndex = 0
             const rows = p.mainRows
@@ -4876,12 +3581,6 @@ ApplicationWindow {
                 return
             }
             window.preSplitOpenRow = split[0]
-            // Bring the row ON SCREEN first — the scroll an operator does before
-            // clicking, and the only way a row that is not built can be clicked at
-            // all (see preSplitRowReady). The index it takes is the row's OWN: a
-            // divided chapter makes a paragraph's number and its row index different
-            // things, so the row is found by the pair the two lists share (number +
-            // piece) rather than by number alone.
             window.preSplitRowReady = false
             p.revealRow(p.mainRows.findIndex((r) => Number(r.number) === Number(split[0].number)
                                                && Number(r.partIndex ?? 0) === Number(split[0].partIndex ?? 0)))
@@ -4890,29 +3589,6 @@ ApplicationWindow {
         }
     }
     // ---- THE LAYOUT PROBE SCENARIO (VGR_LAYOUT_TEST, tools/selftest/run_layout_probe.sh) ----
-    // Drives the two interactions the hang captures name — a filter typed into a library tab,
-    // and a pane switch — one per second, and reports for each step:
-    //
-    //   stallMax/stallSum  how long the INTERFACE thread was parked, measured from the thread
-    //                      itself: a 16 ms heartbeat timer that asks for the interval it wants
-    //                      and reports the overshoot. A DWrite/shape/relayout pile-up cannot
-    //                      hide from this the way it hides from a wall-clock stopwatch (the
-    //                      stopwatch measures the work, this measures the freeze), and the
-    //                      C++ FrameProbe in the same log is the same stall seen from the
-    //                      render thread as the gap between painted frames.
-    //   built/dropped      the delegates each list built and THREW AWAY during the step. This
-    //                      is what separates the two causes: a pane switch that shows
-    //                      builds=+N drops=+N is a view releasing and re-creating its items,
-    //                      while a filter that shows builds=+N drops=0 is a one-way rebuild
-    //                      (nothing was thrown away, the list just grew a new tail).
-    //   rows               how many rows each list's model holds after the step, so a rebuild
-    //                      of a 6-card library can't be confused with one of a 33-card one.
-    //
-    // The walk: a cold switch through every library tab; the SAME-WIDTH pane pairs (media /
-    // overlays / templates all share the narrowed dock width) against the WIDTH-CROSSING pairs
-    // (a reference tab takes the template column's whole width) — the two hypotheses for why a
-    // delegate is re-created, a hidden view or a moved cell; a filter typed into a design
-    // library and into the shows table; and the same pane walk again with everything warm.
     property var layoutProbeSteps: [
         { pane: "shows",     tag: "switch-shows-cold" },
         { pane: "media",     tag: "switch-media-cold" },
@@ -4929,9 +3605,6 @@ ApplicationWindow {
         { pane: "templates", tag: "crosswidth-templates-1" },
         { pane: "table",     tag: "crosswidth-table-2" },
         { pane: "templates", tag: "crosswidth-templates-2" },
-        // The LIBRARY lists' filter, through the app's own entry point (the tab bar's
-        // search: showInLibrary is what its typing beat ends in — every pane reads the
-        // query as searches.<pane>): the shows table (680 rows), then the two design grids.
         { pane: "shows",     query: "",  tag: "shows-filter-open" },
         { pane: "shows",     query: "s", tag: "shows-filter-s" },
         { pane: "shows",     query: "se", tag: "shows-filter-se" },
@@ -4948,38 +3621,6 @@ ApplicationWindow {
         { body: "table",     text: "faith",  search: true, tag: "passage-search-faith" },
         { body: "table",     text: "faith",  search: true, tag: "passage-search-settle" },
         { body: "table",     text: "",       search: true, tag: "passage-search-clear" },
-        // THE SCROLL PHASE (the scroll-cost probe). The steps above measure a SETTLE — a switch,
-        // a filter — one second each. The lag the operator actually reports ("scripture,
-        // templates and the table are sluggish when I scroll") is a DIFFERENT measurement: cost
-        // paid continuously, per frame, while rows enter and leave the viewport. So each step
-        // here scrolls ONE list through its whole content with a linear animation (700 ms, one
-        // and a half screens per second — a fast wheel drag) and the step reports:
-        //
-        //   frames/fps/avgFrameMs/worstFrameMs/jank33/jank50
-        //                    the frame times the app actually produced DURING the scroll, from a
-        //                    FrameAnimation on the interface thread — the same cadence the render
-        //                    thread paints at, so the C++ FrameProbe lines beside these agree with
-        //                    them. The first frame is skipped: its frameTime is the idle gap since
-        //                    the last painted frame, which is not a scroll cost.
-        //   built/dropped    the scrolled list's delegates, as a delta over the scroll window —
-        //                    rows the scroll created and rows it threw away.
-        //   *Evals           the row binding evaluations the same window cost: the reference
-        //                    pane's verse/book/chapter/source rows' own label/text bindings, and
-        //                    cardFitSolves — the design cards' fit solvers (11 bisections and
-        //                    re-measures each) run while cards are built. A list that scrolls with
-        //                    eval deltas of 0 is not paying binding work at all, whatever its
-        //                    frames say; one whose evals scale with the scroll distance is.
-        //   contentPx/viewPx/scrollPx
-        //                    how far the scroll actually went, so a short list (or one that could
-        //                    not scroll) cannot be read as a free one.
-        //
-        // Each scroll step still carries the heartbeat stall numbers: a scroll that parks the
-        // interface thread shows up there at the same time as in the frame times.
-        // Each scroll step names the SNAPSHOT KEYS of the list it scrolls (rows/built/dropped/
-        // evals), so the line reports that list's own numbers as scrollRows/scrollBuilt/
-        // scrollDropped/scrollEvals instead of leaving the reader to map a list name onto the
-        // per-list fields by hand. The deltas are the scroll window's: the line's "previous"
-        // snapshot is taken before the scroll starts (the beat timer runs first).
         { pane: "shows",     scroll: "selfTestShowsList",            rows: "showsRows",    built: "showsBuilt",    dropped: "showsDropped",    evals: "showsEvals",    tag: "scroll-shows-rows" },
         { pane: "table",     scroll: "selfTestVersesList-table",     rows: "refVerseRows", built: "refVerseBuilt", dropped: "refVerseDropped", evals: "refVerseEvals", tag: "scroll-table-verses" },
         { pane: "scripture", scroll: "selfTestVersesList-scripture", rows: "refVerseRows", built: "refVerseBuilt", dropped: "refVerseDropped", evals: "refVerseEvals", tag: "scroll-scripture-verses" },
@@ -5013,10 +3654,6 @@ ApplicationWindow {
                  scripture: SelfTest.findItem("selfTestScripturePane"),
                  shows: SelfTest.findItem("selfTestShowsRows") }
     }
-    // The two reference panes (The Table and Scripture) are the SAME component, so their
-    // counters are summed: a scroll of the sermon list and a scroll of the bible list land in
-    // the same field, and because the scroll phase scrolls ONE named list per step, the delta
-    // that moves is that list's — the line names the list it scrolled.
     function layoutProbeRefSum(prop) {
         const panes = window.layoutProbePanes()
         let total = 0
@@ -5028,9 +3665,6 @@ ApplicationWindow {
         }
         return total
     }
-    // The reference panes' binding-evaluation totals, which live in a plain JS accumulator
-    // (ReferencePane.probeEvals — a QML property written from inside a binding is a reported
-    // binding loop, so the counters are JS fields and are read here rather than notified).
     function layoutProbeRefEvals(key) {
         const panes = window.layoutProbePanes()
         let total = 0
@@ -5103,9 +3737,6 @@ ApplicationWindow {
             refSourceBuilt: window.layoutProbeRefSum("sourceRowBuilds"),
             refSourceDropped: window.layoutProbeRefSum("sourceRowDrops"),
             refSourceEvals: window.layoutProbeRefEvals("source"),
-            // The design cards' own cost (both design grids summed): every text block of every
-            // card that gets built runs an 11-step fit bisection over a hidden twin Text, counted
-            // on the PANE each card reports to (a counter on the card would reset with the card).
             cardFitSolves: Math.max(0, num(p.overlays, "gridFitSolves"))
                            + Math.max(0, num(p.templates, "gridFitSolves"))
         }
@@ -5118,11 +3749,6 @@ ApplicationWindow {
         const list = (name, rowsKey, builtKey, droppedKey) =>
             " " + name + "Rows=" + now[rowsKey]
             + " " + name + "Built=+" + d(builtKey) + " " + name + "Dropped=+" + d(droppedKey)
-        // The reference panes' rows, with the binding evaluations each row cost as well as the
-        // builds and drops: `refVerseEvals` counts evaluations of the verse rows' own text
-        // binding, `refBookEvals`/`refChapterEvals`/`refSourceEvals` the label bindings of the
-        // three sidebar lists. They are printed on EVERY step (a pane switch and a filter are
-        // built and re-evaluated too), and the scroll phase's line is what ties them to frames.
         const ref = (name, rowsKey, builtKey, droppedKey, evalsKey) =>
             " ref" + name + "Rows=" + now[rowsKey]
             + " ref" + name + "Built=+" + d(builtKey) + " ref" + name + "Dropped=+" + d(droppedKey)
@@ -5141,18 +3767,11 @@ ApplicationWindow {
                + ref("Chapter", "refChapterRows", "refChapterBuilt", "refChapterDropped", "refChapterEvals")
                + ref("Source", "refSourceRows", "refSourceBuilt", "refSourceDropped", "refSourceEvals")
                + " cardFitSolves=+" + d("cardFitSolves")
-               // A scroll step that never got going (a name that did not resolve, or a list with
-               // nothing to scroll) is reported here; one that ran writes its own record when the
-               // scroll stops (layoutProbeLogScroll).
                + ((window.layoutProbePendingStep && window.layoutProbePendingStep.scroll !== undefined)
                   ? window.layoutProbeScrollFields() : "")
                + window.layoutProbeScrolledFields(prev, now, window.layoutProbePendingStep)
     }
 
-    // The scrolled list's own deltas (the step names the snapshot keys): what that list built,
-    // threw away and evaluated over the window being reported. Empty on a step that did not
-    // scroll. `prev` is passed in because the two callers measure against different baselines:
-    // the step line against the previous step's end, the scroll's own record against its start.
     function layoutProbeScrolledFields(prev, now, step) {
         if (!step || step.scroll === undefined)
             return ""
@@ -5167,17 +3786,8 @@ ApplicationWindow {
     // ---- the scroll phase's machinery (see the scroll steps in layoutProbeSteps) ----
     // The scrolled list's name, its frame meter's running totals, and where the scroll started.
     property string scrollListName: ""
-    // The STEP that armed this scroll, kept here rather than read off layoutProbePendingStep: a
-    // starved interface thread can delay the beat timer past the tick that advances the walk, and
-    // the record would then be tagged with the NEXT step's list (measured: a books-list record
-    // arriving while the chapters step was already pending).
     property var scrollStep: null
     property bool scrollFound: false
-    // Armed = THIS step's scroll is configured and running; logArmed = its stop is the one whose
-    // record belongs to this step. Two flags rather than one because the animation object is
-    // shared and a starved interface thread overlaps things: the stop of a PREVIOUS run (however
-    // it ended) must not write the current step's record, and only a scroll that actually started
-    // gets a record written on stop.
     property bool scrollArmed: false
     property bool scrollLogArmed: false
     property int scrollTries: 0
@@ -5207,17 +3817,6 @@ ApplicationWindow {
         window.scrollWallMs = 0
     }
 
-    // Scroll ONE list through its whole content, linearly, with the frame meter running. This is
-    // the measurement the phase exists for: the frame times the app produced while rows were
-    // entering and leaving the viewport, not a stopwatch around a positionViewAtIndex jump
-    // (which would time a single relayout and miss the cost of the rows themselves).
-    // Write the record for a scroll that is STILL IN FLIGHT, before anything can stop it
-    // unrecorded. The animation object is shared, so the next step's arming stops it — and that
-    // stop arrives with the next step's arming already in progress, i.e. after this step's
-    // `scrollLogArmed` was cleared, so the stop is swallowed and the scroll is never reported at
-    // all (measured: the scripture passage scroll ran, was armed, started, and wrote nothing).
-    // The window reported is the meter's elapsedTime so far: a partial window on purpose, because
-    // what it measured is what happened.
     function layoutProbeFlushScroll() {
         if (window.scrollStep === null)
             return
@@ -5228,11 +3827,6 @@ ApplicationWindow {
         window.layoutProbeLogScroll()
     }
 
-    // A retrying armer: up to six attempts, 150 ms apart, because a list can be missing from the
-    // tree for a moment right after its pane is switched in (measured: the bible list was not
-    // found at 180 ms and was there a step later). Only after the attempts run out is a missing
-    // name reported as the step's finding — a scroll that could not be set up is worth reporting,
-    // but a race with a pane switch is not.
     function layoutProbeStartScroll() {
         if (window.scrollArmed || window.scrollStep === null)
             return   // this step's scroll is already running, or already reported
@@ -5254,11 +3848,6 @@ ApplicationWindow {
             window.layoutProbeLogScroll()
             return
         }
-        // The shared animation is stopped first: if an earlier step's run is somehow still going,
-        // that stop must not be read as this step's end (scrollLogArmed is false until the line
-        // below), which is exactly how a stale stop once wrote a record with no scroll in it. An
-        // earlier scroll's own record was written when this step was issued (see FlushScroll) —
-        // it cannot be written here, because by now scrollStep IS this step.
         selfTestScrollAnim.stop()
         selfTestScrollAnim.target = item
         selfTestScrollAnim.from = window.scrollStartY
@@ -5268,11 +3857,6 @@ ApplicationWindow {
         selfTestScrollAnim.start()
     }
 
-    // The scroll fields themselves — what the frame meter saw, and how far the list actually
-    // moved. `listFound=0` means the step's objectName did not resolve (a broken name is the one
-    // failure that would otherwise read exactly like a list too short to scroll, so it gets its
-    // own field); `frames=0 listFound=1` with a real contentPx/viewPx means the list was there
-    // and had nothing to scroll.
     function layoutProbeScrollFields() {
         const item = window.scrollFound ? SelfTest.findItem(window.scrollListName) : null
         const contentPx = item ? Math.round(item.contentHeight) : -1
@@ -5281,10 +3865,6 @@ ApplicationWindow {
         const seconds = window.scrollSeconds
         const fps = (seconds > 0 && window.scrollFrames > 0) ? (window.scrollFrames / seconds) : 0
         const avg = window.scrollFrames > 0 ? (window.scrollMs / window.scrollFrames) : 0
-        // The scrolled LIST's own row count where it has one (a view's `count`): the reference
-        // panes' scrollRows fields are the sum of BOTH tabs' rows, so this is the unambiguous
-        // "how long is the list that just scrolled" — -1 for the Flickable + Repeater sidebars,
-        // where contentPx is the only length there is.
         const items = (item && item.count !== undefined) ? item.count : -1
         return " scrollList=" + window.scrollListName
                + " listFound=" + (window.scrollFound ? 1 : 0)
@@ -5299,13 +3879,6 @@ ApplicationWindow {
                + " jank33=" + window.scrollJank33 + " jank50=" + window.scrollJank50
     }
 
-    // The scroll's OWN record, written when the scroll stops rather than at the step timer's next
-    // tick. A step whose list is slow to draw OVERRUNS the 1 s cadence (measured here: the
-    // templates grid's 37 cards took 7.1 s of a 1 s step), and a record taken at the tick would
-    // have been written before the scroll even began — which is exactly what the first cut of this
-    // reported (listFound=0, frames=0, and then the scroll quietly starting afterwards). Its
-    // counter deltas run from the snapshot taken at scroll START, so they are this scroll's
-    // whatever the tick timer did in between.
     function layoutProbeLogScroll() {
         const step = window.scrollStep
         const now = window.layoutProbeSnapshot()
@@ -5316,17 +3889,9 @@ ApplicationWindow {
                          + window.layoutProbeScrolledFields(window.scrollPrevCounts, now, step))
         // The next step's line must measure its own step, not what the scroll left behind.
         window.layoutProbePrev = now
-        // Only disarm the walk if this record IS the step the walk is on. A starved interface
-        // thread delivers a scroll's stop LATE — after the tick has already issued the next step —
-        // and clearing the arming unconditionally cancelled that next step's scroll entirely
-        // (measured: two scripture scrolls wrote no record at all, because their predecessor's
-        // late stop nulled the step they had just armed).
         if (window.layoutProbePendingStep === step)
             window.scrollStep = null
     }
-    // The stall measurement itself: a timer on the interface thread asking for 16 ms. When the
-    // thread is parked in DirectWrite, in a relayout, or in a binding storm, this is late by
-    // exactly how long it was parked. Anything under 8 ms of overshoot is timer noise.
     Timer {
         id: selfTestLayoutHeartbeat
         interval: 16
@@ -5346,18 +3911,6 @@ ApplicationWindow {
                 window.layoutProbeStallMax = lost
         }
     }
-    // The frame meter of the scroll phase: a FrameAnimation fires once per frame the app
-    // renders, on the interface thread, so `frameTime` is the frame the app just produced. It
-    // runs ONLY while a scroll step's animation does, so nothing else in the run pays for it.
-    //
-    // frameTime and elapsedTime are in SECONDS (Qt's own doc: "the time in seconds since the
-    // previous frame update") — converted to ms once, here, and the window comes from the
-    // meter's own elapsedTime rather than a second clock, so frames and duration are the same
-    // measurement.
-    //
-    // The FIRST frame's frameTime is skipped: it is the gap since whatever was last painted, so
-    // on an idle app it reads as seconds of "cost" that no scroll caused. The worst frame
-    // reported is therefore the worst frame the scroll itself produced.
     FrameAnimation {
         id: selfTestScrollMeter
         running: window.scrollMeterOn
@@ -5413,19 +3966,11 @@ ApplicationWindow {
         onTriggered: {
             const pending = window.layoutProbePendingStep
             const wasScroll = pending !== null && pending !== undefined && pending.scroll !== undefined
-            // Report the step that was just issued (its list has settled by now). A scroll step is
-            // NOT reported here: it writes its own record when the scroll stops (or when it turns
-            // out it cannot scroll) — logging it here as well would print it twice, one of them
-            // before the scroll had run.
             if (window.layoutProbePending !== "" && !wasScroll)
                 EngineBridge.log("info", "LayoutProbe",
                                  window.layoutProbeLine(window.layoutProbePending,
                                                         Date.now() - window.layoutProbeT0))
             else if (wasScroll) {
-                // …unless this step never got a record at all: a starved interface thread can hold
-                // the beat timer past the whole step (measured: two scripture scrolls wrote nothing).
-                // One record per scroll step, always — a scroll that could not even start is a
-                // finding, not a gap.
                 if (window.scrollStep !== null && !window.scrollArmed) {
                     EngineBridge.log("info", "LayoutProbe",
                                      window.layoutProbeLine(window.layoutProbePending,
@@ -5473,9 +4018,6 @@ ApplicationWindow {
                     box.text = step.text
             }
             if (step.scroll !== undefined) {
-                // Armed here, started by the beat timer below: the meter's totals are reset with
-                // the step so the record that follows is this scroll's alone. A still-unrecorded
-                // scroll from the previous step is written out first (see FlushScroll).
                 window.layoutProbeFlushScroll()
                 window.scrollListName = step.scroll
                 window.scrollStep = step
@@ -5489,9 +4031,6 @@ ApplicationWindow {
         }
     }
 
-    // The click has to actually LAND before it can be judged (a synthetic click needs the
-    // window focused, which takes a moment), so this waits for the pick it should have
-    // made instead of assuming it arrived.
     Timer {
         id: selfTestPreSplitClicked
         interval: 250
@@ -5500,18 +4039,8 @@ ApplicationWindow {
             const p = SelfTest.findItem("selfTestTablePane")
             const row = window.preSplitOpenRow
             const name = window.preSplitRowName(row)
-            // Click ONCE THE ROW IS ON SCREEN — the reveal above is a scroll, and a
-            // scroll takes a frame or two before the row exists to be clicked. Waiting
-            // for itemVisible (rather than clicking blind) is also what rejects a
-            // RECYCLED row of the same name: the list keeps the rows it has finished
-            // with in a reuse pool, and those are invisible.
             if (!window.preSplitRowReady) {
                 if (!SelfTest.itemVisible(name)) {
-                    // BOUNDED, and it says what it is waiting on: a row that never came on
-                    // screen used to park here for ever, which reads as a hanging run
-                    // instead of a failure. 240 ticks is a minute; the wait itself is the
-                    // reveal being a scroll (a frame or two), so anything long is a
-                    // finding, not patience.
                     const waited = ++window.preSplitWaitTicks
                     if (waited % 40 === 0)
                         console.log("[SELFTEST-PRESPLIT] still waiting for " + name
@@ -5568,22 +4097,12 @@ ApplicationWindow {
     }
 
     // ---- app-wide search ranking (VGR_RANK_TEST=1) --------------------------
-    // User report: "compelling that you recieve" listed Bible verses that carry
-    // only "you that", with the sermon that says "and compelling and compulsory,
-    // that you receive the Holy Ghost" nowhere near the top — while the same
-    // search leads with that sermon for "compelling and compulsory". This
-    // scenario prints the rows the dialog ACTUALLY shows, in order, with how many
-    // of the typed words each one carries, so the ranking is readable from a log
-    // rather than a screenshot.
     readonly property string rankQuery: "compelling that you recieve"
     // The diagnostic's own async search request counter (see the read timer below).
     property int diagSearchToken: 0
     // The hover stage's own state (see rankStartHover): which row the real cursor
     // was parked on, and what its preview read.
     property var rankHover: ({ index: -1, kind: "-", chars: -1 })
-    // The verse-hitting query the hover stage falls back to (see rankStartHover):
-    // the ranked query is a user report's wording, and this machine's run of it
-    // returned sermons only, while the preview under test is the VERSE one.
     readonly property string rankHoverQuery: "holy ghost"
     property bool rankHoverResearched: false
     property int rankHoverTries: 0
@@ -5602,9 +4121,6 @@ ApplicationWindow {
             let hits = 0
             for (const w of words)
                 if (new RegExp("\\b" + w + "\\b").test(hay)) hits++
-            // The rating the row SHOWS ("MATCH n%", the ranking key) next to the
-            // raw count of typed words it carries, so the log shows both the order
-            // and the number behind it — the column must never go UP.
             out.push(r.kind + "(" + hits + "/" + words.length + ") match"
                      + quickSearch.matchRating(r) + "% " + String(r.title).substring(0, 40))
         }
@@ -5628,10 +4144,6 @@ ApplicationWindow {
             const rows = window.rankDescribe(quickSearch.results)
             console.log("[SELFTEST-RANK] query=" + window.rankQuery + " resolved="
                         + quickSearch.highlightSource + " rows=" + quickSearch.results.length)
-            // Diagnostics: is the DIALOG holding the query at all, and does the
-            // SERVICE answer the same query? (rows=0 for every query in an
-            // earlier run made it impossible to tell a ranking bug from a
-            // search that never ran.)
             console.log("[SELFTEST-RANK] diag query='" + quickSearch.query + "' pending="
                         + quickSearch.searchPending + " bibleLoading=" + SearchService.bibleLoading
                         + " bibles=" + SearchService.bibles.length)
@@ -5640,41 +4152,15 @@ ApplicationWindow {
             const first = quickSearch.results.length > 0 ? quickSearch.results[0] : null
             console.log("[SELFTEST-RANK] result top=" + (first ? first.kind : "-")
                         + " topTitle=" + (first ? String(first.title).substring(0, 60) : "-"))
-            // The "does the SERVICE answer the same query" half of the
-            // diagnostic, asked ASYNCHRONOUSLY. This line used to carry
-            // `syncRows=` from a synchronous SearchService.search() inside a
-            // console.log — the whole aggregation (Bible reference, the shows
-            // library, The Table's paragraph scan) on the interface thread, to
-            // print a number. It froze the very thread the scenario exists to
-            // measure. The service's own answer now arrives on resultsReady
-            // (below) and is logged there; the wait is bounded either way, so a
-            // service that never answers still ends the scenario.
-            // The SERVICE half of the diagnostic, and the hover stage, both wait
-            // for their own answers now (see rankDiagCall / rankStartHover).
             window.rankStartHover()
         }
     }
-    // THE HOVER PREVIEW, parked and read without ever leaving the row. The trap this
-    // covers: SearchService.fullVerse is a PUBLISHED read — it answers "" while its
-    // worker read is in flight — and the dialog had no verseCached handler at all,
-    // so a row that took that empty answer showed only its snippet for as long as
-    // the pointer stayed on it (leaving and coming back worked, which is what made
-    // it easy to miss). One REAL cursor move, then two reads with the pointer
-    // unmoved: probe1 is the verdict, probe2 the confirmation.
-    // The first row of the current results that has a LOCATION (a Bible verse or a
-    // sermon paragraph) — `wantBible` restricts it to SearchService's own published
-    // read, which is the one this check is about.
     function rankPickRow(wantBible) {
         const results = quickSearch.results
         for (let i = 0; i < results.length; ++i) {
             const r = results[i]
             const located = (r.kind === "bible" || r.kind === "table")
                              && r.bookId !== undefined && r.bookId !== ""
-            // NOTE: every Bible verse row already carries its own verse text —
-            // readSearch seeds `fullText` from the engine — so a candidate cannot be
-            // narrowed to "one whose preview will be fetched". The published read is
-            // asked on hover regardless, and the seed is what the row shows while its
-            // answer is in flight (see the entry's fullText binding).
             if (located && (!wantBible || r.kind === "bible"))
                 return i
         }
@@ -5683,11 +4169,6 @@ ApplicationWindow {
     function rankStartHover() {
         let pick = window.rankPickRow(true)
         if (pick < 0 && !window.rankHoverResearched) {
-            // The ranked query returned no verse of its own: ASK FOR ONE, because a
-            // sermon paragraph previews through the library while a verse previews
-            // through the published read under test. The ranked query's rows are
-            // already logged and are not logged again, so the harness's ranking
-            // checks still read exactly the rows they did before.
             window.rankHoverResearched = true
             window.rankHoverTries = 0
             quickSearch.query = window.rankHoverQuery
@@ -5700,9 +4181,6 @@ ApplicationWindow {
         window.rankHover = ({ index: pick, kind: pick >= 0 ? String(quickSearch.results[pick].kind) : "-",
                               chars: -1 })
         if (pick < 0) {
-            // Say WHAT came back, not just that nothing did: an empty list (the query
-            // answered nothing), rows with no location, and rows that already carry
-            // their passage are three different reasons for the same silence.
             const rs = quickSearch.results
             let shape = ""
             for (let i = 0; i < rs.length && i < 4; ++i)
@@ -5723,11 +4201,6 @@ ApplicationWindow {
     function rankHoverProbe(tag) {
         const item = SelfTest.findItem("selfTestQuickRow" + window.rankHover.index)
         const text = item ? String(item.fullText ?? "") : ""
-        // Did the hover LAND? The row says so the same way the UI does (its own
-        // handler moves the dialog's selection), and a preview read off a row the
-        // pointer is not on proves nothing about the re-ask — it would just be the
-        // row's seed. Read here, at probe time, not right after the move: the OS
-        // hover event is delivered a beat later.
         const landed = quickSearch.current === window.rankHover.index
         // The row's own seed, so the log says whether the preview came from the
         // published read or from the passage the search already handed the row.
@@ -5743,11 +4216,6 @@ ApplicationWindow {
         SearchService.searchAsync(window.rankQuery, 4, window.diagSearchToken, false)
         selfTestRankDiagWait.restart()
     }
-    // Wait for the fallback query's ROWS rather than for a clock: refresh() clears
-    // the list and sets searchPending, and a pick taken while it is empty (or while
-    // the old rows are still up) would either find nothing or park the cursor on a
-    // delegate the arriving answer is about to rebuild — which re-asks the preview
-    // by itself and would let this check pass without the re-ask it exists for.
     Timer {
         id: selfTestRankHoverQuery
         interval: 1000
@@ -5760,9 +4228,6 @@ ApplicationWindow {
                 window.rankStartHover()
                 return
             }
-            // Gave up waiting (a Bible still loading at 45 s is the likely reason):
-            // say so and let the scenario finish, so the harness reports a missing
-            // row rather than a timeout with no line explaining it.
             selfTestRankHoverQuery.stop()
             console.log("[SELFTEST-RANK] hover none — '" + window.rankHoverQuery
                         + "' returned no rows within " + window.rankHoverTries + "s")
@@ -5807,25 +4272,6 @@ ApplicationWindow {
     }
 
     // ---- The show document JOBS: save / open / peek / timer / copy ----------
-    // (VGR_SHOWIO_TEST=1 only.) ShowService's document reads and writes are QUEUED
-    // (see its header): each answers with a TOKEN and reports its verdict later, as
-    // documentJobFinished. Neither compilation nor a clean boot can tell that
-    // contract from a broken one — a save that never writes its file and a save
-    // whose verdict never arrives both look exactly like nothing happening. So this
-    // drives the whole chain with REAL files and prints every verdict:
-    //   save   the working show to a file, then read back dirty/file/slides;
-    //   open   that file back through the call the show screen uses;
-    //   peek   it the way the centre page does — a miss must answer `pending`, the
-    //          answer must land on the published revision, and a WRITE to it must
-    //          drop that answer so the next read is the new file (the timer);
-    //   timer  apply it, then read the peek again and expect the timer in it;
-    //   copy   the recovery copy, the one write nobody asked for.
-    // The probe's NAME carries a right single quote on purpose: a real library
-    // is full of them ("WE’LL TALK IT OVER"), and the Windows filesystem PAL
-    // used to hand such a name to the OS as narrow bytes — the save wrote a
-    // mangled "WEâ€™LL…" and the publishing rename then failed, so every
-    // non-ASCII import silently stayed behind as a .vgr.tmp. Saving, opening
-    // and peeking a quoted name here keeps that whole route honest.
     property var showIo: ({ savePath: "showio_probe\u2019s.vgr", copyPath: "showio_probe\u2019s_recovery.vgr",
                             saveToken: 0, openToken: 0, timerToken: 0, copyToken: 0,
                             saveOk: false, openOk: false, peekOk: false, timerSeen: false,
@@ -5864,9 +4310,6 @@ ApplicationWindow {
     }
     function showIoTimerLanded(ok) {
         window.showIoLog("timer", "ok=" + ok)
-        // The timer edit is a WRITE to the show: the published peek of it must be
-        // gone, so this read is either a fresh miss or the new answer — never the
-        // old one.
         const after = ShowService.peekShow(window.showIo.savePath)
         window.showIo.timerPeekPending = (after.pending === true)
         window.showIoLog("peek3", "ok=" + after.ok + " pending=" + (after.pending === true))
@@ -5885,17 +4328,6 @@ ApplicationWindow {
         window.showIoLog("result", "save=" + window.showIo.saveOk + " open=" + window.showIo.openOk
                          + " peek=" + window.showIo.peekOk + " timer=" + window.showIo.timerSeen
                          + " timerPeekPending=" + window.showIo.timerPeekPending + " copy=" + ok)
-        // Quit from its OWN tick, never from inside the job-verdict handler.
-        // MEASURED, not assumed: with `SelfTest.quit()` called straight from this
-        // handler the interface thread's 5 s heartbeat (engine.log,
-        // `UI event-loop heartbeat at … ms`) kept ticking for the ~80 s the probe
-        // watched after the verdict — so the loop never returned — while the same
-        // call from this timer returns it within a second (engine.log's
-        // `app event loop returned with code 0`). The verdict is delivered on a
-        // QUEUED call from the engine worker, and a quit issued inside that
-        // delivery is what does not take; the hop is the shape every other
-        // scenario here already quits through, so nothing new is being asked of
-        // the app for this one.
         selfTestShowIoQuit.restart()
     }
     Connections {
@@ -5924,22 +4356,10 @@ ApplicationWindow {
     Timer { id: selfTestShowIoQuit; interval: 500; onTriggered: SelfTest.quit() }
 
     // ---- The QUIT path: unsaved show + a live output + the window close ------
-    // (VGR_QUIT_TEST=1 only.) Closing the window is the one user path that ends the
-    // process, and no build can see it: the unsaved-changes guard has to REFUSE the
-    // first close (or the user loses the show), the answer has to close it for real
-    // (or the app never quits), the save that gates that close is a QUEUED document
-    // job whose verdict decides whether the window may go, and an output is LIVE
-    // while the teardown runs — the case every "it hangs when I close it" report is
-    // about. This drives that chain and prints each step; the harness
-    // (tools/selftest/run_quit_test.sh) reads these lines, the engine's own `Exit`
-    // timings for each aboutToQuit step, and how long the process then took to go.
     property var quitProbe: ({ seedToken: 0, seeded: false, armed: false, refused: false,
                                dialogUp: false, saveClicked: false, live: false })
     function quitLog(step, text) { console.log("[SELFTEST-QUIT] step=" + step + " " + text) }
     function quitBegin() {
-        // A show with a FILE to begin with: the close-time save must not need the
-        // native save-path picker (a modal OS dialog cannot be driven from here),
-        // and being dirty again afterwards is what makes the guard speak.
         ShowService.newShowDocument("Quit probe")
         ShowService.addSlide({ title: "Saved one" })
         ShowService.addSlide({ title: "Saved two" })
@@ -5969,27 +4389,13 @@ ApplicationWindow {
         selfTestQuitAnswer.restart()
     }
     function quitAnswer() {
-        // The dialog FADES IN (ModalCard's opacity behavior, 130 ms), and a card at
-        // opacity 0 is not a visible item — so the button probe belongs here, after
-        // the fade, not in the line that closed the window. MEASURED: probing it
-        // there read `saveButton=false` on a dialog that was up and clickable.
         window.quitProbe.saveClicked = SelfTest.itemVisible("unsavedChangesDialog_save")
         window.quitLog("answer", "how=click saveButton=" + window.quitProbe.saveClicked
                        + " saving=" + unsavedDialog.saving)
-        // Answer it the way the user does — a real synthetic click on the dialog's
-        // Save. Logged BEFORE the click, deliberately: when the click lands, the
-        // verdict that follows closes the window and the app is gone before any
-        // later step could report (measured: the next timer never fired), so the
-        // only safe place for this scenario's "I answered" evidence is here.
         SelfTest.clickItem("unsavedChangesDialog_save")
         selfTestQuitAnswered.restart()
     }
     function quitAnswered() {
-        // A synthetic click needs the window to be foreground and can simply not
-        // land (run_rank_test.sh's hover check has the same limitation and says so
-        // rather than pretending). If the dialog is still up, answer through the one
-        // function its Save button runs — and SAY which way it was answered: a
-        // fallback taken silently is how a button that does nothing reads as a pass.
         if (unsavedDialog.shown) {
             window.quitLog("fallback", "how=confirm (the click did not land) saving=" + unsavedDialog.saving)
             unsavedDialog.confirm()
@@ -5999,9 +4405,6 @@ ApplicationWindow {
         window.quitLog("closed", "the dialog is gone — the answer's save landed and closed the window")
     }
     function quitConfirmed() {
-        // Only reached when the click did not land and the dialog answered instead:
-        // the queued save's verdict is what closes the window, so this says whether
-        // that happened rather than assuming it.
         window.quitLog("after", "dialogVisible=" + unsavedDialog.shown
                        + " closeConfirmed=" + window.closeConfirmed + " visible=" + window.visible)
     }
@@ -6042,48 +4445,8 @@ ApplicationWindow {
     }
 
     // ---- GO LIVE latency as the load grows -----------------------------------
-    // (VGR_LIVELAT_TEST=1 only.) "Going live takes a few seconds, and it gets worse
-    // as the service goes on" is a latency report with a SHAPE: what matters is not
-    // one go-live but the trend as slides and the per-slide blocks pile up. So this
-    // drives a LADDER of live sessions, each bigger than the last, and measures each
-    // one the way the operator pays for it:
-    //
-    //   first frame  GO LIVE -> the live preview's first new frame (that is the
-    //                moment something is on the monitor; the LOOP's own publish is
-    //                what is read, so this is the machine's time, not a timer's)
-    //   cadence      frames the live loop DELIVERS per second while the on-air
-    //                slide is being advanced on a fixed beat
-    //
-    // Three dimensions grow, because all three cost the loop per frame: SLIDES and
-    // the per-slide LAYERS (SceneBuilder composites every block), and the OUTPUTS
-    // (the loop renders one extra pass per enabled roster row — a rung asking for
-    // more enabled screens than the roster has adds them, and the ladder puts the
-    // operator's roster back when it is done).
-    //
-    // The measure has to be read from the engine, not from the log: the loop only
-    // rasterizes when the on-air scene CHANGES (a static verse re-rendered at 60Hz
-    // burned a core — see LiveOutputController's change-driven note), a static scene
-    // is served by a 1Hz heartbeat, and the log's own frame line is emitted on state
-    // CHANGE rather than per frame. That is MEASURED, not assumed: driving the same
-    // ladder with a 3 s beat delivered 7-8 frames per 8 s window — the heartbeat,
-    // with the two changes it was asked for buried in it — while a 150 ms beat
-    // delivered the same count, i.e. the iterations the loop actually completed.
-    // Hence the window's own mode (see liveLatTakeOverlay): an OVERLAY on air
-    // bypasses both the skip and the heartbeat, so the loop rasterizes every
-    // iteration it can and the delivered rate IS the loop's throughput. The
-    // slide-advance fallback asks for changes far faster than the loop can serve, so
-    // the frames that come back are again the iterations it completed. Either way
-    // the number is the rate that falls when a frame costs more to build (more
-    // blocks to composite, more outputs to render).
-    //
-    // run_live_latency_test.sh reads the `measured` lines below and fails when the
-    // worst first frame or the lowest cadence crosses its budget.
     property var liveLat: ({ step: 0, firstFrameMs: -1 })
     function liveLatLog(step, text) { console.log("[SELFTEST-LIVELAT] step=" + step + " " + text) }
-    // The knobs sit in main.cpp beside the rest of the scenario switches:
-    // VGR_LIVELAT_LADDER ("slides:blocks:outputs," repeats), VGR_LIVELAT_DRIVE_MS
-    // (how often a change is asked for while measuring), VGR_LIVELAT_WINDOW_MS (how
-    // long each rung is measured for).
     function liveLatDriveMs() {
         const v = typeof SelfTestLiveLatDriveMs !== "undefined"
                 ? parseInt(String(SelfTestLiveLatDriveMs), 10) : 0
@@ -6115,15 +4478,6 @@ ApplicationWindow {
                                     { slides: 20, blocks: 5, outputs: 4 } ]
     }
     // ---- the OUTPUT dimension: the roster is the operator's, not this run's -----
-    // What an output COSTS the loop is ONE MORE RENDER PASS PER FRAME, and the
-    // engine only renders a pass for an ENABLED, STYLED row
-    // (OutputListModel::pushEngineStyle pushes exactly those). So the count that
-    // matters is enabled+styled, and a row is added here by DUPLICATING a styled
-    // one — the copy carries that style and starts enabled and off air (no window
-    // opens, nothing is sent). This is not a detail: the first version of this
-    // scenario added plain rows, which are styled with nothing, so the "more
-    // outputs" rung measured the identical work as the rung below it and its
-    // flat result would have read as "outputs are free".
     function liveLatStyledRows() {
         let n = 0
         for (let i = 0; i < OutputListModel.rowCount(); ++i) {
@@ -6147,10 +4501,6 @@ ApplicationWindow {
             st.baseRows = OutputListModel.rowCount()
             st.added = []
         }
-        // Drop this run's own rows FIRST when the rung asks for fewer than a
-        // previous rung left behind: `outputs=` is then the rung's own number
-        // rather than an accumulation (a two-rung probe with the outputs rung
-        // first reported 4 for both, which would have hidden the comparison).
         while (st.added.length > 0 && window.liveLatStyledRows() > want)
             window.liveLatDropAdded()
         while (want > 1 && window.liveLatStyledRows() < want && st.added.length < 8) {
@@ -6158,9 +4508,6 @@ ApplicationWindow {
             if (src < 0)
                 break   // no styled row to copy: an added row would render nothing
             OutputListModel.duplicateOutput(src)
-            // The copy lands right after its source (not at the end), so it is named
-            // here: that name is what this run owns and what it drops by, and it can
-            // never collide with a row the operator made.
             const name = "LiveLat out " + (st.added.length + 1)
             OutputListModel.renameOutput(src + 1, name)
             st.added.push(name)
@@ -6183,10 +4530,6 @@ ApplicationWindow {
         const st = window.liveLat
         if (st.baseRows === undefined)
             return
-        // THE ROSTER PERSISTS (OutputListModel::saveRoster writes the store), so a
-        // selftest that grows it has to shrink it back: exactly the rows this run
-        // added come out, and the operator's own roster is what the next launch
-        // reads.
         while (st.added.length > 0)
             window.liveLatDropAdded()
         while (OutputListModel.rowCount() > st.baseRows)   // belt and braces
@@ -6196,10 +4539,6 @@ ApplicationWindow {
     }
     function liveLatRun() {
         const st = window.liveLat
-        // The engine has to be up before a document can be built or put on air:
-        // wait for the boot rather than guessing a delay (this scenario is the one
-        // that runs LAST in a harness, but a cold start can still be slower than
-        // any fixed interval).
         if (!EngineBridge.booted && st.step === 0) {
             window.liveLatLog("wait", "the engine has not finished booting")
             selfTestLiveLat.restart()
@@ -6222,10 +4561,6 @@ ApplicationWindow {
         }
         const rung = rungs[st.step]
         st.step++
-        // A fresh document at this rung's size, and the BLOCKS matter: they are
-        // the per-frame work (SceneBuilder composites every one of them), so the
-        // ladder grows the thing the render loop pays for, not just the slide
-        // count.
         ShowService.newShowDocument("LiveLat " + rung.slides)
         for (let i = 0; i < rung.slides; ++i) {
             const slideId = ShowService.addSlide({ title: "Lat " + (i + 1) })
@@ -6239,10 +4574,6 @@ ApplicationWindow {
         st.blocks = rung.slides * rung.blocks
         const liveOuts = window.liveLatEnsureOutputs(rung.outputs)
         st.outputs = liveOuts
-        // A rung that never gets a frame is reported as measured (firstFrameMs=-1),
-        // not skipped: "it never went live" is the worst case of the number this
-        // harness polices, and a rung that silently disappeared would read as a
-        // pass with one fewer line.
         st.timeoutMs = 5000 + rung.slides * 500
         st.firstFrameMs = -1
         st.frames = 0
@@ -6279,16 +4610,6 @@ ApplicationWindow {
             window.liveLatStop()
         }
     }
-    // THE WINDOW NEEDS THE LOOP TO HAVE WORK, and an overlay does that perfectly:
-    // the live loop's change-driven skip and its 1Hz heartbeat are BOTH bypassed
-    // while the compositor has live content (a taken input, media on air, or an
-    // active overlay — see LiveOutputController::RenderOnce), so with one overlay on
-    // air the loop rasterizes every iteration it can and the delivered rate IS the
-    // loop's throughput. The slide-advance driver below only reaches the same thing
-    // indirectly (it asks for changes faster than the loop serves them), so it is
-    // the fallback for a machine whose overlay library is empty. Which one was used
-    // is printed (`mode=`) and travels with the numbers, because the two do not
-    // mean quite the same thing.
     function liveLatTakeOverlay() {
         const designs = OverlayLibraryService.designs()
         for (let i = 0; i < designs.length; ++i) {
@@ -6365,16 +4686,6 @@ ApplicationWindow {
     Timer { id: selfTestLiveLatQuit; interval: 500; onTriggered: SelfTest.quit() }
 
     // ---- The Scripture pane's columns, as the app really fills them -----------
-    // (VGR_SCRIPTURE_TEST=1 only.) User report, looking at the Scripture tab: the
-    // Bibles column lists the installed Bible, and the books / chapters / verses
-    // columns stay EMPTY — with no error anywhere, because an empty column is the
-    // same pixels whether the outline read is still in flight, was declined, or
-    // came back empty. Those three are very different faults, so this prints the
-    // pane's own state AND what the service answers for the same Bible id, twice:
-    // once as the tab comes up, and once after the pane re-asks exactly the way a
-    // tab switch makes it (syncSources). A pane that shows books on the SECOND
-    // sample but not the first is a notify that never reached it; one that shows
-    // none on either is the read itself.
     function scriptureProbe(tag) {
         const p = SelfTest.findItem("selfTestScripturePane")
         if (!p) {
@@ -6422,27 +4733,10 @@ ApplicationWindow {
     }
 
     // ---- PICK LATENCY: a verse pick, measured to the tile ----------------------
-    // (VGR_PICKLAT_TEST=1 only.) "when I click on scripture it takes too long
-    // before it shows in the monitor preview" is a claim about milliseconds, so
-    // this measures them: it opens the Scripture tab exactly as the tab click does,
-    // then takes a verse through the pane's OWN staging gesture (stageOutputPart —
-    // the body of the row's double-click) and prints
-    //   syncMs  how long that call blocked the interface thread, and
-    //   tileMs  when the monitor tile's composition first held the verse.
-    // The tile is polled every 8 ms, and a poll cannot run while the interface
-    // thread is inside the pick, so tileMs always includes syncMs. A tile that
-    // fills in at ~syncMs is the pick's own cost; one that fills in much later is
-    // the compose/binding behind it.
     property int plNumber: -1
     property int plPart: 0
     property string plNeed: ""
-    // REAL, not int: Date.now() is twelve digits and a QML `int` is 32-bit, so this
-    // used to arrive truncated and the poll's own elapsed check fired on the first
-    // tick ("no-tile after 1795296329785 ms").
     property real plT0: 0
-    // WHERE THE VERSE LANDED: "tile" when the monitor tile's own composition holds
-    // it, "service" when only the staged composition the tile binds to does. The
-    // distinction matters — a tile that never recomposed is the binding, not the pick.
     function plLandedOn(need) {
         const tile = SelfTest.findItem("selfTestMonitorTile0")
         if (tile && window.lsCompText(tile.onAirSlide).indexOf(need) >= 0)
@@ -6543,23 +4837,7 @@ ApplicationWindow {
     }
 
     // ---- The Table pane's own search box: highlight + hit placement -----------
-    // (VGR_PANEHL_TEST=1 only.) User report, looking at the pane's result rows:
-    // "the highlighter is not highlighting compelling" and "i expect the highlighted
-    // text to show well like in the centre not at the extreme so user can see the
-    // hits well". The rows are ONE line wide, so the engine's 220-character snippet
-    // (anchored 60 before the match) could put the matched words past the visible
-    // edge. This drives the pane's REAL box — the text is SET on the field, whose
-    // own debounce runs the search, exactly as typing does — and prints every row
-    // as the pane renders it: the centred text with the wrapped words marked
-    // «like this», where the first hit sits in the row, and (row 0) the markup the
-    // row Text actually carries.
     readonly property string paneQuery: "compelling that"
-    // The same query with a misspelled word in it: this box must offer the typo
-    // fixer's correction while results are on screen (user call: "the typo fixer
-    // should be there" in this box as well). Pass two of the scenario. The typo
-    // sits on the FIRST word on purpose — a trailing half-typed word is a prefix
-    // by design (see ResolveTermsWithSplits' typingTail), so only an earlier word
-    // comes back corrected.
     readonly property string paneTypoQuery: "complling that"
     function paneMark(rendered) {
         return String(rendered ?? "")
@@ -6584,10 +4862,6 @@ ApplicationWindow {
         }
         return missing
     }
-    // One pass, exactly as the pane renders it: every row's centred text with the
-    // wrapped words marked «like this», where its first hit sits, what came back
-    // unlit — and, from the row Text ITSELF (not a re-computation), the markup the
-    // user is actually looking at.
     function panePass(p, query, rowWidth) {
         const rows = p.searchResults
         const words = window.paneWords(query)
@@ -6633,10 +4907,6 @@ ApplicationWindow {
         running: typeof SelfTestPaneHighlight !== "undefined" && SelfTestPaneHighlight
         interval: 45000   // boot + the background sermon indexing
         onTriggered: {
-            // The dock has to be SHOWING this pane for the pane's own surfaces — the hint
-            // line this scenario asserts on — to be on screen at all: the launch view is
-            // whatever the session left behind, so the pane is shown rather than assumed
-            // (the posture the presplit and layout-probe scenarios state in their own notes).
             window.currentView = "show"
             showScreen.showInLibrary("table", "")
             const p = SelfTest.findItem("selfTestTablePane")
@@ -6670,11 +4940,6 @@ ApplicationWindow {
             console.log("[SELFTEST-PANEHL] pass1 query='" + window.paneQuery + "' rowWidth="
                         + Math.round(rowWidth) + " hint='" + window.paneHint(p) + "'")
             const pass1 = window.panePass(p, window.paneQuery, rowWidth)
-            // The pixels too: the pane as it renders pass one (rows + the gold
-            // hint line), so the fix can be LOOKED at, not only parsed — plus the
-            // first row's own Text, the one artifact a pixel probe can judge
-            // without guessing which part of the pane it is looking at
-            // (tools/selftest/gold_pixels.mjs reads it).
             SelfTest.grab("selfTestTablePane", "panehl_pass1.png")
             SelfTest.grab("selfTestPaneHitSnippet", "panehl_row0.png")
             selfTestPaneHighlightTypo.pass1 = pass1
@@ -6709,10 +4974,6 @@ ApplicationWindow {
             const probe = SelfTest.findItem("selfTestPaneHitSnippet")
             const rowWidth = probe && probe.width > 0 ? probe.width : 700
             const hint = window.paneHint(p)
-            // The hint LINE on screen, not just its payload: the user's doubt was
-            // whether the typo fixer is in THIS box at all.
-            // THIS pane's hint, by its own name: the name is per-tab because both tabs' hints
-            // are alive at once, and the bare name read the other tab's (empty) line.
             const hintItem = SelfTest.findItem("selfTestPaneSearchHint-table")
             const hintShown = hintItem ? (hintItem.visible && hintItem.text !== "") : false
             console.log("[SELFTEST-PANEHL] pass2 query='" + window.paneTypoQuery
@@ -6743,12 +5004,6 @@ ApplicationWindow {
     }
 
     // ---- The tab search's SEED: does the open sermon fill the box, and do the
-    // digits typed after it move the pane? (VGR_SEED_TEST=1 only.) ---------------
-    // The operator's flow, driven end to end: The Table opens a sermon, the dock's
-    // search box holds that sermon's citation line ("55-0117 - How The Angel… "),
-    // they focus it and type 56 — the pane must be on ¶56. Every step is printed
-    // with the box's own state (text / hint / seed) so a step that does not happen
-    // is visible as its own line, not inferred from the final position.
     function seedState(tag, paneName) {
         const box = SelfTest.findItem("selfTestSearchBox")
         const field = SelfTest.findItem("selfTestSearchInput")
@@ -6845,14 +5100,6 @@ ApplicationWindow {
             selfTestSeedClick.restart()
         }
     }
-    // THE TWO CLICKS, one row shape apart (user call: "double click is what should
-    // push it to monitor preview, single click is preview pane"). A continuation row
-    // is the case that broke it — its single click used to stage — so the row picked
-    // here is the first divided piece on screen. What a click and a double click DO is
-    // called directly (selectSubpart / stageSubpart), because synthesizing a real
-    // double click on an unnamed row delegate is a coordinate guess; the wiring between
-    // them and the pointer is DragSource's activated/opened, the same pair every other
-    // list in the app uses.
     function seedStagedTitle() {
         const staged = LiveOutputService.stagedSlide
         return staged && staged.title !== undefined ? String(staged.title) : ""
@@ -6993,11 +5240,6 @@ ApplicationWindow {
             selfTestSeedWalk.restart()
         }
     }
-    // THE SEARCH LIST FROM THE KEYBOARD (user call: "if press the down or up button it
-    // should search result list and show their paragraph preview the the <> should
-    // move to their paragraph preview", + "the return search should be 56-0101 - Why
-    // are people ... so it consistent with others"). Back on The Table: "56-" typed,
-    // one Down (the pane's walk), then Return (the result as the box's line).
     Timer {
         id: selfTestSeedWalk
         interval: 1200
@@ -7016,10 +5258,6 @@ ApplicationWindow {
                 SelfTest.quit()
                 return
             }
-            // The way a keystroke reaches the pane's own list: the box asks the
-            // provider, which fills citationMatches (The Table renders those IN the
-            // pane). Then the box's own Up/Down signal is emitted — the same signal
-            // the keys carry.
             box.resetText("56-")
             p.paneSuggestions("56-")
             box.stepMatch(1)
@@ -7093,26 +5331,6 @@ ApplicationWindow {
     }
 
     // ---- Do the pane's result lists build a VIEWPORT, not the whole model? ----
-    // (VGR_PANEROWS_TEST=1 only.) The user's ask, right after the paragraph list
-    // was virtualized: "Make the reference pane's search-results list virtualized
-    // as well, since a two-character query can still build about a thousand rows
-    // at once." A row COUNT cannot answer that — a long list is fine, building it
-    // in one go is not — so this scenario measures the two things only a windowed
-    // list does, for each of the three lists the pane owns (the tab search's
-    // citation matches, the pill search's hits, and the hover peek's sermon
-    // paragraphs):
-    //
-    //   * with the rows on screen, `built` stays a viewport's worth (built << rows), and
-    //   * scrolling to the END materializes the LAST row — a windowed list must, or
-    //     the tail of a 641-match query would be unreachable.
-    //
-    // It drives the REAL path: the two-character query is TYPED into the tab bar's
-    // box (the provider runs per keystroke, as it does under a user's fingers), the
-    // hover is the pane's own peekSuggestion(), and the pill's field is set the way
-    // the pane-highlight scenario sets it. Library-independent: each list's two
-    // numbers are read off its own counters and compared to each other, so a small
-    // library still decides it — a list too short for the question to mean anything
-    // says so instead of passing.
     readonly property string paneRowsQuery: "th"   // the user's two characters
     property var paneRowsFacts: ({})
 
@@ -7139,18 +5357,12 @@ ApplicationWindow {
         if (list && facts && facts.rows > 0)
             list.positionViewAtIndex(facts.rows - 1, ListView.End)
     }
-    // The LAST row's delegate, by the name its delegate carries — itemVisible and
-    // not "exists", because a RECYCLED row of the same name is one the user cannot
-    // see (the pre-split scenario learned this the hard way).
     function paneRowsLastRow(which, rows) {
         const name = which === "match" ? "selfTestMatchRow_" + (rows - 1)
                    : which === "hit" ? "selfTestHitRow_" + (rows - 1)
                                       : "selfTestPeekRow_" + (rows - 1)
         return SelfTest.itemVisible(name)
     }
-    // One line per list per phase: `kept` = as the list stands when the query's
-    // rows are on screen; `scrolled` = after the scroll to its last row. The runner
-    // reads these, so the field names are the contract.
     function paneRowsLog(which, phase) {
         const now = window.paneRowsRead(which)
         const facts = window.paneRowsFacts
@@ -7300,24 +5512,6 @@ ApplicationWindow {
     }
 
     // ---- Is the cursor still SHOWN once the app is scaled? --------------------
-    // (VGR_CURSORSCALE_TEST=1 only.) User report: "for the app rescaling the
-    // cursor doesn't show as well". Every layer here is drawn at its 1440x900
-    // design size and scaled by window.uiScale, and this codebase has already
-    // recorded that per-MouseArea cursorShape stops applying under a scaled
-    // ancestor (see AppCursorCatcher.qml) — which would make the hand cursor on
-    // every plain-cursorShape control (AppButton, footers, scrollbars) vanish on
-    // any display that is not exactly the design size. The app's own stack can
-    // be right while the OS cursor stays an arrow, so this scenario PARKS the
-    // pointer on a plain-cursorShape button and says where it parked; the shell
-    // runner reads the LIVE OS cursor with Win32 (cursor_shape.ps1) at uiScale 1
-    // and again scaled — that pair is the whole question.
-    //
-    // Three parks: a plain-cursorShape button (AppButton's pointing hand) at
-    // uiScale 1 and again with the window 20% over the design size — the pair
-    // that answers whether the pointing hand survives a scaled ancestor — and
-    // then the WINDOW's own edge, where resizing the app starts and
-    // WindowResizeHandles must show a size arrow (PositionHoverArea's cursor,
-    // the mechanism every other cursor in the app uses).
     property string cursorScalePark: ""
     property string cursorFrameEdge: ""
     property string cursorFrameCorner: ""
@@ -7347,10 +5541,6 @@ ApplicationWindow {
                 selfTestCursorScaleNext.restart()
                 return
             }
-            // Park and read in ONE call: the shape the OS shows while the
-            // pointer sits on this button is the whole question, and reading
-            // it from here is what keeps the answer free of the human at the
-            // keyboard (a separate process reading the live cursor races them).
             const shape = SelfTest.cursorAt(c.x, c.y)
             window.cursorScalePark = "A uiScale=" + window.uiScale.toFixed(3)
                         + " cursor=" + shape
@@ -7409,32 +5599,14 @@ ApplicationWindow {
             selfTestCursorScaleNext.restart()
         }
     }
-    // Phase C: the window's OWN frame. WindowResizeHandles puts an 8px grip on
-    // each edge and corner (unscaled on purpose — it IS the frame), and the size
-    // arrow there comes from PositionHoverArea, the pointer-position mechanism
-    // every other cursor in the app uses. "the cursor doesn't show when
-    // rescaling the app" is exactly this strip: if the arrow is missing here,
-    // the operator gets an arrow at the border of a frameless window and has no
-    // cue that the edge can be dragged. Both reads are in one tick, like the
-    // button parks. `windowed=` is printed next to them because the grips are
-    // inert on a maximized window, which would make a missing arrow correct.
     Timer {
         id: selfTestCursorScaleC
         interval: 2200
         onTriggered: {
-            // The Settings card was opened for the button parks and its scrim
-            // covers the whole window — including the frame grips, which are
-            // SUPPOSED to lose the pointer to an open modal. Close it first, or
-            // this phase measures the scrim instead of the frame.
             settingsScrim.visible = false
             const atEdge = { x: 3, y: Math.round(window.height / 2) }
             const atCorner = { x: 3, y: 3 }
             window.cursorFrameEdge = SelfTest.cursorAt(atEdge.x, atEdge.y)
-            // ...and again one pixel further along the same grip. The pair tells
-            // "the shape never applies" apart from "the shape applies one mouse
-            // event late" — a QML cursor claim made WHILE the move is being
-            // processed can only reach the OS on the NEXT move, which is exactly
-            // how a size arrow ends up flashing instead of showing.
             const edgeAgain = SelfTest.cursorAt(atEdge.x, atEdge.y + 1)
             console.log("[SELFTEST-CURSORSCALE] frame edge first=" + window.cursorFrameEdge
                         + " next=" + edgeAgain)
@@ -7463,19 +5635,6 @@ ApplicationWindow {
     }
 
     // ---- The edit canvas: the adjustment points and their cursors ------------
-    // (VGR_CANVAS_TEST=1 only.) User report, looking at a text item framed to the
-    // canvas edge: "the adjustment point of edit are not in the edit canvas", "the
-    // cursor doesn't change when moving or resize but it does when in text mode ...
-    // i meant arrow point beams that show when resize the item", and "for the app
-    // rescaling the cursor doesn't show as well".
-    //
-    // One text item is framed to the canvas edge (the shape in the report), then
-    // the REAL cursor is walked onto every adjustment point: each dot's rectangle
-    // must lie inside the canvas (mCanvas clips — a dot past its edge is not on
-    // screen and cannot be grabbed) and the cursor must take that handle's own
-    // size arrow. The body is probed too (the I-beam a text item shows, then the
-    // grab a press must take), and the whole sweep is repeated after the WINDOW
-    // is resized, since every layer re-scales with it.
     property var canvasProbe: []
     property int canvasIndex: 0
     property bool canvasReading: false
@@ -7562,9 +5721,6 @@ ApplicationWindow {
         console.log("[SELFTEST-CANVAS] pass=" + phase + " " + verdict)
         if (phase === "interior") {
             window.canvasInterior = verdict
-            // The app-scale pass: the window resize re-scales every layer, and
-            // the adjustment points have to survive it (dots on the canvas, the
-            // same arrows under the pointer).
             const before = window.width
             window.width = window.width > 1100 ? window.width - 160 : window.width + 160
             console.log("[SELFTEST-CANVAS] rescaling window " + Math.round(before) + " -> "
@@ -7583,12 +5739,6 @@ ApplicationWindow {
         running: typeof SelfTestCanvasCursor !== "undefined" && SelfTestCanvasCursor
         interval: 24000   // boot: QML load (~15s) + the show/slide models
         onTriggered: {
-            // Take the foreground for the sweep: every probe below reads hover
-            // state, and hover only reaches this window while it is the one
-            // under the pointer. Measured with the terminal in front: EVERY
-            // handle read -1 (no claim at all, not a wrong shape), which reads
-            // like a total regression instead of a harness that lost the
-            // foreground.
             SelfTest.activate()
             window.currentView = "edit"
             editScreen.newShow()
@@ -7601,9 +5751,6 @@ ApplicationWindow {
                 return
             }
             window.canvasItemName = "canvasItem_" + item.key
-            // The stack's own trace in the log: a shape that does not change on
-            // release is answered by "who pushed what, when", not by the shape
-            // alone (see AppCursor.debug).
             AppCursor.debug = true
             // The reported shape: the item framed to the canvas edge, where the
             // dots used to be clipped away (item and canvas both 754x428).
@@ -7693,21 +5840,6 @@ ApplicationWindow {
     }
 
     // ---- Outputs · Edit -> Save (VGR_OUTSAVE_TEST=1 only) --------------------
-    // User report: "the moment i add styles that is when the save button doesn't
-    // respond" — Settings · Outputs · Edit stayed open over the page with a
-    // "Style not saved" notice, so the Save click read as dead. Save writes the
-    // row the dialog was OPENED for, and the only ways it can end without
-    // closing are a row that moved and a style id the roster no longer knows —
-    // both silent apart from that notice. So this scenario walks the operator's
-    // own steps in the running app: add a style, open Settings · Outputs, open
-    // the first output's Edit dialog, press the REAL Save button, and print what
-    // the app did with it. Two passes, because the screenshot was the second
-    // shape:
-    //   A) the output ALREADY wears a style — the pick from an earlier session
-    //      ("New Style 2" in the field) and the operator only presses Save;
-    //   B) the style is CHANGED in the dialog, then saved.
-    // The pair `closed=true styled=true` is the whole verdict
-    // (tools/selftest/run_output_save_test.sh).
     property var outSaveScreen: null
     property string outSaveStyleId: ""
     property string outSaveWanted: ""
@@ -7717,11 +5849,6 @@ ApplicationWindow {
         const d = SelfTest.findItem("selfTestEditOutputDialog")
         return d ? (d.opacity > 0 ? "true" : "false") : "?"
     }
-    // Opens the dialog on the first output with `wanted` in its style field,
-    // then presses Save (the click timer below). editStyleId is written AFTER
-    // openEdit: openEdit seeds the field from the row, so setting it first would
-    // be overwritten — the pull from the row is the behaviour under test in
-    // pass A anyway ("the output already wears a style").
     function outSaveBeginPass(phase, wanted) {
         window.outSavePhase = phase
         window.outSaveWanted = wanted
@@ -7729,9 +5856,6 @@ ApplicationWindow {
         window.outSaveScreen.editStyleId = wanted
         selfTestOutSaveClick.restart()
     }
-    // One line per pass: the roster, the dialog's own state after the click,
-    // the output's saved fields, and the two verdicts the script greps —
-    // closed (the dialog actually went away) and styled (the style landed).
     function outSaveReport(tag) {
         const o = OutputListModel.getOutput(0)
         const styleId = o && o.styleId !== undefined ? String(o.styleId) : "?"
@@ -7763,17 +5887,11 @@ ApplicationWindow {
         interval: 1500           // let the Styles screen build and the click land
         onTriggered: {
             if (StyleListModel.rowCount() === window.outSaveStylesBefore) {
-                // A synthetic click needs window-foreground luck, and the driver's
-                // own note says so; this is the very call the button makes, so the
-                // run still reproduces "save an output with styles present".
                 StyleListModel.addStyle()
                 console.log("[SELFTEST-OUTSAVE] add-style click missed - called addStyle() directly")
             }
             console.log("[SELFTEST-OUTSAVE] roster before=" + window.outSaveStylesBefore
                         + " after=" + StyleListModel.rowCount())
-            // Pass A's premise: the output already wears the FIRST style (what a
-            // persisted assignment looks like on the next launch — the state the
-            // report's screenshot was taken in).
             window.outSaveStyleId = String(StyleListModel.data(
                 StyleListModel.index(0, 0), StyleListModel.IdRole))
             OutputListModel.setStyle(0, window.outSaveStyleId)
@@ -7806,11 +5924,6 @@ ApplicationWindow {
             selfTestOutSaveMissed.restart()
         }
     }
-    // A synthetic click needs window-foreground luck (see SelfTestDriver's own
-    // note) and a miss on a modal lands on the SCRIM, which dismisses the dialog
-    // with nothing saved — indistinguishable from the bug, if left silent. So a
-    // miss is detected (the dialog is still up) and reported, and the pass then
-    // drives the very function the Save button's click calls.
     Timer {
         id: selfTestOutSaveMissed
         interval: 450
@@ -7830,10 +5943,6 @@ ApplicationWindow {
         onTriggered: {
             window.outSaveReport("result" + window.outSavePhase)
             if (window.outSavePhase === "A") {
-                // Pass B: CHANGE the style in the dialog, then save — the pick
-                // arrives the way the picker hands it over (StylePickerModal's
-                // applied -> editStyleId); the picker's own wiring is not what is
-                // under test here, the Save path is.
                 const last = String(StyleListModel.data(
                     StyleListModel.index(StyleListModel.rowCount() - 1, 0), StyleListModel.IdRole))
                 window.outSaveBeginPass("B", last)
@@ -7850,17 +5959,6 @@ ApplicationWindow {
     //      hovering the logo menu's "Settings" row flies the section flyout out
     //      under the pointer, which re-enters the flyout recompute.
     //   2. ReferencePane, "Cannot read property 'playPicked' of undefined":
-    //      a verse double-click (double-click goes on air) that lands while the
-    //      pane is being rebuilt — it is rebuilt when table.splitLongVerses
-    //      flips, which is what the reporting session had just toggled.
-    // Both sequences are driven here with the driver's real cursor moves and
-    // real synthetic clicks. Every step is REPORTED, including the state the
-    // fix is about (the flyout's own `visible`, whether a verse row existed at
-    // all): a scenario that silently did nothing must not read as a pass.
-    //
-    // Armed only with BOTH VGR_SELFTEST=1 and VGR_UIWARN_TEST=1 (it opens menus,
-    // flips a setting and quits, so a plain VGR_SELFTEST=1 run — how the NDI
-    // probes launch the app — never runs it).
     property int uiWarnPhase: 0
     property bool uiWarnFlyoutOpened: false
     property bool uiWarnVerses: false
@@ -7902,9 +6000,6 @@ ApplicationWindow {
                 const fly = window.uiWarnItem("selfTestSettingsFlyout")
                 window.uiWarnFlyoutOpened = !!(fly && fly.visible)
                 console.log("[SELFTEST-UIWARN] settings flyout visible=" + window.uiWarnFlyoutOpened)
-                // Cross the real gap onto the flyout's own first row and down it
-                // — the diagonal the operator's hand makes, and the crossings
-                // that deliver the row enters the recompute re-enters on.
                 const g = window.uiWarnItem("selfTestDropdownRow_General")
                 const s = window.uiWarnItem("selfTestDropdownRow_Styles")
                 if (g) {
@@ -7934,9 +6029,6 @@ ApplicationWindow {
                     return
                 }
                 window.uiWarnVerses = true
-                // The reported trigger first: flip the rendering setting the
-                // pane reads, twice, exactly as the settings toggle does. The
-                // rebuild it causes is what the double-click then arrives into.
                 const now = SettingsService.value("table.splitLongVerses") === true
                 SettingsService.setValue("table.splitLongVerses", !now)
                 SettingsService.setValue("table.splitLongVerses", now)
@@ -7944,9 +6036,6 @@ ApplicationWindow {
                 return
             }
             case 5: {
-                // Double-click the row: two synthetic clicks inside Qt's
-                // double-click interval are one double-click (opened -> the
-                // handler that selects AND goes on air).
                 SelfTest.clickItem("selfTestVerseRow_1")
                 SelfTest.clickItem("selfTestVerseRow_1")
                 console.log("[SELFTEST-UIWARN] verse double-click sent (pane owner re-resolved by the handler)")
@@ -7965,25 +6054,6 @@ ApplicationWindow {
     property int uiWarnTries: 0
 
     // ---- Hardware rendering switch (VGR_GPU_TEST=1) --------------------------
-    // The report it answers: "can add a toggle in general so in case a user want
-    // to turn it by them self but it should [be] software by default as not all
-    // laptops have gpu". Two things have to be true, and only the RUNNING app can
-    // show either of them: the row is there and its switch really writes the
-    // setting, and the ENGINE really changes what it draws with — including the
-    // case the report is about, a machine whose GPU cannot be used, where the
-    // switch reads ON while the frames are still software.
-    //
-    // Every step prints THREE answers, never one: the stored value, what the
-    // engine says it is drawing with (SettingsService.rendererInUse — the backend
-    // really installed, not the setting), and the sentence the row itself DRAWS
-    // under the switch (selfTestNote_preferences.hardwareAcceleration). A row
-    // that echoed the switch back at the user instead of the truth is then
-    // visible in one line, which is the half no property trace can see.
-    //
-    // Borrow and put back: it flips the switch away from whatever it found and
-    // restores it before quitting, and the runner's verdict requires the restore
-    // — a scenario that left the GPU path on would hand the next launch the black
-    // picture this switch exists to avoid.
     property int gpuPhase: 0
     property int gpuTries: 0
     property bool gpuWasOn: false
@@ -7996,12 +6066,6 @@ ApplicationWindow {
     readonly property string gpuKey: "preferences.hardwareAcceleration"
     readonly property string gpuToggleName: "selfTestToggle_preferences.hardwareAcceleration"
     function gpuValue() { return SettingsService.values[window.gpuKey] === true }
-    // Is the row's toggle inside the WINDOW (not merely "visible")? An item
-    // scrolled out of a Flickable keeps isVisible() true because the Flickable
-    // CLIPS instead of hiding — which is exactly how a click aimed at it misses:
-    // its centre maps outside the window entirely (measured: y=1208 on a 900-tall
-    // window). The driver's own itemVisible cannot see that, so the scenario
-    // checks the coordinate it is about to click.
     function gpuToggleOnScreen() {
         const c = SelfTest.itemCenter(window.gpuToggleName)
         return c.x > 0 && c.y > 0 && c.x < window.width && c.y < window.height
@@ -8010,19 +6074,10 @@ ApplicationWindow {
         const t = SelfTest.findItem("selfTestNote_" + window.gpuKey)
         return t ? String(t.text) : ""
     }
-    // The row's own NAME — the line above the note, straight off the setting's
-    // definition. Reported because a row that rendered as a blank line with a
-    // switch on it would still be clickable: this is the difference between
-    // "the switch works" and "the switch is SHOWING", which is the question that
-    // was actually asked. Last on the result line, so its spaces need no quoting.
     function gpuLabelText() {
         const t = SelfTest.findItem("selfTestLabel_" + window.gpuKey)
         return t ? String(t.text) : ""
     }
-    // Does the row's own sentence agree with the backend that is really
-    // installed? The wording is QML's and stays there; this only asks the two
-    // about the SAME fact — the engine says GPU and the row talks about the card,
-    // or the engine says software while the switch is on and the row says so.
     function gpuNoteConsistent(note) {
         const saysNoGpu = note.indexOf("No usable GPU") >= 0
         const saysCard = note.indexOf("graphics card") >= 0
@@ -8051,9 +6106,6 @@ ApplicationWindow {
         onTriggered: {
             switch (window.gpuPhase) {
             case 0: {
-                // Scroll the row into view FIRST: a click at an unlaid-out item's
-                // coordinates lands on whatever else is there, and the Preferences
-                // card sits below the fold of this page.
                 const flick = SelfTest.findItem("selfTestGeneralFlick")
                 const toggle = SelfTest.findItem(window.gpuToggleName)
                 if (!flick || !toggle) {
@@ -8094,12 +6146,6 @@ ApplicationWindow {
             }
             case 1: {
                 if (window.gpuValue() !== window.gpuNowOn) {
-                    // A synthetic click needs window-foreground luck (see
-                    // SelfTestDriver's own note). Twice more before giving up, and
-                    // the path that finally engaged is printed either way — a run
-                    // where the click really took is the one that also proves the
-                    // row is clickable, so a fallback must not read as a pass
-                    // silently.
                     if (window.gpuClicks < 3) {
                         window.gpuClicks++
                         if (window.gpuClicks === 2) {
@@ -8121,9 +6167,6 @@ ApplicationWindow {
                 return
             }
             case 2: {
-                // The apply is a WORKER round-trip (SettingsService pushes the
-                // preference to the engine off the interface thread), so the
-                // engine's answer may arrive a tick or two after the write.
                 if (SettingsService.rendererInUse === "" && window.gpuTries++ < 10)
                     return
                 window.gpuOnEngine = SettingsService.rendererInUse
@@ -8139,9 +6182,6 @@ ApplicationWindow {
                 return
             }
             case 3: {
-                // Put the operator's switch back exactly where it was found (the
-                // same click, and the same retry-then-write fallback: a miss here
-                // is reported by the field below, never assumed away).
                 SelfTest.activate()
                 SelfTest.clickItem(window.gpuToggleName)
                 window.gpuClicks = 0
@@ -8184,19 +6224,6 @@ ApplicationWindow {
     }
 
     // ---- What each output's style does to a slide (VGR_OUTS_TEST=1) --------
-    // The report this answers: "scripture and The Table work, shows do not" —
-    // a style that restyles the content tabs' designs, and one that lays shows
-    // out as well, are different pictures on air and were indistinguishable on
-    // this screen (a row said WHICH style it wears and nothing about what that
-    // style does). The row now prints the engine's own answer
-    // (OutputListModel::styleLayoutNote -> SlideRules::LayoutScope), so what is
-    // checked here is the ROW AS RENDERED: the sentence reaches the delegate,
-    // every styled row has one, and it is one of the documented answers rather
-    // than an empty or stale line.
-    //
-    // Reads the card item by its objectName and its own `styleLayout`
-    // property — the same value the Text under the Style pill binds to — so a
-    // role that resolved in the model but never reached the row is visible.
     property int outsPhase: 0
     property int outsTries: 0
     readonly property var outsScopePhrases: [
@@ -8205,12 +6232,6 @@ ApplicationWindow {
         "No layout of its own"                // background and placement only
     ]
     function outsSample() {
-        // `reported` is the other half of this scenario: EVERY row must say
-        // something about its own runtime, whatever its kind. The live line used
-        // to be NDI/SDI-only, so an HDMI row was silent — read by the operator as
-        // "the notification is only instantiated in one output". A row whose
-        // statusText is empty, or does not open with its own kind, is exactly
-        // that fault, counted here and failed by the runner.
         const found = { rows: 0, styled: 0, described: 0, reported: 0, lines: [] }
         for (let i = 0; i < 24; ++i) {
             const item = SelfTest.findItem("selfTestOutputRow_" + i)
@@ -8252,9 +6273,6 @@ ApplicationWindow {
         interval: 700
         repeat: true
         onTriggered: {
-            // Wait for the rows to exist AND for their style names to resolve:
-            // the roster is adopted a moment after boot, and a row read before
-            // that says "None" for a style it really wears.
             if (window.outsPhase === 0) {
                 const probe = SelfTest.findItem("selfTestOutputRow_0")
                 if (!probe) {
@@ -8280,14 +6298,6 @@ ApplicationWindow {
     }
 
     // ---- Every row's LIVE runtime line (VGR_OUTSLIVE_TEST=1) -----------------
-    // The other half of the report the block above answers: "the notification is
-    // only instantiated in one output". The row's runtime line must exist for
-    // EVERY kind of output, and must say the same things about all of them — a
-    // live feed with its delivered-frame count, and the stage-wide blackout. So
-    // this scenario puts one real slide on air, opens Settings · Outputs, and
-    // prints each row's statusText while live, while blacked out (a real click
-    // on the wall's control), and after the blackout ends. No fixture is saved
-    // and nothing is staged: a failure here is about the rows, not the show.
     function outsLiveSample(tag) {
         let rows = 0
         let reporting = 0
@@ -8314,12 +6324,6 @@ ApplicationWindow {
         console.log("[SELFTEST-OUTSLIVE] " + tag + " result rows=" + rows
                     + " reporting=" + reporting + " blackout=" + blackout
                     + " offair=" + offAir)
-        // ...and the SAME state on the wall itself: each tile carries it as a
-        // DOT (no text — the row owns the words), and runtimeState is read here
-        // too (the dialog sits over the wall, which is still there and still
-        // bound), so "on the tile as well" is checked, not assumed. A tile that
-        // cannot be found is printed as <missing> and the runner says so rather
-        // than passing on the dialog alone.
         const wallTiles = []
         for (let i = 0; i < OutputListModel.rowCount(); ++i) {
             const tile = window.tfTile(i)
@@ -8327,11 +6331,6 @@ ApplicationWindow {
         }
         console.log("[SELFTEST-OUTSLIVE] " + tag + " tiles=" + JSON.stringify(wallTiles.join(" | ")))
     }
-    // The wall's Blackout control is BEHIND the Settings modal, so every press
-    // closes the dialog first and the next read reopens it: a click that lands on
-    // the scrim proves nothing, and this scenario is about the ROWS, not about the
-    // control (run_blackout_test.sh drives that one). The press itself is still the
-    // real control — SelfTest.clickItem, the operator's own gesture.
     Timer {
         id: selfTestOutsLiveStart
         running: typeof SelfTestOutputsLive !== "undefined" && SelfTestOutputsLive
@@ -8355,10 +6354,6 @@ ApplicationWindow {
         interval: 4000           // the 1 Hz probe has published a state by now
         onTriggered: {
             window.outsLiveSample("live")
-            // THE DIALOG CLOSES FIRST — the wall is underneath it. Then the
-            // pointer is put on a tile's runtime DOT and the tip it raises is
-            // read: the dot is colour-only, so the numbers (frames + age) have
-            // to be reachable by hover or they are not reachable at all.
             settingsScrim.visible = false
             const dot = SelfTest.itemCenter("selfTestTileRuntime")
             window.outsHoverAt = dot
@@ -8424,30 +6419,13 @@ ApplicationWindow {
     }
 
     // ---- Style background reaches the output tiles (VGR_STYLEBG_TEST=1) -----
-    // The second half of the same report ("i select the style for output when
-    // there was no bg image in it, then i went to add the bg image — the output
-    // screen did not update its bg image, it still remained transparent"): a
-    // style's background IMAGE is composed per output at read time, so the
-    // question is whether the OUTPUT TILE re-reads it — the model changing is
-    // not the same thing as the tile repainting, and only the tile is what the
-    // operator looked at. This scenario drives the model exactly as the Styles
-    // dialog does (clear the image, then add one) and prints the TILE's own
-    // styleBg at each step beside the model's answer for the same output, so a
-    // tile that lags the model is visible in one line.
     property var bsTileItem: null
-    // The measured output's style assignment as it was BEFORE the scenario
-    // borrowed it — put back at the end, same borrow-and-return rule the
-    // style's background image follows (a test must not leave the operator's
-    // roster pointing somewhere they never clicked).
     property string bsOriginalStyleId: ""
     property bool bsPreviewSameRoster: false
     property int bsTileIndex: -1
     property int bsStyleRow: 0
     property string bsStyleId: ""
     property string bsImage: ""
-    // The style's own image before the scenario touched it, so the run puts the
-    // operator's roster back the way it found it (this scenario MUTATES a
-    // style: it clears the image, adds one, then restores this).
     property string bsOriginalImage: ""
     function bsFindImage() {
         for (let i = 0; i < StyleListModel.rowCount(); ++i) {
@@ -8455,9 +6433,6 @@ ApplicationWindow {
             if (p !== undefined && p !== "" && SettingsService.fileExists(p))
                 return String(p)
         }
-        // Nothing in the roster carries a usable image (a fresh roster): any
-        // real file on this machine does, because hasImage is about the file
-        // being THERE — the tile's decode is a separate concern.
         const candidates = ["C:/Windows/Web/Wallpaper/Windows/img0.jpg",
                             "C:/Windows/Web/Wallpaper/Windows/img1.jpg",
                             "C:/Windows/Web/Screen/img100.jpg"]
@@ -8466,14 +6441,6 @@ ApplicationWindow {
                 return c
         return ""
     }
-    // The SHOW wall's tile n, found by descending from the wall itself. Both
-    // hosts (the Show screen and the Edit screen's ITEMS tab) build tiles named
-    // "selfTestMonitorTile<n>", so a window-wide findItem can hand back the
-    // other surface's tile — a different output, whose style this scenario
-    // never touched, which is exactly how the first version of this scenario
-    // misread its own evidence ("cleared" reported an image while the style
-    // under test had none, because the tile and the model answer were about two
-    // different outputs).
     function bsFindTile(wall, index) {
         if (!wall)
             return null
@@ -8489,12 +6456,6 @@ ApplicationWindow {
         }
         return null
     }
-    // LAYER ORDER inside the tile under test (run_style_bg_test.sh): the
-    // transparency checkerboard must sit BELOW the media/block layers in the
-    // pane's child order, or it paints over them — the reported "the
-    // checkerboard area is where the media is meant to show" (z-order, not
-    // styling: identical visible data, wrong picture). Walks the pane's
-    // children by the names OutputMonitorTile gives them.
     function bsLayerFacts() {
         return window.bsLayerFactsOf(window.bsTileItem)
     }
@@ -8517,12 +6478,6 @@ ApplicationWindow {
         }
         const belowContent = checkers >= 0 && design >= 0 && checkers < design
             && (media < 0 || checkers < media)
-        // THE FEED'S OWN ORDER, read off the tile's layer stack: the design's
-        // backdrop paint below the taken feed, the feed below the block content
-        // drawn over it — the engine's composition (bg < media < text) said as
-        // positions here. run_blank_live_test.sh checks it, because "the tile
-        // and the output agree about what covers a feed" is exactly what a
-        // preview-side copy of the rule breaks.
         const feedOverBackdrop = backdrop < 0 || feed < 0 || backdrop < feed
         const contentOverFeed = feed < 0 || design < 0 || feed < design
         return { line: "tileLayer=checkers" + checkers + " design" + design
@@ -8553,10 +6508,6 @@ ApplicationWindow {
         return null
     }
 
-    // The tile's OWN output index drives the model answer, so the two halves of
-    // every line are always about the same output. styleMatch=true is the
-    // premise check the shell script gates on: the tile really wears the style
-    // this scenario edits.
     function bsReport(tag) {
         const tile = window.bsTileItem
         if (tag === "cleared")
@@ -8577,19 +6528,7 @@ ApplicationWindow {
                     + " styleImage=" + JSON.stringify(String(StyleListModel.getStyle(window.bsStyleRow).backgroundImage)))
     }
     // ---- What each wall tile is drawing (VGR_TILEFACTS_TEST=1) -------------
-    // A DIAGNOSTIC, not a gate: the reported two-tile disagreement is a question
-    // about STATE, and only the tiles' own facts can answer it — two tiles are
-    // fed the same on-air/staged slide but wear their OWN style, and each draws
-    // from its own layer stack (the pane's checkerboard, the style image, a
-    // taken file's frames, the design blocks, the distributed frame). It prints,
-    // per tile, the style it wears, the composition's own facts and which of the
-    // pane's layers is visible, in three states: nothing on air, a media FILE
-    // taken, and live.
     property string tfMedia: "C:/Users/znwaj/Documents/Iwaya Churh Live Stream/9_16 harvest.jpeg"
-    // The tile is reached by DESCENDING FROM THE WALL, never by a window-wide
-    // findItem: both hosts name their tiles "selfTestMonitorTile<n>", so a
-    // window search can hand back the OTHER surface's tile — the very mistake
-    // bsFindTile's comment records from an earlier scenario.
     function tfTile(i) {
         return window.bsFindTile(SelfTest.findItem("selfTestMonitorWall"), i)
     }
@@ -8608,9 +6547,6 @@ ApplicationWindow {
         return "[SELFTEST-TILES] phase=" + phase + " tile=" + i
              + " styleId=" + JSON.stringify(String(tile.styleId))
              + " active=" + tile.active + " enabled=" + tile.isEnabled
-             // The tile's own runtime strip (frames / age / blackout / no feed) —
-             // the same facts the Settings · Outputs row prints, read off the
-             // tile as rendered so a strip that never binds is visible here.
              + " runtime=" + JSON.stringify(String(tile.runtimeState))
              + " rtFrames=" + (tile.runtime ? tile.runtime.frames : -1)
              + " rtAge=" + (tile.runtime ? tile.runtime.ageMs : -1)
@@ -8644,11 +6580,6 @@ ApplicationWindow {
         const count = OutputListModel.rowCount()
         for (let i = 0; i < count; ++i) {
             console.log(window.tfLine(phase, i))
-            // A FRESH composition for the same (slide, style) as the tile just
-            // read. The tile's binding recomposes only when its INPUTS move, and
-            // the take is not one of them — so comparing the tile's cached
-            // answer with a call made now separates "the composition is stale"
-            // from "the composition really says this".
             const tile = window.tfTile(i)
             if (!tile)
                 continue
@@ -8730,9 +6661,6 @@ ApplicationWindow {
         onTriggered: {
             window.tfReport("live")
             window.tfGrab("live")
-            // The grabs are PNG writes queued on the GUI thread; quitting in
-            // this same tick dropped the last phase's files, so the quit waits
-            // one more turn.
             selfTestTileFactsQuit.start()
         }
     }
@@ -8743,20 +6671,12 @@ ApplicationWindow {
     }
 
     // ---- Blank GO LIVE carrier + a live input (VGR_BLANKLIVE_TEST=1) --------
-    // The reported "the moment it is only media it doesn't go": take a real
-    // window input, then press GO LIVE with nothing staged — which sends the ONE
-    // blank carrier slide so the outputs show the compositor's layers (the take)
-    // over the active style. Whatever the engine does with that scene is what
-    // the operator's output, NDI feed and monitor wall show.
     property string blLabel: ""
     Timer {
         id: selfTestBlankLiveStart
         running: typeof SelfTestBlankLive !== "undefined" && SelfTestBlankLive
         interval: 9000           // boot + first frame, like the other scenarios
         onTriggered: {
-            // The SAME roster the Media pane's own take reads: a "screen" row
-            // whose sublabel names a captured window (the first one that is not
-            // this app's own window).
             for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
                 const row = VideoSourceListModel.getSource(i)
                 const label = String(row && row.sublabel ? row.sublabel : "").trim()
@@ -8789,11 +6709,6 @@ ApplicationWindow {
         id: selfTestBlankLiveContent
         interval: 5000
         onTriggered: {
-            // PHASE 2 — the same take with CONTENT on air. The operator's own
-            // styles wear engine templates whose designs carry full-stage slabs,
-            // so this is the state where a slab used to bury the feed: the slide
-            // renders through the style's template, the template's background
-            // must stay UNDER the take, and the outputs must not go black.
             const slide = {
                 valid: true,
                 title: "Blank Live Probe",
@@ -8812,11 +6727,6 @@ ApplicationWindow {
         id: selfTestBlankLiveReport
         interval: 5000
         onTriggered: {
-            // THE TILE'S OWN LAYER STACK, while the take is still held and the
-            // content is on air: the design's backdrop paint must sit UNDER the
-            // taken feed and the block content OVER it, which is what the
-            // engine composed for this same scene (the runner checks both
-            // halves, and they are the two surfaces the operator compares).
             const blTile = window.bsFindTile(SelfTest.findItem("selfTestMonitorWall"), 0)
             console.log("[SELFTEST-BLANKLIVE] tile layers: " + window.bsLayerFactsOf(blTile).line)
             console.log("[SELFTEST-BLANKLIVE] done live=" + LiveOutputService.live)
@@ -8825,19 +6735,6 @@ ApplicationWindow {
         }
     }
     // ---- An NDI output added WHILE LIVE (VGR_NDILATE_TEST=1) ----------------
-    // User report: "the NDI source I created is not even getting any frames — as
-    // if NDI is dead — until I restart the app." A row that exists at boot
-    // feeds; a row ADDED during the session did not, until a relaunch — which is
-    // the signature of state that is only assembled once, at GO LIVE or at boot.
-    // So the scenario reproduces the state exactly: go live with one enabled NDI
-    // row, let it send (the baseline), then ADD a second NDI row MID-SESSION and
-    // read the feed's own per-output state (LiveOutputService.ndiOutputStates)
-    // for the next twelve seconds. The verdict is the NEW row's `frames`
-    // counter growing while the session is still the one it was added to
-    // (tools/selftest/run_ndi_late_output_test.sh).
-    //
-    // Not read-only: the rows this adds are removed again before the quit, so a
-    // run cannot leave the operator's roster changed.
     property string ndiLateName: "NDI Late"
     property string ndiLateBaseName: "NDI Late Base"
     property string ndiSilentName: "NDI Silent"
@@ -8887,11 +6784,6 @@ ApplicationWindow {
             if (row >= 0) OutputListModel.removeOutput(row)
         }
     }
-    // The user-visible half of the same scenario: an output added mid-session is
-    // supposed to ANNOUNCE itself (LiveOutputService's "outputs.ndi.outputLive"
-    // notice), and "I created a new output and got no notification" is the
-    // report this listens for. Logged as a line so the runner can require it
-    // rather than trust that the toast appeared.
     Connections {
         target: EventBus
         function onEventPosted(topic, payload) {
@@ -8946,12 +6838,6 @@ ApplicationWindow {
             if (window.ndiLateTick < 12)
                 return
             selfTestNdiLateSample.stop()
-            // THE OTHER HALF of the same report: an output added mid-session that
-            // CANNOT send. Switched off straight away, it never reaches the feed's
-            // request list — before this it went dark with no explanation. The
-            // feed is supposed to name the wait ("it is switched off on the
-            // Outputs screen") once its grace has passed, and the runner requires
-            // that notice by name.
             OutputListModel.addScreen(window.ndiSilentName, "NDI", "1920 × 1080", "30 Hz", "none")
             OutputListModel.setEnabled(window.ndiLateRowOf(window.ndiSilentName), false)
             window.ndiSilentAdded = true
@@ -8979,14 +6865,6 @@ ApplicationWindow {
         onTriggered: SelfTest.quit()
     }
     // ---- Blackout, through the wall's own control (VGR_BLACKOUT_TEST=1) ------
-    // "Nothing at all on screen" has to be a DELIBERATE gesture: Clear all now
-    // keeps the output's own look, so the ONLY thing that paints an empty frame
-    // is the wall toolbar's Blackout control (LiveOutputService::blackout — the
-    // clearStage carrier). This scenario puts one real slide on air, presses
-    // that control with a REAL click, presses it again to come back, and leaves
-    // the engine's frame-sanity lines (black or not) as the evidence — the same
-    // pixels the HDMI window and the NDI feed receive. Nothing is staged or
-    // saved, so a failure here is about the control, not about a fixture.
     property bool boVisible: false
     property bool boPressed: false
     property bool boEnded: false
@@ -8996,13 +6874,6 @@ ApplicationWindow {
         running: typeof SelfTestBlackout !== "undefined" && SelfTestBlackout
         interval: 9000           // boot + first frame, like the other scenarios
         onTriggered: {
-            // A REAL FEED UNDER THE BLACKOUT. "Nothing at all on screen" has to
-            // include the compositor's own layers: a taken camera rides the
-            // engine scene's video layer, and before this the clear carrier
-            // still composited it, so the screens showed the camera through a
-            // blackout. The first camera in the roster is held for the whole
-            // run (cleared before quitting) so the runner can prove the layer
-            // is GONE while blacked and BACK after it ends.
             for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
                 const row = VideoSourceListModel.getSource(i)
                 const label = String(row && row.sublabel ? row.sublabel : "").trim()
@@ -9028,19 +6899,10 @@ ApplicationWindow {
             selfTestBlackoutPress.restart()
         }
     }
-    // A click and the state it produces are NOT the same tick: clickItem posts a
-    // real mouse event, so the button's handler (and the engine's replacement,
-    // which is what blackedOut reads) only runs after this timer returns. Every
-    // press therefore reports from its OWN timer a couple of seconds later —
-    // reading blackedOut right after the click read the state from BEFORE it and
-    // made a working control look broken.
     Timer {
         id: selfTestBlackoutPress
         interval: 6000
         onTriggered: {
-            // A REAL click on the toolbar control — the same path the operator's
-            // hand takes, so a control that is missing, disabled or off screen
-            // fails here rather than passing on a direct service call.
             window.boVisible = SelfTest.itemVisible("selfTestWallBlackout")
             SelfTest.clickItem("selfTestWallBlackout")
             selfTestBlackoutPressed.restart()
@@ -9087,10 +6949,6 @@ ApplicationWindow {
         interval: 3500           // let the restored frames land before the last phase
         onTriggered: selfTestBlackoutStopPhase.restart()
     }
-    // PHASE 3 — STOP WHILE BLACKED OUT. The carrier must not become the staged
-    // pick: a blackout is a gesture over content, so STOP has to leave what the
-    // blackout was HIDING on the monitor, or the next GO LIVE would put the
-    // black frame straight back on the screens.
     Timer {
         id: selfTestBlackoutStopPhase
         interval: 100
@@ -9118,9 +6976,6 @@ ApplicationWindow {
                         + " stagedBlocks=" + (s.blocks ? s.blocks.length : -1)
                         + " stagedClearStage=" + (s.clearStage === true)
                         + " blackedOut=" + LiveOutputService.blackedOut)
-            // The take this run held (see the start timer) is released here, as
-            // the other capture scenarios do — a selftest must not keep a
-            // camera open after it quits.
             if (LiveOutputService.inputLabel !== "")
                 LiveOutputService.clearInput()
             console.log("[SELFTEST-BLACKOUT] done")
@@ -9128,22 +6983,6 @@ ApplicationWindow {
         }
     }
     // ---- THE LIVE VIDEO PATH, MEASURED (VGR_VIDEOPERF_TEST=1) ----------------
-    // "when im showing hdmi and laptop is stressed the video lags badly".
-    //
-    // The scenario puts a REAL camera/HDMI input on air, goes LIVE with it, and
-    // then samples — every 500 ms for ten seconds — the two numbers that ARE that
-    // complaint:
-    //
-    //   frames   the frames the ENGINE says each output has received (the same
-    //            count its Settings · Outputs row prints)
-    //   ageMs    how long ago that output last presented a frame (the freshest
-    //            available measure of end-to-end lag inside the app)
-    //
-    // plus the live loop's own throughput (framesSentNow) and the pump's frame
-    // revisions (inputRev). Nothing here is a screenshot or a guess: these are
-    // the counters the app already publishes per output. The shell runner
-    // (tools/selftest/run_videoperf_test.sh) launches this under CPU load, so the
-    // stressed machine of the report is the machine being measured.
     property string vpLabel: ""
     property int vpSamples: 0
     property double vpT0: 0
@@ -9222,17 +7061,6 @@ ApplicationWindow {
         }
     }
     // ---- Program-feed rate for a held camera (VGR_INPUTRATE_TEST=1) ----------
-    // "The video bus is lagging both hdmi and ndi". Both outputs render ONE
-    // compositor, and a camera bus fills it from the service's pump — so the
-    // number that decides whether any output can look smooth is how often that
-    // pump sees a NEW frame. It used to be capped twice (the PAL tap published
-    // one JPEG per 66 ms, and the pump itself ticked at 66 ms), which no
-    // measurement anywhere would have told you.
-    //
-    // This scenario takes the first camera and reports inputRev over a fixed
-    // window: the pump bumps it once per frame that actually moved, so the rate
-    // is the feed's own. A 30 fps camera reads ~30 here now; the old ceiling was
-    // ~15 and the number did not exist.
     property string irLabel: ""
     property real irFirst: 0
     Timer {
@@ -9303,12 +7131,6 @@ ApplicationWindow {
                                               ? beforeStyle.styleId : "")
             OutputListModel.setStyle(window.bsTileIndex, window.bsStyleId)
             StyleListModel.setBackgroundImage(0, "")
-            // IDENTITY PROBE: is the roster the OUTPUT MODEL resolves styles
-            // through the same one the Styles screen edits? A colour written
-            // through the QML singleton and read back through
-            // OutputListModel's own style lookup answers it in one line. The
-            // background-image path can't answer it, because a stale roster and
-            // a stale file test look identical from here.
             const probeColor = "#0f0e0d"
             const wasColor = String(StyleListModel.getStyle(window.bsStyleRow).backgroundColor)
             StyleListModel.setBackgroundColor(window.bsStyleRow, probeColor)
@@ -9318,16 +7140,6 @@ ApplicationWindow {
                         + " modelSeen=" + seenColor
                         + " sameRoster=" + String(seenColor === probeColor)
                         + " rowForId=" + StyleListModel.rowForId(window.bsStyleId))
-            // SECOND IDENTITY PROBE — the COMPOSITION path. A monitor tile's
-            // picture is composed by LiveOutputService.previewWithStyle, which
-            // resolves the style itself; resolving it through the C++
-            // singleton (the OTHER StyleListModel object) meant the tile kept
-            // previewing the boot-time style while the engine's spec — this
-            // model's adopted roster — rendered the edit on the real output.
-            // Same trick as the colour probe above, one layer further out: set
-            // a colour through the QML singleton, compose a synthetic slide
-            // with THIS style, and read the composed background back. It can
-            // only match if the composition read the roster the UI edits.
             const probePrevColor = "#123456"
             const wasPrevColor = String(StyleListModel.getStyle(window.bsStyleRow).backgroundColor)
             StyleListModel.setBackgroundColor(window.bsStyleRow, probePrevColor)
@@ -9348,21 +7160,6 @@ ApplicationWindow {
                         + " composedBg=" + JSON.stringify(composedBg)
                         + " blocks=" + String((composed.blocks || []).length)
                         + " sameRoster=" + String(window.bsPreviewSameRoster))
-            // FOURTH PROBE — A STYLE THAT NAMES NO BACKGROUND, and the UNSTYLED
-            // default beside it. In both, nothing names a background at all:
-            // the engine's composition leaves the frame UNPAINTED (a keyable
-            // overlay — SceneBuilder::ComposeSlide) instead of filling it with
-            // an opaque black of its own. The preview has to compose "" here,
-            // not a colour: a colour it invented is a black slab over whatever
-            // the output is keyed onto, on the tile, while the real output (which
-            // paints nothing) stays see-through.
-            //
-            // EVERY field that can name a background is cleared for the probe —
-            // the style's colour and image AND its template keys. A picked
-            // template DESIGN carries a background of its own (Big Bold is
-            // #000000), the style adopts it, and that is the intended look —
-            // which is exactly why it has to be out of the way to probe the
-            // unnamed case this rule is about. All of it is restored below.
             const prevStyle = StyleListModel.getStyle(window.bsStyleRow)
             const prevFam = [ String(prevStyle.familyTemplateShows),
                               String(prevStyle.familyTemplateMedia),
@@ -9391,14 +7188,6 @@ ApplicationWindow {
             console.log("[SELFTEST-STYLEBG] unstyled default probe composedBg=" + JSON.stringify(unstyledBg)
                         + " blocks=" + String((unstyled.blocks || []).length)
                         + " unpainted=" + String(unstyledBg === ""))
-            // FIFTH PROBE — THE STYLE'S BACKGROUND IMAGE RULE. clearBackground
-            // OnText steps the style's image aside for a slide that CARRIES
-            // content, and NOT for a slide that merely exists: the blank go-live
-            // carrier keeps the branded backdrop, which is the whole point of
-            // going live with nothing. The engine decides this in the
-            // composition and hands the answer to the tile and the output
-            // window (suppressStyleImage) — the two surfaces used to re-derive it
-            // from `hasSlidePreview`, which is the case that lost the backdrop.
             const bareSlide = { valid: true, title: "", text: "", background: "", blocks: [] }
             const titleOnly = { valid: true, title: "Blank", text: "", background: "", blocks: [] }
             const prevClear = StyleListModel.getStyle(window.bsStyleRow).clearBackgroundOnText === true
@@ -9415,16 +7204,6 @@ ApplicationWindow {
                         + " titleOnlySup=" + keptTitleOnly
                         + " ok=" + String(suppressed === "true" && keptBare === "true"
                                           && keptTitleOnly === "true"))
-            // SIXTH PROBE — THE FRAME RULE. A camera/media/audio/image block
-            // carries no pixels a block renderer can draw; the compositor's
-            // distributed frame is the honest picture for it, and every other
-            // kind draws true, so the BLOCKS win there. That decision is the
-            // composition's (framePriority) and both preview surfaces — the
-            // monitor tile and the output window — read that one answer; each
-            // used to run its own copy of the kind test, and a rule with two
-            // copies is a rule that drifts. Composed through the UNSTYLED
-            // default so the slide's OWN blocks are the composition's source
-            // whatever templates the roster's styles carry.
             const mediaSlide = {
                 valid: true, title: "", text: "", background: "",
                 blocks: [ { kind: "camera", text: "", x: 40, y: 40,
@@ -9466,9 +7245,6 @@ ApplicationWindow {
         interval: 1200           // let the dataChanged pulse reach the tile
         onTriggered: {
             window.bsReport("added")
-            // A second beat: only a binding that needs another turn to land
-            // would differ here, and "it updated a moment later" is still a
-            // repaint the operator never sees as missing.
             selfTestStyleBgSettled.restart()
         }
     }
@@ -9491,30 +7267,6 @@ ApplicationWindow {
     }
 
     // ---- header vs the caption buttons (VGR_HEADER_TEST=1) -------------------
-    // The report: "the header tile is overlapping the minimize, maximize, close
-    // button ... it only happens when the window scales down". Two separate
-    // facts make that true, and both are measured here at THREE window sizes
-    // (the launch size, the smallest the window goes, and one in between):
-    //
-    //   * the tab row's right-hand tiles (GO LIVE, then Settings) hold the
-    //     window's own right end, in the SAME column as the caption buttons
-    //     above them — that is the design (the tabs own the middle, GO LIVE owns
-    //     the end). What must never happen is the two rows OVERLAPPING, or a
-    //     tile drifting up into the caption row; the shared column itself is the
-    //     intent, so the check is separation, not clearance;
-    //   * the window's resize grips do NOT scale (they ARE the frame), so the
-    //     smaller the window, the larger a share of the buttons an 8px strip
-    //     covers. The symptom is exactly a resize: a SIZE cursor and a press
-    //     that resizes instead of minimizing/closing.
-    //
-    // So the checks are: no rect intersection between a tile and the cluster
-    // (measured in the HEADER's own design space, so scale cannot hide it), the
-    // tiles still in the row BELOW the caption row, no grip rect touching the
-    // cluster in window pixels, and — the end-to-end one — the LIVE OS cursor
-    // (Win32 GetCursorInfo, the same call a user's eye makes)
-    // parked 3px inside the close button's top edge, which must not be a size
-    // arrow. The last step grabs the WHOLE WINDOW at the smallest size, so the
-    // runner can sample the very corner the report is about.
     property var headerSizes: []
     property int headerStep: 0
     property int headerMeasured: 0
@@ -9549,9 +7301,6 @@ ApplicationWindow {
         const cluster = SelfTest.findItem("selfTestCaptionButtons")
         const goLive = SelfTest.findItem("selfTestGoLive")
         const settings = SelfTest.findItem("selfTestSettingsTile")
-        // The tiles and the cluster are MEASURED IN THE HEADER'S OWN SPACE (the
-        // design units their clearance is expressed in), the cluster again in
-        // window pixels for the grips, which live outside the scaled header.
         const cD = window.headerRectIn(cluster, appHeader)
         const gD = window.headerRectIn(goLive, appHeader)
         const sD = window.headerRectIn(settings, appHeader)
@@ -9571,16 +7320,10 @@ ApplicationWindow {
         for (const g of grips)
             if (window.headerOverlap(g, cW))
                 ++gripHits
-        // The close button is the last 46 design units of the cluster, so its
-        // centre scales with the app and then 3px inside its top edge is the
-        // point an unscaled 8px strip reaches first.
         const probeX = cW.x + cW.w - 23 * window.uiScale
         const probeY = cW.y + 3
         const cursor = String(SelfTest.cursorAt(probeX, probeY))
         const cursorOk = cursor.indexOf("SIZE") < 0
-        // `clearance` is reported for the record, not asserted: the tiles share
-        // the caption column by design, so the failing cases are overlap and a
-        // tile outside its own row.
         const clear = !tileOverlap && belowRow && gripHits === 0 && cursorOk
         if (!clear)
             ++window.headerBad
@@ -9649,9 +7392,6 @@ ApplicationWindow {
         id: selfTestHeaderGrab
         interval: 1200              // the smallest size, laid out
         onTriggered: {
-            // The whole window (an empty item name means the content item): the
-            // runner samples the caption corner's own pixels out of this, so the
-            // verdict does not have to trust the geometry above.
             SelfTest.grab("", "header_clear_small.png")
             console.log("[SELFTEST-HEADER] summary sizes=" + window.headerSizes.length
                         + " measured=" + window.headerMeasured + " bad=" + window.headerBad
@@ -9666,17 +7406,6 @@ ApplicationWindow {
     }
 
     // ---- metadata palette: click and drag (VGR_METAPAL_TEST=1) ---------------
-    // The palette ("> +" menu's Metadata chip) has two gestures and neither had a
-    // scenario: CLICK a field to add a text item carrying its placeholder, or DRAG
-    // one onto the canvas to land it where the pointer is. The boot check loads
-    // the whole tree, but nothing drove the gesture.
-    //
-    // This drives the REAL path with REAL input: the + chip, the Metadata chip in
-    // the + menu (a zone-hover chip, so the hover move is part of the gesture),
-    // then a press/move/release drag from a field chip onto the canvas. Both
-    // fields come from MetadataFields.all rather than being spelled here, so the
-    // scenario follows the registry the palette draws from — a field added there
-    // is covered without touching this block.
     property var metaAll: []
     property string metaClickToken: ""
     property string metaDragToken: ""
@@ -9685,10 +7414,6 @@ ApplicationWindow {
     property var metaKeysBefore: []
     property var metaDropAt: ({ x: 0, y: 0 })
     property var metaDragTo: ({ x: 0, y: 0 })
-    // The popup half (see selfTestMetaPopup): the panel must read as lifted
-    // ABOVE the canvas — no I-beam of the text item beneath it showing through,
-    // the chips' own pointing hand winning — and a click outside the box must
-    // close it.
     property var metaUnderAt: ({ x: 0, y: 0 })
     property var metaPadAt: ({ x: 0, y: 0 })
     property string metaChipCursor: ""
@@ -9702,9 +7427,6 @@ ApplicationWindow {
     property var metaOutsideAt: ({ x: 0, y: 0 })
 
     function metaChipName(token) { return "selfTestMetaChip_" + String(token).replace(/[{}]/g, "") }
-    // Every canvas item delegate that exists right now, by the engine's key. The
-    // delegate is what the user SEES, so an item that only exists in the model
-    // does not count as added.
     function metaCanvasKeys() {
         const out = []
         const walk = (item) => {
@@ -9721,12 +7443,6 @@ ApplicationWindow {
         walk(SelfTest.findItem("selfTestCanvas"))
         return out
     }
-    // `exclude` is the item an EARLIER gesture in this run already added. The
-    // canvas keys come back in delegate order and `metaKeysBefore` was taken
-    // before the first gesture, so without it the second gesture reports the
-    // FIRST gesture's item again — the drag half was reading the click's box and
-    // failing `textOk`/`landed` on its own bookkeeping (both reported keys were
-    // "item-1"), which says nothing about the drop.
     function metaNewKey(exclude) {
         const skip = exclude || []
         const now = window.metaCanvasKeys()
@@ -9744,9 +7460,6 @@ ApplicationWindow {
         const d = del.modelData
         if (!d)
             return null
-        // The STYLE is part of the answer: a palette-inserted field is built to
-        // its token (EditScreen.addMetadataItem), so the scenario reports the
-        // box and the font it landed with, not just its text and position.
         return { text: String(d.text), x: Number(d.x), y: Number(d.y),
                  w: Number(d.width), h: Number(d.height),
                  font: Number(d.meta && d.meta.fontSize !== undefined ? d.meta.fontSize : 0),
@@ -9791,9 +7504,6 @@ ApplicationWindow {
                 SelfTest.quit()
                 return
             }
-            // The + menu's chips are ONE zone-hover area whose zone is the
-            // pointer's column, so this click has to arrive with the hover set —
-            // clickItem moves the real cursor there first.
             SelfTest.clickItem("selfTestAddKindChip_metadata")
             selfTestMetaPaletteOpen.restart()
         }
@@ -9856,9 +7566,6 @@ ApplicationWindow {
                         + " font=" + (f ? String(f.font) : "?")
                         + " autoSize=" + JSON.stringify(f ? f.autoSize : "")
                         + " styledOk=" + (!!f && f.font === 40 && f.autoSize === "shrinkToFit")
-                        // The SLOT the field stands for, against the registry's
-                        // own answer for that token — the insert must carry it
-                        // or the engine cannot bind the block to a slide.
                         + " bind=" + JSON.stringify(f ? f.bind : "")
                         + " wantBind=" + JSON.stringify(String(window.metaAll[0].bind === undefined ? "" : window.metaAll[0].bind))
                         + " bindOk=" + (!!f && f.bind === String(window.metaAll[0].bind === undefined ? "" : window.metaAll[0].bind)))
@@ -9866,10 +7573,6 @@ ApplicationWindow {
                 SelfTest.quit()
                 return
             }
-            // Now the DRAG half: press the other field's chip, cross onto the
-            // canvas, release. The drop must land the item under the pointer, so
-            // the check is the distance between the drop point and the item's
-            // own centre — a couple of units of ghost-hotspot offset allowed.
             const canvas = SelfTest.findItem("selfTestCanvas")
             window.metaDropAt = { x: Math.round(canvas.width * 0.62),
                                   y: Math.round(canvas.height * 0.30) }
@@ -9914,22 +7617,12 @@ ApplicationWindow {
                         + " distance=" + dist
                         + " textOk=" + (!!f && f.text === window.metaDragToken)
                         + " landed=" + (dist >= 0 && dist <= 60)
-                        // A DROP is the same insert as a click, so it must land
-                        // the same style and the same registry slot — the two
-                        // are built by one function and this is what says so.
                         + " box=" + (f ? Math.round(f.w) + "x" + Math.round(f.h) : "?")
                         + " font=" + (f ? String(f.font) : "?")
                         + " autoSize=" + JSON.stringify(f ? f.autoSize : "")
                         + " bind=" + JSON.stringify(f ? f.bind : "")
                         + " wantBind=" + JSON.stringify(String(window.metaAll[window.metaAll.length - 1].bind === undefined ? "" : window.metaAll[window.metaAll.length - 1].bind))
                         + " bindOk=" + (!!f && f.bind === String(window.metaAll[window.metaAll.length - 1].bind === undefined ? "" : window.metaAll[window.metaAll.length - 1].bind)))
-            // The POPUP half needs a TEXT item UNDER the panel, or the cursor
-            // check proves nothing: no item beneath it means no I-beam to shine
-            // through in the first place. The item the click half added is the
-            // one to put there (this is a show the scenario made, never the
-            // user's), parked in the panel's lower-left padding — under the
-            // panel, on its padding rather than on a chip, so the expected
-            // cursor there is the panel's own arrow.
             const canvas = SelfTest.findItem("selfTestCanvas")
             const palette = SelfTest.findItem("selfTestMetadataPalette")
             const obj = editScreen.canvasObjectByKey(window.metaClickKey)
@@ -9971,12 +7664,6 @@ ApplicationWindow {
             selfTestMetaOutside.restart()
         }
     }
-    // The item that was parked UNDER the panel for check 2 is no longer usable
-    // for the outside click: the panel's padding is INSIDE its own rect, so a
-    // click there is a click on the panel's surface and cannot close anything.
-    // Move it clear of the panel first — the property the check is about is kept
-    // (the click still lands on a CANVAS OBJECT, the swallowing MouseArea, not on
-    // bare canvas), only the geometry is honest now.
     Timer {
         id: selfTestMetaOutside
         interval: 700               // the moved item's delegate, re-laid out clear of the panel
@@ -10010,10 +7697,6 @@ ApplicationWindow {
         interval: 700               // the item's delegate at its new home
         onTriggered: {
             // 4. And a click OUTSIDE the box closes it. The click lands on the
-            //    canvas item above — one that used to swallow the press in its
-            //    own MouseArea, which is why "click outside its box" left the
-            //    panel standing; a click on the canvas BACKGROUND always closed
-            //    it and proves nothing.
             SelfTest.clickItem("canvasItem_" + window.metaClickKey)
             window.metaClosedAfterOutside = !editScreen.metadataPaletteOpen
             window.metaDismissOk = window.metaClosedAfterOutside
@@ -10041,32 +7724,6 @@ ApplicationWindow {
     }
 
     // ---- item colour/opacity reaches the canvas (VGR_ITEMCOLOR_TEST=1) -------
-    // The report: "the opacity in the colour picker shows well but it never
-    // applies to the shape in the edit canvas — the text item does apply it".
-    // Both kinds go through the SAME BackgroundColorModal, so if one works and
-    // the other does not, the difference is either in the apply or in what the
-    // canvas reads back — and reading the code cannot tell the two apart.
-    //
-    // THREE WITNESSES PER ITEM, because the first two can agree while the screen
-    // still shows nothing:
-    //   * the ITEM's own value (style.backgroundColor / meta.color),
-    //   * its DELEGATE's own read (DraggableCanvasText.styleBackgroundColor),
-    //   * the PIXELS that delegate actually paints — grabbed to a PNG and
-    //     sampled by the runner (run_item_color_test.sh).
-    //
-    // Items are resolved by KEY on every read (editScreen.canvasObjectByKey),
-    // never from the object addCanvasItem handed back: the engine owns item
-    // identity and a document round-trip can replace the object, after which a
-    // captured reference reads as null — a read that an earlier version of this
-    // scenario turned into a PASS (alpha -1 < 0.9 counted as "faded").
-    //
-    // A RECTANGLE takes the delegate's own fill box; a CIRCLE takes the OTHER
-    // branch (drawsOwnBody — EditScreen's shapeContent paints the body from the
-    // same style), so both render paths are measured. The text item's colour is
-    // applied in the same run as the known-good comparison.
-    //
-    // Every apply is WHITE at 100% first (a colour no style in this app carries,
-    // so a white pixel in the grab is unambiguous), then WHITE at 30% (alpha).
     property string itemColorRectKey: ""
     property string itemColorCircleKey: ""
     property string itemColorTextKey: ""
@@ -10089,9 +7746,6 @@ ApplicationWindow {
     // The colour every apply uses.
     readonly property string itemColorPaint: "#ffffff"
 
-    // -1 for anything that is not a colour at all, so a MISSING value is a
-    // number in the report instead of an exception that ends the run — and the
-    // runner treats -1 as "missing", never as "faded".
     function itemColorAlpha(hex) {
         const s = String(hex)
         if (s.length === 0 || s.charAt(0) !== "#")
@@ -10119,12 +7773,6 @@ ApplicationWindow {
             return "(no delegate)"
         return window.itemColorHex(d.styleBackgroundColor)
     }
-    // Selects the item, then opens the picker through the ROW'S OWN expression
-    // (EditScreen's Background row: "itemBackground" when something is
-    // selected, the slide background otherwise) rather than a target this
-    // scenario hardcodes. A hardcoded target would keep passing while the row
-    // itself decided otherwise for a selected shape — which is exactly the
-    // reported "the shape's colour goes somewhere else".
     function itemColorOpenFor(key, target) {
         editScreen.handleCanvasSelect(key, 0)
         const rowTarget = editScreen.primarySelectedItemStyle ? "itemBackground" : "background"
@@ -10137,9 +7785,6 @@ ApplicationWindow {
         editScreen.openBackgroundPicker(rowTarget)
         editScreen.selectedCanvasObjects = []
     }
-    // The picker driven the way the operator drives it: a typed CUSTOM colour
-    // (liveKind "color" is what typing sets) plus the Opacity slider, then the
-    // SAME accept() the Save button calls.
     function itemColorApply(opacityPct) {
         const picker = SelfTest.findItem("selfTestBgPicker")
         if (!picker || !picker.open) {
@@ -10163,13 +7808,6 @@ ApplicationWindow {
         return { item: window.itemColorItemHex(key),
                  delegate: window.itemColorDelegateHex(key) }
     }
-    // WHICH ITEM ANSWERS A CLICK AT A POINT TWO ITEMS COVER — the reported
-    // "you pick the text item instead of the shape". clickItem delivers a real
-    // OS click at the named delegate's own centre, so this is the operator's
-    // gesture, not a selection the scenario made up from the model.
-    // The CLICK-THROUGH probe: two taps on ONE point that two items cover.
-    // `key` is what Qt hands the topmost item's handler, which is what the
-    // operator's click reports; the second tap must reach the item UNDER it.
     function itemColorCycleClick(label, key) {
         editScreen.handleCanvasSelect(key, 0, Qt.point(100, 90))
         const sel = editScreen.selectedCanvasObjects.slice()
@@ -10188,9 +7826,6 @@ ApplicationWindow {
                     + " kinds=" + JSON.stringify(kinds))
         return sel
     }
-    // Opens the picker with an EXPLICIT target — the Text panel's own colour
-    // row (TextItemPanel -> openBackgroundPicker("textColor")), a different door
-    // from the Items tab's Background row.
     function itemColorOpenWith(key, target) {
         editScreen.handleCanvasSelect(key, 0)
         editScreen.openBackgroundPicker(target)
@@ -10209,9 +7844,6 @@ ApplicationWindow {
             selfTestItemColorTick.restart()
         }
     }
-    // One step per tick: a picker apply and the read that judges it must not
-    // share a tick (the dialog's own signals and the delegate's relayout land
-    // between them, the way they do for a human).
     Timer {
         id: selfTestItemColorTick
         interval: 700
@@ -10323,11 +7955,6 @@ ApplicationWindow {
             } else if (step === 12) {
                 window.itemColorClickProbe("text", "canvasItem_" + window.itemColorTextKey)
             } else if (step === 13) {
-                // THE CLICK-THROUGH. (100,90) lies inside the CIRCLE's box AND
-                // inside the text item's box above it, so Qt delivers the tap to
-                // the text item — the reported "you pick the text item instead of
-                // the shape". One tick = 700 ms, inside the 350-900 ms window
-                // that separates a deliberate second click from a double-click.
                 window.itemColorCycleFirst = window.itemColorCycleClick("click1", window.itemColorTextKey)
             } else if (step === 14) {
                 window.itemColorCycleSecond = window.itemColorCycleClick("click2", window.itemColorTextKey)
@@ -10363,30 +7990,13 @@ ApplicationWindow {
         }
     }
 
-
     // ---- The sermon-folder sweep's OWN notice, read off the screen ----
-    // "Add sermons folder" reports what it imported and, for every file it would
-    // not take, WHY — the wording the operator actually reads. That wording was
-    // covered only by the engine's unit tests, which see the ImportReport and
-    // never the notice drawn from it, so this scenario runs the REAL sweep (the
-    // same service call the folder picker makes, minus the dialog a script
-    // cannot answer) over a folder the shell runner prepared — one sermon beside
-    // a document, an image and a renamed spreadsheet — then reads every notice
-    // the app raised, including the card's own rendered text, and logs them
-    // verbatim for the runner to assert on.
-    //
-    // Armed only with BOTH VGR_SELFTEST=1 and VGR_TABLEFOLDER_TEST=1, and told
-    // the folder by VGR_TABLEFOLDER_DIR: it imports real files and quits, so a
-    // plain VGR_SELFTEST=1 run (how the NDI probes launch the app) never does.
     property int tableFolderTick: 0
     property var tableFolderSeen: []      // one entry per notice, oldest first
     function tableFolderCollect() {
         const items = NotificationCenter.items
         for (let i = 0; i < items.length; ++i) {
             const e = items[i]
-            // The topic is this scenario's own filter: the sweep's notices are
-            // the only ones the Table library raises, so a boot warning from
-            // another producer can never be mistaken for the toast under test.
             if (String(e.topic).indexOf("table.") !== 0)
                 continue
             if (window.tableFolderSeen.indexOf(e.message) !== -1)
@@ -10423,10 +8033,6 @@ ApplicationWindow {
         onTriggered: {
             ++window.tableFolderTick
             window.tableFolderCollect()
-            // The outcome notices are pushed from the sweep's own queued callback,
-            // so a few ticks after `importing` goes false is what lets them reach
-            // the center — and 120 ticks (a minute) is the bound, so a sweep that
-            // never finishes still reports instead of hanging the run.
             const settled = !TheTableService.importing && window.tableFolderTick > 4
             const bounded = window.tableFolderTick >= 120
             if (!settled && !bounded)
@@ -10437,15 +8043,7 @@ ApplicationWindow {
             for (let i = 0; i < window.tableFolderSeen.length; ++i)
                 if (String(window.tableFolderSeen[i]).indexOf("Skipped ") === 0)
                     refused = window.tableFolderSeen[i]
-            // What is ON SCREEN for those notices: the overlay stacks one card
-            // per item, in order, so the last card is the newest notice (the
-            // refusals) and its own `message` is the wording it was handed. A
-            // wording that reached the center but never reached a card would be
-            // no answer to "what does the operator read?".
             const overlay = SelfTest.findItem("selfTestToast")
-            // The overlay's children are the cards (the Repeater itself is one
-            // child too, and carries no objectName): the last CHILD that is a
-            // card is the newest notice on screen.
             const kids = overlay ? overlay.children : []
             let cards = 0
             let last = null
@@ -10470,5 +8068,4 @@ ApplicationWindow {
         interval: 1500              // the log lines above, on their way to the log
         onTriggered: SelfTest.quit()
     }
-
 }

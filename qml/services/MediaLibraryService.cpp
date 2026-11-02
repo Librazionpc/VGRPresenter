@@ -23,7 +23,6 @@
 namespace bm = bps::media;
 
 namespace {
-
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
 // QML hands over either a plain path or a file:// URL (what a file dialog gives).
@@ -41,9 +40,6 @@ void report(const QString &title, const QString &message, const QString &level =
     EventBus::instance().notify(message, level, title, QStringLiteral("media.library"), crux, action);
 }
 
-// The name a path ENDS in, without its extension — a pure string parse, never a
-// filesystem question (a file that is already gone still has to be named in the
-// notice about it).
 QString leafName(const QString &path)
 {
     QString name = path;
@@ -56,7 +52,6 @@ QString leafName(const QString &path)
         name = name.left(dot);
     return name.isEmpty() ? path : name;
 }
-
 } // namespace
 
 MediaLibraryService::MediaLibraryService(QObject *parent)
@@ -188,9 +183,6 @@ QVariantList MediaLibraryService::items(const QString &folderPath, const QString
                                         : it.kind == bm::MediaKind::Audio ? QStringLiteral("audio")
                                                                           : QStringLiteral("image") },
             { QStringLiteral("folder"), qstr(it.folder) },
-            // THIS FILE'S OWN FILL ("" = the output's default): the badge and
-            // the picker on the card read it, and the take pushes it into the
-            // compositor so the engine lays the picture out by it.
             { QStringLiteral("fit"), qstr(it.fit) },
         });
     return out;
@@ -208,9 +200,6 @@ QString MediaLibraryService::thumbnailFile(const QString &path, int size, int st
     if (made.ok())
         return qstr(made.value());
 
-    // A picture the engine's own decoders cannot read (SVG, for one) may still be readable by one of
-    // Qt's image plugins. Its result goes into the engine's cache under the engine's own name for it,
-    // so the engine finds it there, fresh, the next time it is asked.
     if (*kind == bm::MediaKind::Image && step < 0 && made.error().code != bps::Err::NotFound) {
         const int target = bm::ThumbnailCache::RoundSize(size);
         QImageReader reader(path);
@@ -261,10 +250,6 @@ void MediaLibraryService::removeFolder(const QString &path)
 {
     if (!library_)
         return;
-    // The name for the toast comes from the PATH — a pure string parse, NOT a
-    // filesystem question: a folder that is already gone must still leave the
-    // library, and QFileInfo would ask the disk about it. Last component, or the
-    // whole path when it ends in a separator.
     QString name = path;
     while (name.endsWith(QLatin1Char('/')) || name.endsWith(QLatin1Char('\\')))
         name.chop(1);
@@ -306,10 +291,6 @@ void MediaLibraryService::removeItem(const QString &path)
     editItem(path, ItemOp::Remove, QString());
 }
 
-// The same delete for a whole selection. ONE notice, ONE Undo: the tokens are joined
-// with a newline (a path cannot contain one) and undoRemove() splits them back, so
-// "delete these five" costs one toast instead of five the operator has to read and
-// answer separately.
 void MediaLibraryService::removeItems(const QStringList &paths)
 {
     VGR_CALL_TRACE("MediaLibraryService.removeItems");
@@ -364,11 +345,6 @@ void MediaLibraryService::removeItems(const QStringList &paths)
     });
 }
 
-// The Undo on a delete's notice. Same shape as the edit it takes back: the engine
-// call on the pool, the verdict back here, foldersChanged() once the file is on
-// the disk again — so the tile reappears in its own folder, in its own order,
-// with the id (and the thumbnails) it had. A batch's token is several tokens joined
-// with a newline (see removeItems), and each one is put back in turn.
 void MediaLibraryService::undoRemove(const QString &token)
 {
     VGR_CALL_TRACE("MediaLibraryService.undoRemove");
@@ -419,19 +395,11 @@ void MediaLibraryService::setItemFit(const QString &path, const QString &fit)
 
 QString MediaLibraryService::itemFit(const QString &path) const
 {
-    // In-memory map lookup behind one path canonicalisation, so a caller on the
-    // interface thread can ask this on every take (and the tile can ask it for
-    // the file on air) without touching the disk.
     if (!library_ || path.isEmpty())
         return {};
     return qstr(library_->ItemFit(path.toStdString()));
 }
 
-// The three file operations are one shape: a PAL call on the pool (the same thread
-// the scans use), the verdict queued back here, and foldersChanged() — the signal the
-// pane already re-reads on — once the disk agrees. Every figure the pane shows comes
-// from the library, so one emit is the whole refresh: the grid, the folder counts and
-// the tree.
 void MediaLibraryService::editItem(const QString &path, ItemOp op, const QString &argument)
 {
     VGR_CALL_TRACE("MediaLibraryService.editItem");
@@ -453,9 +421,6 @@ void MediaLibraryService::editItem(const QString &path, ItemOp op, const QString
                 failure = qstr(r.error().message);
             break;
         case ItemOp::Fit:
-            // A PREFERENCE, not a file operation — but it writes its own small
-            // document, so it takes the same off-thread hop as the rest (a
-            // share that has gone away must never park the window).
             if (auto r = library_->SetItemFit(target, arg); !r.ok())
                 failure = qstr(r.error().message);
             break;
@@ -510,9 +475,5 @@ void MediaLibraryService::startScan(const QString &path)
 
 void MediaLibraryService::shutdown()
 {
-    // BOUNDED: GUI thread, in aboutToQuit. A folder scan on a slow/network
-    // drive could otherwise hold the UI here for the full 10s — past Windows'
-    // ~5s hang threshold (AppHangB1 -> killed). Scans are safe to abandon at
-    // quit: each result is delivered through a queued call into this object.
     (void)QThreadPool::globalInstance()->waitForDone(2000);
 }

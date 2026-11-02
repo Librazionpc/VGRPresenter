@@ -1,14 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One DESIGN - an overlay or a template - in a library grid: a 16:9 preview of its blocks
-// (DesignPreview, drawn from what the ENGINE keeps) over a dark stage, and its name under it.
-// Pointing at the card shows small actions on the preview - open it in the Edit screen, file it
-// in a category, rename, duplicate, delete - and a RIGHT-CLICK on the card offers the same actions as a menu
-// (contextMenuRequested; the host builds and shows the menu). Each is reported as a signal; the card changes
-// nothing itself.
-//
-// A design that stays on screen when the slide changes (locked) carries a small padlock.
 Item {
     id: root
 
@@ -52,16 +44,6 @@ Item {
             root.renameCommitted(text)
     }
 
-    // Underneath everything, so the actions on the preview (which sit above it) get their clicks.
-    //
-    // checkAncestors: false — the same posture the Scripture/The Table rows
-    // (ReferencePane) and the shows rows use. The default (true) walks EVERY
-    // ancestor's visible/enabled to decide "is this shown"; inside the library
-    // grid one of those ancestors can read hidden/disabled while the card is
-    // plainly on screen, which left `hover.hovered` stuck false — the card
-    // never lit and its hover action row (Edit / File / Rename / Duplicate /
-    // Delete) never appeared. Geometry alone is the truth here; the open-
-    // popup case is still handled by AppCursor.blocked() in PositionHoverArea.
     PositionHoverArea {
         id: hover
         anchors.fill: parent
@@ -137,10 +119,6 @@ Item {
                         name: actionBtn.icon
                         color: Theme.navLabelMuted
                         width: 12; height: 12
-                        // All five actions are on the 24 grid now (penTool /
-                        // folder / fileText / copy / close), so `fit` lines
-                        // them all up in the 12px box — without it `copy`
-                        // (14px natural) sat bigger than its neighbours.
                         fit: true
                     }
                     PositionHoverArea {
@@ -260,10 +238,6 @@ Item {
             }
         }
 
-        // THE POINTER'S EDGE — the app's shared hover layer, declared LAST so
-        // it draws over the preview; a border on the card itself would sit
-        // under every child. Transparent wash: a design's preview must not be
-        // tinted, only edged.
         HoverGlow {
             anchors.fill: parent
             radius: parent.radius

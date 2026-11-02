@@ -1,12 +1,5 @@
 #pragma once
 
-// IDisplayProvider (docs/specs/18 §Provider-based display model). Exactly like
-// Importers and Notification Providers, the Display Engine owns a registry of
-// IDisplayProvider implementations and knows nothing about the concrete
-// providers (Linux, Windows, Virtual, OBS, NDI, Remote, Web, future). Adding a
-// provider requires implementing this interface and registering it — no engine
-// changes.
-
 #include "core/common/Common.hpp"
 #include "modules/display/DisplayTypes.hpp"
 
@@ -14,7 +7,6 @@
 #include <vector>
 
 namespace bps::display {
-
 struct DisplayProviderCapabilities {
     size_t maxOutputs = 0;          // 0 = unlimited
     bool supportsHotPlug = false;   // Probe() detects connect/disconnect
@@ -39,5 +31,4 @@ public:
 
     virtual DisplayProviderCapabilities Capabilities() const noexcept = 0;
 };
-
 } // namespace bps::display

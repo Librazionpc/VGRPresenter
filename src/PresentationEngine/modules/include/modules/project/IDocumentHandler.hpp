@@ -1,17 +1,10 @@
 #pragma once
 
-// IDocumentHandler (docs/specs/15 §Document Manager). The engine extension
-// point for editable documents: presentations, songs, bible notes, themes,
-// templates, profiles and layouts all implement this interface. The
-// DocumentManager knows nothing about concrete document types — it only hosts
-// a registry of handlers (Manager → Registry → Interface → Implementations).
-
 #include "core/common/Common.hpp"
 
 #include <string>
 
 namespace bps::project {
-
 class IDocumentHandler {
 public:
     virtual ~IDocumentHandler() = default;
@@ -24,5 +17,4 @@ public:
     virtual Result<void> Close() = 0;
     virtual bool IsDirty() const = 0;
 };
-
 } // namespace bps::project

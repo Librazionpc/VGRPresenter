@@ -1,16 +1,5 @@
 #pragma once
 
-// Compile-time platform tags (PAL). The core never uses #if _WIN32/__linux__/
-// __APPLE__ directly (PAL DoD §1 — no OS knowledge outside the PAL); when the
-// binary identity is needed (e.g. BuildInfo) it is read from here instead.
-// This header is the single macro home of the project (DoD §25).
-//
-// Architecture names are canonical across every OS:
-//   x86_64 · x86 · arm64 · arm · riscv64
-// so a Windows ARM64 build, an Apple Silicon build and a Linux aarch64 build
-// all report "arm64"; a Win32 x86 build, an i686 Linux build and a macOS x86
-// build all report "x86" (32-bit ARM reports "arm").
-
 #include <string>
 #include <string_view>
 
@@ -20,7 +9,6 @@
 #endif
 
 namespace bps::platform {
-
 inline constexpr const char* kCompileOs =
 #if defined(_WIN32)
     "windows"
@@ -57,9 +45,6 @@ inline constexpr const char* kCompileArch = CompileArch();
 // 64-bit target) — matches sizeof(void*) * 8 at runtime.
 inline constexpr int kCompileBits = static_cast<int>(sizeof(void*) * 8);
 
-// Canonicalizes an OS-reported architecture string ("aarch64", "armv7l",
-// "AMD64", ...) into the canonical form used across the engine, so Arch() and
-// EnvironmentInfo.arch are consistent on every platform.
 inline std::string CanonicalArch(std::string_view raw) {
     if (raw == "aarch64" || raw == "arm64" || raw == "ARM64") return "arm64";
     if (raw == "arm" || raw == "ARM" || raw == "armv6l" || raw == "armv7l" ||
@@ -72,9 +57,6 @@ inline std::string CanonicalArch(std::string_view raw) {
     return std::string(raw);   // passthrough for anything unrecognized
 }
 
-// Debug-build call-site stack capture for Error.stack (DoD §19). Empty string
-// in release builds and on platforms without a backtrace API. glibc only;
-// Windows/macOS capture is a documented follow-up.
 inline std::string CaptureStack() {
 #if defined(__linux__) && !defined(NDEBUG)
     void* frames[16] = {};
@@ -93,5 +75,4 @@ inline std::string CaptureStack() {
     return {};
 #endif
 }
-
 } // namespace bps::platform

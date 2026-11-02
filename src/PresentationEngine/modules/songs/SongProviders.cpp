@@ -12,9 +12,7 @@
 #include <format>
 
 namespace bps::song {
-
 namespace {
-
 using XmlNode = xml::Node;
 
 std::string Trim(std::string_view s) { return xml::Trim(s); }
@@ -337,9 +335,6 @@ public:
         if (Lower(source.substr(0, 64)).contains("<rvb") ||
             Lower(source.substr(0, 64)).contains("<song"))
             return ParseOpenSongLike(source);
-        // ProPresenter 7/8 documents are protobuf, not XML — a ProPresenter
-        // library folder is full of them, and reading them here is what makes
-        // "Import from ProPresenter" work on a current library at all.
         return ParseProPresenterFile(source);
     }
 };
@@ -584,7 +579,6 @@ public:
         return song;
     }
 };
-
 } // namespace
 
 std::shared_ptr<ISongProvider> CreateChordProProvider() {
@@ -608,5 +602,4 @@ std::shared_ptr<ISongProvider> CreatePlainTextSongProvider() {
 std::shared_ptr<ISongProvider> CreateJsonSongProvider() {
     return std::make_shared<JsonSongProvider>();
 }
-
 } // namespace bps::song

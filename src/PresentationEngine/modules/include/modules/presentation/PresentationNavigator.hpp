@@ -1,10 +1,5 @@
 #pragma once
 
-// PresentationNavigator (docs/specs/19 §Navigation). Next / Previous / First /
-// Last / Jump by index / by stable slide id / by tag / by section / search.
-// Keeps a navigation history for "Back" and recovery. Slides use stable IDs —
-// never array indexes.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::presentation {
-
 class PresentationNavigator {
 public:
     // Binds the navigator to a presentation (visible slide order).
@@ -47,5 +41,4 @@ private:
     size_t current_ = 0;
     std::vector<size_t> history_; // previous positions
 };
-
 } // namespace bps::presentation

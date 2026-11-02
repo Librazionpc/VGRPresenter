@@ -1,10 +1,5 @@
 #pragma once
 
-// NotificationQueue (docs/specs/14 §Notification Queue): priority FIFO with
-// rate limiting, burst handling, deduplication, and grouping. The queue is the
-// async buffer between the EventBus and the providers — notifications never
-// interrupt the engine (docs/specs/14 §Notification Queue).
-
 #include "modules/notification/Notification.hpp"
 
 #include <condition_variable>
@@ -16,7 +11,6 @@
 #include <vector>
 
 namespace bps::notification {
-
 struct QueueStats {
     size_t pending = 0;
     size_t delivered = 0;
@@ -78,5 +72,4 @@ private:
 
     size_t PendingLocked() const;   // requires mutex_
 };
-
 } // namespace bps::notification

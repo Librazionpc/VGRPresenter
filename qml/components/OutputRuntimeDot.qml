@@ -2,42 +2,11 @@ import QtQuick
 import VGRPresenterUI
 
 // ============================================================================
-// OutputRuntimeDot.qml — ONE output's runtime, as a coloured dot whose numbers
-// are on hover.
-//
-// The colour IS the state (the picture carries no text — the Outputs row owns
-// the words):
-//   green  — frames are landing on this output
-//   amber  — it is up but blacked out, or its feed has stalled
-//   grey   — off air / waiting for the first frame / switched off
-//
-// The hover detail spells out the same state plus what the ENGINE measured for
-// THIS output: the frames it has received and how long ago the last one landed
-// (LiveOutputService.outputRuntime ← RenderEngine::OutputFeedAges, i.e. the same
-// numbers the Outputs screen prints). So "is this one actually sending?" is
-// answerable on the wall, without opening Settings.
-//
-// Built on HoverDetail: the tip, the position-driven hover and the
-// forget-on-unload are inherited, not re-implemented. Any surface that needs an
-// output's runtime (the wall's tiles and the Outputs rows both do) uses this one
-// component, and a surface that needs it to look different overrides `dotColor`
-// or `pulse` rather than re-deriving the state.
 HoverDetail {
     id: root
 
-    // WHICH output this dot is about — the roster name, exactly as
-    // OutputListModel carries it (the runtime map and the stall set are keyed by
-    // it).
     property string outputName: ""
-    // Whether this output is switched ON in the roster (not Item.enabled — this
-    // is the output's own state, so it is named for it). The runtime map only
-    // exists while a session is live, so a caller that knows the row's flag (the
-    // wall's tile, the Outputs row) passes it: a switched-off output then reads
-    // "off" rather than "off air".
     property bool outputEnabled: true
-    // The status source: the same maps the Outputs row reads. A caller that
-    // already knows the state (a row that also colours its text by it) passes
-    // dotColor instead.
     readonly property var runtime: LiveOutputService.outputRuntime[root.outputName] || null
     // outputFeedStalled() is an invokable — opaque to QML's dependency tracking —
     // so the revision is read to make this re-evaluate when the stall set moves.
@@ -70,11 +39,6 @@ HoverDetail {
     property bool pulse: false
     property int dotSize: 7
     property bool showDot: true
-    // Say the STATE in words beside the dot — and nothing else. A surface where
-    // the dot stands alone on the picture (the wall's tiles) needs the word; a
-    // surface that already prints its own line (the Outputs row) leaves it off so
-    // the same state is not stated twice. The numbers are never here: they are
-    // the hover detail (see detailText).
     property bool showState: false
 
     // ---- the hover detail (the numbers, not the colour) ---------------------

@@ -1,12 +1,5 @@
 #pragma once
 
-// Projects (FreeShow's Projects panel, in the engine): a project is an ordered list of the things one service or event uses - shows,
-// media, audio, overlays, scripture, sections that group them - kept in folders. Opening a project lists its items; clicking one puts it
-// on the centre page. The ENGINE owns all of it: the folder tree, what a project may hold, what may be dropped where, how items move,
-// which projects were used lately, and the file they are kept in. The UI draws the tree and the items and asks.
-//
-// A project item points at what it stands for (`ref`: a show's file path, a media file, an overlay id...) - it never copies it.
-
 #include "core/common/Common.hpp"
 
 #include <cstdint>
@@ -17,7 +10,6 @@
 #include <vector>
 
 namespace bps::library {
-
 struct ProjectItem {
     std::string id;           // unique within its project
     std::string type;         // show | media | audio | overlay | scripture | section | effect | camera | screen | ndi | player | pdf | image | video | folder
@@ -126,13 +118,6 @@ public:
     const std::string& StorageFile() const noexcept { return storageFile_; }
 
 private:
-    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
-    // BuildStoreJsonLocked runs with mutex_ HELD and is pure serialization — no
-    // PAL, no provider, nothing that can block. CommitStore does the PAL write
-    // and must be called AFTER the lock is released: it used to be one helper
-    // (SaveLocked) called from inside every mutator's locked scope, which
-    // charged a disk write to the interface thread and parked the whole project
-    // tree behind it.
     std::string BuildStoreJsonLocked() const;
     // Writes the text BuildStoreJsonLocked() produced. PAL: NEVER call with
     // mutex_ held. "" / no store path is a no-op.
@@ -150,5 +135,4 @@ private:
     std::vector<ProjectFolder> folders_;
     std::function<int64_t()> clock_;
 };
-
 } // namespace bps::library

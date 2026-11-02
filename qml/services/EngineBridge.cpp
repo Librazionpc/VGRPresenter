@@ -178,12 +178,29 @@ bool EngineBridge::boot()
             }
         }
         logPath_ = QDir::toNativeSeparators(QDir(dir).absoluteFilePath(QStringLiteral("engine.log")));
-        (void)bps::Logger::Instance().AddSink(std::make_shared<bps::FileSink>(logPath_.toStdString()));
+        // Both destinations are sinks of the one logger, with the one formatter — the
+        // console keeps everything the app prints (a self-test reads it back), the file
+        // keeps info and above. Logger::Initialize only seeds defaults when no sink is
+        // installed, so the console sink has to be named here too.
+        // VGR_LOG_LEVEL is the developer override, read in one place (Logger.cpp) so this and
+        // the stored preference cannot disagree about it. It wins over everything; without it
+        // engine.log starts at Info and the per-frame trace diagnostics never reach it
+        // (docs/scroll_mode_thread_audit.md §7). The preference replaces this level at load.
+        const auto forcedLevel = bps::LogLevelEnvOverride();
+        auto fileSink = std::make_shared<bps::FileSink>(logPath_.toStdString());
+        fileSink->SetMinLevel(forcedLevel.value_or(bps::LogLevel::Info));
+        (void)bps::Logger::Instance().AddSink(fileSink);
+        auto consoleSink = std::make_shared<bps::ConsoleSink>();
+        consoleSink->SetMinLevel(bps::LogLevel::Debug);
+        (void)bps::Logger::Instance().AddSink(consoleSink);
     }
 
     bps::BootOptions options;
     options.dataDir = dataDir.toStdString();
-    options.logLevel = bps::LogLevel::Info;
+    // The global gate sits at Debug so a message is never dropped before a sink can
+    // apply its own level: the console shows debug, engine.log starts at Info (and
+    // follows the Log level preference once the settings store opens).
+    options.logLevel = bps::LogLevelEnvOverride().value_or(bps::LogLevel::Debug);
     // pluginDirs left empty, ipcPort left 0 (its BootOptions default) —
     // no plugin loading, no network listener opened.
 

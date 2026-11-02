@@ -6,14 +6,6 @@
 #include <optional>
 #include <thread>
 
-// The UI's window onto the ENGINE's sermon library (bps::library::TheTableLibrary)
-// behind "The Table" tab. The same reference architecture as scripture —
-// books (years) -> chapters (sermons) -> verses (paragraphs) — but a SEPARATE
-// engine module with its own importer: "New sermon" takes a .txt or .pdf, the
-// engine parses it (year from the folder, title from the file name, paragraphs
-// as verses) and updates the library. The pane owns no data; this hands over
-// the engine's documents and search results.
-
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -32,9 +24,6 @@ class TheTableService : public QObject
     QML_ELEMENT
     QML_SINGLETON
 
-    // The library document for the browser pane:
-    // { name, collections: [ { name, books: [ { title, sections: [ { verses: [...] } ] } ] } ] }
-    // (ReferencePane browses years/sermons/paragraphs from this adapter.)
     Q_PROPERTY(QVariantMap document READ document NOTIFY changed)
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
     // Total paragraph count (the sidebar's count badge).
@@ -55,18 +44,7 @@ public:
     Q_INVOKABLE void previewChapterAsync(const QString &bookId, int chapter, int token);
     // Loads a chapter off the UI thread; stale requests are discarded.
     Q_INVOKABLE void chapterAsync(const QString &bookId, int chapter, int token);
-    // A paragraph's FULL text — `count` 1 = just that paragraph, 2 = it and its
-    // successor blank-line joined. The hover preview asks for 2 on a spanned
-    // match (words spread across both), 1 otherwise. "" when unknown.
     Q_INVOKABLE QString paragraphPair(const QString &bookId, int chapter, int verse, int count = 2) const;
-    // Whole-library search: [{ reference, bookId, chapter, verse, snippet }]
-    // `exactWords` (the search boxes' padlock): the typed words must appear
-    // verbatim as whole words — no completion, no inner substring, no typo
-    // correction. See TheTableLibrary::Search.
-    // `scopeBookId` + `scopeChapter` are the pane's CHAPTER LOCK: when the search
-    // is locked to the sermon on screen, only that sermon's paragraphs are
-    // searched (never another sermon, never another year). Empty `scopeBookId` =
-    // the whole library; `scopeChapter` 0 = every sermon of that year.
     Q_INVOKABLE QVariantList search(const QString &text, int limit = 60,
                                     bool exactWords = false, bool includeFullText = false,
                                     const QString &scopeBookId = QString(),
@@ -76,18 +54,11 @@ public:
     QVariantList searchCancellable(const QString &text, int limit, bool exactWords,
                                    bool includeFullText, const QString &scopeBookId,
                                    int scopeChapter, const std::function<bool()>& cancelled) const;
-    // ASYNC search (the Quick-search pattern): the same rows on a worker thread
-    // — the pill search pane runs this per keystroke and the GUI never blocks
-    // on a big query. `token` = newest request wins; answers arrive as
-    // searchResultsReady(token, rows) (stale tokens are dropped).
     Q_INVOKABLE void searchAsync(const QString &text, int limit, int token,
                                  bool exactWords = false, const QString &scopeBookId = QString(),
                                  int scopeChapter = 0);
 
     // ---- the shared reference-pane adapter (the same calls ScriptureService
-    // answers, so ONE pane UI serves both tabs) ----
-    // The one collection ("Sermons") + the years as books: [{ id, name }]
-    // (the pane's sidebar rows — the library is a single source).
     Q_INVOKABLE QVariantList sources() const;
     // A source's books in order: [{ id, name, chapters: [1, 2, ...] }]
     Q_INVOKABLE QVariantList books(const QString &sourceId) const;
@@ -96,20 +67,7 @@ public:
     Q_INVOKABLE QString reference(const QString &book, int chapter, const QVariantList &verses) const;
     // "1953 12:3" typed into search -> { bookId, book, chapter, verseStart, verseEnd }, else {}.
     Q_INVOKABLE QVariantMap resolve(const QString &text) const;
-    // Citation search: typed text ("faith", "47-0412") matched against the sermons'
-    // citation lines (CONTAINS). Engages at 5 chars for EVERY needle (short fragments
-    // like "47-" or "fai" match dozens of sermons — the resolve would just pick the
-    // first one). UNIQUE match -> the ref (the pane jumps); MULTIPLE matches ->
-    // {} (the dropdown lists them, the user picks the actual sermon).
-    // Used by resolve() when the text is not a year/paragraph reference.
     QVariantMap resolveCitation(const QString &text) const;
-    // A typed HANDLE put into the one form the citation search compares on:
-    // lower case with the spaces beside a dash removed, so "47-0412", "47 - 0412"
-    // and "47 -0412" all name the same sermon while the title's own spaces are
-    // left alone. Exposed (not just internal) because ReferencePane.suggest
-    // mirrors this search for the pane's dropdown — one formatter, so the box
-    // that jumps and the list that appears can never disagree about what was
-    // typed.
     Q_INVOKABLE QString citationNeedle(const QString &handle) const;
     // The preview slide for the picked paragraphs, in the Edit screen's block
     // shape (DesignPreview draws it): { blocks, background, reference, slideCount }.
@@ -118,9 +76,6 @@ public:
     // the chosen template split by the tab's own "table." options.
     Q_INVOKABLE QVariantList slides(const QString &bookId, int chapter, const QVariantList &verses) const;
 
-    // The Table's template chrome (the shared pane's template card + picker).
-    // The SAME template library Scripture uses; only "table"-type layouts are
-    // listed and the choice is stored under its own settings key.
     Q_INVOKABLE QString templateId() const;
     Q_INVOKABLE QString defaultTemplateId() const;
     Q_INVOKABLE QString templateName(const QString &id) const;
@@ -132,16 +87,9 @@ public:
     // Returns true when a sermon landed in the library.
     Q_INVOKABLE bool newSermon();
 
-    // aboutToQuit (main.cpp), BEFORE EngineBridge::shutdown(): cancel the
-    // background index pass between documents and join its thread — a pass
-    // still upserting into the Search Engine during the kernel teardown was
-    // the 0xc0000005 on quit. The SearchService::shutdown() counterpart.
     void shutdownIndexing();
 
     // ---- User data (the ScriptureService calls, the shared pane's drawer) ----
-    // The engine (TheTableLibrary) persists notes and highlights in the
-    // library JSON; `reference` may be "1953 12:3" or a sermon citation
-    // line — it resolves before anything stores. A bad one answers false/{}.
     Q_INVOKABLE bool setNote(const QString &reference, const QString &text);
     Q_INVOKABLE QString note(const QString &reference) const;
     Q_INVOKABLE QVariantList notes() const;
@@ -154,15 +102,7 @@ public:
     Q_INVOKABLE QString verseNote(const QString &bookId, int chapter, int verse) const;
     Q_INVOKABLE QVariantMap chapterUserData(const QString &bookId, int chapter) const;
 
-    // "Add sermons folder": picks a folder and imports every .pdf/.txt under
-    // it (recursively) on a WORKER THREAD — the UI stays live; `progress`
-    // carries { done, total, current } per file and one final `imported`
-    // ({ imported, skipped, failed }) toast lands when it finishes.
     Q_INVOKABLE bool newSermonFolder();   // gui-ok: a modal native picker parks the interface thread on PURPOSE — the user is looking at the dialog, and its own event loop keeps the window painting; the work after the pick (import, scan, copy) already runs off the interface thread
-    // The same sweep for a root that is already known - the folder picker above
-    // calls this, and the env-gated self-test scenario drives it directly (the
-    // same worker thread, the same progress and the same final toast, without a
-    // dialog a script cannot answer).
     Q_INVOKABLE bool importSermonFolder(const QString &root);
     Q_PROPERTY(bool importing READ importing NOTIFY importingChanged)
     bool importing() const { return importing_; }
@@ -186,9 +126,6 @@ private:
     std::atomic<int> latestPreviewToken_{0};  // previewChapterAsync: latest hovered row wins
     explicit TheTableService(QObject *parent = nullptr);
 
-    // THE SPLIT CUT AHEAD OF THE CLICK — the same contract as ScriptureService's
-    // (see SlideBuilder's warm cache): a sermon's paragraphs are long, so the cut is
-    // what makes clicking one during a service a lookup instead of a fill.
     SlideBuilder::ChapterKey chapterKey(const QString &bookId, int chapter) const;
     std::optional<SlideBuilder::WarmSlides> warmFor(const QString &bookId, int chapter, int number) const;
     mutable bool warmServeLogged_ = false;
@@ -201,29 +138,14 @@ private:
     int cutToken_ = 0;
     std::optional<SlideBuilder::ChapterKey> cutKey_;
     bool cutStale_ = false;
-    // THE WORDS UNDER THE HELD CUT MOVED (a sermon imported, the library reopened, a
-    // template edited in place): drop the cut, say so, and let the re-cut handler cut the
-    // open sermon again. See the .cpp — a settings write must NOT come through here.
     void libraryMoved();
 
     void loadLibrary();
     QVariantMap documentFromEngine() const;
-    // The background index pass (one joinable worker, coalesced): (re-)upserts
-    // the sermons into the platform Search Engine — loadLibrary's first index
-    // and every post-import reindex go through this. indexPassDone joins a
-    // finished pass and restarts for a late request; shutdownIndexing (public,
-    // aboutToQuit) cancels + joins BEFORE the engine teardown.
     void startIndexing();
     void indexPassDone();
 
     void *library_ = nullptr;   // bps::library::TheTableLibrary* (void* keeps the engine header out of QML builds)
-    // THE LIBRARY IS OPENED OFF THE INTERFACE THREAD (user call: "make The Table's
-    // library load happen off the interface thread so opening the tab never blocks on
-    // reading the sermon JSON"). `libraryOwner_` owns the engine object for the
-    // process (typed void* here for the same reason as `library_`). All three are read
-    // and written on the INTERFACE thread only: loadLibrary() starts the read, and the
-    // publish — the assignment, the flags, the index and the notify — is a queued
-    // callback that runs there, never on the worker.
     std::shared_ptr<void> libraryOwner_;
     bool loadStarted_ = false;
     bool loadFailed_ = false;
@@ -231,13 +153,6 @@ private:
     bool importing_ = false;
     QVariantMap progress_;
 
-    // The ONE background indexer (the three detached std::threads this replaced
-    // were the 0xc0000005 on quit: an orphaned pass walked its upserts into the
-    // Search Engine while the kernel was tearing it down). std::thread like the
-    // old passes; indexWorker_ is mutated ONLY on the GUI thread — loadLibrary,
-    // startIndexing's coalesce, indexPassDone and shutdownIndexing all run there.
-    // The worker itself touches only the engine-locked library, these two
-    // atomics, and the Logger (thread-safe by contract).
     std::thread indexWorker_;
     std::atomic<bool> indexCancel_{false};   // shutdownIndexing: end the walk between documents
     std::atomic<bool> indexReindex_{false};  // a startIndexing() arrived while a pass ran

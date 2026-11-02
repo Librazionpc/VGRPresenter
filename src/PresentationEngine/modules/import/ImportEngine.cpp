@@ -17,9 +17,7 @@
 #include <mutex>
 
 namespace bps::import {
-
 namespace {
-
 constexpr const char* kModule = "ImportEngine";
 using J = json::Value;
 
@@ -158,10 +156,6 @@ std::string ChordsJsonOf(const song::SongSection& section) {
     return any ? out : std::string();
 }
 
-// The folder the file came from — the category its show is filed under, so a
-// ProPresenter library (or any folder of song files) arrives as one batch named
-// after its source instead of thousands of loose shows in "song". A bundle
-// member ("pack.probundle::shows/x.pro") takes the bundle's own folder.
 std::string ParentFolderName(std::string_view path) {
     if (const size_t member = path.find("::"); member != std::string_view::npos) path = path.substr(0, member);
     const size_t leaf = path.find_last_of("/\\");
@@ -202,13 +196,6 @@ bool EqualsNoCase(std::string_view a, std::string_view b) {
     return true;
 }
 
-// What one folder holds, cached for the run.
-//
-// A ProPresenter sweep asks the same Media/Assets folder once per referenced
-// picture of once per deck — a library of 1144 shows re-reads it thousands of
-// times, which is the difference between a minute and an afternoon. The names
-// are only CANDIDATES: every hit is re-checked against the disk by the caller,
-// so a cached name that has since been deleted cannot resurrect a missing file.
 std::mutex& FolderCacheMutex() {
     static std::mutex mutex;
     return mutex;
@@ -233,31 +220,11 @@ const std::vector<std::string>& FolderEntries(const std::string& folder) {
     return FolderCache().emplace(folder, std::move(entries)).first->second;
 }
 
-// One SWEEP's worth of listings: a media folder can gain files between imports
-// (the operator drops a new picture into the library), so ImportFiles clears
-// this before it reads anything.
 void ResetFolderCache() {
     std::lock_guard<std::mutex> lock(FolderCacheMutex());
     FolderCache().clear();
 }
 
-// Where a referenced media file actually is, here and now.
-//
-// A ProPresenter document carries the absolute path of the machine that made it
-// (a Mac path, usually meaningless here), a path relative to the presentation's
-// root ("Media/Assets/logo.png"), and very often nothing but the media's NAME.
-// The relative one is tried against each folder above the presentation file,
-// nearest first — that is what lets a library copied from another computer
-// still find its artwork.
-//
-// When none of that answers, the library's own media folders are searched by
-// name, because that is where a ProPresenter media library keeps its files and
-// under the names the documents use for them: either the plain name
-// ("CBC_Mark_White-2.png") or the media id prefixed to it
-// ("1559c5d1-…Sermon background.jpg"). Matching the END of the file name is
-// what lets a lower-third's own PNG come along instead of only its words.
-// "" when nothing matches, so a missing file is simply not brought along
-// instead of pointing at something that isn't there.
 std::string ResolveMediaPath(const std::string& reference, const std::string& filePath) {
     if (reference.empty()) return {};
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
@@ -307,9 +274,6 @@ std::string ResolveMediaPath(const std::string& reference, const std::string& fi
                     if (nameHasExtension) {
                         named = EndsWithNoCase(leaf, name);
                     } else {
-                        // A reference that is just an id (FreeShow's own media
-                        // library names its files after it): the entry's STEM
-                        // is that id, whatever extension the file kept.
                         const size_t entryDot = leaf.find_last_of('.');
                         const std::string entryStem = entryDot == std::string::npos ? leaf : leaf.substr(0, entryDot);
                         named = EqualsNoCase(entryStem, name);
@@ -563,15 +527,6 @@ std::vector<presentation::ContentBlock> FreeShowBlocks(const J& items, const Imp
     return blocks;
 }
 
-// The pictures and videos a FreeShow show puts on its slides.
-//
-// A FreeShow slide's picture (or video) is an ITEM of kind "media" / "image" /
-// "video" whose `src` is either the absolute path of a file dragged in from the
-// disk or the id the app's own media library gave it. Both are resolved the way
-// a ProPresenter deck's artwork is, and the files that exist here are recorded
-// on the imported show — which is what makes the import copy them into the
-// media library. Without this the import kept the words and left the pictures
-// behind (the report: "not just the text").
 void CollectFreeShowMedia(const J& showJson, const ImportFile& file, ImportedShow& out) {
     const J* slides = showJson.Find("slides");
     if (!slides || !slides->asObject()) return;
@@ -609,10 +564,6 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     // a show file is either the show itself, or [id, show]
     if (root->asArray() && root->asArray()->size() >= 2) root = &(*root->asArray())[1];
     if (!root->asObject() || !root->Find("slides")) {
-        // A DANGLING REFERENCE — ["<id>",{"category":"song"}] with no show body
-        // at all — is what FreeShow leaves behind when a show was deleted or
-        // lives elsewhere; the honest thing to say is that the file holds
-        // nothing to import, not that the show it names has no slides.
         bool onlyReference = root->asObject() != nullptr;
         if (onlyReference)
             for (const auto& [key, value] : *root->asObject())
@@ -641,12 +592,6 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
     if (layout)
         if (const J* n = layout->Find("notes")) show.notes = std::string(n->asString());
 
-    // A group string that carries no real information: absent, or some
-    // exporters (not FreeShow itself — whatever produced this file) write a
-    // bare running number ("1", "2", "3"...) instead of a real verse/chorus
-    // tag. Using that verbatim is where "1, 2, 3..." slide titles instead of
-    // "Verse 1, Chorus, Verse 2..." came from — a real, reported bug, not a
-    // hypothetical: this app's own OWN sample songs that carry that pattern.
     auto isMeaninglessGroup = [](const std::string& g) {
         if (g.empty()) return true;
         return std::all_of(g.begin(), g.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
@@ -663,10 +608,6 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
         return out;
     };
 
-    // Pass 1: every section in order, its raw group string, and its own
-    // (parent-slide) text — nothing labeled yet. Sections with a genuinely
-    // meaningless group are earmarked for content-based auto-detection,
-    // exactly like a header-less stanza pasted as plain text.
     struct RawSection { std::string id; std::string group; std::vector<ImportedSlide> slides; bool needsAutoGroup = false; };
     std::vector<RawSection> raw;
     auto collect = [&](const std::string& id) {
@@ -696,9 +637,6 @@ Result<ImportedShow> ParseFreeShowFile(const ImportFile& file) {
         }
     }
 
-    // Pass 2: guess real groups for every earmarked section, comparing them
-    // against EACH OTHER (a repeated one reads as a chorus/bridge) the same
-    // way ParseSongText's own auto-detection does for unlabeled stanzas.
     std::vector<std::string> guessInput;
     std::vector<size_t> guessTargets;
     for (size_t i = 0; i < raw.size(); ++i)
@@ -735,7 +673,6 @@ std::string BibleFormatOf(std::string_view formatId) {
     if (formatId == "bible_json") return "json";
     return "txt";
 }
-
 } // namespace
 
 const char* ToString(ImportKind kind) {
@@ -799,9 +736,6 @@ Result<ImportResult> ImportFiles(std::string_view formatId, const std::vector<Im
             if (show.ok()) result.shows.push_back(std::move(show.value()));
             else if (!IsEmptyFreeShowReference(show.error())) fail(show.error().message);
         } else if (formatId == "freeshow_project") {
-            // A FreeShow PROJECT: a zip of show files (or a JSON ARRAY of
-            // [id, show] pairs) — every show inside is imported in archive
-            // order, a broken member failing its own warning only.
             if (LooksLikeZip(file.content)) {
                 auto zip = ReadZip(file.content);
                 if (!zip.ok()) { fail(zip.error().message); continue; }
@@ -841,9 +775,6 @@ Result<ImportResult> ImportFiles(std::string_view formatId, const std::vector<Im
             }
         } else if (auto provider = SongProviderFor(formatId)) {
             if (file.extension == "probundle") {
-                // A ProPresenter BUNDLE: a zip of OpenSong-shaped show XMLs
-                // (Pro6 documents are the same shape ParseProPresenterProvider
-                // reads). Every member imports on its own.
                 auto zip = ReadZip(file.content);
                 if (!zip.ok()) { fail(zip.error().message); continue; }
                 size_t members = 0;
@@ -943,10 +874,6 @@ presentation::Presentation ShowFromImported(const ImportedShow& imported, const 
                 if (auto chords = json::Parse(src.chordsJson); chords.ok()) slideMeta["chords"] = chords.value();
             slide.metaJson = J(std::move(slideMeta)).ToString();
 
-            // FreeShow's imported text items already carry independent boxes;
-            // keep those placements instead of flattening them into one box.
-            // Other import formats continue using the configured template or
-            // the neutral single-box layout below.
             int blockNumber = 0;
             if (!src.blocks.empty()) {
                 slide.blocks = src.blocks;
@@ -975,5 +902,4 @@ presentation::Presentation ShowFromImported(const ImportedShow& imported, const 
     }
     return p;
 }
-
 } // namespace bps::import

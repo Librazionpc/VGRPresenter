@@ -186,6 +186,11 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/presentation/PresentationValidator.cpp
     ${BPS_ROOT}/modules/presentation/PresentationCompiler.cpp
     ${BPS_ROOT}/modules/presentation/SceneBuilder.cpp
+    ${BPS_ROOT}/modules/presentation/MediaPixels.cpp
+    ${BPS_ROOT}/modules/presentation/ScenePaint.cpp
+    ${BPS_ROOT}/modules/presentation/SceneBuild.cpp
+    ${BPS_ROOT}/modules/presentation/SlideBinding.cpp
+    ${BPS_ROOT}/modules/presentation/SlideComposer.cpp
     ${BPS_ROOT}/modules/presentation/SlideRules.cpp
     ${BPS_ROOT}/modules/presentation/CompositorState.cpp
     ${BPS_ROOT}/modules/presentation/PresentationRuntime.cpp
@@ -487,6 +492,20 @@ qt_add_executable(appVGRPresenterUI
     qml/services/StyleSpecBuilder.cpp
     qml/services/include/services/LiveOutputService.h
     qml/services/LiveOutputService.cpp
+    # The live service, split by concern (see docs/long_file_audit.md):
+    #   Reading = scroll mode + the measured line table it steps by
+    #   Inputs  = taken camera/screen/NDI feeds, card previews, bus windows
+    #   Media   = a media file on air (decode, fit, transport)
+    #   Ndi     = the NDI program sender
+    #   PreviewMap = the engine composition -> QML preview shape (shared)
+    qml/services/LiveOutputReading.cpp
+    qml/services/LiveOutputInputs.cpp
+    qml/services/LiveOutputMedia.cpp
+    qml/services/LiveOutputNdi.cpp
+    qml/services/include/services/SlidePreviewMap.h
+    qml/services/SlidePreviewMap.cpp
+    qml/services/include/services/MediaOnAirState.h
+    qml/services/include/services/PressTimeline.h
     qml/services/include/services/TelemetryService.h
     qml/services/TelemetryService.cpp
     qml/services/include/services/ShowService.h
@@ -553,6 +572,7 @@ set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/ListRows.q
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppCursor.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/Db.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/AppScale.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/qml/settings/ScreenHelpers.qml" PROPERTIES QT_QML_SINGLETON_TYPE true)
 # The Edit stage's grid (754x428) and the mapping from it to a target frame — the
 # ONE definition every surface that draws a design block reads, so the canvas, a
 # library card, a thumbnail and a monitor tile cannot disagree about where a block

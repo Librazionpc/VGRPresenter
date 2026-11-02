@@ -1,10 +1,3 @@
-// bps_remote — remote-control app for a running engine (SystemArchitecture.md
-// §2 Communication layer; the "Remote App" frontend). Talks to `bps_cli --ipc
-// <port>` over the TCP + JSON-line transport: ping, health, live log streaming,
-// a presentation.slide command, and engine shutdown.
-//
-//   bps_remote <port> [command]     command: ping (default) | health | logs | slide | shutdown
-
 #include "core/common/Common.hpp"
 #include "core/ipc/IpcClient.hpp"
 

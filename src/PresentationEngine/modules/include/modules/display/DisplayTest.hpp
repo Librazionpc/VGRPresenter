@@ -1,12 +1,5 @@
 #pragma once
 
-// DisplayTest (docs/specs/18 §Testing / §My Acceptance Test). A self-test
-// subsystem for the Display & Output Engine: verifies that monitors/outputs are
-// connected, that frames actually reach every output, that scaling modes
-// produce correct rectangles, and that hot-plug + recovery work. Generates test
-// patterns (color bars / gradient / checkerboard / solid) so an operator can
-// visually confirm a projector or confidence monitor. Pure display logic — no UI.
-
 #include "core/common/Common.hpp"
 #include "modules/display/DisplayTypes.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
@@ -16,7 +9,6 @@
 #include <vector>
 
 namespace bps::display {
-
 class OutputRouter;
 
 // --- Test patterns (visual confirmation on a real screen) --------------------
@@ -85,10 +77,6 @@ public:
     static rendering::Frame Checkerboard(int width, int height, int cells = 8);
 };
 
-// --- Display self-test runner --------------------------------------------------
-// Runs every connectivity / routing / scaling / recovery check against a
-// DisplayEngine-like view (device resolver + output router). Kept dependency-
-// light: takes lambdas so it can test both the live engine and a mock.
 class DisplayTester {
 public:
     using DeviceResolver = std::function<const DisplayDevice*(std::string_view deviceId)>;
@@ -111,5 +99,4 @@ public:
     // Verify ComputeDestRect for every scaling mode on a 1920x1080 device.
     static DisplayTestReport TestScaling(const OutputRouter& router);
 };
-
 } // namespace bps::display

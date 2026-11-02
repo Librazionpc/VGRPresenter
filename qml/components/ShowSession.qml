@@ -1,21 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The seam between the Edit screen's UI state and the ENGINE that owns the show.
-//
-// Who owns what:
-//   * The ENGINE (ShowService -> ShowEditor/PresentationDocument) owns the show:
-//     which slides exist and in what order, which items are on each slide,
-//     duplicate/delete, ids, and the .vgr file. Every structural change is asked
-//     of the engine first.
-//   * The UI (SlideListModel + SlideCanvasStore) is a PROJECTION of that, plus the
-//     live gesture state (an item being dragged, text being typed) that is too
-//     fine-grained to send to the engine per frame. That live state is FLUSHED to
-//     the engine when it settles (see flushSlide) and always before anything that
-//     needs the engine to be current: a structural change, a slide switch, Save.
-//
-// One rule keeps them honest: the engine issues every id (slides and items). The
-// UI never invents one, so the two can never disagree about identity.
 QtObject {
     id: session
 
@@ -23,16 +8,7 @@ QtObject {
     property var slideModel: null
     property var slideStore: null
     property var canvasHistory: null
-    // function(then) — asks "save / don't save / cancel?" when the show has unsaved
-    // changes, and calls `then` if the user lets us proceed. Set by Main.qml (the
-    // dialog lives there so it can appear over any screen). Unset = proceed.
     property var askUnsaved: null
-    // THE DOCUMENT JOBS IN FLIGHT, by token (see ShowService's queued document
-    // jobs): the engine writes the .vgr off the interface thread, so saveShow /
-    // saveShowAs / openShowFile answer LATER — through documentJobFinished — and
-    // this is where each request's own continuation waits. A token that is not in
-    // here was not asked for by this session (another screen's save, the autosave
-    // tick), so its verdict is somebody else's business.
     property var _jobs: ({})
     function _awaitJob(kind, token, then) {
         if (!token || token <= 0) {
@@ -42,9 +18,6 @@ QtObject {
         }
         session._jobs[token] = { kind: kind, then: then }
     }
-    // Held as a PROPERTY, not a child: this object is a QtObject, which has no
-    // default property to adopt children into (the same reason designBackend is
-    // written this way below).
     property Connections _jobResults: Connections {
         target: ShowService
         function onDocumentJobFinished(token, kind, ok, error, payload) {
@@ -55,20 +28,11 @@ QtObject {
             if (job.then)
                 job.then(ok, payload !== undefined && payload !== null ? payload : ({}))
         }
-        // A job this session was waiting on was ABANDONED (ShowService's
-        // cancelDocumentJobs — another show was opened, the app is closing): its
-        // verdict is never coming, so the continuation is dropped here rather than
-        // left holding a token nothing will ever report. That is what the signal
-        // exists for; without it, a cancelled job would be indistinguishable from
-        // one that is merely slow, and the caller would wait forever.
         function onDocumentJobCancelled(token, kind) {
             delete session._jobs[token]
         }
     }
 
-    // What the engine calls go to. Normally the open SHOW (ShowService); while the Edit screen is editing a DESIGN (an
-    // overlay or a template from a library) it is that design (DesignBackend), which answers the same calls. Every slide and
-    // item action below goes through this, so the screen edits a design with exactly the code it edits a slide with.
     property var backend: ShowService
     // Set while a design is open (see openDesign).
     property bool designMode: false
@@ -112,9 +76,6 @@ QtObject {
             return null
         return Object.assign({}, session.slideModel.slideFieldsAt(row), {
             background: session.slideStore.backgroundOf(slideId).toString(),
-            // The slide's per-slide filter set (the SLIDE tab's Filters rows) —
-            // part of the same patch, so a filter edit is flushed, saved and
-            // applied on air exactly like the background it sits beside.
             filters: session.slideStore.filtersOf(slideId),
             blocks: session.slideStore.blocksOf(slideId)
         })
@@ -175,10 +136,6 @@ QtObject {
             session._flushed[slideId] = JSON.stringify(patch)
     }
 
-    // Rebuilds the slide list (and per-slide canvases of NEW slides) from the
-    // engine after a structural change. Slides that still exist keep their live
-    // UI state. `selectEngineId` = which slide to show afterwards ("" = keep the
-    // current one); `fallbackIndex` = where to land if the current one was deleted.
     function refresh(selectEngineId, fallbackIndex) {
         session._applying = true
         const show = session.backend.currentShow
@@ -274,9 +231,6 @@ QtObject {
 
     // ---- canvas item actions (engine-first) ----------------------------------------
 
-    // Adds an item to the active slide; the ENGINE assigns its id. `copyFrom` =
-    // duplicate that item (engine copy, offset). Returns the live CanvasItem, or
-    // null if the engine refused (no slide / no show).
     function addItem(kind, x, y, width, height, copyFrom, insertAt) {
         const sid = session.activeEngineId()
         if (sid === "")
@@ -315,9 +269,6 @@ QtObject {
 
     // ---- designs: the Edit screen editing an overlay / template --------------------------------------
 
-    // Opens a design from a library (kind "overlay" | "template") on the canvas. The show that was open is sent to the
-    // engine first and comes back untouched when the design is closed. Opening another design while one is open just
-    // saves the first.
     function openDesign(kind, id) {
         const service = kind === "template" ? TemplateLibraryService : OverlayLibraryService
         if (service.design(id).id === undefined)
@@ -387,9 +338,6 @@ QtObject {
         })
     }
 
-    // The open is a document job too: the file is read off the interface thread and
-    // the show is applied when its verdict lands (the read used to happen here,
-    // with the interface thread waiting on the disk).
     function openShow() {
         session.closeDesign()
         session.guardUnsaved(function () {
@@ -407,16 +355,7 @@ QtObject {
         session.guardUnsaved(function () { session.openPath(path) })
     }
 
-    // The open itself, WITHOUT the guard: the picker flow has already asked (and
-    // asking twice is what re-guarding inside openShow would do — the second ask
-    // arrives with the show still dirty after "don't save").
     function openPath(path) {
-        // Opening a show SUPERSEDES any read still queued for the last one: an
-        // earlier open (or a template load) that nobody will look at any more is
-        // abandoned instead of running ahead of the read this screen is waiting
-        // for — see ShowService's cancelDocumentJobs. Only READS go: a save the
-        // user asked for keeps its write, and this call is made from a
-        // continuation the save already reported to.
         ShowService.cancelDocumentJobs(["open", "templateLoad"])
         const token = ShowService.openShowFile(path)
         session._awaitJob("open", token, function (ok, payload) {
@@ -425,11 +364,6 @@ QtObject {
         })
     }
 
-    // Saves the show. `then(saved)` is called when the verdict lands — the write
-    // itself is queued (ShowService's queued document jobs), so nothing here can
-    // know the answer any sooner; a caller that must not continue until the file
-    // is on disk (the "save changes?" dialog, the close flow) passes `then` and
-    // waits. No `then` at all = fire and forget (the menu's Save, autosave).
     function saveShow(then) {
         if (session.designMode) {   // a design saves as it goes: Save just makes sure the last edit is in
             session.flushAll()

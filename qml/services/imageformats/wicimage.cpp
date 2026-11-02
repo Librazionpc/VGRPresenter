@@ -1,23 +1,3 @@
-// A Qt image-format plugin backed by WIC, the Windows Imaging Component.
-//
-// WHY THIS EXISTS. Qt's official MinGW build ships only qgif/qico/qjpeg/qsvg,
-// so a .webp (or .avif/.heic/.jp2) is "Unsupported image format" to every Qt
-// loader in the app: QML's Image logs the warning, and QImageReader answers an
-// empty picture for a still being taken on air. The engine never had that
-// problem — its own decode path (WindowsFrameSource::GrabImage) has always been
-// WIC — so one file could render on the stage and be refused by the library
-// card and the Show Center preview beside it.
-//
-// WIC is the OS's decoder set: PNG/JPEG/BMP/GIF/TIFF/ICO are built in, and
-// WebP / HEIC / AVIF / JPEG 2000 arrive with the Microsoft Store "Image
-// Extensions" codecs, which register machine-wide (an unpackaged app gets them
-// too). A machine without them reports no capability here, and the behaviour is
-// exactly what it was before this plugin — placeholder plus the named reason.
-//
-// Deliberately keys-limited to webp: Qt already handles every other format it
-// claims, and a plugin that takes a format away from Qt's own handler (or
-// answers it twice) is a decoder difference nobody asked for. Widening the key
-// list in wicimage.json is the whole change for the next format.
 #include <QByteArray>
 #include <QImage>
 #include <QImageIOHandler>
@@ -32,7 +12,6 @@
 #endif
 
 namespace {
-
 // RIFF<size>WEBP — the container's own magic, so a JPEG renamed to .webp is not
 // claimed by this plugin (Qt's own handler answers it instead).
 bool looksLikeWebp(QIODevice *device)
@@ -73,10 +52,6 @@ private:
     T *p_ = nullptr;
 };
 
-// WIC needs COM on the calling thread, and the caller here is Qt's image-loading
-// thread — never one this app set up. A thread already in another apartment
-// answers RPC_E_CHANGED_MODE, which is fine (the factory still works) and the
-// balancing CoUninitialize is then not ours to make.
 class ComScope {
 public:
     ComScope() { uninit_ = SUCCEEDED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)); }
@@ -108,9 +83,6 @@ QImage decodeWic(QIODevice *device)
                                   IID_PPV_ARGS(factory.put()))))
         return {};
 
-    // IStream over the bytes Qt already read: the plugin is handed a QIODevice
-    // (a file, or a memory buffer), and CreateDecoderFromStream takes both
-    // without caring which it was.
     HGLOBAL memory = ::GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(bytes.size()));
     if (!memory)
         return {};
@@ -138,9 +110,6 @@ QImage decodeWic(QIODevice *device)
     if (FAILED(frame->GetSize(&width, &height)) || !width || !height)
         return {};
 
-    // 32bppBGRA is straight (non-premultiplied) alpha — exactly what
-    // QImage::Format_ARGB32 holds, so the copy below is byte-for-byte and a
-    // transparent WebP keeps its transparency on the way to QML.
     Com<IWICFormatConverter> converter;
     if (FAILED(factory->CreateFormatConverter(converter.put())) ||
         FAILED(converter->Initialize(frame.get(), GUID_WICPixelFormat32bppBGRA,
@@ -186,7 +155,6 @@ public:
 private:
     QIODevice *device_ = nullptr;
 };
-
 } // namespace
 
 class WicImagePlugin : public QImageIOPlugin

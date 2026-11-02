@@ -12,11 +12,6 @@
 #include <string>
 
 namespace bps {
-
-// Renderer registry + frame dispatch (core/rendering/). The active renderer is
-// a registered IRenderer (OpenGL/Vulkan/software backends); modules only ever
-// see this manager and the IRenderer interface. Frames are timed here and
-// reported through Stats() (performance logging, 02 §Performance).
 class RendererManager final : public IService {
 public:
     static RendererManager& Instance();
@@ -57,5 +52,4 @@ private:
     static constexpr size_t kWindow = 120;
     std::atomic<bool> initialized_{false};
 };
-
 } // namespace bps

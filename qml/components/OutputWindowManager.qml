@@ -2,19 +2,6 @@ import QtQml
 import QtQml.Models
 import VGRPresenterUI
 
-// Owns one OutputWindow (qml/components/OutputWindow.qml) per row in
-// OutputListModel — GO LIVE's real destination on a physical/HDMI screen,
-// separate from MonitorWall.qml/OutputMonitorTile.qml's small in-app
-// preview tiles. Instantiator (not Repeater): its delegates don't need a
-// visual parent item, which is exactly what a top-level Window delegate
-// needs — this is its documented use case.
-//
-// Every row gets a delegate (cheap: an OutputWindow with visible: false is
-// just a hidden native window, no rendering cost); each instance decides
-// its OWN visibility from outputEnabled/outputScreenName, so a row that
-// isn't enabled or isn't bound to a screen never shows anything. This
-// mirrors MonitorWall.qml's own model: ALL enabled+bound outputs show
-// simultaneously while live, not just the one open in Settings/Edit.
 Instantiator {
     id: root
     model: OutputListModel
@@ -36,9 +23,6 @@ Instantiator {
         ownBuffer: win.frameBuffer
         outputStayOnTop: win.stayOnTop
         outputRes: win.res
-        // NDI/network rows carry ONLY their own transport — no screen window,
-        // ever (the receiver's monitor is the audience screen). Every window
-        // below this flag stays invisible and renders nothing.
         onAirOnly: win.onAirOnly
         outputActive: win.active
     }

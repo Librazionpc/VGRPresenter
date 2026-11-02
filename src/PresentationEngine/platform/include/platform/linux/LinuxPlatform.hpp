@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../IPlatform.hpp"
+#include "../PlatformAccessors.hpp"
 #include "../common/Filesystem.hpp"
 #include "../common/Timer.hpp"
 #include "LinuxPaths.hpp"
@@ -27,7 +27,9 @@ namespace bps::platform {
 
 // Linux backend of the PAL (docs/architecture/PAL.md): the only place on this
 // platform that reads /proc, /sys, and calls libc/pthread directly.
-class LinuxPlatform final : public IPlatform {
+class LinuxPlatform final : public PlatformAccessors<LinuxPlatform> {
+    friend class PlatformAccessors<LinuxPlatform>;
+
 public:
     const char* Name() const noexcept override { return "LinuxPlatform"; }
 
@@ -35,25 +37,6 @@ public:
     std::string OsName() const override;
     std::string OsVersion() const override;
     std::string Arch() const override;
-
-    IFilesystem& Filesystem() override { return filesystem_; }
-    IPaths& Paths() override { return paths_; }
-    ITimer& Timer() override { return timer_; }
-    IThreading& Threading() override { return threading_; }
-    IProcess& Process() override { return process_; }
-    ILibrary& Library() override { return library_; }
-    IMonitor& Monitor() override { return monitor_; }
-    IAudio& Audio() override { return audio_; }
-    IVideo& Video() override { return video_; }
-    INetwork& Network() override { return network_; }
-    IPower& Power() override { return power_; }
-    IClipboard& Clipboard() override { return clipboard_; }
-    IEnvironment& Environment() override { return environment_; }
-    ILocale& Locale() override { return locale_; }
-    ISocketFactory& Sockets() override { return sockets_; }
-    IInput& Input() override { return input_; }
-    IDialogs& Dialogs() override { return dialogs_; }
-    INotifications& Notifications() override { return notifications_; }
 
     Snapshot Sample() override;
     std::vector<OsEvent> PollChanges() override;

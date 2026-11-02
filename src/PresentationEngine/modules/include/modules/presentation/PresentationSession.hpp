@@ -1,10 +1,5 @@
 #pragma once
 
-// PresentationSession (docs/specs/19 §Session Manager + Recovery). Tracks the
-// active presentation, playback position and state; stores snapshots so a crash
-// can be recovered ("Restart → Recover Session → Restore Presentation → Restore
-// Slide → Continue"). Storage is in-memory; the caller may persist the JSON.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
@@ -14,7 +9,6 @@
 #include <string>
 
 namespace bps::presentation {
-
 class PresentationSession {
 public:
     Result<void> Initialize();
@@ -35,5 +29,4 @@ private:
     std::optional<SessionSnapshot> latest_;
     bool initialized_ = false;
 };
-
 } // namespace bps::presentation

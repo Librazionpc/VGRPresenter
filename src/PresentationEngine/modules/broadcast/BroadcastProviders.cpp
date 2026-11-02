@@ -15,18 +15,11 @@
 #include <mutex>
 
 namespace bps::broadcast {
-
 namespace {
-
 constexpr const char* kNdiModule = "NdiProvider";
 constexpr const char* kSdiModule = "SdiProvider";
 
 // ===========================================================================
-// NDI provider — runtime binding to the NDI runtime's C API (NDI 5/6 ABI).
-// The runtime is resolved at run time through the PAL library loader (it is a
-// separate, vendor-licensed install — never bundled). When it is absent every
-// call degrades to an error, and Probe() reports Err::Broadcast_SdkNotInstalled
-// so the UI can send the user to the download page instead of guessing.
 // ===========================================================================
 
 // NDI opaque instances.
@@ -34,10 +27,6 @@ using NdiSendInstance = void*;
 using NdiRecvInstance = void*;
 using NdiFindInstance = void*;
 
-// ABI mirror of Processing.NDI.structs.h (NDI 5/6, 64-bit), field for field.
-// The runtime READS AND WRITES these by layout: a wrong field order or a
-// short struct is silent memory corruption (recv_capture writes every field),
-// which is why the sizes are pinned by static_assert below.
 struct NdiSourceT {
     const char* p_ndi_name;      // "HOST (Camera 1)"
     const char* p_url_address;   // union with p_ip_address
@@ -142,9 +131,6 @@ void FrameRateRational(double fps, int& n, int& d) {
     d = 1000;
 }
 
-// Function table resolved from the NDI runtime. Return types matter: the
-// runtime's `bool` returns only define the low byte, so they must be declared
-// bool here, not int.
 struct NdiApi {
     bool (*initialize)(void);
     void (*destroy)(void);
@@ -166,11 +152,6 @@ struct NdiApi {
     void (*recv_destroy)(NdiRecvInstance);
 };
 
-// Where the NDI runtime's shared library might live, best candidate first.
-// The vendor installers do NOT put it on PATH: NDI 5/6 record its folder in
-// NDILIB_REDIST_FOLDER and (for the Tools bundle) drop it under
-// "Program Files\NDI\NDI <n> Tools\Runtime" — a bare LoadLibrary by name finds
-// neither, which made NDI look "not installed" on machines that had it.
 struct NdiLibraryCandidates {
     std::vector<std::string> existing;   // absolute paths that exist on disk
     std::vector<std::string> byName;     // bare names for the OS loader's own search
@@ -236,18 +217,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<NdiSourceInfo> out;
         if (!api_.initialize || !api_.find_create_v2) return out;
-        // The finder is PERSISTENT: NDI's discovery browses the network in a
-        // background thread and find_get_current_sources only reports the
-        // cache it has accumulated so far — a create/query/destroy finder
-        // per call would read an always-fresh (always empty) cache and never
-        // see a single source on a real network. Created once here; the SDK
-        // keeps refreshing it; destroyed in ShutdownProvider.
         if (!find_) {
             NdiFindCreateT cfg{};
-            // Sources on THIS machine are the common case for a single-PC
-            // production (OBS, NDI Tools' Test Patterns/Screen Capture,
-            // another VGR window) — hiding them made those invisible. Our
-            // own senders are filtered out below instead.
             cfg.show_local_sources = true;
             find_ = api_.find_create_v2(&cfg);
             if (!find_) return out;
@@ -391,9 +362,6 @@ public:
             return Error::Make(Err::Broadcast_NotFound, kNdiModule, "unknown receiver");
         if (!api_.recv_capture_v2) return false;
         NdiVideoFrameV2 v{};
-        // Audio/metadata slots are null: this call asks for VIDEO only (the
-        // runtime then discards audio/metadata instead of queueing frames
-        // nobody will ever free).
         const int type = api_.recv_capture_v2(it->second, &v, nullptr, nullptr, 0);   // non-blocking
         if (type != kNdiFrameTypeVideo || !v.p_data) return false;
         info.width = static_cast<uint32_t>(v.xres);
@@ -545,10 +513,6 @@ private:
 };
 
 // ===========================================================================
-// SDI provider — runtime binding to the Blackmagic DeckLink SDK. The SDK
-// (libDeckLinkAPI / DeckLinkAPI.dll) provides the IDeckLink COM interfaces;
-// we resolve the iterator entry point and enumerate devices. Without the SDK
-// the provider degrades to Unsupported, exactly like NDI.
 // ===========================================================================
 
 using IDeckLink = void*;
@@ -600,11 +564,6 @@ public:
     }
 
     std::vector<SdiDeviceInfo> EnumerateSdiDevices() override {
-        // The vendor SDK's own calls below are FOREIGN code — the iterator, the
-        // per-device name query and the releases all talk to the capture hardware
-        // and can block — so the lock is taken only long enough to read the
-        // function pointer out, and the enumeration runs unlocked. Same posture
-        // ShutdownProvider already takes for the DLL unload.
         using CreateIteratorFn = long (*)(void**);
         CreateIteratorFn createIterator = nullptr;
         {
@@ -667,10 +626,6 @@ public:
     }
 
 private:
-    // Both of these take the lock ONLY around the member state they own: the
-    // vendor DLL load, the symbol lookup and the unload are PAL calls that can
-    // block, so they run outside it. (The old shape held the lock across them,
-    // and re-entered it from Probe — which is why the lock is not recursive.)
     Result<void> EnsureApi() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -726,7 +681,6 @@ private:
     platform::ILibrary::Handle libHandle_ = nullptr;
     CreateIteratorFn createIterator_ = nullptr;
 };
-
 } // namespace
 
 // Called by BroadcastEngine::Initialize to register the real providers.
@@ -736,11 +690,7 @@ Result<void> RegisterBuiltinBroadcastProviders(BroadcastEngine& engine) {
     return engine.RegisterProvider(std::make_shared<SdiProvider>());
 }
 
-// A fresh, unopened NDI provider (see the declaration in BroadcastEngine.hpp) —
-// SetNdiEnabled's off-cycle tears the old instance's SDK handles down and this
-// hands back a clean one for the next on.
 std::shared_ptr<IBroadcastProvider> MakeNdiProvider() {
     return std::make_shared<NdiProvider>();
 }
-
 } // namespace bps::broadcast

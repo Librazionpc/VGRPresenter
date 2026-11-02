@@ -1,6 +1,3 @@
-// Unit tests: Notification service (docs/specs/14).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests notify
 #include "TestHarness.hpp"
 
 void TestNotifyQueue() {

@@ -10,14 +10,6 @@
 class QQmlEngine;
 class QJSEngine;
 
-// The UI's window onto the ENGINE's importing (bps::import - FreeShow's import formats): the format list the Import dialog is
-// drawn from, and "read these files as format X". The engine converts the files into shows (or installs Bibles); this hands it the
-// file bytes, saves each imported show as a .vgr in the shows library, and reports what came of it.
-//
-// importFiles runs ASYNCHRONOUSLY on a worker thread (a 700-file import takes
-// a minute or more — on the GUI thread it froze the whole window, AppHang):
-// the dialog shows a progress overlay bound to `busy`/`progress`, and the
-// `imported` signal delivers the outcome when the sweep completes.
 class ImportService : public QObject
 {
     Q_OBJECT
@@ -45,26 +37,9 @@ public:
     qreal progress() const { return m_progress; }
     QString status() const { return m_status; }
 
-    // Reads `files` (local paths or file:// urls) as format `formatId`. Each imported show is saved into the shows library, each
-    // Bible is installed; a file that could not be read is reported. Returns
-    //   { ok: true, started: true } immediately ("" result = nothing started);
-    // the real outcome { ok, shows, bibles, files, warnings, error, firstShow }
-    // arrives later via the `finished(answer)` signal (and `imported(shows, bibles)`).
-    // A FreeShow library import saves into a CATEGORY NAMED AFTER THE SOURCE
-    // FOLDER (the imported .show files' parent directory, "FreeShow" when it
-    // cannot be told), replacing the previous batch in that category first.
     Q_INVOKABLE QVariantMap importFiles(const QString &formatId, const QStringList &files);
-    // "Paste from clipboard": the text as one show (FreeShow's "Quick lyrics").
-    // `name`/`category` override what the text itself implies ("" = keep the
-    // parser's own guess — see SongTextOptions: category defaults to "song").
     Q_INVOKABLE QVariantMap importText(const QString &text, const QString &name = QString(),
                                        const QString &category = QString());
-    // The same, reading the text from the clipboard.
-    // ASYNC: the PAL's clipboard open WAITS OUT another process's write (a
-    // screenshot posts a full-screen bitmap, which takes a moment), and a
-    // screenshot's PNG encode is tens of megabytes of pixels — so the read and
-    // the encode run on a worker and the answer arrives on clipboardImported.
-    // The library notify and the emits still happen on the interface thread.
     Q_INVOKABLE void importClipboard();
 
 signals:

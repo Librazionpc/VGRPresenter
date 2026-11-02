@@ -1,9 +1,5 @@
 #pragma once
 
-// Media Engine (Phase 10, docs/specs/21). The single system for managing every
-// type of media. Only understands Media Assets — never Songs/Bibles/
-// Presentations/Slides/Themes.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 #include "modules/rendering/RenderTypes.hpp"
@@ -14,7 +10,6 @@
 #include <vector>
 
 namespace bps::media {
-
 // --- Media types ---------------------------------------------------------------
 enum class MediaType : int {
     Image = 0,
@@ -127,5 +122,4 @@ inline const char* ToString(DecodePath p) {
     }
     return "Unknown";
 }
-
 } // namespace bps::media

@@ -1,9 +1,5 @@
 #pragma once
 
-// Pressure managers (docs/specs/16 §14–§17): the runtime's reflexes. Battery,
-// thermal and memory pressure throttle background work and shrink caches —
-// never the live presentation. The GPURuntime answers GPU-vs-CPU questions.
-
 #include "core/common/Common.hpp"
 
 #include <atomic>
@@ -11,7 +7,6 @@
 #include <string>
 
 namespace bps::adaptive {
-
 // --- PowerManager (docs/specs/16 §14) ---------------------------------------
 // Battery state → reduce FPS, background tasks, thumbnails, animations, AI.
 struct PowerState {
@@ -62,10 +57,6 @@ private:
     double tempC_ = -1.0;
 };
 
-// --- MemoryPressureManager (docs/specs/16 §16) -------------------------------
-// RAM pressure → unload unused textures, AI/search/thumbnail caches, shrink
-// render cache. The reaction itself is delegated (CAMS ShrinkCache + resource
-// manager); this manager records the level and the decision.
 class MemoryPressureManager {
 public:
     MemoryPressureManager() = default;
@@ -79,9 +70,6 @@ private:
     std::atomic<PressureLevel> level_{PressureLevel::None};
 };
 
-// --- GPURuntime (docs/specs/16 §17) ------------------------------------------
-// GPU available → GPU text/decode/blur/scale/composition; no GPU → CPU fallback.
-// Rendered decisions come from the optimizer; this is the thin policy holder.
 class GPURuntime {
 public:
     GPURuntime() = default;
@@ -92,5 +80,4 @@ public:
 private:
     std::atomic<bool> gpuAvailable_{false};
 };
-
 } // namespace bps::adaptive

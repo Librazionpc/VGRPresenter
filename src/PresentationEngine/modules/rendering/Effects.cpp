@@ -7,12 +7,7 @@
 #include <vector>
 
 namespace bps::rendering {
-
 namespace {
-
-// The engine's packed pixel is 0xAABBGGRR (Color::Pack — see RenderOutputs);
-// every channel helper below goes through these so the filter pass can never
-// disagree with the rest of the render path about which byte is which.
 inline uint32_t Ch(uint32_t px, int shift) { return (px >> shift) & 0xFFu; }
 inline uint32_t Clamp8(double v) {
     if (v <= 0.0) return 0;
@@ -23,11 +18,6 @@ inline uint32_t Pack(uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
     return (a << 24) | (b << 16) | (g << 8) | r;
 }
 
-// One 3x3 colour matrix over the region, in 0..255 space. The CSS filter
-// functions are all expressed as one of these (hue-rotate, grayscale and
-// saturate are literal matrices; brightness/contrast/invert reduce to a
-// diagonal matrix plus an offset), which keeps the arithmetic identical to what
-// the browser-based original produces.
 struct ColorMatrix {
     double m[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     double offset[3] = {0, 0, 0};
@@ -48,9 +38,6 @@ void ApplyMatrix(RgbaImage& img, const ColorMatrix& cm) {
     }
 }
 
-// Box blur over the whole image, radius in pixels. Two passes (horizontal then
-// vertical) rather than an N×N neighbourhood: same average, a fraction of the
-// work, which matters because this runs on the live frame path.
 void BoxBlur(RgbaImage& img, int radius) {
     if (radius < 1 || img.empty()) return;
     const int w = img.width;
@@ -173,14 +160,10 @@ ColorMatrix ContrastMatrix(double c) {
     }
     return cm;
 }
-
 } // namespace
 
 void ApplyFilters(RgbaImage& img, const SlideFilterValues& f) {
     if (img.empty() || f.IsIdentity()) return;
-    // CSS order: hue-rotate, invert, blur, grayscale, brightness, contrast,
-    // saturate — the same order the rows are listed in, so what the operator
-    // reads top-to-bottom is what the pixels get.
     if (f.hueRotateDeg != 0.0) ApplyMatrix(img, HueRotateMatrix(f.hueRotateDeg));
     if (f.invert > 0.0) ApplyMatrix(img, InvertMatrix(f.invert));
     if (f.blurPx > 0.0) BoxBlur(img, std::max(1, static_cast<int>(f.blurPx + 0.5)));
@@ -199,5 +182,4 @@ bool EffectStack::Has(EffectType t) const {
         if (e.type == t && e.enabled) return true;
     return false;
 }
-
 } // namespace bps::rendering

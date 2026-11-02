@@ -3,7 +3,6 @@
 #include <algorithm>
 
 namespace bps::content {
-
 Result<void> AssetWatcher::AddRoot(
     std::string_view dir,
     const std::function<std::optional<std::vector<std::string>>(std::string_view)>& list) {
@@ -23,11 +22,6 @@ void AssetWatcher::RemoveRoot(std::string_view dir) {
 }
 
 std::vector<WatchChange> AssetWatcher::Poll() {
-    // The diff runs under the lock; the CALLBACK does not. `callback_` is foreign
-    // code (ContentManager's handler — it publishes asset events and syncs the
-    // metadata store), and calling it with the watcher's own lock held is the
-    // lock-held-across-a-callback shape the lock-scope guard exists for: one slow
-    // or re-entrant handler turns this lock into an app-wide pile-up.
     std::vector<WatchChange> changes;
     WatchCallback callback;
     {
@@ -91,5 +85,4 @@ size_t AssetWatcher::RootCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return roots_.size();
 }
-
 } // namespace bps::content

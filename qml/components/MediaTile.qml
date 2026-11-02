@@ -1,28 +1,12 @@
 import QtQuick
 import VGRPresenterUI
 
-// One image or video in the Media grid: a 16:9 preview with its name under it.
-//
-// The pictures come from the ENGINE's thumbnail cache (image://mediathumb, served by
-// MediaThumbnailProvider) - this file only shows them, the way FreeShow's media card does:
-//   STILL  - the poster: an image is itself, a video is its middle frame.
-//   MOVING - hover a video and move the mouse across the tile: it scrubs through the video's
-//            MediaLibraryService.frameSteps frames (FreeShow's hover-scrub, steps = 10), the
-//            frame under the pointer replacing the poster. The engine makes each frame the
-//            first time it is asked for and caches it, so scrubbing a video a second time is
-//            instant. A thin bar at the foot of the preview shows how far along you are.
-// When there is no picture (not decoded yet, or the engine has no decoder for that file) the
-// tile shows an icon placeholder instead; a play badge marks a video either way.
 Item {
     id: root
 
     property string name: ""
     property string path: ""
     property string kind: "image"   // "image" | "video" | "audio"
-    // THIS FILE'S OWN FILL ("" = the output's default): a choice made on the
-    // picture itself (the tile menu's Fill row), which wins over every output's
-    // Fill setting when it is on air — so the grid has to show it holds one, or
-    // a picture that crops everywhere else reads as a bug on the other tiles.
     property string fit: ""
 
     readonly property bool isVideo: kind === "video"
@@ -31,29 +15,13 @@ Item {
     readonly property string kindIcon: isVideo ? "camera" : (isAudio ? "music" : "layoutTemplate")
     readonly property bool gridIcon: isVideo || isAudio
     readonly property real previewHeight: Math.round((width - 12) * 9 / 16)
-    // On air? This exact file is on the program mix (video/image: the
-    // monitor wall's compositor layer; audio: the output tile's L/R
-    // meters are the only visible confirmation — it has no frame).
     readonly property bool onAir: LiveOutputService.mediaOnAir
                                   && LiveOutputService.mediaPath === root.path
-    // PICKED (the grid's multi-selection). The tile draws its own ring for it, so a
-    // selection reads on the picture itself rather than only in a count at the foot
-    // of the pane.
     property bool selected: false
-    // What THIS tile's drag carries: one file normally, the whole selection when the
-    // tile is part of one (the pane builds it — see dragItemsFor). A list of
-    // { ref, name }, the same shape every drop target in the app already takes.
     property var dragItems: []
 
-    // Click: the file on the centre page AND on the output (a take). Double-click: into the
-    // open project (and still on the output — a take never toggles). Drag: into a project.
-    // The click carries its KEYBOARD MODIFIERS — Ctrl toggles this tile's pick, Shift
-    // extends it from the last plain click (the pane decides; the tile only reports).
     signal activated(int modifiers)
     signal opened()
-    // Right-click: the host builds and shows the item menu (rename / move / delete).
-    // The same signature the design cards and sidebar rows report, so one host-side
-    // menu pattern serves every library — the tile itself touches no file.
     signal contextMenuRequested(var source, real mx, real my)
 
     // The size to ask the engine for (it rounds up to a cache size).
@@ -90,9 +58,6 @@ Item {
         onOpened: root.opened()
     }
 
-    // The RIGHT button only, declared over the DragSource: the left one (click,
-    // double-click, drag onto a project) stays the DragSource's, and a button this
-    // area does not accept is passed straight down to it.
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.RightButton
@@ -215,7 +180,6 @@ Item {
                     width: 12; height: 12
                 }
             }
-
         }
 
         // ---- name ----
@@ -247,10 +211,6 @@ Item {
                 textFormat: Text.PlainText
             }
         }
-        // THE POINTER'S EDGE — the app's shared hover layer, declared LAST so
-        // it is drawn over the preview (a border on the card itself would sit
-        // under every child and show only along the name strip). Its wash is
-        // transparent: a tile's picture must not be tinted, only edged.
         HoverGlow {
             anchors.fill: parent
             radius: parent.radius
@@ -277,21 +237,7 @@ Item {
         id: hover
         anchors.fill: parent
         showCursor: false
-        // Geometry alone decides "is this tile on screen" — the same posture
-        // DesignCard and the library rows take. Walking every ancestor's
-        // visible/enabled made `shownChain` depend on a chain that itself reads
-        // a hover-driven property inside the grid, which the binding loop
-        // detector caught (MediaTile.qml: QML PositionHoverArea: Binding loop
-        // detected for property "shownChain"). The open-popup case is still
-        // covered by AppCursor.blocked() below.
         checkAncestors: false
-        // HOVER ONLY — NO CLICKS. This area is the tile's LAST child, so it is drawn
-        // over everything: with its click-sinking MouseArea enabled it swallowed
-        // every press before the DragSource beneath it ever saw one. That is why a
-        // click on a tile did
-        // nothing to the output and a double-click never opened it — the gestures
-        // were being delivered to a hover tracker. DesignCard's own hover layer sits
-        // UNDER its DragSource for the same reason.
         clickEnabled: false
     }
 }

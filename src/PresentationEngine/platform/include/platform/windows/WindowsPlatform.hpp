@@ -1,10 +1,6 @@
 #pragma once
 
-// Windows backend of the PAL (docs/architecture/PAL.md): the only place on
-// Windows that calls Win32 directly. Uses the common backends for filesystem
-// (std::filesystem) and timer (std::chrono).
-
-#include "platform/IPlatform.hpp"
+#include "platform/PlatformAccessors.hpp"
 #include "platform/common/Filesystem.hpp"
 #include "platform/common/Timer.hpp"
 #include "platform/windows/WindowsPaths.hpp"
@@ -31,8 +27,9 @@
 #include <string>
 
 namespace bps::platform {
+class WindowsPlatform final : public PlatformAccessors<WindowsPlatform> {
+    friend class PlatformAccessors<WindowsPlatform>;
 
-class WindowsPlatform final : public IPlatform {
 public:
     const char* Name() const noexcept override { return "WindowsPlatform"; }
 
@@ -41,39 +38,12 @@ public:
     std::string OsVersion() const override;
     std::string Arch() const override;
 
-    IFilesystem& Filesystem() override { return filesystem_; }
-    IPaths& Paths() override { return paths_; }
-    ITimer& Timer() override { return timer_; }
-    IThreading& Threading() override { return threading_; }
-    IProcess& Process() override { return process_; }
-    ILibrary& Library() override { return library_; }
-    IMonitor& Monitor() override { return monitor_; }
-    IAudio& Audio() override { return audio_; }
-    IVideo& Video() override { return video_; }
-    INetwork& Network() override { return network_; }
-    IPower& Power() override { return power_; }
-    IClipboard& Clipboard() override { return clipboard_; }
-    IEnvironment& Environment() override { return environment_; }
-    ILocale& Locale() override { return locale_; }
-    ISocketFactory& Sockets() override { return sockets_; }
-    IInput& Input() override { return input_; }
-    IDialogs& Dialogs() override { return dialogs_; }
-    INotifications& Notifications() override { return notifications_; }
-
     Snapshot Sample() override;
     std::vector<OsEvent> PollChanges() override;
 
-    // This process's live thread count, refreshed at most every
-    // kThreadCountRefreshMs (see the definition: the Toolhelp walk it needs
-    // enumerates every thread on the machine and measured 60-115 ms).
     uint64_t ThreadCount();
     static constexpr int kThreadCountRefreshMs = 5000;
 
-    // The audio (WASAPI) and video (Media Foundation) device fingerprints the
-    // hot-plug check compares, WALKED at most every kDeviceFingerprintRefreshMs
-    // (see the definition: each is a full device enumeration, and the MF one
-    // opens a device-access handle per device path — polled every second for the
-    // life of the process, that walk is what the idle kernel-handle leak was).
     void DeviceFingerprints(std::string& audioFp, std::string& videoFp);
     static constexpr int kDeviceFingerprintRefreshMs = 5000;
 
@@ -117,5 +87,4 @@ private:
     std::string lastAudioFp_;
     std::string lastVideoFp_;
 };
-
 } // namespace bps::platform

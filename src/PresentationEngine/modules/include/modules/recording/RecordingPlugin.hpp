@@ -1,9 +1,5 @@
 #pragma once
 
-// RecordingPlugin (docs/specs/28): the Phase 16 extension seams. Containers,
-// codecs and capture devices are registry-provided — new formats, codecs and
-// hardware are registered by plugins, never added to the recording engine core.
-
 #include "core/common/Common.hpp"
 #include "modules/production/ProductionTypes.hpp"
 #include "modules/recording/RecordingTypes.hpp"
@@ -15,7 +11,6 @@
 #include <string>
 
 namespace bps::recording {
-
 // A capture source: camera, capture card, screen, NDI, network, audio
 // interface, system audio or virtual device (user brief §31).
 class ICaptureSource {
@@ -90,5 +85,4 @@ public:
     virtual Result<void> Shutdown() = 0;
 };
 using AudioEncoderFactory = std::function<std::shared_ptr<IAudioEncoder>()>;
-
 } // namespace bps::recording

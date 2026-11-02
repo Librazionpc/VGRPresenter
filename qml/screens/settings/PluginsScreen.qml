@@ -2,31 +2,9 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Plugins — the installed-plugins list, same minimal skeleton
-// as the other settings screens (Item root, Flickable, shared
-// AppScrollBar, Theme tokens). One card of rows: name + version/tag
-// subtitle, a status pill, and an enable toggle. The pill is DERIVED, not
-// stored — "Active" (green) while enabled, "Installed" (amber) when
-// switched off — so the row can never show contradictory state.
 Item {
     id: root
 
-    // The UI-only plugin roster (name/version/tag facts) MERGED with the
-    // ENGINE's real feature registry (EngineBridge.pluginFeatures — entries
-    // { id, name, enabled, defaultEnabled }): an entry with a `feature` id
-    // has its pill AND its switch driven by the engine's own state, so the
-    // toggle turns the subsystem on or off for real (NDI's broadcast stack
-    // honors it) and the state survives a restart. Entries without one stay
-    // inert UI rows with their honest "not wired up" toast.
-    // Every row needs a real `enabled` boolean, even the ones the engine
-    // merge below is expected to replace — modelData.enabled feeds `checked`
-    // (SettingsToggle) and the `live` pill directly, and an unset field
-    // reads as JS `undefined`, not a QML bool: assigning it to a `property
-    // bool` throws "Unable to assign [undefined] to bool" the moment this
-    // row renders before the engine registry has populated (e.g. still
-    // booting), which then broke construction of everything under it in the
-    // same delegate — reported live as the toggle throwing a ReferenceError
-    // on an id that WAS in scope, just inside a half-constructed component.
     readonly property var uiPlugins: [
         { name: qsTr("Song Provider"), version: "v1.2", tag: qsTr("chords + transpose"), enabled: true },
         { name: qsTr("Bible Provider"), version: "v1.0", tag: qsTr("KJV + BBE"), enabled: true },
@@ -36,22 +14,9 @@ Item {
         { name: qsTr("MIDI Control"), version: "v0.9", tag: qsTr("hardware triggers"), enabled: false },
         { name: qsTr("Flow Automation"), version: "v1.0", tag: qsTr("service flows"), enabled: true }
     ]
-    // UI-only rows have no engine feature to flip (the registry only carries
-    // "ndi"), so their switch keeps HONEST LOCAL state here — keyed by name —
-    // while the toast says it isn't wired up. The merged `plugins` binding
-    // below reads this; the toggle writes it. (It used to assign straight to
-    // the read-only `plugins`, which threw "Cannot assign to read-only
-    // property 'plugins'" the moment one of these rows was switched.)
     property var uiOnlyStates: ({})
 
     // ---- The NDI toggle's firewall answer (see EngineBridge::
-    // requestNdiFirewallAccess) -------------------------------------------
-    // Turning NDI on asks for INBOUND firewall access — a hidden `netsh` child
-    // process (elevated when the rule has to be added), which runs off the
-    // interface thread, so the notice for that toggle is sent from the result
-    // handler below instead of from a return value. The flag says a toggle is
-    // WAITING for that answer, so a switch-off, or a second screen's ask, never
-    // claims it.
     property bool ndiTogglePending: false
     function handleNdiFirewallResult(outcome) {
         if (!root.ndiTogglePending)
@@ -101,13 +66,6 @@ Item {
         return merged
     }
 
-    // Persist a flip: key → enabled, merged over the last saved map (every
-    // switch leaves its own trace; an unlisted feature keeps its default).
-    // Reads the ENGINE's registry, NOT root.plugins — the merged binding is
-    // still stale at call time (setPluginFeatureEnabled returned before
-    // pluginFeaturesChanged re-evaluated it), so reading it here saved the
-    // PRE-toggle value: a switch-ON rebooted as OFF (self-test caught it:
-    // SendFrame refused "NDI is switched off" on a fresh boot).
     function persistFeatureStates() {
         let saved = {}
         try { saved = JSON.parse(SettingsService.value("plugins.featureStates") || "{}") } catch (e) { saved = {} }
@@ -214,10 +172,6 @@ Item {
                                     Text {
                                         id: pillLabel
                                         anchors.centerIn: parent
-                                        // A deliberate "off" (the switch, ndiState
-                                        // "disabled") is neutral-amber "Switched
-                                        // off" — not the red "Runtime missing"/
-                                        // "Error" of a runtime problem.
                                         text: !pluginRow.runtimeOk
                                               ? (pluginRow.ndiState === "notInstalled" ? qsTr("Runtime missing")
                                                  : pluginRow.ndiState === "disabled"   ? qsTr("Switched off")
@@ -235,44 +189,7 @@ Item {
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
                                     checked: pluginRow.modelData.enabled
-                                    // A `feature` row IS the engine's registry
-                                    // entry: the toggle calls the bridge, which
-                                    // flips the AdaptiveRuntime feature — NDI's
-                                    // broadcast stack honors that for real (its
-                                    // senders/receivers come down with the
-                                    // switch). Everything else stays an inert
-                                    // UI row with the honest toast.
                                     onToggled: {
-                                        // Capture everything needed BEFORE
-                                        // calling setPluginFeatureEnabled —
-                                        // it emits pluginFeaturesChanged()
-                                        // synchronously, which recomputes
-                                        // root.plugins, which makes the
-                                        // Repeater destroy/recreate THIS
-                                        // delegate (pluginRow) while this
-                                        // very handler is still running on
-                                        // it. Anything read from pluginRow
-                                        // AFTER that call is reading from a
-                                        // dying object — reported live as
-                                        // "root is not defined" a few lines
-                                        // later, inside a context whose
-                                        // owning component had already been
-                                        // torn down. Qt.callLater defers the
-                                        // rest to a fresh call stack, once
-                                        // the destroy/recreate has settled.
-                                        // A plain QML id lookup (bare "root")
-                                        // inside a Qt.callLater callback does
-                                        // NOT reliably resolve — empirically
-                                        // confirmed live (still threw "root
-                                        // is not defined" from INSIDE the
-                                        // deferred callback even after moving
-                                        // the risky reads there). Capturing
-                                        // the object into a plain JS const
-                                        // BEFORE deferring sidesteps this
-                                        // entirely — ordinary variable
-                                        // closures don't depend on QML's own
-                                        // id-resolution machinery the way a
-                                        // bare id reference does.
                                         const rootRef = root
                                         const want = !pluginRow.modelData.enabled
                                         const feature = pluginRow.modelData.feature
@@ -281,33 +198,11 @@ Item {
                                             EngineBridge.setPluginFeatureEnabled(feature, want)
                                             Qt.callLater(function () {
                                                 rootRef.persistFeatureStates()
-                                                // NDI specifically needs INBOUND
-                                                // firewall access to actually SEND
-                                                // (receiving is outbound-only and
-                                                // always works) — check it right
-                                                // when the user turns the feature
-                                                // on, instead of leaving them to
-                                                // find a separate button elsewhere
-                                                // in Settings > Outputs. Probes
-                                                // first (EngineBridge.request
-                                                // NdiFirewallAccess's own
-                                                // contract) — a no-op toast-wise
-                                                // when access is already there.
                                                 if (want && feature === "ndi") {
-                                                    // The ask and its probe are `netsh` child
-                                                    // processes off the interface thread, so the
-                                                    // outcome lands on ndiFirewallAccessResult
-                                                    // and THAT sends this toggle's notice —
-                                                    // including the plain "switched on." one when
-                                                    // access was already in place.
                                                     rootRef.ndiTogglePending = true
                                                     EngineBridge.requestNdiFirewallAccess()
                                                     return
                                                 }
-                                                // Any pending NDI answer is no longer this
-                                                // toggle's (switched back off while the ask
-                                                // was in flight): its notice must not claim
-                                                // this one.
                                                 rootRef.ndiTogglePending = false
                                                 EventBus.notify(want
                                                     ? qsTr("%1 switched on.").arg(name)

@@ -16,24 +16,6 @@ class QQmlEngine;
 class QJSEngine;
 class QThread;
 
-// The app's one search: the header's Search button, Ctrl+K, the Projects panel's
-// "Quick search" and the menu item all ask this service, and it asks the engine.
-//
-//   shows ........ the engine's ShowLibrary (name / category)
-//   slides ....... the working show's slides (title, lines, reference)
-//   templates,
-//   overlays,
-//   categories ... the working show's own templates / overlays / categories
-//   songs ........ the engine's SongEngine (title, authors, lyrics)
-//   Bible ........ the engine's BibleEngine: a typed reference ("John 3:16",
-//                  "Ps 23") is resolved to its verses, and any other words are
-//                  searched in the verse text of every installed Bible
-//   settings ..... the Settings entries (the service owns that list; the Settings
-//                  popup's own search box asks searchSettings())
-//
-// Every result is { kind, title, subtitle, text, id, path, section, key } — what to
-// do with it (open the show, go to the slide, open the settings section...) is the
-// UI's call, the service only finds things.
 class SearchService : public QObject
 {
     Q_OBJECT
@@ -45,10 +27,6 @@ class SearchService : public QObject
     Q_PROPERTY(bool bibleLoading READ bibleLoading NOTIFY bibleChanged)
     // Ids of the Bibles the engine has installed ("kjv", ...).
     Q_PROPERTY(QStringList bibles READ bibles NOTIFY bibleChanged)
-    // True while an import (startup load or a "New scripture" install) runs on
-    // the worker thread; `bibleProgress` is { done, total, current } — verses
-    // indexed so far, verses in the file, and the book being indexed (or the
-    // file name between files).
     Q_PROPERTY(bool bibleImporting READ bibleImporting NOTIFY bibleImportingChanged)
     Q_PROPERTY(QVariantMap bibleProgress READ bibleProgress NOTIFY bibleProgressChanged)
 
@@ -62,70 +40,25 @@ public:
     QVariantMap bibleProgress() const { return progress_; }
     QStringList bibles() const;
 
-    // Searches everything. At most `perKind` results per kind, best first; results
-    // are grouped by kind in a fixed order. Empty/blank text -> {}.
-    // `exactWords` is the dialog's padlock: every typed word must appear VERBATIM
-    // as a whole word — no completion ("word" stops finding "words"), no inner
-    // substring, no typo correction. The sermons' words are matched exactly by the
-    // library itself; the Bible, songs, media and the local show/slide/setting
-    // surfaces have their fuzzy hits filtered out here.
     Q_INVOKABLE QVariantList search(const QString &text, int perKind = 5,
                                     bool exactWords = false) const;
-    // ASYNC search: the same aggregation on a worker thread (the GUI never
-    // blocks on a big query — "the" has ~1,200 candidates and a synchronous
-    // call froze typing for hundreds of ms). `token` is the caller's identity:
-    // only the LATEST request's results are emitted (a fast typist's older
-    // keystrokes answer into the void), delivered as resultsReady(token, rows).
     Q_INVOKABLE void searchAsync(const QString &text, int perKind, int token,
                                  bool exactWords = false);
 
-    // What the engine's word resolution would change about `text` — the same
-    // resolution every search applies internally: incomplete words completed
-    // ("friend" -> "friends"), typos corrected ("thn" -> "then"), typed-together
-    // words split ("holyspirit" -> "holy spirit"). One { typed, resolved, weight }
-    // entry per word that DIFFERS from its resolution, in order; empty when the
-    // query is already well-spelled (the common case: zero UI, zero cost).
-    //
-    // SYNCHRONOUS AND PUBLISHED, like every other read here: it answers from the
-    // last worker read of that text, and `[]` means "nobody has read this yet" as
-    // much as it means "nothing to correct" — wordsCached announces the answer
-    // that fills it, so a caller that cannot wait re-asks on that (the same
-    // contract verseCached gives fullVerse). A WORKER must call readResolveWords
-    // instead (the private half): it has no signal to wait on, and a miss there
-    // silently drops the correction the caller asked for.
     Q_INVOKABLE QVariantList resolveWords(const QString &text) const;
     // ASYNC resolveWords: answers as wordsResolved(token, rows); only the
     // LATEST request's token is answered (same contract as searchAsync).
     Q_INVOKABLE void resolveWordsAsync(const QString &text, int token);
 
-    // One verse's FULL text (typesetting marks cleaned) — the Quick search dialog's
-    // hover preview: a result row only carries a capped snippet, hovering fetches
-    // the whole verse with this. "" when the bible/book/chapter/verse is unknown.
     Q_INVOKABLE QString fullVerse(const QString &bibleId, const QString &bookId,
                                   int chapter, int verse) const;
 
-    // Only the Settings entries (the Settings popup's search box): best first, at most
-    // `limit`. Each is { kind: "setting", title, section, subtitle, key } - `key` is the
-    // settings section to open. Matches the entry's name or its section's.
     Q_INVOKABLE QVariantList searchSettings(const QString &text, int limit = 50) const;
 
-    // Reads the Bible files into the engine on a background thread, once: the file
-    // named by VGR_BIBLE_FILE, every Bible in <Documents>/VGR Presenter/Bibles, and
-    // (development builds) the KJV shipped in the source tree. Needs the engine booted.
     Q_INVOKABLE void loadBibles();
 
-    // Re-reads the installed Bible ids and announces them with bibleChanged. This
-    // is what a caller that INSTALLED a Bible asks for: the published list is only
-    // re-walked when it is empty, so hand-emitting bibleChanged would tell every
-    // binding to re-read a list that still holds the ids from before the install.
-    // The walk and the notify both happen off the caller's thread (a worker answers,
-    // the signal lands with it).
     Q_INVOKABLE void refreshBibles();
 
-    // Installs one Bible file now (json / xml / osis / usfm / txt). Returns false
-    // (and toasts the error) when the import fails or another one is already
-    // running; the work happens on a worker thread — bibleImporting/
-    // bibleProgress follow it, and bibleChanged fires when it lands.
     Q_INVOKABLE bool importBibleFile(const QString &path);
 
     // Waits for a running Bible import to finish. Call before the engine shuts down.
@@ -144,14 +77,7 @@ signals:
     // A hover preview's verse text landed (see fullVerse): the dialog re-asks for
     // the row it is still showing, and now reads it from the published cache.
     void verseCached(const QString &bibleId, const QString &bookId, int chapter, int verse);
-    // A published SEARCH answer landed (the sync `search()`'s worker read). The
-    // sync entry point has no token to match — `[]` there means "not run yet" as
-    // much as "no rows" — so its callers re-ask on this. searchAsync's answer
-    // arrives on resultsReady instead and needs no second signal.
     void searchCached(const QString &text);
-    // A published word resolution landed (the sync `resolveWords()`'s worker read),
-    // for the same reason: the sync entry answers `[]` on a miss, so a caller that
-    // used it re-asks here. resolveWordsAsync answers on wordsResolved instead.
     void wordsCached(const QString &text);
 
 private:
@@ -159,14 +85,6 @@ private:
     static QStringList candidateBibleFiles();
 
     // ---- THE PUBLISHED BIBLE READS -----------------------------------------
-    // `bibles`, `search`, `resolveWords` and `fullVerse` used to ask the ENGINE on
-    // the interface thread. `bibles` is a property binding (re-evaluated on every
-    // bibleChanged) and the other three are asked per row, per hover and per
-    // keystroke. Each answer is now READ ONCE on a worker and kept here as the
-    // published value: the entry point is a lookup, a miss queues the read, and
-    // the notify that lands with it (bibleChanged, verseCached) is what makes the
-    // UI re-read. The "read*" half is the old body, called on a worker — which is
-    // exactly where searchAsync and resolveWordsAsync already ran it.
     QStringList readBibles() const;
     QVariantList readResolveWords(const QString &text) const;
     QString readFullVerse(const QString &bibleId, const QString &bookId, int chapter, int verse) const;

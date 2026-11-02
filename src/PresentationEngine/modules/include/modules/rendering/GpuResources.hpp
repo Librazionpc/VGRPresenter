@@ -1,11 +1,5 @@
 #pragma once
 
-// GPU resource management (docs/specs/17 §GPU Resource Manager / §Render Cache
-// / §Resource Uploader / §Frame Graph). The manager owns texture/buffer/shader/
-// mesh lifetimes with reuse + eviction; the cache caches glyphs/layouts/
-// geometry; the uploader loads async without blocking rendering; the frame
-// graph tracks per-frame resource usage.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/IGraphicsBackend.hpp"
 #include "modules/rendering/TextEngine.hpp"
@@ -17,24 +11,13 @@
 #include <vector>
 
 namespace bps::rendering {
-
 class GPUResourceManager {
 public:
     GPUResourceManager() = default;
-    // Installs the active backend. A REAL switch also drops everything the
-    // registry holds for the old one — its TextureIds belong to the backend that
-    // created them, so carrying them across would leave every cached texture an
-    // id the new backend does not hold (the blit draws nothing and the scene
-    // comes out background-only). See the definition in GpuResources.cpp.
     void BindBackend(IGraphicsBackend* backend);
 
     // Texture registry (dedup by name; reuse when unchanged).
     Result<TextureId> AcquireTexture(std::string_view name, const RgbaImage& image);
-    // LIVE-PIXEL VARIANT: `rev` is the source's monotonic frame version. The
-    // texture is re-uploaded (in place, same TextureId) only when `rev` moved
-    // past the version last bound to `name` — AcquireTexture above is
-    // create-once, so a VideoObject pushing a new frame every tick kept
-    // blitting the first frame's texture forever.
     Result<TextureId> UpdateTexture(std::string_view name, const RgbaImage& image,
                                     uint64_t rev);
     Result<void> ReleaseTexture(std::string_view name);
@@ -80,13 +63,6 @@ public:
         TextureId texture;
     };
     Result<const AtlasEntry*> GlyphAtlas(float sizePx);
-    // Font-identity-aware form: builds via FontManager::BuildSystemAtlas
-    // when style.fontId names a real, resolvable font, else falls back to
-    // the plain builtin atlas above (same cache, same key space — a style
-    // whose font isn't available reads exactly as "builtin" always has).
-    // Kept as a SEPARATE overload rather than changing GlyphAtlas(float)'s
-    // own signature: every existing caller (including the unit tests) that
-    // only ever wanted the builtin font keeps working unchanged.
     Result<const AtlasEntry*> GlyphAtlas(const TextStyle& style, const FontManager& fonts);
     void InvalidateGlyphAtlas();
 
@@ -102,9 +78,6 @@ public:
 private:
     mutable std::mutex mutex_;
     std::map<int, std::unique_ptr<AtlasEntry>> atlases_;   // keyed by px size
-    // Font-identity-aware atlases (GlyphAtlas(style, fonts)) — a SEPARATE
-    // map from atlases_ above: that one is always the builtin font, keyed
-    // by size alone, and every pre-existing caller keeps using it unchanged.
     struct FontAtlasKey {
         std::string fontId;
         int sizePx = 0;
@@ -132,16 +105,7 @@ private:
         // Same reasoning as letterSpacing: it changes every measured width and
         // therefore every wrap decision.
         float wordSpacing = 0;
-        // Layout-affecting and therefore key-relevant: lineSpacing changes the
-        // line height (totalHeight), bold/italic change the real-font advances
-        // (SystemCharAdvances takes them) and with them every wrap decision.
-        // Omitting any of these served a stale layout whenever the SAME text
-        // was laid out twice under styles differing only here — measured
-        // fitting, drawn overflowing.
         float lineSpacing = 0;
-        // The additive gap BETWEEN line boxes changes the same total height
-        // lineSpacing does, so it belongs in the key for the same reason: two
-        // layouts that differ only here must never share a cache entry.
         float lineGap = 0;
         bool bold = false;
         bool italic = false;
@@ -168,10 +132,6 @@ private:
 // --- ResourceUploader: async uploads via the core ThreadPool ----------------
 class ResourceUploader {
 public:
-    // Queue an async decode+upload. `decoder` produces the RGBA image from raw
-    // bytes; `done` is called on completion (may be null). Decoding runs on the
-    // core ThreadPool (never the render thread); Pump() performs the actual GPU
-    // upload and fires `done`, so the render loop never blocks on decoding.
     using Decoder = std::function<RgbaImage(const std::vector<uint8_t>&)>;
     using DoneFn = std::function<void(Result<TextureId>)>;
     void Submit(std::string name, std::vector<uint8_t> bytes, Decoder decoder,
@@ -229,5 +189,4 @@ private:
     std::map<std::string, Entry, std::less<>> resources_;
     int frame_ = 0;
 };
-
 } // namespace bps::rendering

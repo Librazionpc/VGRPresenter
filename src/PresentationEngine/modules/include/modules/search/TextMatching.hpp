@@ -1,11 +1,3 @@
-// Shared text-matching primitives for search surfaces.
-//
-// One definition on purpose: the Search Engine's query path and The Table's
-// paragraph scan must agree on what "word", "whole word" and "phrase" MEAN.
-// They were private copies in two .cpp files and drifted once already (one
-// became punctuation-tolerant, the other didn't) — so the helpers now live
-// here and both files include this header. Internal to the engine modules:
-// public APIs stay in SearchEngine.hpp / the library's own header.
 #pragma once
 
 #include <algorithm>
@@ -18,7 +10,6 @@
 #include <vector>
 
 namespace bps::search::textmatch {
-
 // ASCII lower-case (bytes >= 0x80 are passed through untouched: UTF-8 text is
 // matched verbatim; case folding beyond ASCII is not needed for this corpus).
 inline std::string Lower(std::string_view s) {
@@ -29,19 +20,6 @@ inline std::string Lower(std::string_view s) {
     return out;
 }
 
-// The three things a search surface asks about one term in one paragraph —
-// answered in a SINGLE walk of the text, because that walk is the hot loop of
-// every search keystroke (the ranking pass asks it of every term in every
-// paragraph). They used to be separate scans: a `find` for "does it occur at
-// all", then ContainsWord walking the paragraph again, then StartsWord
-// walking it a third time — up to three passes per term per paragraph, and a
-// four-word query paid twelve. The walk stops at the first whole-word
-// occurrence: a whole word IS a word start, so nothing later in the text can
-// change either answer.
-//   found  — the bytes occur somewhere (a mid-word substring counts)
-//   whole  — ... as a complete word ("we" in "we", not in "went")
-//   start  — ... at the START of a word ("friend" in "friends")
-// `whole` implies `start`.
 struct TermPresence {
     bool found = false;
     bool whole = false;
@@ -67,29 +45,10 @@ inline TermPresence PresenceOf(std::string_view hay, std::string_view needle) {
     return out;
 }
 
-// True when `needle` occurs in `hay` as a WHOLE word: the characters around
-// the occurrence are not letters/digits (so "we" does not match "went").
-// UTF-8 continuation bytes (>= 0x80) count as word letters so multibyte words
-// stay whole. One definition of the boundary rule: PresenceOf below is where
-// it now lives, and the callers that need more than one answer per walk (the
-// ranking passes) ask it once instead of twice.
 inline bool ContainsWord(std::string_view hay, std::string_view needle) {
     return PresenceOf(hay, needle).whole;
 }
 
-// All the terms in order as a phrase, tolerating whatever punctuation/space
-// sits between them ("then, friends" in the text matches the terms
-// then+friends; a phrase re-wrapped across a line break still matches). Terms
-// keep the user's word order; a single term is just a whole-word test. The
-// LAST term may end mid-word ("then friend" matches "then, friends," — the
-// user's final word unfinished), the others must be whole. Real verbatim
-// presence — the strongest evidence a paragraph is what was asked for — and
-// the reason a pasted line always finds its paragraph. When `matchPos` is
-// given it receives the match's start (for snippet anchoring).
-//
-// `lastWhole` closes the last term's mid-word tolerance — the EXACT-WORD
-// searches set it so "my wife" stops matching "my wives": locked, the sentence
-// must be there as typed, to the character.
 inline bool ContainsPhrase(std::string_view hay, const std::vector<std::string>& terms,
                            size_t* matchPos = nullptr, bool lastWhole = false) {
     if (terms.empty()) return false;
@@ -132,9 +91,6 @@ inline bool ContainsPhrase(std::string_view hay, const std::vector<std::string>&
     return false;
 }
 
-// Lower-case alphanumerics runs as words (UTF-8 letters/digits stay together:
-// bytes >= 0x80 count as word letters). The query-side tokenizer for surfaces
-// that match whole words.
 inline std::vector<std::string> TokenizeWords(std::string_view text) {
     std::vector<std::string> out;
     std::string cur;
@@ -152,26 +108,9 @@ inline std::vector<std::string> TokenizeWords(std::string_view text) {
 }
 
 // ---- WORD SPANS: the allocation-free half of TokenizeWords ---------------
-// A hot scan must ask "which of these words does this paragraph carry" for tens
-// of thousands of paragraphs per keystroke, and TokenizeWords answers it by
-// building a std::string (its own heap block) per word — the allocation storm
-// that made a common-word sermon search take seconds. These helpers split the
-// same words into SPANS into the caller's own text instead, so a whole corpus
-// scan allocates one reused vector and nothing else.
-//
-// Callers must pass text that is ALREADY lower-case (the lowered paragraphs are
-// cached) and compare terms case-sensitively, exactly as the tokenizing
-// variants do after their own lowering. A span's bytes are the same run
-// TokenizeWords would have produced for that word.
 
-// The byte class a word is made of — the SAME rule TokenizeWords uses
-// (letters/digits plus UTF-8 continuation bytes, so a multibyte word stays one
-// word).
 inline bool IsWordByte(unsigned char c) { return std::isalnum(c) || c >= 0x80; }
 
-// Appends every word span of `segs` (one paragraph, or a paragraph and its
-// neighbour for the spanned-match case) to `out`. `out` is NOT cleared: callers
-// clear and reuse one vector across a whole scan.
 inline void AppendWordSpans(const std::string_view* segs, size_t segCount,
                             std::vector<std::string_view>& out) {
     for (size_t s = 0; s < segCount; ++s) {
@@ -209,11 +148,6 @@ inline bool ContainsNearPhraseWords(const std::vector<std::string_view>& words,
     return false;
 }
 
-// Does `words` carry terms[termStart .. termStart+termCount) IN ORDER, with up
-// to `maxGapWords` other words between consecutive ones? The single test the
-// EXACT-WORD ladder's window scan is built from (the caller loops the windows
-// longest-first). Spans are compared as whole words — the same strictness the
-// tokenizing version has.
 inline bool ContainsTermRunWords(const std::vector<std::string_view>& words,
                                  const std::vector<std::string>& terms,
                                  size_t termStart, size_t termCount, size_t maxGapWords) {
@@ -234,19 +168,6 @@ inline bool ContainsTermRunWords(const std::vector<std::string_view>& words,
     return false;
 }
 
-// Like ContainsPhrase, but tolerates up to `maxGapWords` OTHER words between
-// each consecutive pair of terms (ContainsPhrase itself allows only
-// punctuation/whitespace there — zero gap). "compelling and compulsory,
-// that" matches terms {compelling, compulsory, that} with maxGapWords >= 1
-// even though the word "and" sits between the first two — a query that
-// skipped a connector word the real text actually has must still read as
-// the sentence, not as scattered words (user call: "because i missed some
-// words in between ... if it can find a similar sentence['s] exact words").
-// Bounded so a genuinely scattered match (the words spread across an entire
-// paragraph) still does not count. Punctuation is never part of the match
-// either way — both this and ContainsPhrase tokenize past it. Whole words
-// only (terms are matched as complete tokens, same strictness ContainsPhrase
-// gives EXACT-locked callers via lastWhole=true).
 inline bool ContainsNearPhrase(std::string_view hay, const std::vector<std::string>& terms,
                                size_t maxGapWords) {
     if (terms.empty()) return false;
@@ -268,12 +189,6 @@ inline bool ContainsNearPhrase(std::string_view hay, const std::vector<std::stri
     return false;
 }
 
-// True when `needle` STARTS a word in `hay` — the left side is a boundary and
-// the needle fills to (or past) the word's end: "friend" in "friends" (the
-// completion shape: the user just didn't type the trailing letters), not
-// "friend" in "boyfriend" (mid-word). A word-start extension is a STRONG hit —
-// the same word the user meant, plus an ending — while a mid-word substring is
-// weak (probably a different word entirely).
 inline bool StartsWord(std::string_view hay, std::string_view needle) {
     if (needle.empty()) return false;
     const auto isWord = [](unsigned char c) { return std::isalnum(c) || c >= 0x80; };
@@ -285,13 +200,6 @@ inline bool StartsWord(std::string_view hay, std::string_view needle) {
     return false;
 }
 
-// True when `a` and `b` differ ONLY by one adjacent pair of letters swapped —
-// the ie/ei slip ("recieve"/"receive", "thier"/"their", "freind"/"friend").
-// Plain Levenshtein scores a swapped pair as TWO edits, and that is what let a
-// one-letter substitution of a different word win the typo pass: typing
-// "recieve" offered "relieve", searched for it, and found nothing the user
-// meant. A swapped pair is one keystroke in the wrong order, so every typo pass
-// counts it as one slip.
 inline bool IsAdjacentTransposition(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     size_t first = std::string_view::npos, second = std::string_view::npos;
@@ -307,11 +215,6 @@ inline bool IsAdjacentTransposition(std::string_view a, std::string_view b) {
            && a[first] == b[second] && a[second] == b[first];
 }
 
-// Bounded Levenshtein distance with an early exit: anything provably beyond
-// `maxDist` returns maxDist+1 (the caller only cares whether the distance is
-// within budget — this is a typo filter, not a metric). Fixed buffers (terms
-// past kFuzzyMaxTerm chars are pastes, not typos — the fuzzy path never sees
-// them) keep the scan allocation-free.
 constexpr size_t kFuzzyMaxTerm = 24;
 inline size_t EditDistanceBounded(std::string_view a, std::string_view b, size_t maxDist) {
     if (a == b) return 0;
@@ -336,27 +239,9 @@ inline size_t EditDistanceBounded(std::string_view a, std::string_view b, size_t
     return prev[lo];
 }
 
-// Resolution of one query word against a word list (the engine's vocabulary,
-// a media library's file names, a show's titles — anything): the shared rules
-// every search surface applies.
-//   exact word present        -> {"", 1.0}      (as typed — caller keeps it)
-//   "friend" + list["friends"] -> {"friends", 1.0}   (incomplete word completed)
-//   "frend" + list["friend"]   -> {"friend", 0.7}    (typo corrected)
-//   nothing close              -> {"", 0.0}      (unresolvable — will not match)
-// The completion goes to the most frequent list word the term prefixes; the
-// typo path takes the closest word by bounded edit distance (ties by
-// frequency), keeping the term's first letter and a ±maxDist length band —
-// the overwhelmingly common typo shape, which holds even large lists to the
-// sub-millisecond range.
 struct ResolvedWord { std::string word; double weight = 0.0; };
 inline ResolvedWord ResolveWordInList(const std::string& term,
                                       const std::vector<std::string>& words) {
-    // Word frequencies FIRST, in one pass. The two loops below ask how often a
-    // candidate word occurs, and they ask it inside their own loops — counting
-    // by scanning the whole vocabulary each time (std::count over a list that
-    // holds 100k+ words) is what made a mistyped keystroke cost tens of
-    // milliseconds. The table is built once and every count after it is a
-    // lookup; the numbers are identical either way.
     std::unordered_map<std::string_view, uint32_t> freq;
     freq.reserve(words.size() * 2);
     for (const std::string& w : words) ++freq[std::string_view(w)];
@@ -374,19 +259,6 @@ inline ResolvedWord ResolveWordInList(const std::string& term,
         if (n > bestN) { bestN = n; best = w; }
     }
     if (!best.empty()) return {best, 1.0};   // a stem, not a typo: full weight
-    // 2) Typo: closest vocabulary word by bounded edit distance. Equal-distance
-    //    ties prefer the ONE-SLIP shapes — the candidate is the query with one
-    //    letter dropped ("thn" -> "then", "frind" -> "friend") or with an ADJACENT
-    //    PAIR SWAPPED ("recieve" -> "receive") — over substitutions ("thn" ->
-    //    "the"), which are usually a DIFFERENT common word that merely happens to
-    //    be close. Then frequency decides what is left.
-    //
-    //    The transposition shape is called out separately because plain
-    //    Levenshtein scores a swapped pair as TWO edits, so the real word lost to
-    //    a one-letter neighbour: the user typed "recieve" and the search offered
-    //    him "relieve" (one substitution), searched for that, and found nothing
-    //    of what he meant. Swapping two adjacent letters is the ie/ei slip, one
-    //    keystroke in the wrong order, and is counted as the single slip it is.
     const size_t maxDist = term.size() <= 4 ? 1 : 2;
     std::string typo;
     size_t bestDist = maxDist + 1, bestN2 = 0;
@@ -421,5 +293,4 @@ inline ResolvedWord ResolveWordInList(const std::string& term,
     if (!typo.empty()) return {typo, 0.7};
     return {};   // unresolvable
 }
-
 } // namespace bps::search::textmatch

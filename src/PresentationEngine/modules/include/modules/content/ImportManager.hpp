@@ -1,10 +1,5 @@
 #pragma once
 
-// ImportManager (docs/specs/13 §Import Manager): discovers and executes
-// registered importers. Knows nothing about specific formats. The pipeline is:
-// find importer → validate file → read → extract → normalize → create engine
-// assets → generate metadata → thumbnail → index → save.
-
 #include "modules/content/IImporter.hpp"
 
 #include <memory>
@@ -15,7 +10,6 @@
 #include <vector>
 
 namespace bps::content {
-
 class ImportManager {
 public:
     ImportManager() = default;
@@ -74,5 +68,4 @@ public:
     Result<ImportResult> Import(const ImportContext& ctx,
                                 const std::vector<uint8_t>& bytes) const override;
 };
-
 } // namespace bps::content

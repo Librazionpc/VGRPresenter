@@ -2,19 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// Action roster and editor share one ModalCard. The editor and catalog replace
-// the content in place, so choosing an action never stacks another popup.
-//
-// The editor has TWO shapes, matching the design:
-//   ADD  (a blank action, straight from the roster's + Add) — labels sit
-//        ABOVE their fields, a centered "— shortcut —" placeholder, and no
-//        icon box: a brand-new action takes its icon from whatever catalog
-//        entry it runs;
-//   EDIT (an action that already exists) — the same fields with FLOATING
-//        labels inside their boxes, an Icon box beside the name, and the
-//        keypress field carrying its clear (×) and capture (↵) marks.
-// `editLayout` is fixed when the editor opens, so the shape never changes
-// under the pointer while somebody types.
 ModalCard {
     id: root
     objectName: "manageActionsModal"
@@ -23,12 +10,6 @@ ModalCard {
     subtitle: view === "list" ? qsTr("Create shortcuts that run one or more actions.") : ""
     cardWidth: 660
     showFooter: false
-    // The top-right door this view has: the icon picker while editing an
-    // action, the reveal eye on the trigger list AND the action catalog
-    // (closed = common only, same shape for both — see showAllActions/
-    // showAllTriggers). Living in the header beside the close X instead of
-    // floating inline next to the search box frees that box to use the
-    // dialog's full width.
     headerActionIcon: root.view === "triggers"
                       ? (root.showAllTriggers ? "eye" : "eyeOff")
                       : root.view === "catalog"
@@ -66,9 +47,6 @@ ModalCard {
     // false = the eye is CLOSED and only the common triggers are listed (the
     // default); true reveals the long tail. Same shape as the catalog's eye.
     property bool showAllTriggers: false
-    // THE TRIGGERS (FreeShow's custom activations): the app events an action
-    // can run on by itself. The table lives in ActionListModel (one source for
-    // this picker AND the Functions pane's summary).
     readonly property var triggerChoices: { void ActionListModel.rosterChanged; return ActionListModel.triggerEntries() }
     // The icons an action may wear. Every name here is one of IconGlyph's
     // own glyphs, so the grid can never offer a blank swatch.
@@ -152,9 +130,6 @@ ModalCard {
         const entry = root.triggerEntry(id)
         return entry.name || ""
     }
-    // The name of ANOTHER action already using this trigger, "" when free.
-    // The picker shows it, so two actions silently waking on the same event is
-    // something the operator sees while choosing, not afterwards.
     function usedElsewhere(triggerId) {
         void ActionListModel.rosterChanged
         for (let i = 0; i < ActionListModel.rowCount(); ++i) {
@@ -171,9 +146,6 @@ ModalCard {
         const out = []
         for (let i = 0; i < root.triggerChoices.length; ++i) {
             const entry = root.triggerChoices[i]
-            // A trigger this action already runs on stays listed even when the
-            // eye is closed, or the current choice would vanish from its own
-            // picker.
             if (entry.common !== false || entry.id === root.currentTrigger())
                 out.push(entry)
         }
@@ -184,16 +156,10 @@ ModalCard {
         root.view = "editor"
     }
 
-    // The "+ Add" strip the roster and the editor share — a solid accent
-    // fill, the same primary-button purple as the app's other primary
-    // actions (e.g. Save Changes), not a translucent wash.
     component AddActionRow: Rectangle {
         id: addRow
         signal picked()
         width: parent ? parent.width : 200
-        // 34 — AppButton's own implicitHeight (the "Edit" buttons beside the
-        // rows above use it), not a bespoke taller number that made this the
-        // most visually dominant control in the dialog.
         height: 34
         radius: 7
         color: mouseArea.pressed ? Qt.darker(Theme.accent, 1.15) : Theme.accent
@@ -234,9 +200,6 @@ ModalCard {
             width: parent.width
             spacing: Theme.space2
 
-            // The roster lives in the SAME striped panel as the two pickers
-            // (StripedListPanel) — one ground, one hairline, one pair of row
-            // colours for all three lists.
             StripedListPanel {
                 id: rosterPanel
                 width: parent.width
@@ -384,12 +347,6 @@ ModalCard {
                     Rectangle {
                         id: nameField
                         width: parent.width
-                        // 44 — the app's standard row/field height (matches
-                        // ManageGroupsModal's rows and SettingsField's own
-                        // family), for BOTH layouts. The EDIT layout's
-                        // floating label still fits above the baseline at
-                        // this height, just with tighter padding than the
-                        // old 58px box.
                         height: 44
                         radius: 7
                         color: Theme.inset
@@ -447,11 +404,6 @@ ModalCard {
                         anchors.rightMargin: 10
                         anchors.verticalCenter: parent.verticalCenter
                         width: 28; height: 28; radius: 6
-                        // Neutral until the picker is actually open/hovered —
-                        // an always-on accent tint here was one more place
-                        // adding to "too many purples" on screen at once; it
-                        // now mirrors the Icon box's OWN border highlight
-                        // (iconBoxHover.hovered || root.iconPickerOpen) above.
                         color: (iconBoxHover.hovered || root.iconPickerOpen)
                                ? Qt.alpha(Theme.accentLight, 0.16) : Theme.card
                         IconGlyph {
@@ -533,9 +485,6 @@ ModalCard {
                     onCaptureCancelled: root.shortcutCaptureRow = -1
                     onShortcutEdited: (value) => {
                         ActionListModel.setShortcut(root.editingRow, value)
-                        // Read back the accepted value immediately. The model can
-                        // reject a duplicate key, and model notifications alone
-                        // should not leave this open editor showing stale text.
                         root.editingShortcut = String(
                             ActionListModel.getAction(root.editingRow).shortcut || "")
                         root.shortcutCaptureRow = -1
@@ -596,15 +545,6 @@ ModalCard {
             Rectangle { width: parent.width; height: 1; color: Theme.border; opacity: 0.75 }
 
             // ---- Start action #n -------------------------------------------
-            // What the action DOES comes before how it's triggered (FreeShow's
-            // own order) — a single standard-height row per step (the "#n"
-            // badge folds into the row itself, rather than a separate header
-            // strip stacked above it — that made a plain step read as a tall
-            // two-part mini-card instead of one normal row). A step that
-            // takes a parameter (jump to group) carries a second standard
-            // row below it for that choice. The empty card below is the
-            // same shape with nothing picked yet, so a step never changes
-            // shape the moment an action lands in it.
             Repeater {
                 model: root.stepsFor(root.editingRow)
                 delegate: Rectangle {
@@ -659,10 +599,6 @@ ModalCard {
                             elide: Text.ElideRight
                         }
 
-                        // Reorder / remove, only while the row is under the
-                        // pointer — their own small hit targets sit on top
-                        // of the row's own tap area, so a click on one of
-                        // these takes it before "choose action" does.
                         Row {
                             id: stepActions
                             anchors.right: parent.right
@@ -718,9 +654,6 @@ ModalCard {
                     }
 
                     // ---- the step's own parameter (jump to group) ----------
-                    // A second band, shaped exactly like the row above it:
-                    // the group's own colour mark, its name (or "Choose
-                    // group") and a chevron into the group roster.
                     Rectangle {
                         visible: stepCard.entry.needsGroup === true
                         y: 44
@@ -801,10 +734,6 @@ ModalCard {
         }
 
         // ---- custom activations: the trigger list -------------------------
-        // The design's own screen: one flat, quiet list inside a single
-        // rounded panel, every row an event this action could run on. The
-        // header keeps "Action" and gains a back arrow; the eye beside the X
-        // narrows the list to the triggers already in use (see shownTriggers).
         Column {
             visible: root.view === "triggers"
             width: parent.width
@@ -901,13 +830,6 @@ ModalCard {
             width: parent.width
             spacing: 8
 
-            // The app's standard search look (TabSearchBox's own visual
-            // language: magnifier, clear ×, accent underline — no boxed
-            // border) instead of a bordered Theme.inset field, so this reads
-            // like every other search in the app rather than a one-off
-            // settings input. The reveal eye lives in the header beside the
-            // close X (see headerActionIcon above), so this box gets the
-            // dialog's full width instead of sharing it with an inline button.
             Item {
                 id: catalogSearchBox
                 width: parent.width
@@ -973,9 +895,6 @@ ModalCard {
                             onClicked: { catalogSearchInput.text = ""; catalogSearchInput.forceActiveFocus() }
                         }
                     }
-                    // Always the app's accent colour, not just on focus —
-                    // the same always-on underline TabSearchBox draws (the
-                    // app's one other search box), not a conditional one.
                     Rectangle {
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -1018,11 +937,6 @@ ModalCard {
                                 width: parent.width
                                 height: catalogPanel.rowHeight
                                 radius: catalogPanel.rowRadius
-                                // The panel decides both tints, so this list can
-                                // never drift from the others. The dim of a
-                                // "Coming soon" row lives on its CONTENTS, not on
-                                // the row — scaling the row faded its stripe too,
-                                // which is what made the alternation look uneven.
                                 color: catalogPanel.rowColor(catalogItem.index, itemHover.hovered)
 
                                 Row {

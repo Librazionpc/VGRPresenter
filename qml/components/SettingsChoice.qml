@@ -1,10 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The "pick one" control of a Settings row: the current choice's label and a chevron, opening a dropdown of the other
-// choices. It is driven ENTIRELY by the engine's definition of the setting (SettingsService.definitions[key]): the list of
-// choices, their labels and the current value all come from there, and a pick is sent back with SettingsService.setValue(),
-// which the engine checks. Nothing about a setting is written into the screen that uses this.
 Item {
     id: root
 

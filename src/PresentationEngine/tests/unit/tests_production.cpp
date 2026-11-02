@@ -43,10 +43,6 @@ struct ProdEvents {
     }
 };
 
-// A capture tap whose frames are always ready, so the mixer's gain staging can
-// be read straight off Render()'s output with no sound device anywhere near the
-// test. Only the four pure enumeration virtuals plus the two tap virtuals are
-// needed; everything else keeps IAudio's own defaults.
 class StubTapAudio final : public bps::platform::IAudio {
 public:
     std::vector<bps::platform::AudioDeviceInfo> Enumerate() const override { return {}; }
@@ -76,15 +72,6 @@ public:
 };
 } // namespace
 
-// One bus takes any number of sources, and a source feeds any number of
-// buses. A video bus used to hold exactly ONE provider, so routing a second
-// camera/media row into it was refused — and that refusal reached the board as
-// a drag that simply did not connect, with nothing on screen saying why ("two
-// video sources cant be conected to one bus").
-//
-// The one bus rule that remains is the signal-type one: an audio-only bus has
-// no video plane to feed. Everything else the matcher rejects (a cycle, a
-// type mismatch) is checked before it, and stays.
 void TestProductionRoutingPolicy() {
     pr::ProductionGraph g;
     CHECK(g.AddBus("bus:1#a", "Program", pr::BusRole::Custom, pr::SignalType::Audio).ok());
@@ -130,9 +117,6 @@ void TestProductionRoutingPolicy() {
     CHECK(g.Upstream("bus:1#v").size() == 1);
 }
 
-// Full-graph persistence: Serialize -> Restore -> Serialize produces the
-// same document (round-trip), and a restored graph behaves like the original
-// (routing, volume, meta, edges). Also covers auto-save firing on mutation.
 void TestProductionPersistence() {
     pr::ProductionGraph g;
 
@@ -180,16 +164,6 @@ void TestProductionPersistence() {
     CHECK(saves == 2);
 }
 
-// A bus built the way the UI builds one must reach the DISK on its own — with
-// no clean shutdown, no explicit flush, and no PersistGate in sight.
-//
-// This is the reported bug ("my buses are not persisted, they do not survive a
-// restart"): the QML roster models mutate this graph through Graph() directly,
-// which requests a save but leaves it in the kernel's in-memory store, because
-// the one thing that consumed that request — PersistGate — is private to
-// ProductionEngine and only the engine's own methods construct one. The write
-// therefore happened only at DatabaseManager::Shutdown, i.e. only a clean exit
-// ever persisted a bus; a crash or a force-quit lost the whole session's buses.
 void TestProductionGraphSavedToDisk() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
     const std::string dir = "/tmp/bps_production_durable";
@@ -225,9 +199,6 @@ void TestProductionGraphSavedToDisk() {
     CHECK(raw.ok() && raw.value().find("\"production\"") != std::string::npos);
     CHECK(raw.value().find("bus:7#v") != std::string::npos);
 
-    // Coalescing: a burst of edits does not queue one write per mutation. After
-    // the pending write lands, the scheduler holds no leftover flush task for
-    // this engine.
     const size_t idle = TaskScheduler::Instance().ScheduledCount();
     for (int i = 0; i < 20; ++i)
         CHECK(g.SetVolume("bus:7#a", pr::VolumeControl{-3.0, false, false, 0.0, 0.0}).ok());
@@ -527,11 +498,6 @@ void TestProductionEngine() {
 }
 
 // ---------------------------------------------------------------------------
-// AudioMixer — the render-path half of the production graph. The mixer is
-// the piece that consumes the bus topology into real playout frames; these
-// checks pin the gain staging (dB→linear), mute, pan and the unbound-source
-// gate WITHOUT a sound device (the tap source stays null; the gain law is
-// exercised through the platform's own unit-test seam).
 void TestProductionAudioMixer() {
     pr::ProductionGraph graph;
     CHECK(graph.AddBus("bus1", "Main", pr::BusRole::Program, pr::SignalType::Audio).ok());
@@ -565,11 +531,6 @@ void TestProductionAudioMixer() {
     CHECK(!bare.Render(buf, 2, 2, 48000));
 
     // ---- the L/R channel trim must REACH THE ENGINE'S OUTPUT -------------
-    // The channel buttons a source card shows write uiChannelGain<channel> on
-    // the source node (AudioInputListModel::pushEffectsOffThread). This is the
-    // behavioural proof that the trim travels all the way down into the mixed
-    // frames AND into the program meter the output tiles render — closing one
-    // side really silences that side of the output, on EITHER side.
     (void)graph.SetVolume("bus1", pr::VolumeControl{});   // un-mute the bus above
     StubTapAudio taps;
     pr::AudioMixer live;
@@ -606,12 +567,6 @@ void TestProductionAudioMixer() {
     CHECK(darkLevel.peaks[0] == 0.0f && darkLevel.peaks[1] == 0.0f);
 
     // ---- the BUS's own L/R trim must reach the output too -----------------
-    // A bus card's L/R buttons write the SAME uiChannelGain<channel> key, on
-    // the BUS plane node (BusListModel::setChannelGain). A bus is a summing
-    // point, so this is the proof that closing one side of a BUS silences that
-    // side of the bus's mix even while every source feeding it is wide open —
-    // which is exactly what the bus card's pills claim to do, and what
-    // "mute that side only, not the whole bus" has to mean in real audio.
     (void)graph.SetMeta("src1", "uiChannelGain0", "1");   // source wide open again
     (void)graph.SetMeta("src1", "uiChannelGain1", "1");
 
@@ -643,12 +598,6 @@ void TestProductionAudioMixer() {
     CHECK(busDark[0] == 0.0f && busDark[1] == 0.0f);
 
     // ---- the ROUTING MATRIX's per-channel mask --------------------------
-    // The matrix (AudioInputListModel's Routing… modal) routes a row's CHANNELS
-    // to buses: each bus it names gets "uiRouteMask:<busNode>" with a bit per
-    // routed channel, which is what lets one source feed its left channel to one
-    // bus and its right to another. A bus with NO mask reads the whole source
-    // (the old contract) — pinned here so the mask can never silently mute a
-    // route the bus dialog made.
     {
         (void)graph.SetMeta("src1", "uiChannelGain0", "1");
         (void)graph.SetMeta("src1", "uiChannelGain1", "1");
@@ -689,13 +638,6 @@ void TestProductionAudioMixer() {
     }
 
     // ---- a VIDEO row's own audio reaches the mix -------------------------
-    // A bus is a PAIR of planes ("bus:N#a" audio, "bus:N#v" video — the ids
-    // BusListModel derives). A video row routes to the VIDEO plane, so before
-    // this the audio side of a bus whose only source was a media/NDI row summed
-    // NOTHING: the card's pills and the bus's meters sat dark however loudly the
-    // file played. A video row's audio (a media file's track, an NDI stream's
-    // embedded audio) is real audio the bus owes its mix, so the audio plane's
-    // feed set includes its paired video plane's sources.
     {
         // The ids are the real ones BusListModel builds for a bus: one number,
         // two plane suffixes ("bus:1#a" audio / "bus:1#v" video).
@@ -709,11 +651,6 @@ void TestProductionAudioMixer() {
         CHECK(paired.AddSource("vsrc:1", "Media", pr::SignalType::Video).ok());
         CHECK(paired.Connect("vsrc:1", "bus:1#v", pr::SignalType::Video).ok());
 
-        // The PROGRAM mix is the sum of the buses wired to the SPEAKER endpoint
-        // (AudioMixer's contract, and what the app always has — AudioEngine
-        // creates that node and wires every bus to it). Without the endpoint this
-        // graph has no program mix to read, so it is part of the fixture, not an
-        // extra: the check below is about the video row's audio reaching it.
         pr::OutputConfig spk;
         spk.caps.supportsVideo = false;
         spk.caps.supportsAudio = true;
@@ -752,20 +689,6 @@ void TestProductionAudioMixer() {
 }
 
 // ---------------------------------------------------------------------------
-// An OUTPUT terminates any signal it carries.
-//
-// A row's node is created as a VIDEO node (its picture), so the audio edge into
-// an NDI / recording / streaming row used to be refused by the type check in
-// Connect(). The wire still appeared — the canvas draws it from the
-// OutputConfig the routing service writes — but nothing consumed it: the mixer
-// resolves an output's feeds through the EDGE set, and a recording taps the mix
-// of its own output node. So "audio wired to NDI" drew a wire and sent silence.
-//
-// What a row may carry is its CAPS, but sound is not one of the things a caps can
-// take away: every OUTPUT is a transport, so audio is assigned to one regardless of
-// what an older document saved on the node. Caps still gate VIDEO (the speaker
-// endpoint has no picture), and that is enforced where buses are assigned — not by
-// refusing the edge.
 void TestProductionOutputSignalEdges() {
     pr::ProductionGraph g;
     CHECK(g.AddBus("bus:9#a", "Program", pr::BusRole::Custom, pr::SignalType::Audio).ok());
@@ -790,10 +713,6 @@ void TestProductionOutputSignalEdges() {
     for (const auto& issue : g.Validate())
         CHECK(issue.code != "signal_mismatch");
 
-    // A DISPLAY row takes audio too — including one whose node was saved by an
-    // older build with `supportsAudio: false` (which is the state a real HDMI row
-    // was in when the canvas started offering the audio dot). An output is a
-    // transport; what it can DELIVER is decided where its mix is played, not here.
     pr::OutputConfig screen;
     screen.caps.supportsVideo = true;
     screen.caps.supportsAudio = false;
@@ -812,10 +731,6 @@ void TestProductionOutputSignalEdges() {
     // recording / streaming.
     CHECK(g.AssignOutputBuses("out:ndi", "bus:9#v", "bus:9#a").ok());
 
-    // THE BEHAVIOUR, not the bookkeeping: a tap on that output hears the audio
-    // bus wired into it. A recording asks for exactly this tap (AddMixTap with
-    // its own output node id), so this is the check that the wire now CARRIES
-    // sound instead of only drawing one.
     CHECK(g.AddSource("vsrc:9", "Media", pr::SignalType::Video).ok());
     CHECK(g.Connect("vsrc:9", "bus:9#v", pr::SignalType::Video).ok());
 
@@ -852,15 +767,6 @@ void TestProductionOutputSignalEdges() {
 }
 
 // ---------------------------------------------------------------------------
-// A DISPLAY output's audio is part of what the app plays.
-//
-// The app has ONE playout stream (IAudio::StartRender), so an HDMI row's monitor
-// cannot be a second render client. The buses wired to a plays-locally output are
-// therefore summed into the same program the speakers get — which IS the monitor's
-// speakers on a booth PC, where that monitor is the render endpoint. What must not
-// happen is a bus counted twice (a display attached to a program that is already on
-// the speakers) or an output's audio leaking into the program when that output
-// leaves through its own sink (NDI, recording, streaming).
 // ---------------------------------------------------------------------------
 namespace {
 class DisplayAudioFixture {
@@ -926,25 +832,11 @@ void TestProductionDisplayOutputAudioPlays() {
     CHECK(speakersOnly.renderPeak() > 0.3);
     CHECK(std::abs(both.renderPeak() - speakersOnly.renderPeak()) < 0.01);
 
-    // An output without the flag (NDI / recording / streaming) leaves through its
-    // own tap: its audio must NOT reach the program, or every feed would also play
-    // on the booth speakers nobody wired it to.
     DisplayAudioFixture unflagged(false, true, false);
     CHECK(unflagged.renderPeak() == 0.0);
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch scope: a bus dispatch runs with the engine lock RELEASED.
-//
-// This is the behavioural proof the lock-scope guard only approximates by
-// reading source: the guard can tell that the `Publish` line sits outside a
-// lock scope, but not that the lock is genuinely free while a subscriber runs.
-// Here the subscriber PARKS, and a second thread uses the engine (every one of
-// those calls needs the engine's mutex); if the dispatch still ran under the
-// lock the second thread could not make progress until the subscriber
-// returned. The regression this pins down is real, not theoretical: a
-// subscriber that takes a device, a renderer or a disk write inside the lock
-// stalls every other thread that needs that engine.
 // ---------------------------------------------------------------------------
 void TestProductionDispatchOutsideLock() {
     auto& eng = pr::ProductionEngine::Instance();
@@ -954,11 +846,6 @@ void TestProductionDispatchOutsideLock() {
     std::atomic<bool> inHandler{false};
     std::atomic<bool> otherThreadDone{false};
     std::atomic<bool> reachedEngineWhileParked{false};
-    // The subscriber PARKS inside the dispatch, and the park is bounded on
-    // purpose: whoever sets the release flag has to be a different thread than
-    // the one that is parked here (this call is synchronous), so an unbounded
-    // spin would wedge the whole test — the failure mode has to be a failed
-    // CHECK, never a hang.
     Subscription sub = EventBus::Instance().Subscribe<events::ControlSignalReceived>(
         [&](const events::ControlSignalReceived&) {
             inHandler.store(true);

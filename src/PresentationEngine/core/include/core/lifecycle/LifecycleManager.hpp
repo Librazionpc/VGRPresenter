@@ -10,10 +10,6 @@
 #include <vector>
 
 namespace bps {
-
-// Canonical 12-state lifecycle (docs/specs/12 §5; architecture brief):
-// Discovered -> Created -> Registered -> Initialized -> Started -> Running ->
-// Paused -> Suspended -> Resumed -> Stopping -> Stopped -> Destroyed.
 enum class LifecycleState : int {
     Discovered = 0,
     Created,
@@ -100,5 +96,4 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Entity> entities_;
 };
-
 } // namespace bps

@@ -8,12 +8,12 @@
 #include <deque>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace bps {
-
 // ---------------------------------------------------------------------------
 // Log record & query
 // ---------------------------------------------------------------------------
@@ -92,9 +92,6 @@ private:
     std::ofstream file_;
 };
 
-// Debugger sink (02 §3): on Windows this would call OutputDebugStringA; on
-// POSIX it writes a [DBG]-prefixed line to stderr and keeps a small ring a
-// debugger / diagnostics can inspect via RecentLines().
 class DebuggerSink final : public ISink {
 public:
     const char* Name() const noexcept override { return "Debugger"; }
@@ -106,9 +103,6 @@ private:
     std::deque<std::string> lines_;   // guarded by mutex_
 };
 
-// Remote sink (02 §3): serializes each record as a JSON line and hands it to a
-// publisher callback. The Kernel wires the publisher to IpcServer::Broadcast so
-// `log.subscribe` clients receive live engine logs (SystemArchitecture §2).
 class RemoteSink final : public ISink {
 public:
     const char* Name() const noexcept override { return "Remote"; }
@@ -123,6 +117,15 @@ private:
 
 // Shared JSON-line formatter for JsonSink and RemoteSink (02 §3).
 std::string LogJsonLine(const LogRecord& rec);
+
+// "trace"/"debug"/"info"/"warning"/"error" in any case -> level. std::nullopt for
+// anything else, so a caller can tell "not a level" from "the default".
+std::optional<LogLevel> LogLevelFromName(std::string_view name);
+
+// VGR_LOG_LEVEL, the developer override. It WINS over every stored preference: a
+// session started with it set is a session someone is diagnosing, and the per-frame
+// diagnostics only exist at trace (docs/scroll_mode_thread_audit.md §7).
+std::optional<LogLevel> LogLevelEnvOverride();
 
 // ---------------------------------------------------------------------------
 // Logger (docs/specs/02)
@@ -148,6 +151,13 @@ public:
     void SetGlobalLevel(LogLevel level) { globalLevel_.store(level); }
     void SetCategoryLevel(std::string_view category, LogLevel level);
     LogLevel GlobalLevel() const noexcept { return globalLevel_.load(); }
+
+    // A sink's own filter — the level a *destination* keeps, as opposed to the global
+    // gate every record passes first. A stored preference (notifications.logLevel)
+    // belongs here: it decides what engine.log keeps, not what the app may say.
+    // Answers false when no sink carries that name.
+    bool SetSinkLevel(std::string_view name, LogLevel level);
+    LogLevel SinkLevel(std::string_view name) const;   // Trace when absent
 
     // Session logging (02 §Session): stamped into every record after this call.
     void SetSessionId(std::string session);
@@ -206,5 +216,4 @@ private:
     static constexpr size_t kMaxQueue = 100000;
     size_t ringLimit_ = 8192;  // guarded by mutex_
 };
-
 } // namespace bps

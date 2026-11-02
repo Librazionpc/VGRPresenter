@@ -12,7 +12,6 @@
 #include <vector>
 
 namespace bps {
-
 enum class AssetType : int { Unknown = 0, Texture, Image, Audio, Video, Font, Data };
 enum class AssetState : int { Unknown = 0, Registered, Loading, Loaded, Failed, Unloaded };
 
@@ -26,9 +25,6 @@ struct AssetInfo {
     EngineTime lastUsedAt;
 };
 
-// Central asset registry/cache (core/assets/). The engine core does not decode
-// media — it tracks, prefetches and unloads assets for feature modules, and
-// reacts to memory pressure automatically (ResourceManager pressure events).
 class AssetManager final : public IService {
 public:
     static AssetManager& Instance();
@@ -63,5 +59,4 @@ private:
     Subscription pressureSub_;
     std::atomic<bool> initialized_{false};
 };
-
 } // namespace bps

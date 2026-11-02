@@ -1,11 +1,5 @@
 #pragma once
 
-// ProductionTypes (docs/specs/27): the canonical Phase 15 model. Production is
-// signals moving through a universal node graph — Sources → Processing →
-// Virtual Sources → Buses → Processing → Buses → Outputs — for audio, video,
-// data and control independently. This header is pure data; the graph logic
-// lives in ProductionGraph and the facade in ProductionEngine.
-
 #include <cstdint>
 #include <map>
 #include <string>
@@ -13,7 +7,6 @@
 #include <vector>
 
 namespace bps::production {
-
 // Everything is a signal (docs/specs/27 §Core Model).
 enum class SignalType { Audio, Video, Data, Control };
 
@@ -159,10 +152,6 @@ struct NodeInfo {
     ResourceCost cost;
     SignalInfo signal;
     std::string fallbackId;       // source fallback (user brief §18)
-    // Free-form metadata carried with the node — used by persistence (the
-    // serialized graph round-trips it verbatim) and by higher layers that
-    // need to hang policy on a node (e.g. the UI's bus "type" routing
-    // policy on bus plane pairs). Never interpreted by the graph itself.
     std::map<std::string, std::string, std::less<>> meta;
 };
 
@@ -305,5 +294,4 @@ inline const char* ToString(OutputPriority p) {
     }
     return "?";
 }
-
 } // namespace bps::production

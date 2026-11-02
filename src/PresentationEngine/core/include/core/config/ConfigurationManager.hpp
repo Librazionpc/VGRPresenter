@@ -10,7 +10,6 @@
 #include <mutex>
 
 namespace bps {
-
 // Configuration scope stack (docs/specs/03). Higher overrides lower.
 enum class ConfigScope : int {
     Global = 0,   // machine-wide
@@ -53,11 +52,6 @@ public:
     Result<void> Reload(ConfigScope scope);     // hot reload (00 §5)
     Result<void> Reset(ConfigScope scope);      // clear to defaults
 
-    // --- Migration (03 §Migrate) ---
-    // A migration transforms the scope document in place; the schema version is
-    // stamped into the document under the reserved `_schema` key. Migrate runs
-    // every registered migration whose target version is above the current one,
-    // in ascending order.
     using MigrationFn = std::function<Result<void>(json::Value& doc)>;
     Result<void> AddMigration(int toVersion, MigrationFn fn);
     Result<void> Migrate(ConfigScope scope);
@@ -104,5 +98,4 @@ private:
     std::string profile_;
     std::atomic<uint64_t> loadErrors_{0};
 };
-
 } // namespace bps

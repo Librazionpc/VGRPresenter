@@ -8,9 +8,7 @@
 #include <format>
 
 namespace bps::rendering {
-
 namespace {
-
 #ifdef BPS_HAVE_ZLIB
 // CRC32 used by PNG chunk integrity (zlib provides crc32 when available).
 uint32_t Crc32(const uint8_t* data, size_t len) {
@@ -113,9 +111,6 @@ void Unfilter(uint8_t filter, const uint8_t* prev, const uint8_t* cur,
     }
 }
 
-// zlib-inflates the concatenated IDAT payloads into one buffer, never producing
-// more than maxOut bytes (decompression-bomb guard — a crafted but valid
-// deflate stream could otherwise expand to gigabytes from a tiny input).
 Result<std::vector<uint8_t>> InflateIdat(const std::vector<uint8_t>& idat,
                                          size_t maxOut) {
     z_stream zs;
@@ -226,7 +221,6 @@ void ScanlineToRgba(const uint8_t* scan, size_t w, uint8_t colorType, uint8_t bi
     }
 }
 #endif // BPS_HAVE_ZLIB
-
 } // namespace
 
 bool LooksLikePng(const uint8_t* data, size_t len) {
@@ -394,5 +388,4 @@ Result<std::vector<uint8_t>> EncodePngRgba8(const uint8_t* rgba, int width, int 
     return Result<std::vector<uint8_t>>{std::move(out)};
 #endif
 }
-
 } // namespace bps::rendering

@@ -2,92 +2,22 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// Draws a DESIGN - an overlay or a template - from the BLOCKS the ENGINE keeps for it
-// (DesignLibraryService.designs(): { key, kind, text, x, y, width, height, bind, meta, style }).
-//
-// The blocks are in the Edit screen's stage units (StageGrid.w x StageGrid.h, 754 x 428); this item lays the stage out at its own
-// width (set the width and the height follows). They may be plain objects (a library card) or the Edit screen's live
-// CanvasItem objects (a slide thumbnail) - either way every property is read through bindings, so a live item re-draws here
-// the moment it changes, without the list being rebuilt. It draws the same kinds the Edit screen draws, with the
-// same meta keys, so a card preview and the canvas agree:
-//   text ..... meta { fontFamily, fontSize, bold, italic, underline, strikethrough, align, color, autoSize }
-//   shape .... meta { shapeType } rectangle | circle | line | triangle | arrow | star | hexagon
-//   clock .... meta { format, showSeconds, showDate, style: "analog" }
-//   timer .... meta { mode, durationSeconds }
-//   camera / media / audio ... the canvas's own tile: the source's name (block text) over the kind's icon
-//   vignette . the screen's edges tinted: style.backgroundColor = the tint, meta.inset = how far in
-//   corners .. the four screen corners cut round: style.backgroundColor = the colour, meta.inset = radius
-// A template's bound block (bind set) shows the name of the field that feeds it, so the preview reads
-// as a layout rather than empty text.
-//
-// It is ONE renderer for every small picture of content in the app: the library cards, and the Edit screen's slide list
-// (the LIVE thumbnails - SlideCanvasStore.blocksOf() re-reads the slide whenever anything on it changes). It follows the
-// canvas's own rules for text (weight, case, list, alignment, shrink/grow to fit), clocks and timers (the same LiveClock
-// formatting), shapes and transparency, so what the thumbnail shows is what the slide is.
 Item {
     id: root
 
     property var blocks: []
     property string background: "transparent"
-    // LAYER SPLIT FOR A LIVE FEED (the monitor tile's use). WHICH blocks paint
-    // under a taken camera/screen feed is the ENGINE's rule, not this item's
-    // (SceneBuilder::PlanBlockLayers, asked through
-    // EngineBridge.backdropBlockIndexes) — a block it puts there arrives here
-    // MARKED (block.underVideo === true), so the marker travels with the block
-    // and no surface has to index into a list it also filters. This item then
-    // only knows how to DRAW the two passes that marker implies:
-    //   * paintOnly: draw this pass's item PAINTS only, no item content — the
-    //     pass below the feed, which is under the text as well as the video.
-    //   * blocks marked underVideo are drawn WITHOUT their own paint (a text
-    //     block's box, a shape's fill) in every normal pass, because their paint
-    //     is below the feed while their text stays above it.
     property bool paintOnly: false
-    // A background IMAGE painted over the colour, under the blocks — the
-    // engine's own order (SceneBuilder: background colour object, then the
-    // style image cover-fit, then content). Hosts pass the STYLE's image
-    // here so a preview mirrors what the output renders behind the blocks;
-    // empty = none (library cards, canvas thumbnails).
     property string backgroundImage: ""
-    // The transparency checkerboard behind a clear background. The output
-    // monitor tile turns it OFF: there the pane under the preview paints the
-    // OUTPUT STYLE's colour/image, and checkers would cover it (a styled
-    // output must never read as "transparent/unstyled").
     property bool showCheckerboard: true
     // What time the clocks show; the host ticks it (one shared ticker rather than one per card).
     property date now: new Date()
-    // Checkerboard CELL size in SCREEN pixels — FreeShow's fixed 13px board at
-    // every preview size. The Checkerboard is handed this preview's own `unit`
-    // as its hostScale, so the cell lands at this many real pixels whatever the
-    // card's size (see the Checkerboard call below).
     property real checkerSize: 13
-    // A bound text block with no literal text shows "{bind}" as a stand-in —
-    // correct for a library card or the Edit canvas (it reads as "this is a
-    // template field," not broken text), wrong for REAL on-air content (the
-    // Main Output tile, a real bound-screen output window): going live with
-    // nothing queued composited the style's own template, whose bound field
-    // had nothing to resolve, and the raw placeholder syntax leaked onto the
-    // live picture as literal text. Hosts rendering actual on-air/staged
-    // content turn this off; every editor/library surface keeps it on.
     property bool showBindPlaceholders: true
 
     // ---- THE READING STEP (LiveOutputService.lineStep) ----------------------
-    // A host that draws the stepped content itself (the Main Output tile) opts
-    // in: its reading block then paints the PASSAGE the page is cut from and
-    // slides it by LiveOutputService.readingScroll — the same passage, at the
-    // same offset, that the engine draws on the HDMI window and the NDI feed.
-    // Opt-in because every other host — a library card, a canvas thumbnail — has
-    // no reading step behind it and must keep drawing the page.
     property bool animateLineSteps: false
-    // WHICH STYLE THIS SURFACE DRAWS AT. The reading position itself is a character
-    // offset into the passage (LiveOutputService.readingChar), which means the same
-    // words everywhere; the LINE that character sits on depends on the style's own
-    // type size and wrap — so a host that owns a style (the monitor tile and the
-    // output window, one per output) names it here and this file converts. Empty =
-    // the reference (active style) grid, for hosts that have no style of their own.
     property string readingStyleId: ""
-    // ...and THIS surface's own line for that position: the conversion below, or
-    // the reference grid's number when no style is named. Everything that draws or
-    // measures the move reads this one value.
     readonly property real stepLine: {
         const ch = LiveOutputService.readingChar
         if (!root.animateLineSteps || root.readingStyleId === "" || ch < 0)
@@ -95,30 +25,13 @@ Item {
         return LiveOutputService.readingLineForStyle(root.readingStyleId, ch)
     }
     // ---- WHAT THIS SURFACE REALLY LAID OUT (diagnostic, one line per wrap) ---
-    //
-    // `stepLine` above is a line index in the SERVICE's table for this style;
-    // the column under it is a Qt Text laid out in this box. Those are the same
-    // grid only while the size, the box and the wrap agree, and when they do not
-    // the drawn words lag the step: the reader reports the output "going slower"
-    // than its neighbour and "finishing" with lines still below the box. The
-    // number that decides it is the column's OWN line count against the table's,
-    // so both are printed together, here, for the style this surface draws at.
-    // (Information level, like the ReadRun/LineStep diagnostics beside it.)
     property int readingDrawnLines: -1
-    // ...and WHICH box it laid that column out in, in stage units: two surfaces of
-    // one style can hold the passage in different blocks (the reading block is the
-    // longest TEXT, and a fill-built page can make a different block longest), and
-    // the table can only be measured in one of them.
     property real readingDrawnBoxW: 0
     property real readingDrawnBoxH: 0
     // The signature of the last ReadingDrawn line this surface wrote — see
     // noteReadingDrawn: the log is change-driven, not lineCount-driven.
     property string readingDrawnLogged: ""
     function noteReadingDrawn(flow, block) {
-        // ONLY THE READING BLOCK'S COLUMN IS THE DRAWN COLUMN: every text block
-        // carries a flowText (hidden unless it is the one drawing the passage), and
-        // each used to report its line count here — whichever reported last (a
-        // 730x28 metadata strip) became "what this surface drew", which is not.
         if (!block.readingBlock)
             return
         readingDrawnLines = flow.lineCount
@@ -131,17 +44,12 @@ Item {
         let svcSize = -1
         try { table = LiveOutputService.readingRunLineStarts(style).length } catch (e) { table = -2 }
         try { svcSize = LiveOutputService.readingRunSizeForStyle(style) } catch (e) { svcSize = -2 }
-        // CHANGE-DRIVEN, like the memo above: this fires from lineCountChanged, which
-        // a reading walk trips many times a second per surface (45k records in one
-        // measured session — a formatted string on the interface thread for numbers
-        // that had not moved). The line is worth writing when the answer CHANGES: a
-        // drawn column that stops matching the table, or a type size that moves.
         const drawnSig = style + "|" + flow.lineCount + "|" + table + "|" + block.width
             + "x" + block.height + "|" + Number(flow.font.pixelSize).toFixed(2)
         if (root.readingDrawnLogged === drawnSig)
             return
         root.readingDrawnLogged = drawnSig
-        EngineBridge.log("info", "ReadingDrawn",
+        EngineBridge.log("trace", "ReadingDrawn",
             "style=" + (style === "" ? "(ref)" : style.slice(0, 8))
             + " drawn=" + flow.lineCount + " table=" + table
             + " flowPx=" + Number(flow.font.pixelSize).toFixed(2)
@@ -153,15 +61,6 @@ Item {
             + " chars=" + flow.text.length)
     }
     // ---- WHAT THIS PREVIEW IS SHOWING, AND WHAT IT SHOWED BEFORE (diagnostic) ----
-    // One line (tag PreviewShows) each time this surface's top line changes, while a
-    // scroll walks: the words at the top and at the bottom of the box, and where they
-    // sit in the passage. `shownHighWater` is the furthest the TOP of this surface has
-    // reached in the passage; everything before it has been scrolled past. When the
-    // top comes back to a place before it, the words between are SHOWN AGAIN — counted
-    // in `shownRepeatWords` and flagged REPEAT on that line, so "the text jumps back"
-    // can be read as a number per preview instead of described. Passage positions (not
-    // run positions), so a window slide at a page commit does not look like a jump.
-    // The count starts over with each operator jump (a new pick).
     property int shownHighWater: -1
     property int shownRepeatWords: 0
     property int shownSerial: -1
@@ -202,7 +101,7 @@ Item {
         }
         root.shownHighWater = Math.max(root.shownHighWater, topPassage)
         const clip = (s) => String(s).replace(/\s+/g, " ").trim()
-        EngineBridge.log("info", "PreviewShows",
+        EngineBridge.log("trace", "PreviewShows",
             (repeated > 0 ? "REPEAT " : "")
             + "surface=" + (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
             + " style=" + (style === "" ? "(ref)" : style.slice(0, 8))
@@ -213,26 +112,6 @@ Item {
             + " top=\"" + clip(flow.text.slice(topLocal, topLocal + 40)) + "\""
             + " bottom=\"" + clip(flow.text.slice(Math.max(topLocal, endLocal - 30), endLocal)) + "\"")
     }
-    // How long that text is, so a delegate can tell whether IT is the reading
-    // block. Only that one draws the passage: every text block used to shift by
-    // the same pitch, which moved a title by the BODY's line height — a visible
-    // hop out of place on the very blocks the step is not supposed to touch.
-    // THE READING COLUMN'S TYPE SIZE, HELD ACROSS A PAGE COMMIT.
-    //
-    // A walk that crosses from 1 into 1-1 commits that page: its blocks arrive,
-    // its delegate is new, and the fit solver answers for ITS text — so the
-    // words came back at a slightly different size, laid out from the top of the
-    // new page. Reported as "the moment it moves to 1-1 it refreshes and opens
-    // 1-1 like I clicked" — the scroll never continues into the next page, it
-    // restarts there.
-    //
-    // One walk is one column, so its type size is one number: the size the first
-    // page of the walk solved is reused for every page after it, and the offset
-    // (readingScroll) is then the only thing that moves. The size is only
-    // re-solved when it genuinely does not fit the new page's box — a longer page
-    // still gets the smaller size it needs, rather than being clipped to keep a
-    // number constant. Keyed by the design inputs (box + type), so a different
-    // template or a resized box starts over.
     property string readingFitKey: ""
     property real readingFitSize: 0
     readonly property int stepTextLength: {
@@ -248,29 +127,11 @@ Item {
         }
         return longest
     }
-    // WHICH BLOCK OWNS THE PASSAGE — the FIRST of the longest-text blocks.
-    //
-    // "the longest text" is not unique on a fill-built page: the same paragraph
-    // arrives in the content slot AND in a band (measured on a real walk — one
-    // tile reported laying the passage out in 754x124 while drawing it in 150x42,
-    // 39 lines against 271), and a `length === stepTextLength` test then marks BOTH
-    // as the reading block. Two columns scroll in two different boxes, each reports
-    // its own size and box to the service, and which one the eye (and the harness)
-    // reads flips between them — the reported "this is not how the template is
-    // defined" and the un-fixable grid mismatch, because ONE style can only be
-    // measured in ONE box. The passage belongs in exactly one box, so the first
-    // such block owns it.
     readonly property int readingBlockIndex: {
         const bs = root.blocks !== undefined && root.blocks !== null ? root.blocks : []
         const longest = root.stepTextLength
         if (longest <= 0)
             return -1
-        // SCROLL'S PASSAGE LIVES IN THE TEMPLATE'S OWN TEXT AREA — the block bound to
-        // the text field — not in whichever block happens to hold the most characters
-        // on the page on screen. That "longest" rule is a slide's (it follows the
-        // page's content), and it moved the scroll column into a 730x28 metadata strip
-        // whenever the strip's line was longer than a short paragraph: the tile drew
-        // the passage in a band while the service measured the template's 711x331 area.
         if (typeof LiveOutputService !== "undefined"
                 && LiveOutputService.readingBudgetFitActive === true) {
             for (let i = 0; i < bs.length; ++i) {
@@ -290,18 +151,7 @@ Item {
         }
         return -1
     }
-    // NO CLOCK AND NO OVERLAY HERE ANY MORE. The move used to be played by a
-    // second copy of the words on top of the picture (an old-window snapshot
-    // translated by `blockShift`, cross-faded at the end), which is exactly what
-    // read as a slide with a snap: two snapshots of a re-flowed string can only
-    // be animated to LOOK like a scroll. The offset now comes from the service,
-    // animated once, and the block's own passage is slid under its own box (see
-    // el.drawsFlow below) — the words on screen are the words that exist, and
-    // when the move lands there is nothing to hand over.
 
-    // The stage's grid, from its ONE definition (qml/settings/StageGrid.qml) —
-    // this item draws a picture OF THE STAGE, so it follows the stage's own
-    // proportion (StageGrid's rule 2), never the frame's axis-by-axis mapping.
     readonly property real stageW: StageGrid.w
     readonly property real stageH: StageGrid.h
     readonly property real unit: width / StageGrid.w
@@ -311,17 +161,6 @@ Item {
 
     // The canvas's clock/timer formatting, shared (this one never ticks; the host feeds `now`).
     LiveClock { id: fmt; running: false }
-    // SCROLL-COST PROBE (VGR_LAYOUT_TEST, tools/selftest/run_layout_probe.sh): every text block
-    // that runs its fit solver reports it to `probeSink`, the library pane hosting the card. One
-    // solve is eleven bisection steps, each re-measuring the invisible twin Text's layout — the
-    // single most expensive thing building a card does — so a scroll that builds six cards of
-    // three text blocks each reports +198 solves into the pane's `gridFitSolves`, and that is
-    // what the templates grid pays per newly-revealed card.
-    //
-    // The counter lives on the PANE, not on this preview: a card is destroyed and recreated by
-    // every filter and every scroll (that is the very cost being measured), so a counter on the
-    // preview would fall to zero with each recycled card and a delta over a step could come out
-    // NEGATIVE. null (every other host in the app) simply counts nowhere.
     property var probeSink: null
     // Fully transparent? Works for "transparent", "#00000000" (what a live colour reads back as) and real colours alike.
     function isClear(c) { return c === undefined || c === null || c === "" || Qt.color(c).a === 0 }
@@ -333,9 +172,6 @@ Item {
              + "M 0 " + h + " L 0 " + (h - r) + " A " + r + " " + r + " 0 0 0 " + r + " " + h + " Z"
     }
 
-    // The stage, shrunk to fit. A transparent background shows the shared
-    // transparency checkerboard (the Edit canvas's convention), anything else
-    // paints its colour.
     Item {
         width: root.stageW; height: root.stageH
         scale: root.unit
@@ -343,11 +179,6 @@ Item {
 
         Checkerboard {
             anchors.fill: parent
-            // This subtree is painted in STAGE units and scaled by `unit`, so the
-            // board is told that scale: it keeps the cell at checkerSize real
-            // pixels and rasterizes at the size the card actually covers on
-            // screen — not at 754×428 stage units for a 120px card, which is
-            // what every design card in a grid used to do.
             tileSize: root.checkerSize
             hostScale: root.unit
             visible: root.showCheckerboard && root.isClear(root.background)
@@ -357,10 +188,6 @@ Item {
             visible: !root.isClear(root.background)
             color: root.background
         }
-        // The style's background IMAGE — over the colour, under every block,
-        // cover-fit (SceneBuilder's CoverRect). Only when the image is set:
-        // a slide's own composed colour stays visible through a transparent
-        // image slot.
         Image {
             anchors.fill: parent
             visible: root.backgroundImage !== ""
@@ -369,40 +196,16 @@ Item {
         }
 
         Repeater {
-            // THE SLOT LIST, NOT THE CONTENT LIST.
-            //
-            // `model: root.blocks` made every block a BRAND-NEW delegate whenever
-            // the array was replaced — and the array is replaced on every selector
-            // move, every re-stage, every style edit. Between the destroy and the
-            // create there is a frame with no delegate at all (and a new one's fit
-            // not yet solved), and THAT is the blink: "the moment the selector
-            // moves down it will blink". The picture was not changing size, it was
-            // being torn down and rebuilt.
-            //
-            // The model is the SLOT COUNT, and each delegate reads its block by
-            // `index` instead (el.modelData below). A change that keeps the count —
-            // the common case: same template, new words, a moved reference — now
-            // updates the delegates that already exist, in place. Only a block
-            // actually appearing or disappearing (a heading neither page has) still
-            // rebuilds, which is the one case where a new node is genuinely needed.
             model: root.blocks ? root.blocks.length : 0
 
             delegate: Item {
                 id: el
                 required property int index
-                // The block this slot currently holds. A binding, not the model
-                // item: that is what lets the same delegate be re-used for the
-                // next page's block at this index (see the model comment).
                 readonly property var modelData: (root.blocks && index < root.blocks.length)
                                                  ? root.blocks[index] : ({})
                 readonly property string kind: modelData.kind
                 readonly property var meta: modelData.meta !== undefined ? modelData.meta : {}
                 readonly property var style: modelData.style !== undefined ? modelData.style : {}
-                // The line advance THIS block paints at, measured from its own
-                // fitted size (measureLineBox is the font's line box at
-                // fitProbe = fitAnswer; fitMeasure.lineHeight is the multiplier
-                // with the additive gap already folded in) — the distance one
-                // line of the reading step travels, in this block's own type.
                 readonly property real linePitch: measureLineBox.contentHeight * fitMeasure.lineHeight
                 // THE READING BLOCK: the longest text (the same rule the service
                 // steps and the engine glides) — the only block the line step moves.
@@ -410,33 +213,6 @@ Item {
                     && String(modelData.text ?? "").length > 0
                     && String(modelData.text ?? "").length === root.stepTextLength
                     && el.index === root.readingBlockIndex
-                // DOES THIS BLOCK DRAW THE READING PASSAGE? Only the reading
-                // block of a host that follows the step (the Main Output tile),
-                // and only while the service has a passage for it. Everything
-                // else about this file draws the page it always drew.
-                // DOES THIS BLOCK DRAW THE READING PASSAGE? Only the reading
-                // block of a host that follows the step (the Main Output tile),
-                // and only while the service has a passage for it. Everything
-                // else about this file draws the page it always drew.
-                //
-                // ...and only if the passage really holds THIS block's page: a
-                // flow left over from another slide would put the wrong words in
-                // the box. It is a CONTAINMENT test, not a prefix test, because the
-                // passage is now a RUN of pages around the one being read (see
-                // LiveOutputService's reading run): the current page can sit
-                // anywhere inside it, and the offset that positions the column is
-                // measured from the run's start, so whichever page the block holds,
-                // the line at the top of the box is the line being read.
-                //
-                // ...EXCEPT WHEN THE PASSAGE IS THE JSON'S (readingBudgetFitActive: Scroll
-                // is on and the service holds the chapter's text, not a slide set). That
-                // passage is the whole reading, drawn at the budget size, and the slide
-                // that happens to be staged is no part of it: testing the block's slide
-                // text against the flow made the surface draw that SLIDE until the walk's
-                // window grew to contain it, then flip to the flow — the flicker after
-                // staging, and the page-by-page "book" look. With the passage active the
-                // flow is drawn from the first frame. Its position comes from the service
-                // (stepLine), never from where the slide's text sits in it.
                 readonly property bool drawsFlow: el.readingBlock && el.kind === "text"
                     && !root.paintOnly && root.animateLineSteps
                     && String(el.modelData.text ?? "") !== ""
@@ -444,26 +220,12 @@ Item {
                         ? String(LiveOutputService.readingFlowText ?? "") !== ""
                         : String(LiveOutputService.readingFlowText ?? "")
                               .indexOf(String(el.modelData.text ?? "")) >= 0)
-                // ONE-SHOT DIAGNOSTIC: every TRANSITION of this gate, named —
-                // this is the EXACT moment the visible surface hands off
-                // between the animated flow (flowText) and the plain static
-                // page (fitText), on a NEW delegate every page-boundary
-                // commit (the Repeater rebuilds when root.blocks changes).
-                // false->true->false in quick succession, or landing on
-                // false right after a commit, is what a cut/refresh at the
-                // boundary would look like from here (user report, A/B
-                // tested and confirmed independent of ReferencePane's own
-                // selector: "it's still refreshing... not continuing the
-                // flow").
-                onDrawsFlowChanged: EngineBridge.log("info", "DrawsFlowChanged",
+                onDrawsFlowChanged: EngineBridge.log("trace", "DrawsFlowChanged",
                     "drawsFlow=" + el.drawsFlow
                     + " readingBlock=" + el.readingBlock
                     + " modelText=" + String(el.modelData.text ?? "").slice(0, 24)
                     + " flowText=" + String(LiveOutputService.readingFlowText ?? "").slice(0, 24)
                     + " fitAnswer=" + el.fitAnswer)
-                // THE PAGE'S TOP EDGE — where the page's first line sits, from
-                // the block's own vertical alignment. The passage begins exactly
-                // there, so at offset 0 it draws where the page drew.
                 readonly property real pageTop: {
                     const pad = el.style.padding ?? 0
                     const v = el.meta.verticalAlign ?? "center"
@@ -478,25 +240,13 @@ Item {
                 // The box behind a block the canvas draws one for: a text or a clock (a fill of nothing is just its border).
                 // (Shapes, timers and camera / media tiles draw their own; a vignette / corners block is never a box.)
                 readonly property bool hasBox: kind === "text" || kind === "clock"
-                // Set by the layer that renders a live feed (the monitor tile),
-                // from the ENGINE's own answer: this block's paint belongs under
-                // the feed, so it is not painted again above it.
                 readonly property bool paintUnderFeed: modelData.underVideo === true
 
-                // The Filters card's Opacity (CanvasItemStyle.opacity, round-
-                // tripped onto the plain block's style object) — applied here
-                // so every consumer of this file (the monitor tile, the
-                // output window, design-card thumbnails) fades a block the
-                // same way the edit canvas does, from the one shared style
-                // field instead of each rendering path re-deriving it.
                 opacity: el.style.opacity !== undefined ? el.style.opacity : 1
 
                 x: modelData.x; y: modelData.y
                 width: modelData.width !== undefined ? modelData.width : 160
                 height: modelData.height !== undefined ? modelData.height : 40
-                // A block never paints outside its own box — the Edit canvas clips a
-                // bound placeholder for the same reason it is pinned to the item's own
-                // type size below: it can be wider than a small box.
                 clip: true
 
                 // fill + border (the box the Edit screen draws behind a text or a clock)
@@ -509,19 +259,7 @@ Item {
                     border.color: el.style.borderColor !== undefined ? el.style.borderColor : "#ffffff"
                 }
 
-                // --- text (and a bound template field's placeholder) ---
-                // Auto-size runs through the SAME explicit fit solver as the edit
-                // canvas (EditScreen.qml's recomputeFit): Qt's Text.Fit converged
-                // differently in this scaled-down subtree than on the canvas, and
-                // grown text could spill below its box on one surface but not the
-                // other. A tiny bisection over candidate sizes, re-measuring an
-                // invisible twin each step, gives both surfaces the same answer
-                // (the largest size whose real laid-out height/width fit the box).
                 property real fitProbe: el.meta.fontSize ?? 16
-                // The first rendered frame of a committed page already carries
-                // the walk's size (see root.readingFitSize): the solver runs
-                // immediately for the reading block, but a frame at the fallback
-                // size before it would be the same pop the latch exists to stop.
                 property real fitAnswer: (el.readingBlock && root.animateLineSteps
                                           && LiveOutputService.readingBudgetFitActive)
                                          ? Number(el.meta.fontSize ?? 16)
@@ -530,29 +268,11 @@ Item {
                                           && root.readingFitKey === el.readingFitKey)
                                          ? root.readingFitSize : (el.meta.fontSize ?? 16)
                 property bool fitSolving: false
-                // What the latched size is keyed by: the BOX and the TYPE, never
-                // the text — the text is exactly what changes at a page commit,
-                // and re-solving for it is the refresh this whole block prevents.
-                // WHAT THE LATCH IS KEYED BY: the BOX and the TYPE — never the text,
-                // which is exactly what changes at a page commit.
-                //
-                // ...and never the PAGE'S OWN FONT SIZE while a walk is drawing this
-                // block: a fill-built page (The Table, the Bible) carries its size per
-                // page — measured on a real walk: 45.84, 43.90, 42.93 and 40.99 in one
-                // passage — and a key that includes it lets every page re-solve the
-                // column, which is both the pop this latch exists to stop and a
-                // different line table under the reader (the table is measured at ONE
-                // size; a column drawn at four is four grids).
                 readonly property string readingFitKey: {
                     const reading = el.readingBlock && root.animateLineSteps
                     const budgetFit = reading && typeof LiveOutputService !== "undefined"
                                       && LiveOutputService.readingBudgetFitActive === true
                     const parts = []
-                    // ...AND THE PICK, for the reading block: one WALK is one size, so
-                    // every page commit inside it must reuse the answer the walk
-                    // started with. A new pick is a new walk and solves its own —
-                    // the pick's name is that line, and it is the only input here
-                    // that changes when one passage ends and the next begins.
                     if (reading && typeof LiveOutputService !== "undefined") {
                         parts.push(String(LiveOutputService.readingSetName ?? ""))
                         parts.push(String(budgetFit))
@@ -563,23 +283,6 @@ Item {
                             // the size only when the slide text is unchanged.
                             parts.push(String(fitText.text ?? ""))
                         }
-                        // ...AND THE JUMP/WALK DISTINCTION (readingStageSerial). One
-                        // WALK is one size: a line step inside the page already on
-                        // screen must not re-fit, or the column re-flows under the
-                        // reader (the template changing while it scrolls). A JUMP —
-                        // a click on another paragraph, the pane's ‹ ›, a search pick
-                        // — is a new page arriving, and reusing the previous page's
-                        // answer is what made a short paragraph look under-sized and
-                        // a long one overflow its box (reported: "when [I] double
-                        // click I expected autosize [to] show and the text font size
-                        // [to fit] the text area"). A walk never bumps this counter,
-                        // so its hold is untouched.
-                        // ...the OPERATOR-JUMP serial, not the stage serial: the walk's
-                        // own follow re-stages each page it crosses into (measured:
-                        // stage 10, 11, 12 ... once per press), so the stage serial made
-                        // every paragraph boundary look like a jump and re-solved the
-                        // type mid-scroll. A click, the ‹ › and a search pick bump this
-                        // one; a page turn does not.
                         parts.push(String(Number((LiveOutputService.readingJumpSerial
                                                   ?? LiveOutputService.readingStageSerial) ?? 0)))
                     }
@@ -592,13 +295,6 @@ Item {
                         parts.push(el.meta.fontSize ?? 16)
                     return parts.join("|")
                 }
-                // THE SCROLL COLUMN'S BUDGET PROBE — the max-words worth of the
-                // passage, measured instead of the page's own words. Every output
-                // draws the passage in ITS OWN box, so a small box (a second output
-                // on a lower-third or a white panel) was handed the same type size
-                // as the big one and its words ran off the edge. Solving the budget
-                // against THIS box gives each output a size that really holds the
-                // page: one size per box for the whole walk, nothing clipped.
                 readonly property int scrollBudget: (el.readingBlock && root.animateLineSteps
                                                      && LiveOutputService.readingBudgetFitActive)
                                                     ? Math.max(3, Number(LiveOutputService.readingWordBudget ?? 40)) : 0
@@ -610,13 +306,6 @@ Item {
                     const words = String(LiveOutputService.readingFlowText ?? "").match(/\S+\s*/g) || []
                     if (words.length === 0)
                         return ""
-                    // ALWAYS EXACTLY THE BUDGET'S WORDS. Right after a jump the flow text this
-                    // surface holds is only the page that was just staged (the walk's window
-                    // fills in a moment later) — a dozen words against a budget of dozens, and
-                    // a short probe fits a HUGE size (measured on a real double-click: 90.81 px
-                    // in a box the full window fits at 42.93, which the walk then kept). Cycling
-                    // the words it has up to the budget makes the answer the budget's, whatever
-                    // has loaded yet: scroll never auto-sizes to the words in front of it.
                     const probe = []
                     for (let i = 0; i < el.scrollBudget; ++i)
                         probe.push(words[i % words.length])
@@ -632,9 +321,6 @@ Item {
                     MetadataFields.letterSpacing(el.meta), MetadataFields.wordSpacing(el.meta),
                     MetadataFields.oneLine(el.meta), el.style.padding ?? 0
                 ]
-                // A scroll column whose passage had not arrived when it was asked
-                // (scrollColumnSize answers 0 until there are words to budget) asks again
-                // when the passage does arrive.
                 property bool scrollColumnPending: false
                 Connections {
                     target: LiveOutputService
@@ -647,24 +333,6 @@ Item {
                             && (el.scrollColumnPending || root.readingFitKey !== el.readingFitKey))
                         el.solveFit()
                 }
-                // EVERY text block solves — "none" included: the box is the master and the
-                // text must always sit inside it (a "none" block renders at its set size
-                // while that fits, and SQUEEZES the moment it doesn't; nothing is ever cut).
-                //
-                // DEFERRED (Qt.callLater), except for the ONE case where that defer is
-                // itself the bug: the reading block on a surface that animates line steps
-                // (el.readingBlock && root.animateLineSteps — the SAME pair drawsFlow
-                // gates on). A page-boundary commit destroys this delegate and builds a
-                // brand new one for the new page; deferred, its FIRST rendered frame uses
-                // the un-fitted fallback size (el.meta.fontSize) — not yet the solver's
-                // answer — for however long it takes Qt.callLater to run, right as
-                // readingScroll also resets to 0 for the new page. Two discontinuities
-                // landing in the same frame (a font-size pop on top of the page swap) is
-                // what read as "it['s] as if the app clicks" instead of a continued scroll.
-                // Solving immediately for just this one case costs one bisection on a page
-                // boundary (rare: one per Alt+Down that crosses one) — every other consumer
-                // of this file (library cards, canvas thumbnails, grids — see the
-                // scroll-cost probe above) keeps the deferred/coalesced solve unchanged.
                 onFitInputsChanged: {
                     if (fitSolving)
                         return
@@ -691,18 +359,9 @@ Item {
                     if (fitSolving)
                         return
                     fitSolving = true
-                    // (scroll-cost probe: one bisection over the twin Text, per solve. The delegate can
-                    // be DESTROYED between the Qt.callLater that queued this and the call — the pane it
-                    // reports to goes with it — so `typeof` guards the dead scope, the same way
-                    // DropdownPanel's stale-row guards do.)
                     const hostAlive = typeof root !== "undefined" && root !== null && root !== undefined
                     if (hostAlive && root.probeSink)
                         root.probeSink.gridFitSolves++
-                    // SCROLL IS NOT SOLVED HERE. A scroll column's size comes from the
-                    // service, which fits the max-words budget into this block's text
-                    // area once (LiveOutputService.scrollColumnSize) and measures its
-                    // line table from the very same block and size. No bisection, no
-                    // report back, nothing a slide does: this surface draws the answer.
                     if (hostAlive && el.readingBlock && root.animateLineSteps
                             && LiveOutputService.readingBudgetFitActive === true) {
                         if (root.readingFitSize > 0 && root.readingFitKey === el.readingFitKey) {
@@ -727,19 +386,9 @@ Item {
                     const pad = el.style.padding ?? 0
                     const bw = el.width - pad * 2, bh = el.height - pad * 2
                     let lo = 3, hi = 400
-                    // Bound placeholders keep their declared size except in Grow, where the
-                    // visible token is fitted as an editing-preview approximation. Actual
-                    // output fits the resolved value. The delegate clips any token overflow.
                     const emptyBox = bw <= 0 || bh <= 0
                     const tokenOrZero = MetadataFields.isToken(fitText.text)
                     const fixedPlaceholder = tokenOrZero && el.fitMode !== "grow"
-                    // SCROLLING SOLVES THE BUDGET INTO THIS BOX (see scrollProbe):
-                    // the max-words worth of the passage, fitted to the box it will
-                    // be drawn in — one size per box for the whole walk, so a small
-                    // output shrinks to hold the page instead of running its words
-                    // off the edge. The size is latched by readingFitKey (pick, box
-                    // and budget — never the page's text), so a page turn cannot
-                    // re-solve and re-flow the column under the reader.
                     const scrollFit = hostAlive && el.scrollProbe !== ""
                     if (scrollFit && root.readingFitSize > 0
                         && root.readingFitKey === el.readingFitKey) {
@@ -771,16 +420,10 @@ Item {
                                 hi = mid
                         }
                     }
-                    // grow: fill the box; shrink/none: at most the set size (the squeeze).
-                    // A scroll column always takes the solved answer: its content IS the
-                    // budget, so "fill this box with the budget" is the whole rule.
                     fitAnswer = (scrollFit || el.fitMode === "grow")
                                 ? lo : Math.min(el.meta.fontSize ?? 16, lo)
                     fitProbe = fitAnswer
                     if (!tokenOrZero && hostAlive && el.readingBlock && root.animateLineSteps) {
-                        // This is the walk's first page (or its first page at this box,
-                        // for this pick): it has just been fitted like any slide at
-                        // rest, so latch that answer for the pages that follow it.
                         root.readingFitKey = el.readingFitKey
                         root.readingFitSize = fitAnswer
                         if (typeof LiveOutputService !== "undefined")
@@ -798,21 +441,12 @@ Item {
                     // el.scrollProbe): the budget's words, not this page's.
                     text: el.scrollProbe !== "" ? el.scrollProbe : fitText.text
                     font: MetadataFields.textFont(el.meta, el.fitProbe)
-                    // The same line STEP the label below draws (see
-                    // MetadataFields.lineHeightWithGap): the twin must measure
-                    // the spacing that is painted, or the fit solve answers for
-                    // a layout nobody sees.
                     lineHeight: MetadataFields.lineHeightWithGap(el.meta, measureLineBox.contentHeight)
                     lineHeightMode: Text.ProportionalHeight
                     // The twin measures the layout the label below draws: a
                     // one-line block is measured unwrapped, as it renders.
                     wrapMode: MetadataFields.oneLine(el.meta) ? Text.NoWrap : Text.WordWrap
 
-                    // This font's OWN line box at the probe size — the number Qt
-                    // multiplies by lineHeight. Measured with a Text (line height
-                    // 1 on one glyph) rather than TextMetrics, which exposes no
-                    // ascent/descent; the two would only differ if Qt changed
-                    // what it means by "a line box", and then this follows it.
                     Text {
                         id: measureLineBox
                         visible: false
@@ -822,17 +456,8 @@ Item {
                         lineHeightMode: Text.ProportionalHeight
                     }
                 }
-                // The per-LINE background band (the Lines card's "Background
-                // color"), painted UNDER the glyphs by the same text as rich
-                // text — Qt bands each wrapped line fragment at that line's own
-                // width, so the tile shows what the output draws (the engine
-                // paints one band per laid-out line, TextStyle::lineBg).
                 LineBandLayer {
                     anchors.fill: parent
-                    // The bands follow the GLYPHS they band — and while this block
-                    // draws the passage, that is the flow's own band layer below
-                    // (the words are one translated column there, so a band left
-                    // here would stay put while its words slid).
                     visible: el.kind === "text" && !root.paintOnly && !el.drawsFlow
                     layout: fitText
                     color: String(el.meta.lineBg ?? "")
@@ -841,9 +466,6 @@ Item {
                 }
                 Text {
                     id: fitText
-                    // HIDDEN WHILE THE PASSAGE IS DRAWN (el.drawsFlow): the flow
-                    // contains this page's words already, so drawing both puts two
-                    // copies of every line in one box.
                     visible: el.kind === "text" && !root.paintOnly && !el.drawsFlow
                     anchors.fill: parent
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
@@ -852,14 +474,6 @@ Item {
                         : ((root.showBindPlaceholders && (el.modelData.bind ?? "") !== "") ? "{" + el.modelData.bind + "}" : "")
                     text: TextFormatService.applyList(ownText, el.meta.list ?? "")
                     color: el.meta.color ?? "#f2f4fa"
-                    // THE ENGINE'S OWN ANSWER (FontService -> FontManager), not
-                    // the raw name and not Qt's substitution: a template whose
-                    // font this machine lacks must draw here in the SAME face the
-                    // frame on air uses, or the card and the output disagree on
-                    // advances, wrapping and the auto-size solve.
-                    // Always the solver's answer: grow fills the box, shrink/none render
-                    // at the set size and squeeze only on overflow — the text ALWAYS sits
-                    // inside its box, on every surface this item draws for.
                     font: MetadataFields.textFont(el.meta, el.fitAnswer)
                     fontSizeMode: Text.FixedSize
                     lineHeight: MetadataFields.lineHeightWithGap(el.meta, labelLineBox.contentHeight)
@@ -878,41 +492,14 @@ Item {
                         return a === "left" ? Text.AlignLeft : a === "right" ? Text.AlignRight
                              : a === "justify" ? Text.AlignJustify : Text.AlignHCenter
                     }
-                    // Mirrors the canvas's own EditableCanvasLabel/EditScreen.qml verticalAlignment binding -
-                    // defaults centered, a template can set "top" (or "bottom") on a block that reads better
-                    // anchored to an edge (a big sermon-paragraph box, say) instead of floating mid-box.
                     verticalAlignment: {
                         const a = el.meta.verticalAlign ?? "center"
                         return a === "top" ? Text.AlignTop : a === "bottom" ? Text.AlignBottom : Text.AlignVCenter
                     }
                     wrapMode: MetadataFields.oneLine(el.meta) ? Text.NoWrap : Text.WordWrap
-                    // (No elide: the solver above guarantees the laid-out text fits the
-                    // box, so there is nothing to truncate — swallowed tails with an
-                    // ellipsis were this line's doing.)
                 }
 
                 // ---- THE READING PASSAGE (the Alt+Down / Alt+Up step) ------
-                //
-                // The block draws the PASSAGE its page was cut from — this page
-                // and the one after it, as one string — and slides it under its
-                // own box by LiveOutputService.readingScroll LINES. That offset is
-                // the same number the engine is handed for the HDMI window and the
-                // NDI feed, so the tile and the projector are two views of one
-                // scroll rather than two animations that have to agree.
-                //
-                // WHY THIS IS THE SCROLL AND NOT AN ANIMATION OF ONE: the words
-                // are one laid-out column that exists once and moves (el.clip cuts
-                // it at the box's edges). There is no second copy, no cross-fade
-                // and no hand-off at the end of the move — so nothing can snap when
-                // it lands, and the type size never changes, because the size the
-                // solver chose for the PAGE still governs (linePitch is measured at
-                // exactly that size).
-                // THE VIEWPORT IS THE PAGE'S OWN RECTANGLE, not the block's box: a
-                // box can be taller than the page it was fitted for (a shrink-mode
-                // page leaves slack at the bottom), and clipping to the BOX would
-                // leak the lines below into that slack — the passage would show
-                // next-page text on a slide nobody has stepped yet. At offset 0
-                // this window IS the page; a step moves the words inside it.
                 Item {
                     id: flowWindow
                     visible: el.drawsFlow
@@ -929,11 +516,6 @@ Item {
                     // the offset, one measured line at a time.
                     Item {
                         id: flowBox
-                        // THIS STYLE's line for the shared position (see stepLine):
-                        // two outputs styled at different sizes used to scroll the
-                        // same LINE number, which is a different word in each — one
-                        // showed the passage's next sentence while the other was
-                        // still on the previous one.
                         y: -root.stepLine * el.linePitch
                         width: parent.width
                         height: flowText.implicitHeight
@@ -950,46 +532,27 @@ Item {
                         Text {
                             id: flowText
                             width: parent.width
-                            // The passage as the service assembled it, with the
-                            // block's own list formatting applied — the same call
-                            // fitText makes.
                             text: TextFormatService.applyList(
                                       String(LiveOutputService.readingFlowText ?? ""),
                                       el.meta.list ?? "")
-                            // EVERYTHING ABOUT THE TYPE IS THE PAGE'S: family,
-                            // size (the solver's answer), spacing, case, wrap. Only
-                            // the string is longer, so the page's own lines land
-                            // exactly where they did and the lines below it are the
-                            // ones that scroll into view.
                             font: fitText.font
                             fontSizeMode: Text.FixedSize
                             color: fitText.color
                             leftPadding: fitText.leftPadding
                             rightPadding: fitText.rightPadding
-                            horizontalAlignment: fitText.horizontalAlignment
+                            // SCROLL READS LIKE A BOOK PAGE: with the max-words column the passage is
+                            // fully justified on every surface whatever the template says (the
+                            // engine's scenes do the same), so screens differ only in size.
+                            horizontalAlignment: LiveOutputService.readingBudgetFitActive
+                                                 ? Text.AlignJustify : fitText.horizontalAlignment
                             // TOP, always: the passage is one column starting at
                             // the page's top edge, not a block centred in the box.
                             verticalAlignment: Text.AlignTop
-                            // REVERTED to fitText.wrapMode (WordWrap) — NoWrap only
-                            // made sense paired with flowTextFor's wrapped-lines
-                            // build (now reverted — see its own comment: that build
-                            // broke el.drawsFlow's prefix match against the block's
-                            // raw text, which is what actually caused "not moving").
-                            // With the raw text restored here too, NoWrap would draw
-                            // each authored paragraph as one unbroken line clipped
-                            // at the box edge.
                             wrapMode: fitText.wrapMode
                             lineHeight: fitText.lineHeight
                             lineHeightMode: fitText.lineHeightMode
-                            // WHAT THIS COLUMN REALLY BECAME (see noteReadingDrawn):
-                            // the drawn line count against the service table's, and
-                            // the size each was laid out at — the two numbers that
-                            // decide whether the step and the words are one grid.
                             onLineCountChanged: root.noteReadingDrawn(flowText, el)
                             Component.onCompleted: root.noteReadingDrawn(flowText, el)
-                            // WHAT IS ON SCREEN, once per line this surface moves (see
-                            // noteReadingShown): the words at the top and bottom of the
-                            // box and how many have been shown again after scrolling past.
                             Connections {
                                 target: root
                                 function onStepLineChanged() { root.noteReadingShown(flowText, el) }
@@ -1141,10 +704,6 @@ Item {
                     }
                 }
 
-                // --- bus: a window onto a bus's live feed, drawn as the canvas draws it. The tile
-                // starts no tap of its own: it shows the picture while some holder (the Edit
-                // canvas's own window for the same bus) is pulling frames, and otherwise a plain
-                // dark plate with the bus's name. ---
                 Loader {
                     anchors.fill: parent
                     active: el.kind === "bus" && !root.paintOnly
@@ -1180,12 +739,6 @@ Item {
                     }
                 }
 
-                // --- a placed picture, and a video's poster (Media Foundation's still
-                // for the same file) — the engine's own thumbnail cache, the SAME url
-                // EditScreen's own canvas asks for (mediaPictureUrl), so a slide
-                // thumbnail/card/preview and the edit canvas show one picture, not a
-                // decode here and a placeholder icon there (the gap that left every
-                // thumbnail with just an "IMAGE" tile and no actual frame).
                 Image {
                     id: picturePreview
                     readonly property bool isPicture: el.kind === "image" || el.kind === "video"
@@ -1205,10 +758,6 @@ Item {
                             ? "image://mediathumb/500/-1/" + encodeURIComponent(el.meta.src) : ""
                 }
 
-                // --- media / audio / any other kind, and an image/video whose thumbnail
-                // isn't decoded (yet, or at all — MediaThumbnailProvider's own answer for
-                // a file it can't read is a 1x1 blank): the canvas's generic tile - the
-                // kind's icon and name, and the picked file ---
                 Rectangle {
                     visible: (el.isPlaceholder || (picturePreview.isPicture && !picturePreview.visible)) && !root.paintOnly
                     anchors.fill: parent
@@ -1309,7 +858,6 @@ Item {
                 readonly property bool isLine: el.shapeType === "line"
                 readonly property bool isGlyph: ["triangle", "arrow", "star", "hexagon"].includes(el.shapeType)
             }
-
         }
     }
 }

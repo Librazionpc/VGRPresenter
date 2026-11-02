@@ -8,15 +8,10 @@
 #include <sstream>
 
 namespace bps::broadcast {
-
 namespace {
-
 constexpr const char* kModule = "BroadcastEngine";
 
 // ---------------------------------------------------------------------------
-// Built-in software loopback provider (docs/specs/29 §11). Senders write into
-// a per-sender ring; receivers pull the newest frame. This exercises the whole
-// provider contract in CI and rehearsal without any SDK or hardware.
 // ---------------------------------------------------------------------------
 class SoftwareProvider final : public IBroadcastProvider {
 public:
@@ -146,7 +141,6 @@ private:
     uint64_t receiverSeq_ = 0;
     size_t lastAudioSize_ = 0;
 };
-
 } // namespace
 
 BroadcastEngine& BroadcastEngine::Instance() {
@@ -161,17 +155,7 @@ Result<void> BroadcastEngine::Initialize() {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (initialized_.load()) return Ok();
     }
-    // The software loopback provider is always available — CI and rehearsal
-    // exercise the full contract without any SDK (docs/specs/29 §11). Registered
-    // through the PUBLIC entry point, with NO engine lock held: registration
-    // publishes 'provider registered' on the bus, and a subscriber that calls
-    // back in would otherwise wait on mutex_.
     (void)RegisterProvider(std::make_shared<SoftwareProvider>());
-    // NDI + SDI provider CONSTRUCTION resolves their SDKs at runtime
-    // (LoadLibrary), so it runs OUTSIDE the engine lock — the same rule as
-    // every other provider call here. Registration itself only takes the
-    // registry's short lock. On machines without the SDKs, Probe() reports
-    // Unsupported cleanly (docs/specs/29 §2).
     (void)RegisterBuiltinBroadcastProviders(*this);
     initialized_.store(true);
     return Ok();
@@ -203,9 +187,6 @@ Result<void> BroadcastEngine::Stop() {
 
 Result<void> BroadcastEngine::Shutdown() {
     (void)Stop();
-    // Snapshot the registry, then shut providers down OUTSIDE every lock:
-    // ShutdownProvider() closes vendor SDK handles (the NDI finder teardown
-    // alone can take seconds) and must never make a lookup wait.
     std::vector<std::shared_ptr<IBroadcastProvider>> providers;
     {
         std::unique_lock<std::shared_mutex> plock(providersMu_);
@@ -225,10 +206,6 @@ Result<void> BroadcastEngine::Shutdown() {
 }
 
 Result<void> BroadcastEngine::Reload() {
-    // Probe OUTSIDE the lock: Probe() loads and probes a vendor SDK. The
-    // "sdi" feature switch still gates its own probe (reloading with the SDK
-    // absent used to publish "DeckLink SDK not installed" at every boot); a
-    // switched-off provider keeps its registration and just isn't probed.
     const bool sdiOn = sdiEnabled_.load();
     for (const auto& p : ProviderSnapshot()) {
         if (!sdiOn && std::string_view(p->Name()) == "sdi") continue;
@@ -293,9 +270,6 @@ Result<void> BroadcastEngine::RegisterProvider(std::shared_ptr<IBroadcastProvide
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (auto r = RegisterProviderLocked(std::move(provider)); !r.ok()) return r;
     }
-    // Published with the engine lock RELEASED: the registration itself is the
-    // registry insert above; telling the world about it is bus work, and a
-    // subscriber that re-enters this engine would otherwise wait on mutex_.
     (void)EventBus::Instance().Publish(events::BroadcastProviderRegistered{name});
     return Ok();
 }
@@ -311,9 +285,6 @@ Result<void> BroadcastEngine::RegisterProviderLocked(std::shared_ptr<IBroadcastP
                                "provider already registered: " + name);
         providers_[name] = std::move(provider);
     }
-    // The 'provider registered' event is NOT published here: this helper runs
-    // with the engine lock held, and publishing is bus work. RegisterProvider()
-    // publishes it after the lock is released (see there).
     return Ok();
 }
 
@@ -326,12 +297,6 @@ std::vector<std::string> BroadcastEngine::ProviderNames() const {
 }
 
 Result<ProviderState> BroadcastEngine::Probe(std::string_view name) {
-    // The "sdi" feature switch gates its probe BEFORE the provider is
-    // touched: EngineBridge::enumerateDevices probes sdi on every device
-    // refresh, and without this the absent-SDK failure was published as an
-    // error toast each time. The refusal is a clean error (the UI shows it
-    // as the sdi status line), not a BroadcastProviderUnavailable event —
-    // a switched-off feature is a user choice, not a failure.
     if (name == "sdi" && !sdiEnabled_.load())
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "SDI is switched off (Settings · Plugins)");
@@ -363,10 +328,6 @@ Result<std::vector<NdiSourceInfo>> BroadcastEngine::DiscoverNdiSources() {
         (void)EventBus::Instance().Publish(events::NdiSourcesChanged{0});
         return out;
     }
-    // Discovery is provider-agnostic (the software provider reports loopback
-    // senders; a real NDI provider browses the network) and it is SLOW, so it
-    // runs OUTSIDE every lock — a network browse under the engine mutex was
-    // what froze unrelated callers.
     for (const auto& p : ProviderSnapshot()) {
         auto found = p->DiscoverSources();
         out.insert(out.end(), found.begin(), found.end());
@@ -380,15 +341,9 @@ Result<BroadcastSenderId> BroadcastEngine::CreateNdiSender(std::string_view name
                                                            const NdiSenderConfig& cfg) {
     if (name.empty())
         return Error::Make(Err::InvalidArgument, kModule, "sender name required");
-    // The feature switch (Settings · Plugins): NDI off refuses every
-    // NDI-shaped sender — the software loopback is NDI-shaped too, so it
-    // must not silently keep "sending" what the user switched off.
     if (!ndiEnabled_.load())
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "NDI is switched off (Settings · Plugins)");
-    // Prefer a real NDI provider when it is actually usable (SDK present);
-    // otherwise fall back to the always-available software loopback. The
-    // Probe() below runs OUTSIDE every lock — it opens the vendor SDK.
     std::string preferred;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -484,9 +439,6 @@ std::vector<std::string> BroadcastEngine::SenderIds() const {
     return out;
 }
 
-// Delegates to the sender's own provider — the NDI provider answers from the
-// SDK's connection count; providers that can't tell return -1 (the UI hides
-// the indicator rather than guessing).
 int BroadcastEngine::SenderConnectedReceivers(std::string_view senderId) const {
     std::shared_ptr<IBroadcastProvider> p;
     {
@@ -585,9 +537,6 @@ std::vector<std::string> BroadcastEngine::ReceiverIds() const {
 // --- SDI -----------------------------------------------------------------------
 
 Result<std::vector<SdiDeviceInfo>> BroadcastEngine::EnumerateSdiDevices() {
-    // Feature switch: a disabled SDI refuses cleanly WITHOUT probing the
-    // SDK (the old path LoadLibrary'd DeckLink on every device refresh and
-    // published the failure as an error toast each time).
     if (!sdiEnabled_.load())
         return Error::Make(Err::Broadcast_Unsupported, kModule,
                            "SDI is switched off (Settings · Plugins)");
@@ -661,9 +610,6 @@ bool BroadcastEngine::NdiAvailable() const {
 
 BroadcastEngine::NdiRuntimeStatus BroadcastEngine::NdiStatus() const {
     NdiRuntimeStatus st;
-    // The feature switch reports its own honest state first: the runtime may
-    // be installed and fine, but the user switched NDI off — that is neither
-    // "not installed" (nothing to download) nor an error (nothing broken).
     if (!ndiEnabled_.load()) {
         st.state = NdiRuntimeStatus::State::Error;
         st.detail = "NDI is switched off in Settings · Plugins";
@@ -693,17 +639,7 @@ void BroadcastEngine::PreferProvider(std::string_view name) {
     preferredProvider_ = std::string(name);
 }
 
-// The feature switch, engine-side: OFF tears down everything the real NDI
-// provider owns (senders + receivers; its ShutdownProvider also drops the
-// persistent discovery finder), then re-registers a FRESH provider so the
-// next ON re-opens the SDK cleanly. The software loopback stays registered
-// (tests and non-NDI plumbing rely on it) but its NDI-shaped paths above
-// are gated by the same switch.
 void BroadcastEngine::SetNdiEnabled(bool enabled) {
-    // The switch itself flips atomically (status queries stay lock-free); the
-    // teardown it triggers — SDK shutdown, sender/receiver stops — runs OUTSIDE
-    // every lock. Holding mutex_ across that teardown was the long holder that
-    // froze the GUI: its Find() waited here behind NDI SDK work.
     const bool was = ndiEnabled_.exchange(enabled);
     if (was == enabled) return;
     if (enabled) {
@@ -740,12 +676,6 @@ void BroadcastEngine::SetNdiEnabled(bool enabled) {
     (void)EventBus::Instance().Publish(events::NdiSourcesChanged{0});
 }
 
-// The "sdi" feature switch, engine-side. OFF (the default) keeps every sdi
-// path at a clean refusal without probing the DeckLink SDK — the absent-
-// library probe used to run on every device refresh and publish "DeckLink
-// SDK not installed" as an error toast each time (the spam report). ON just
-// opens the gate; the next enumerate/refresh re-opens the SDK on demand.
-// Going OFF drops any live captures (same teardown contract as NDI's).
 void BroadcastEngine::SetSdiEnabled(bool enabled) {
     const bool was = sdiEnabled_.exchange(enabled);
     if (was == enabled) return;
@@ -787,10 +717,6 @@ void BroadcastEngine::UnwireEvents() {
 // --- Private helpers ---------------------------------------------------------------
 
 std::shared_ptr<IBroadcastProvider> BroadcastEngine::Find(std::string_view name) const {
-    // The registry has its OWN lock: a lookup is a map find and must never
-    // queue behind a slow provider call (the GUI blocked here, waiting for the
-    // engine mutex held across an NDI SDK teardown). Readers do not block each
-    // other; only (rare) registration does.
     std::shared_lock<std::shared_mutex> plock(providersMu_);
     auto it = providers_.find(std::string(name));
     return it == providers_.end() ? nullptr : it->second;
@@ -811,5 +737,4 @@ void BroadcastEngine::RecordError(std::string_view provider, std::string_view me
     (void)EventBus::Instance().Publish(
         events::BroadcastError{std::string(provider), std::string(message)});
 }
-
 } // namespace bps::broadcast

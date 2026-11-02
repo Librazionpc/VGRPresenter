@@ -1,12 +1,5 @@
 #pragma once
 
-// Native .vgr format (docs/specs/22). The authoritative representation of
-// everything created in the platform. One extension, many internal document
-// types (Show, Presentation, Template, Theme, Workspace, Playlist, Package,
-// Asset Collection, Config Profile). Sectioned container with a JSON header,
-// CRC32 integrity per section, dependency manifest, embedded assets, and
-// version detection + migration hooks.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 
@@ -16,7 +9,6 @@
 #include <vector>
 
 namespace bps::vgr {
-
 inline constexpr char kMagic[9] = "BPSVGR01";        // 8 bytes + NUL
 inline constexpr uint32_t kFormatVersion = 1;
 
@@ -104,5 +96,4 @@ public:
     // Migration hook: upgrades a document from an older format version.
     static Result<void> Migrate(VgrDocument& doc, uint32_t fromVersion);
 };
-
 } // namespace bps::vgr

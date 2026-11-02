@@ -1,11 +1,5 @@
 #pragma once
 
-// AssetManager (docs/specs/13 §Asset Manager): runtime assets. Owns loaded
-// assets, lifetime, references, and state; combines the AssetRegistry (who is
-// loaded) with the AssetCache (what bytes are resident) and the AssetLoader
-// (how bytes are read). Supports Load/Unload/Reload/Pin/Release/Prefetch and
-// reference counting.
-
 #include "modules/content/AssetCache.hpp"
 #include "modules/content/AssetLoader.hpp"
 #include "modules/content/AssetRegistry.hpp"
@@ -16,7 +10,6 @@
 #include <mutex>
 
 namespace bps::content {
-
 class AssetManager {
 public:
     AssetManager();
@@ -57,5 +50,4 @@ private:
     AssetLoader loader_{nullptr};
     std::mutex mutex_;
 };
-
 } // namespace bps::content

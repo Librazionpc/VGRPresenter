@@ -5,17 +5,12 @@
 #include <format>
 
 namespace bps {
-
 DatabaseManager& DatabaseManager::Instance() {
     static DatabaseManager instance;
     return instance;
 }
 
 Result<void> DatabaseManager::Open(std::string filePath) {
-    // Read the file BEFORE taking the lock: the PAL filesystem read must not
-    // run under mutex_, which every other database operation also needs. A
-    // corrupt file has to be SET ASIDE (another PAL call) before anything is
-    // adopted, so the parse step moved out of the locked section too.
     std::string text;
     if (!filePath.empty()) {
         auto read = platform::PlatformAccessor::Get().Filesystem().ReadText(filePath);
@@ -38,22 +33,6 @@ Result<void> DatabaseManager::Open(std::string filePath) {
         }
     }
 
-    // A DAMAGED database file must never stop the engine from booting.
-    //
-    // Observed: an interrupted flush left kernel.json as 5973 bytes of NULs,
-    // Open() answered Config_ParseFailed, Kernel::Boot turned that into a
-    // "Boot failed", and every QML write for the rest of the session answered
-    // "the engine is not running yet". One unreadable file cost the whole
-    // session. The operator's bytes are preserved under <path>.corrupt-<stamp>
-    // — moved aside, never silently deleted, in case they are worth salvaging —
-    // and the SAME path is adopted below, so the next Flush writes a healthy
-    // database and persistence keeps working.
-    // The move-aside itself is the engine's ONE recovery policy
-    // (recovery::SetAsideDamagedDocument): rename with a bounded retry, copy +
-    // remove when the rename is refused, and a warning that names where the
-    // bytes went. It was hand-rolled here first — this call is that same policy,
-    // so the settings database and every other internal document recover (and
-    // report) identically instead of drifting apart.
     if (corrupt)
         (void)recovery::SetAsideDamagedDocument(filePath, "DatabaseManager", parseError);
 
@@ -66,10 +45,6 @@ Result<void> DatabaseManager::Open(std::string filePath) {
             return Ok();   // in-memory only
         }
 
-        // Adopt the path in EVERY remaining case, including the quarantined
-        // corrupt one: the old code refused it so a later Flush could never
-        // overwrite the damaged file, which also meant the app silently stopped
-        // persisting for the whole session.
         filePath_ = std::move(filePath);
         if (!corrupt && !text.empty()) {
             const json::Value* collections = root.Find("collections");
@@ -154,12 +129,6 @@ std::string DatabaseManager::SerializeLocked() const {
 
 Result<void> DatabaseManager::WriteFile(const std::string& filePath, const std::string& text) {
     auto& fsys = platform::PlatformAccessor::Get().Filesystem();
-    // The temp-file-and-rename dance lives in the PAL now (WriteAtomic): parent
-    // directories, the byte-count check, and the bounded rename retry that a
-    // live-synced folder needs — ONE implementation shared with every other
-    // document the engine saves. It was hand-rolled here first, which is exactly
-    // why the database was crash-safe while the settings file beside it was not.
-    // writeMutex_ (held by Flush) still serializes writers in this process.
     auto w = fsys.WriteAtomic(filePath, text);
     if (!w.ok())
         return Error::Make(Err::IoError, "DatabaseManager",
@@ -168,9 +137,6 @@ Result<void> DatabaseManager::WriteFile(const std::string& filePath, const std::
 }
 
 Result<void> DatabaseManager::Flush() {
-    // Hold writeMutex_ for the whole operation so an older snapshot can never
-    // overwrite a newer one, but release mutex_ before the PAL disk write:
-    // the database lock must not be held across filesystem I/O.
     std::lock_guard<std::mutex> writeLock(writeMutex_);
     std::string path;
     std::string text;
@@ -211,5 +177,4 @@ HealthReport DatabaseManager::GetHealth() const {
                            filePath_.empty() ? " [in-memory]" : " file=" + filePath_);
     return r;
 }
-
 } // namespace bps

@@ -1,19 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// Circular level knob (the reference Add Source dialog's big dial —
-// VGRPresenter_Settings_Audio_Video_Add.qml's circular volume control).
-// Controlled-component contract identical to LabeledSlider.qml: `value` is
-// owned by the caller, the dial only *reports* via moved()/dragStarted()/
-// dragFinished() and never assigns its own `value` (self-assigning would
-// kill the consumer's binding — the bug class that convention exists for).
-//
-// The pointer is a plain rotated Rectangle pivoting at the knob's center
-// (transformOrigin: Item.Bottom on a pointer whose bottom sits on the
-// center) sweeping -135°..+135°. No PathArc/Shape ring — the reference
-// image shows a dial pointer, not a filled arc, and a rotated pointer is
-// the simpler, lower-risk drawing. Angle math is the inverse of the drag
-// mapping: atan2 around the center, clamped to the sweep.
 Item {
     id: root
 
@@ -54,9 +41,6 @@ Item {
             Behavior on border.color { ColorAnimation { duration: 100 } }
         }
 
-        // Pointer — pivots around its own bottom edge, which sits exactly on
-        // the knob's center (y + height == knob center). Accent, matching
-        // LabeledSlider's accent fill — the app's control-active color.
         Rectangle {
             width: 3
             height: knob.width / 2 - 14
@@ -84,10 +68,6 @@ Item {
             id: dragArea
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            // The dial lives inside scrollable dialogs — without this the
-            // Flickable steals the drag a few pixels in and the page scrolls
-            // mid-adjustment (the "scroller changes while adjusting volume"
-            // bug).
             preventStealing: true
 
             onPressed: (mouse) => {
@@ -99,18 +79,6 @@ Item {
             onCanceled: root.dragFinished()
 
             function setFromPosition(px, py) {
-                // Screen coords → knob-local, then atan2 with 0° pointing up
-                // and positive clockwise (matching the pointer's sweep).
-                //
-                // DEAD-ZONE handling — the sweep spans -135°..+135°, so the
-                // bottom 90° is unreachable. Raw atan2 wraps through it:
-                // dragging just past the lower-left stop lands at ~±180°,
-                // and naive clamping of THAT would snap to +135 → the dial
-                // JUMPED TO 100% on a small anti-clockwise overshoot.
-                // Hardware-knob end stops instead: angles in the dead zone
-                // hold the NEAREST stop (-180..-135 → -135 → 0%; +135..+180
-                // → +135 → 100%), so overshooting a stop never changes the
-                // value — and never wraps to the opposite end.
                 const dx = px - knob.width / 2
                 const dy = py - knob.height / 2
                 const deg = Math.atan2(dx, -dy) * 180 / Math.PI

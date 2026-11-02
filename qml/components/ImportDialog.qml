@@ -2,25 +2,8 @@ import QtQuick
 import Qt.labs.platform as Platform
 import VGRPresenterUI
 
-// The Import screen (FreeShow's Import popup, File > Import): every file format the app reads, laid out the way FreeShow lays them
-// out - its own files up front (song/presentation file, project file, "More options" for templates / actions / stage layouts /
-// themes), "Paste from clipboard", Media import (Lessons.church, PDF, PowerPoint), Text import (a card for every song and lyric
-// format), and the scripture and calendar formats.
-//
-// The list itself is the ENGINE's (ImportService.formats, from bps::import::ImportFormats): which formats exist, their sections,
-// which are up front, the extensions each opens and the note that goes with it. This draws it, opens the file picker filtered to
-// the format, and hands the picked files to the engine, which converts them. A format the engine has not written a converter for
-// yet is shown dimmed and says so.
-//
-// Literal colours, not Theme.* (a modal opened from the window root, like the other modal cards).
 Item {
     id: root
-    // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog. Bumped
-    // to the top of ModalStack's shared counter whenever this opens (see
-    // onOpenChanged below and ModalStack.qml's own comment) — a flat 30000
-    // shared with every other modal in the app stacked simultaneously-open
-    // dialogs by declaration order, not by which one actually opened last.
     z: ModalStack.base
 
     // Resolved automatically from ModalStack's open-dialog stack — see
@@ -77,21 +60,11 @@ Item {
             EventBus.notify(format.tutorial, "info", format.name, "import.tutorial")
         root.pendingFormat = format.id
         root.pendingFilter = format.filter
-        // The format's OWN patterns only - "All files" is not offered beside
-        // them. A file of another type could only be refused later by the
-        // importer (that is what the format's extension list encodes), so the
-        // second entry turned a wrong choice into a failed import instead of
-        // letting the picker stop it. Formats that declare no extensions
-        // (OpenSong, SongBeamer) arrive with the all-files filter AS their
-        // filter, so they are unaffected.
         picker.nameFilters = [format.filter]
         picker.open()
     }
 
     function finish(answer) {
-        // importFiles returns { ok, started } immediately and reports the real
-        // outcome later via ImportService.finished — the dialog stays up with
-        // a progress overlay while the sweep runs, closing on success.
         if (answer.started) return
         if (answer.ok)
             root.closed()
@@ -102,9 +75,6 @@ Item {
         function onFinished(answer) {
             if (answer.ok) root.closed()
         }
-        // The clipboard read runs on a worker (the PAL's clipboard open waits
-        // out another process's write — see ImportService::importClipboard), so
-        // the dialog is finished by the answer rather than by the click.
         function onClipboardImported(result) {
             if (!root.awaitingClipboard)
                 return
@@ -138,9 +108,6 @@ Item {
         height: 60
         radius: 8
         color: hover.hovered && card.format.available ? Theme.hoverBg : Theme.rowBg
-        // The "primary" format card reads as the brighter one (its border was a
-        // lighter shade than a plain card's); Theme has no strong-border token, so
-        // the brighter outline is derived from the divider token.
         border.color: card.format.primary ? Qt.lighter(Theme.borderSubtle, 1.3) : Theme.borderSubtle
         border.width: 1
         opacity: card.format.available ? 1 : 0.5
@@ -221,15 +188,8 @@ Item {
 
     Rectangle {
         id: dialogCard
-        // Hook for the modal-fit scenario — same convention as ModalCard's card:
-        // the modal ROOT always fills the window, so only the card can show the
-        // scale it is drawn at.
         objectName: root.objectName === "" ? "" : root.objectName + "_card"
         anchors.centerIn: parent
-        // The app's one scale, on the card (see AppScale.qml) — never on the root
-        // above, whose scrim IS the dialog's black box and has to stay
-        // window-sized. Centred, so scaling about the centre leaves it where it
-        // was, in proportion with the screens behind it.
         scale: AppScale.cardScale(dialogCard)
         transformOrigin: Item.Center
         width: Math.min(parent.width - 48, 900)
@@ -393,13 +353,6 @@ Item {
         }
     }
 
-    // The async import's progress overlay: the window would otherwise sit
-    // silent (or frozen, in the pre-thread era) for a large batch. Declared
-    // LAST (a sibling of dialogCard, after it) — QML paints later siblings
-    // on top, and dialogCard's own opaque background was hiding this
-    // completely even while ImportService.busy was genuinely true: the
-    // sweep visibly ran (progress/status updated, the log showed it), but
-    // nothing on screen said so, which is exactly what read as a hang.
     Rectangle {
         anchors.fill: parent
         visible: ImportService.busy

@@ -2,22 +2,8 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// "Select Style" picker — opens from the Outputs Edit dialog's Style row
-// (see OutputsScreen.qml) instead of the old inline chip Flow, matching the
-// same scrim + centered card + preview-grid convention as
-// CameraSourceModal.qml/MediaSourceModal.qml/ShapeSourceModal.qml.
-//
-// Cards preview the style's ACTUAL background colour now that the model
-// carries one ("transparent" falls back to the deterministic swatch cycle).
-// A "None" card leads the grid: an output with no style renders unstyled
-// (the engine's default composition) — the same "style: optional" contract
-// FreeShow's picker has.
 Item {
     id: root
-    // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog.
-    // This picker opens over the Edit Output dialog on the shared window
-    // overlay, so it needs a higher layer than the dialog's modal card.
     z: 31000
 
     property bool open: false
@@ -40,9 +26,6 @@ Item {
         }
     }
     Component.onDestruction: Hotkeys.close(root.hotkeyScope)
-    // Selection by the style's STABLE id ("" = the None card). Ids survive
-    // roster edits between the dialog opening and the pick landing; an id
-    // that no longer exists reads as None.
 
     // A handful of distinguishable swatch colors, cycled by index — not
     // meant to represent any real per-style color (none exists yet).
@@ -58,9 +41,6 @@ Item {
         return swatch || Theme.windowBg
     }
 
-    // Selection by the style's STABLE id ("" = the None card). Ids survive
-    // roster edits between the dialog opening and the pick landing; an id
-    // that no longer exists reads as None.
     property string selectedId: ""
 
     // Fired when "Select" is clicked, carrying the picked style's id
@@ -71,13 +51,6 @@ Item {
     anchors.fill: parent
     visible: root.open
 
-    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
-    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
-    // the whole app, not just that page's content column: parented in place its scrim
-    // covered one side of the settings card, so the dialog read as half-modal (user
-    // report: "the black box doesn't cover the whole settings modal, only one side").
-    // Reparented to the window overlay, this component has no scaled ancestor to
-    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
     parent: Overlay.overlay
 
     ModalScrim {
@@ -127,30 +100,9 @@ Item {
                         font.weight: Font.DemiBold
                     }
 
-                    Rectangle {
+                    ModalCloseButton {
                         id: closeBtn
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 28
-                        height: 28
-                        radius: 7
-                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✕"
-                            color: Theme.textSecondary
-                            font.pixelSize: 14
-                        }
-
-                        MouseArea {
-                            id: closeArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.cancelled()
-                        }
+                        onClicked: root.cancelled()
                     }
                 }
 
@@ -184,9 +136,6 @@ Item {
                 columnSpacing: 14
                 rowSpacing: 14
 
-                // "None" — no style. selectedId "" both means "None is picked
-                // here" and is what applied() carries for it, matching
-                // OutputListModel's "" styleId through OutputsScreen's mapping.
                 Rectangle {
                     readonly property bool selected: root.selectedId === ""
                     width: (parent.width - 28) / 3
@@ -272,9 +221,6 @@ Item {
                         border.color: styleCard.selected ? Theme.accent : Theme.borderSubtle
                         Behavior on border.color { ColorAnimation { duration: 100 } }
 
-                        // Preview "slide" — the style's real background when it
-                        // has one; the deterministic swatch cycle only covers
-                        // "transparent" (no colour to show).
                         Rectangle {
                             x: 10
                             y: 10

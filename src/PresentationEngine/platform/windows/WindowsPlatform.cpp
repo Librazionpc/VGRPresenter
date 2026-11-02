@@ -18,20 +18,10 @@
 #include <vector>
 
 namespace bps::platform {
-
 namespace {
-
 // ---------------------------------------------------------------------------
 // Live health counters (PDH)
 // ---------------------------------------------------------------------------
-// The three "how is this machine doing right now" numbers the Settings health
-// surface shows: GPU engine utilization, the CPU's actual speed as a percent of
-// its nominal clock (% Processor Performance — below 100 means the part is
-// being held under nominal, i.e. power/thermal throttling), and a best-effort
-// package temperature from the ACPI thermal zones. PDH is Windows' documented
-// performance-counter API; nothing here is required for the engine to run, so
-// any failure just leaves the field at its -1 "not measured" default instead of
-// failing the Sample() the ResourceManager also depends on.
 class HealthCounters {
 public:
     struct Values {
@@ -49,9 +39,6 @@ public:
         if (PdhCollectQueryData(query_) != ERROR_SUCCESS)
             return v;
         if (gpu_) {
-            // THIS process only: the counter lists every process on every adapter, and
-            // the machine-wide sum read as "the app uses 51%" while a browser or the
-            // desktop compositor was doing it. Left at -1 when nothing reported at all.
             const double gpu = OwnGpu(gpu_);
             if (gpu >= 0.0)
                 v.gpuPct = Clamp(gpu, 0.0, 100.0);
@@ -129,10 +116,6 @@ private:
         return any ? total : -1.0;
     }
 
-    // GPU Engine instances are named "pid_<pid>_luid_..._phys_N_eng_N_engtype_<kind>".
-    // This process's load is, like Task Manager, its busiest engine type (3D, Copy,
-    // VideoEncode...) summed over its instances. A process that has touched no engine
-    // has no instance: that is 0 while the counter is alive, not "unmeasured".
     double OwnGpu(PDH_HCOUNTER counter)
     {
         const std::wstring tag = L"pid_" + std::to_wstring(GetCurrentProcessId()) + L"_";
@@ -185,7 +168,6 @@ HealthCounters &Health()
     static HealthCounters counters;
     return counters;
 }
-
 } // namespace
 
 std::string WindowsPlatform::OsVersion() const { return environment_.Current().osVersion; }
@@ -208,15 +190,6 @@ SystemInfo WindowsPlatform::Info() {
     return info;
 }
 
-// The process's live thread count. Toolhelp32 is fully documented (unlike
-// NtQuerySystemInformation), but it ENUMERATES THE WHOLE SYSTEM to answer this
-// one question, so the answer is kept for kThreadCountRefreshMs: re-walking on
-// every Sample() (2-4 times a second across the engine's samplers) measured
-// 60-115 ms per call on a ~6900-thread machine.
-//
-// The last known count covers the window, refreshed by whichever sampler gets
-// there first. 0 means "not measured yet" and the walk is then retried on the
-// next call rather than reporting a stale zero.
 uint64_t WindowsPlatform::ThreadCount() {
     const auto now = std::chrono::steady_clock::now();
     {
@@ -227,9 +200,6 @@ uint64_t WindowsPlatform::ThreadCount() {
             return threadCount_;
     }
 
-    // The walk itself runs with NO lock held: it is an OS call over thousands of
-    // threads, and a second sampler arriving meanwhile may simply walk too — the
-    // count is the same and the cost is bounded by the window, not by arrivals.
     uint64_t count = 0;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap != INVALID_HANDLE_VALUE) {
@@ -253,23 +223,6 @@ uint64_t WindowsPlatform::ThreadCount() {
     return threadCount_;
 }
 
-// The audio + video device fingerprints the hot-plug check compares.
-//
-// WHY THIS IS CACHED: both "fingerprints" are FULL device enumerations, not
-// cheap reads — the audio one walks WASAPI endpoints and the video one walks
-// Media Foundation's device sources (WindowsVideo::Enumerate →
-// MFEnumDeviceSources → MFTEnumEx), which opens a device-access handle per
-// device path under the hood. PollChanges is drained by the Kernel's platform
-// watcher on a 1 s tick, so those walks ran a full enumeration EVERY SECOND for
-// the life of the process, and that is the app's idle kernel-handle leak: with
-// it on the stack, `probe_handles.exe` measured ~20 File + ~20
-// WaitCompletionPacket + ~130 Event handles accumulating per second on an idle
-// process (and WindowsVideo::Enumerate accounted for two thirds of the file
-// opens in a gdb trace of NtCreateFile). A device roster does not change faster
-// than a person can plug in a camera, so the walk is kept for
-// kDeviceFingerprintRefreshMs and answered from the cache in between — the same
-// trade the thread count above already documents, and hot-plug detection moves
-// from "within 1 s" to "within 5 s" because of it.
 void WindowsPlatform::DeviceFingerprints(std::string& audioFp, std::string& videoFp) {
     const auto now = std::chrono::steady_clock::now();
     {
@@ -283,9 +236,6 @@ void WindowsPlatform::DeviceFingerprints(std::string& audioFp, std::string& vide
         }
     }
 
-    // The walks themselves run with NO lock held: they are PAL/COM/MF calls that
-    // open devices, and a second caller arriving meanwhile may simply walk too —
-    // the answer is the same and the cost stays bounded by the window.
     const std::string freshAudio = audio_.Fingerprint();
     const std::string freshVideo = video_.Fingerprint();
 
@@ -352,16 +302,6 @@ Snapshot WindowsPlatform::Sample() {
     GetNativeSystemInfo(&si);
     s.coreCount = si.dwNumberOfProcessors > 0 ? si.dwNumberOfProcessors : 1;
 
-    // Live thread count for this process, at most every kThreadCountRefreshMs
-    // (see ThreadCount()). This reading is NOT free: the snapshot enumerates
-    // every thread on the MACHINE to count the ones belonging to this process,
-    // and that walk measured 60-115 ms on a machine with ~6900 threads (a probe
-    // against the running app; the PDH counters this same Sample() reads cost
-    // ~1 ms). Sample() is called several times a second — the ResourceManager's
-    // sampler, the adaptive heartbeat and the interface's own health poll — so
-    // an unthrottled walk was a steady ~0.25 of a core of pure idle overhead,
-    // and catching it costs nothing worth having: a thread count only moves when
-    // a thread is created or destroyed.
     s.threadCount = ThreadCount();
 
     // The main graphics adapter's own video memory, from DXGI (asked once; see WindowsGpu.cpp).
@@ -419,11 +359,6 @@ std::vector<OsEvent> WindowsPlatform::PollChanges() {
     }
     lastPower_ = p;
 
-    // Audio device hot-plug (DoD §13): the endpoint roster's ids change when
-    // devices are added/removed. Both fingerprints come from DeviceFingerprints(),
-    // which re-walks them at most every kDeviceFingerprintRefreshMs — a cache hit
-    // returns the value last walked, which is also what lastAudioFp_/lastVideoFp_
-    // hold, so an unchanged roster reports nothing either way.
     std::string audioFp, videoFp;
     DeviceFingerprints(audioFp, videoFp);
 
@@ -443,5 +378,4 @@ std::vector<OsEvent> WindowsPlatform::PollChanges() {
 
     return events;
 }
-
 } // namespace bps::platform

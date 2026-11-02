@@ -1,29 +1,5 @@
 #pragma once
 
-// DesignLibrary: a user's library of DESIGNS - things made on the Edit screen's canvas out of content
-// blocks - filed in CATEGORIES. One implementation serves every kind of design the app keeps:
-//   * OVERLAYS  - graphics laid over slides (a lower third, a clock, a recording marker); the app ships
-//                 some (the "Visuals" category and its overlays), see MakeOverlayLibrary
-//   * TEMPLATES - reusable slide layouts whose blocks are bound to slide fields; the app ships none, the
-//                 user's own only, see MakeTemplateLibrary
-// The DesignLibraryConfig says what is different (the noun, the shipped categories/designs, what a new
-// design starts as); everything else - filing, searching, counting, saving, block editing - is here once.
-//
-// A design's CONTENT is exactly what the engine already uses everywhere else: a background and a list of
-// presentation::ContentBlock (positioned on the Edit screen's stage, kStageWidth x kStageHeight units). That is
-// what lets the Edit screen edit any design with the code it uses for slides, and lets a library template be
-// embedded into a show as a plain presentation::SlideTemplate (AsTemplate). It is stored in that same
-// schema (PresentationSerializer's template body), so the block format is written and read in one place.
-//
-// Modelled on FreeShow's overlay / template lists (drawer/pages/Overlays, Templates and their navigation tabs):
-// categories with icons, an "unlabeled" bucket, default items that are protected from renaming (categories) or
-// can be deleted and restored (designs), and per-design flags.
-//
-// Persistence: one JSON file per library (categories, designs, which shipped designs were deleted). A missing
-// file is an empty library plus what ships; a damaged one is reported and replaced by what ships.
-//
-// Thread-safety: every method may be called from any thread.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 
@@ -37,7 +13,6 @@
 #include <vector>
 
 namespace bps::library {
-
 // The Edit screen's canvas, in the units every block's x/y/width/height (and font size) are in.
 inline constexpr double kStageWidth = 754.0;
 inline constexpr double kStageHeight = 428.0;
@@ -45,29 +20,6 @@ inline constexpr double kStageHeight = 428.0;
 // Filter value for "designs that are in no category".
 inline constexpr std::string_view kUnlabeled = "unlabeled";
 
-// THE SHIPPED CONTENT'S REVISION. It is stored in each library document, and a
-// library written under an older revision is migrated ONCE on Load. The installer
-// seed catalogs (installer/seed-data/local/*.json) carry the same number, so a
-// fresh install starts current instead of rewriting itself on first boot.
-//
-// Why it has to exist: shipped designs are seeded into a store only when the
-// store does not already hold them (EnsureDefaultsLocked), so a change to the
-// catalog only ever reached a fresh install.
-//
-// Revision 2 made the catalogs FONT-FREE (no design names a font family — the
-// renderer resolves "none" to the host's UI face) and stripped the two faces the
-// catalogs used to write by name, "Segoe UI" and "Arial". That was too narrow: the
-// seeded catalogs had also picked up the AUTHORING MACHINE's faces on a handful of
-// shipped designs ("TT Nooks Trial", "Cambria Math", "Inter", "Segoe UI Semibold"),
-// and those survived the migration — a shipped template still naming a font no
-// other install has, which is the exact defect the font-free catalog removes.
-//
-// Revision 3 is the rule stated plainly: a SHIPPED design names no font at all, so
-// the migration drops the fontFamily key from every block of a default design. The
-// user's own designs — and a copy they made of a shipped one — keep the family they
-// chose; refreshing the app's defaults never reaches into their work.
-//
-// Bump this when the catalog changes something an existing install must pick up.
 inline constexpr int kCatalogRevision = 3;
 
 struct Design {
@@ -132,17 +84,10 @@ public:
     Result<void> DeleteCategory(std::string_view id);
 
     // ---- designs ----
-    // Every design in name order (case-insensitive, numbers in natural order), or only those in `filter` -
-    // "" = all, kUnlabeled = in no category, otherwise a category id (an unknown id lists nothing).
-    // With `query`, only the designs whose NAME matches it: every word has to appear, in any order, and a name
-    // that starts with the first word ranks above one that only contains it.
     std::vector<Design> Designs(std::string_view filter = {}, std::string_view query = {}) const;
     Result<Design> Get(std::string_view id) const;
     DesignCounts Counts() const;
 
-    // A new design holding the config's starter blocks, in category `categoryId` ("" = unlabeled). `name`
-    // empty gives the config's default name numbered ("Overlay", "Overlay 2", ...). InvalidArgument for an
-    // unknown category.
     Result<Design> Create(std::string_view name = {}, std::string_view categoryId = {});
     // A copy named "<name> copy", never shipped and never locked. NotFound for an unknown id.
     Result<Design> Duplicate(std::string_view id);
@@ -164,9 +109,6 @@ public:
     // ---- content: what the Edit screen edits ----
     // Replaces the canvas: its background and every block (what the Edit screen sends when an edit settles).
     Result<void> SetContent(std::string_view id, std::string background, std::vector<presentation::ContentBlock> blocks);
-    // Block edits, engine-first like a slide's (ShowEditor's rules): the ENGINE issues the block id ("item-N",
-    // unique within the design), so the UI never invents one. `above` (a block id) places the new block
-    // directly above it, "" puts it on top.
     Result<std::string> AddBlock(std::string_view id, presentation::ContentBlock block, std::string_view above = {});
     // A copy offset by (20, 20), directly above the original; returns its id.
     Result<std::string> DuplicateBlock(std::string_view id, std::string_view blockId);
@@ -176,22 +118,11 @@ public:
     // The design as a slide template (its blocks keep their `bind`), e.g. to embed a library template in a show.
     Result<presentation::SlideTemplate> AsTemplate(std::string_view id) const;
 
-    // The document this library saves — categories, designs, which shipped ones were deleted, and the
-    // shipped-content revision. It is also the SEED the installer ships: tools/make_installer.sh asks
-    // bps_cli for it (see SeedStoreJson), so a shipped library is always what THIS build's catalogs say
-    // — never a copy of somebody's appdata, which is how the shipped templates once carried the fonts
-    // of the machine they were copied from.
     std::string StoreJson() const;
 
     const DesignLibraryConfig& Config() const { return config_; }
 
 private:
-    // SPLIT IN TWO ON PURPOSE (the lock-scope rule this module was breaking):
-    // BuildStoreJsonLocked runs with mutex_ HELD and is pure serialization — no
-    // PAL, no provider, nothing that can block. CommitSave does the PAL write and
-    // must be called AFTER the lock is released: the two used to be one helper
-    // (SaveLocked) called from inside every mutator's locked scope, so a disk
-    // write sat on the interface thread with the design library parked behind it.
     std::string BuildStoreJsonLocked() const;
     // Writes the text BuildStoreJsonLocked() produced. PAL: NEVER call with
     // mutex_ held. "" / no store path is a no-op.
@@ -212,5 +143,4 @@ private:
     std::vector<Design> designs_;
     std::set<std::string, std::less<>> deletedDefaults_;   // ids of shipped designs the user deleted
 };
-
 } // namespace bps::library

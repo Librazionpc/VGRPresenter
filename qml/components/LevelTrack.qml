@@ -1,17 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The small level meter on a routing-board card (audio rows, video media rows, buses).
-// FreeShow's own compact meter (src/frontend/components/drawer/live/Mic.svelte): a signal
-// dot beside a thin bar. The bar's a CONTINUOUS gradient (cyan -> green -> amber -> red),
-// not discrete LED segments — a faint "ghost" of the full range stays visible at rest (so
-// the scale reads even at silence), and the lit portion reveals left-to-right as `value`
-// rises. Extracted so track/fill geometry can't drift across delegates — place it and give
-// it `value` (0..100, clamped).
-//
-// COLOR IS VALUE-DRIVEN, like a real VU meter, EXCEPT when a caller passes a deliberate
-// fixed color (fixedColor: true — e.g. a bus row tinting by TYPE, not level): then the bar
-// is a flat fill in that color instead of the gradient, same as before.
 Item {
     id: root
 
@@ -19,19 +8,11 @@ Item {
     // Used only when fixedColor is set; otherwise the bar is the gradient below.
     property color fillColor: Theme.success
     property bool fixedColor: false
-    // The signal dot that normally leads the bar. Off where the strip is drawn
-    // BESIDE a dot that already exists (Settings · Routing's port dots), so the
-    // meter is the bar alone instead of a second, smaller dot next to the first.
     property bool showDot: true
 
     implicitWidth: 100
     implicitHeight: 4
 
-    // `value` (0..100) is a raw LINEAR amplitude percentage straight off the
-    // WASAPI tap. Meters read in dB, not linear amplitude, so the FILL is
-    // mapped on the same -60..0 dB scale the gradient's zones assume — the
-    // one shared mapping lives in the Db singleton (was a private copy here,
-    // OutputMonitorTile and ProAudioForm; three copies, three ways to drift).
     readonly property real pct: Db.pct(root.value)
     // "is anything coming in at all" — mirrors Mic.svelte's rawDb > -60 dot: a small
     // nonzero floor so a hair of noise floor doesn't flicker the dot on its own.
@@ -63,9 +44,6 @@ Item {
         Item {
             id: bar
             anchors.verticalCenter: parent.verticalCenter
-            // No dot means the whole width is bar: subtracting a hidden dot's
-            // width AND the row's spacing would leave the bar short of the track
-            // it is supposed to fill.
             width: parent.width - (root.showDot ? dot.width + parent.spacing : 0)
             height: parent.height
 

@@ -1,6 +1,3 @@
-// Unit tests: Bible Engine (docs/specs/24).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests bible
 #include "TestHarness.hpp"
 
 #include "modules/presentation/BookFill.hpp"
@@ -101,9 +98,6 @@ void TestBibleProviders() {
     auto vN = eng.GetVerse("NBS", "JHN", 3, 16);
     CHECK(vN.ok() && vN.value().text.find("loved the world") != std::string::npos);
 
-    // Real Zefania shape: <XMLBIBLE> root, uppercase tags throughout, the
-    // bnumber/cnumber/vnumber attribute spellings, and the bible name in
-    // <information><biblename> — as distributed on bible websites.
     const char* zefCaps =
         "<XMLBIBLE biblename=\"King James Caps\" status=\"v\">"
         "<BIBLEBOOK bnumber=\"43\" bname=\"John\">"
@@ -120,9 +114,6 @@ void TestBibleProviders() {
     auto capsBible = eng.GetBible("ZFNC");
     CHECK(capsBible.ok() && capsBible.value().metadata.name == "King James Caps");
 
-    // OSIS content that ships in a ".xml" file: the extension-based lookup
-    // must fall back to the OSIS provider when the Zefania XML provider
-    // declines the payload (docs/specs/24 §Providers).
     const char* osisXml =
         "<osis><osisText>"
         "<div type=\"book\" osisID=\"Jhn\"><title>John</title>"
@@ -277,10 +268,6 @@ void TestBibleEngine() {
     CHECK(none.ok());
 
     // ---- the chapter lock: the search can be scoped to the open passage --------
-    // The reference panes' book pill locks the search to what is on screen.
-    // "shall" lives in BOTH books of this fixture (John 3:16 "shall not perish",
-    // Psalm 23:1 "I shall not want"), so the same query shows the scope really
-    // narrows — it is a narrowing of the SEARCH, not a label on the box.
     {
         auto both = eng.Search("shall", "TEST");
         bool anyPsalm = false, anyJohn = false;
@@ -465,10 +452,6 @@ void TestBiblePersistence() {
 }
 
 // ---------------------------------------------------------------------------
-// User-data persistence: notes, highlights, and collections survive a full
-// engine restart when a store path is set (they ride their OWN file beside the
-// corpus — bibles.userdata.json, schema 3) and stay in memory without one — the parity
-// The Table's library has had all along (docs/specs/24 §User Data).
 // ---------------------------------------------------------------------------
 void TestBibleUserDataPersist() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -560,17 +543,6 @@ void TestBibleUserDataPersist() {
 }
 
 // ---------------------------------------------------------------------------
-// A MARK ON A VERSE WRITES THE SIDECAR, NOT THE CORPUS.
-//
-// setNote/setHighlighted are Q_INVOKABLE on a QML singleton, so their cost is
-// the INTERFACE thread's, and the path used to be: read the corpus from disk,
-// parse it (megabytes of verse text — a real dev store is 5.8 MB for one Bible)
-// and write it back, all under the engine lock every scripture read takes. The
-// guarantee this test pins is the cheap one to check and the expensive one to
-// lose: after the schema-3 switch a mark touches ONE small file, and the corpus
-// must be BYTE-IDENTICAL afterwards — not merely re-readable, because a rewrite
-// that happened to produce the same bytes would still have paid the parse, the
-// write and the lock.
 // ---------------------------------------------------------------------------
 void TestBibleMarkWritesOnlyTheSidecar() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -642,26 +614,6 @@ void TestBibleMarkWritesOnlyTheSidecar() {
 }
 
 // ---------------------------------------------------------------------------
-// WHAT A MARK COSTS, IN MILLISECONDS — the number the sidecar split is FOR.
-//
-// The test above pins the cheap-to-check half (one small file, corpus
-// byte-identical). This one puts a wall-clock figure on it, because "a mark no
-// longer rewrites the corpus" is a claim about TIME: setNote/setHighlighted are
-// Q_INVOKABLE on a QML singleton, so their cost is the interface thread's, and
-// what the operator feels is milliseconds, not bytes.
-//
-// Measured on a corpus the size of a real one (the dev store is 5.8 MB for one
-// Bible), the two numbers are the evidence, side by side:
-//   * `corpus rewrite` — read the store and write it back: what the OLD path
-//     paid per mark (it read the corpus, parsed it and rewrote it, all under the
-//     engine lock every scripture read takes);
-//   * `mark` — what the path pays now (build the sidecar JSON, write kilobytes).
-//
-// The bounds are deliberately loose — a wall-clock figure on a shared machine is
-// evidence, not a specification — and are there only to catch a regression back
-// to the corpus write: the mark must come in far under the rewrite, and under a
-// bound a multi-megabyte rewrite cannot meet by accident. The printed figures
-// are the real output (stderr, greppable as `[mark-timing]`).
 // ---------------------------------------------------------------------------
 void TestBibleMarkTiming() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -736,9 +688,6 @@ void TestBibleMarkTiming() {
     }
     const long long markUs = markTotalUs / kMarks;
 
-    // The corpus did not move a byte through any of the marks (the same guarantee
-    // the other test pins by content; here it also means the timing above is the
-    // mark path and nothing else).
     const auto after = fs.ReadText(store);
     CHECK(after.ok() && before.ok() && after.value() == before.value());
 
@@ -761,13 +710,6 @@ void TestBibleMarkTiming() {
                  static_cast<double>(markWorstUs) / 1000.0,
                  static_cast<double>(rewriteUs) / static_cast<double>(markUs ? markUs : 1));
 
-    // A mark must be far cheaper than the rewrite it replaced, and cheap enough
-    // in absolute terms that no corpus write of this size can be hiding in it.
-    // The margin is 3x, not the 12x measured here: this number is evidence from a
-    // shared machine (a background build moves it), and the point of the bound is
-    // to catch the regression — a mark that reads, parses or rewrites the corpus
-    // again lands at or above the rewrite — not to re-state the speedup. The real
-    // figure is the one printed above.
     CHECK(markUs * 3 < rewriteUs);
     CHECK(markUs < 50000);   // < 50 ms on the interface thread
     // The sidecar is kilobytes; the corpus is megabytes. If those ever swap, the
@@ -780,11 +722,6 @@ void TestBibleMarkTiming() {
 }
 
 // ---------------------------------------------------------------------------
-// The schema-2 -> schema-3 MIGRATION: a store an older build left behind has
-// the user data INSIDE the corpus. The boot must read it from there, write the
-// sidecar, and keep the notes across restarts — without ever losing them to a
-// failed write (which is why the corpus keeps carrying the data until the
-// sidecar write succeeds, and why this test checks the second restart too).
 // ---------------------------------------------------------------------------
 void TestBibleUserDataMigration() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -956,19 +893,11 @@ void TestBookFill() {
     CHECK(pf::FillBookSlides({ text("{scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "And the earth was without form, and void.");
     // and in a template that does not name the verse at all the number always stays
     CHECK(pf::FillBookSlides({ text("{scripture_text}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
-    // a template that RESERVES a number slot ({scripture_number}) keeps the number even
-    // for a single verse with the verse in the reference — the marker is the author's
-    // explicit "render the number here" request (the old heuristic suppressed it and the
-    // number vanished everywhere)
     CHECK(pf::FillBookSlides({ text("{scripture_number} {scripture_text}"), text("{scripture_reference}") }, single, {}, true)[0].blocks[0].text == "2 And the earth was without form, and void.");
     // the other Bibles of a parallel set are blank, {scripture_number} is only a style marker
     CHECK(pf::FillBookSlides({ text("{scripture2_text}|{scripture1_name}|{scripture_number}x") }, src, {}, true)[0].blocks[0].text == "|King James Version|x");
 
     // ---- {table_code}: the citation's code alone, and The Table's only ----
-    // A sermon is cited by its date code; a template with room for a date code
-    // has nowhere to put the whole citation line {scripture_book} writes. Blank
-    // for Scripture (a verse has no date code), and a template whose ONLY
-    // placeholder is the code still counts as one the engine fills.
     pf::BookSource sermon = src;
     sermon.book = "47-0412 - Faith Is The Substance";
     sermon.code = "47-0412";
@@ -1001,12 +930,6 @@ void TestBookFill() {
     fixed.maxPerSlide = 3;
     auto even = pf::FillBookSlides(tmpl, five, fixed);
     CHECK(even.size() == 2 && even[0].reference == "Genesis 1:1-2" && even[1].reference == "Genesis 1:3-4");
-    // THE TEMPLATE'S TEXT BOX NO LONGER DECIDES ANYTHING. It used to be a second,
-    // tighter budget (its estimated character capacity over six), which is how
-    // "Max words per slide: 40" silently produced four-word parts. The box's
-    // geometry is deliberately the same as the old smart-split check's small one:
-    // the slides a fill produces must not change with it any more. (`five` is the
-    // four-verse set left after the EVEN-share check above.)
     std::vector<pf::ContentBlock> smallBox = { text("{scripture_text}", {}, 60) };
     smallBox[0].width = 400; smallBox[0].height = 200;       // a box the old rule measured as ~2 lines
     std::vector<pf::ContentBlock> bigBox = { text("{scripture_text}", {}, 60) };
@@ -1015,9 +938,6 @@ void TestBookFill() {
     CHECK(pf::FillBookSlides(smallBox, five, {}).size() == 2);   // Scripture's own cap of 3, box or no box
     pf::BookSource fiveVerses = five;
     fiveVerses.items.push_back(verse(5, "Verse number 5 text."));
-    // The packing cap is a HARD CAP, and it is no longer a control: Scripture's
-    // number comes from the caller (AppSettings gives it three), so five verses
-    // still split 3 + 2 rather than taking all five.
     auto capped = pf::FillBookSlides(tmpl, fiveVerses, {});   // big box, Scripture's cap of 3
     CHECK(capped.size() == 2 && capped[0].reference == "Genesis 1:1-3" && capped[1].reference == "Genesis 1:4-5");
     // ...and THE TABLE takes one paragraph to a slide: the same five items take a
@@ -1031,10 +951,6 @@ void TestBookFill() {
     // ---- long verses divided ----
     pf::BookSource longOne = src;
     longOne.items = { verse(1, "one two three four five six seven eight nine ten eleven twelve") };
-    // The budget is in WORDS ("max words per slide"), not characters, and it is
-    // THE rule. Twelve words with a four-word budget is three parts of four — the
-    // even share and "fill each part" are the same answer when the text divides
-    // exactly.
     pf::BookFillOptions split; split.splitLongItems = true; split.wordsPerSlide = 4; split.maxPerSlide = 1;
     auto parts = pf::FillBookSlides({ text("{scripture_text}") }, longOne, split);
     CHECK(parts.size() == 3);
@@ -1046,13 +962,6 @@ void TestBookFill() {
         CHECK(parts[1].blocks[0].text == "five six seven eight");
         CHECK(parts[2].blocks[0].text == "nine ten eleven twelve");
     }
-    // NO LEFTOVER PARTS. The rule is "the fewest parts the budget allows, holding
-    // as close to the same number of words as they can" — a report put it as "find
-    // a way to treat this so we don't always have all this three words remainder",
-    // with a paragraph that came out as one full slide and one holding "can be
-    // done.". Thirteen words at a four-word budget is four parts (four three-word
-    // parts, not three of four with a stray word pushed onto the last): 4 + 3 + 3 + 3,
-    // and 4 + 4 + 4 + 1 is exactly the shape that does not exist any more.
     pf::BookSource thirteen = src;
     thirteen.items = { verse(1, "one two three four five six seven eight nine ten eleven twelve thirteen") };
     auto tail = pf::FillBookSlides({ text("{scripture_text}") }, thirteen, split);
@@ -1063,9 +972,6 @@ void TestBookFill() {
         CHECK(tail[2].blocks[0].text == "eight nine ten");
         CHECK(tail[3].blocks[0].text == "eleven twelve thirteen");
     }
-    // The reported shape itself: a 43-word paragraph at a 40-word budget is two
-    // parts of 22 and 21 — NOT 40 + 3. Every part is base or base+1 of
-    // total/parts, so the budget is respected AND no part is the remainder.
     {
         std::string words43;
         for (int n = 1; n <= 43; ++n) {
@@ -1098,46 +1004,23 @@ void TestBookFill() {
     CHECK(old.size() == 1 && old[0].blocks[0].text.rfind("1 In the beginning", 0) == 0 && old[0].blocks[1].text == "Genesis 1:1-3" && old[0].blocks[2].text == "Static");
 
     // ---- THE FAMILY IS NAMED, NOT INFERRED FROM A MISSING CHAPTER ----
-    //
-    // A Bible writes its chapter and joins its items with a colon; a citation
-    // writes no chapter (its `book` IS the citation line) and joins with a space.
-    // The JOINER follows the FAMILY, not the chapter — the old `chapter > 0` test
-    // made "chapter zero" a hidden synonym for "a sermon", so a Bible-shaped
-    // selection that happened to have no chapter (or a sermon whose citation came
-    // with a number) produced the other family's reference.
     CHECK(pf::BookReference("47-0412 - Faith Is The Substance", 0, { 1, 2, 3 }, pf::ContentFamily::Table)
           == "47-0412 - Faith Is The Substance 1-3");
     CHECK(pf::BookReference("Genesis", 0, { 1, 2, 3 }, pf::ContentFamily::Scripture) == "Genesis:1-3");
     // a sermon's citation never grows a chapter, even when a caller sets one
     CHECK(pf::BookReference("47-0412 - Faith", 5, { 2 }, pf::ContentFamily::Table) == "47-0412 - Faith 2");
 
-    // The three BIBLE-ONLY facts answer empty on a sermon whatever the caller put
-    // in them (this is what kept the tab's own brand string, which used to be
-    // assigned to `versionName`, out of {scripture_name} — a slot that means
-    // "King James Version") ...
     const std::vector<pf::ContentBlock> facts = { text("N={scripture_name}|A={scripture_book_abbr}|C={scripture_chapter}") };
     CHECK(pf::FillBookSlides(facts, sermon, {}, true)[0].blocks[0].text == "N=|A=|C=");
     // ...and they DO answer for a Bible carrying the very same fields.
     CHECK(pf::FillBookSlides(facts, src, {}, true)[0].blocks[0].text == "N=King James Version|A=GEN|C=1");
 
-    // The single-item de-duplication (the reference already names the one picked
-    // item, so its leading number would say it twice) used to list only the
-    // scripture spellings, so the same single-paragraph pick kept a redundant
-    // leading number under The Table and dropped it under Scripture. One rule, one
-    // answer, both families.
     pf::BookSource oneParagraph = sermon;
     oneParagraph.items = { verse(3, "I trust that sometime when I come back again to Oakland") };
     const auto tableSingle = pf::FillBookSlides({ text("{table_text}"), text("{table_reference}") }, oneParagraph, {}, true);
     CHECK(tableSingle[0].blocks[0].text == "I trust that sometime when I come back again to Oakland");
     CHECK(tableSingle[0].blocks[1].text == "47-0412 - Faith Is The Substance 3");
 
-    // NOTHING IS MEASURED FROM THE TEMPLATE'S TEXT BOX ANY MORE. The box was a
-    // SECOND budget (its estimated capacity over six), which is how "Max words per
-    // slide: 40" silently became four words a slide; and because the estimate read
-    // the body slot's geometry, the same design split differently depending only on
-    // which spelling its author typed ({scripture_text} vs {scripture2_text}). Both
-    // are the same non-question now: the words-per-slide number alone decides, so a
-    // selection inside the budget fills the same however the box is spelled.
     pf::BookFillOptions noBoxCap; noBoxCap.maxPerSlide = 100;   // the cap out of the way: the word budget is all that is left
     std::vector<pf::ContentBlock> secondBible = smallBox;
     secondBible[0].text = "{scripture2_text}";
@@ -1145,14 +1028,6 @@ void TestBookFill() {
     CHECK(pf::FillBookSlides(secondBible, five, noBoxCap).size() == 1);     // ...in its second-Bible spelling too
 
     // ---- EVERY FIELD THE PALETTE OFFERS SHOWS A VALUE ON ITS OWN FAMILY ----
-    //
-    // The menu (MetadataFields.qml) offers exactly these tokens, and this is the
-    // check that each one a slide can carry renders something: a field the engine
-    // resolves to EMPTY on the family that owns it is a field that looks
-    // implemented in the menu and shows nothing on the slide — which is how
-    // {meta_copyright} and {scripture_book_abbr} behaved on a sermon while there
-    // was no way to say "not applicable" rather than "nobody filled this in".
-    // The two fixtures are filled the way the two services fill them.
     src.copyright = "Public domain.";
     sermon.year = "1947";
     sermon.title = "Faith Is The Substance";
@@ -1169,19 +1044,9 @@ void TestBookFill() {
                                "table_reference_last", "table_citation", "table_code", "table_code_paragraphs",
                                "table_year", "table_title" })
         CHECK(!field(token, sermon).empty());
-    // {scripture_number} / {table_number} are STYLE MARKERS, not values: they
-    // resolve to nothing on purpose (the engine draws the number separately), which
-    // is why they are not in the lists above.
     CHECK(field("scripture_number", src).empty() && field("table_number", sermon).empty());
 
     // ---- the registry's boot check asks the ENGINE this -------------------------
-    //
-    // MetadataFields.qml's palette offers these tokens per family and validates
-    // itself against the engine at load, so a chip the fill cannot answer for is
-    // reported instead of rendering nothing. The engine's half of that question is
-    // pinned here — the YESes a chip needs, and the NOs that keep a wrong chip out
-    // of the menu (a Bible-only fact asked of the sermon family), plus the NO that
-    // catches a MISSPELT token, which the fill blanks rather than leaking braces.
     for (const char* token : { "scripture_text", "scripture_verses", "scripture_reference", "scripture_reference_full",
                                "scripture_reference_last", "scripture_book", "scripture_book_abbr", "scripture_chapter",
                                "scripture_name", "meta_copyright", "scripture_number" })
@@ -1199,13 +1064,6 @@ void TestBookFill() {
           && !pf::FamilyAnswersToken(pf::ContentFamily::Scripture, "scripture_texts"));
 
     // ---- ONE ITEM OF A CHAPTER, WITHOUT READING THE CHAPTER AGAIN ----------------
-    //
-    // The chapter a tab cuts ahead of a click (SlideBuilder::warmChapter) is read ONCE,
-    // and each of its items is narrowed out of that one read. The narrowing must answer
-    // exactly what a per-item read would have — a warm split and a click that missed the
-    // warm can never be allowed to disagree. The subtle half is the parallel columns: a
-    // version that does not carry the item contributes NO column at all, which is what
-    // the per-item read reports too (it drops a column it filtered to nothing).
     {
         pf::BookSource chapter = src;
         chapter.items = { verse(1, "One."), verse(2, "Two."), verse(3, "Three.") };

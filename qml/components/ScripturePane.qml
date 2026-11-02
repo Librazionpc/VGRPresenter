@@ -1,10 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Scripture tab: ReferencePane (the shared scripture-architecture UI)
-// with the ScriptureService adapter. All data, search and slide-building
-// belong to the engine; this only binds the two together and carries the
-// Scripture-specific wording + chrome switches.
 ReferencePane {
     id: pane
 
@@ -25,9 +21,6 @@ ReferencePane {
         // the active output's style pills) and its display name for toasts.
         readonly property string contentType: "scripture"
         readonly property string tabLabel: qsTr("Scripture")
-        // REGISTERED settings key remembering the last-opened Bible across
-        // sessions (the old code wrote "session.referenceSource", which was
-        // never declared — every open toasted "there is no setting …").
         readonly property string sessionSourceKey: "session.scriptureBible"
         // WHERE THE READER WAS: the open Bible, book, chapter, picked verses and the
         // row at the top of the list, as one JSON value (ReferencePane's readingKey).
@@ -41,12 +34,6 @@ ReferencePane {
         readonly property var chapterAsync: (src, bookId, n, token) => ScriptureService.chapterAsync(src, bookId, n, token)
         readonly property var reference: (book, ch, nums) => ScriptureService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => ScriptureService.resolve(text, srcId)
-        // `exact` = the pane's padlock: every typed word must appear as a whole
-        // word in the verse (the engine's index matches fuzzily, so the service
-        // filters its rows when locked).
-        // CHAPTER LOCK: Scripture has books, so the pane's search field offers the
-        // chapter lock — the search is limited to the passage on screen (the book
-        // and chapter the pane passes as `bookId`/`chapter`).
         readonly property bool supportsChapterLock: true
         readonly property var search: (text, srcId, exact, bookId, chapter) => ScriptureService.search(text, srcId, 60, exact, bookId, chapter)
         // ASYNC pill search: the pane prefers this when present (token-guarded,
@@ -54,32 +41,14 @@ ReferencePane {
         readonly property var searchAsync: (text, srcId, token, exact, bookId, chapter) => ScriptureService.searchAsync(text, srcId, 60, token, exact, bookId, chapter)
         readonly property var preview: (src, bookId, ch, nums) => ScriptureService.preview(src, bookId, ch, nums)
         readonly property var slides: (src, bookId, ch, nums) => ScriptureService.slides(src, bookId, ch, nums)
-        // A picked passage STAGES (Main Output tile preview only) — the
-        // SAME gate ShowCenter.qml's own double-click pick already obeys:
-        // nothing reaches the real output until the top GO LIVE button
-        // actually commits it (live report: "media, overlay, scripture,
-        // the table all need to be aware of the go live gate — they can't
-        // just push live"). Gated on the style's scripture pill first.
         readonly property var goLive: (name, slides) => LiveOutputService.stageSlides(name, slides)
-        // Is THIS tab's content what's on air right now? (the play button's
-        // refresh glyph — FreeShow's isActiveInOutput.) The on-air title of a
-        // scripture pick IS the reference text, so a title match reads "ours".
         readonly property var liveIsOurs: (refText) => LiveOutputService.live
                                              && refText !== "" && LiveOutputService.onAirTitle === refText
-        // ...and its STAGED counterpart: the pick this tab double-clicked is on
-        // the Main Output tile (waiting for GO LIVE), which is what the pane's
-        // ‹ › steps and re-stages — see ReferencePane.stepAndPlay.
         readonly property var stagedIsOurs: (refText) => LiveOutputService.stagedIsOurs(refText)
         readonly property var importNew: () => ScriptureService.importBible()
         // No bulk folder action on Scripture — Bibles install one JSON at a time.
         readonly property string addFolderLabel: ""
         readonly property var importFolder: null
-        // The import progress bar (the same one The Table's folder import
-        // feeds): importing() shows the bar, progress() { done, total, current }
-        // moves it — verses indexed so far / verses in the file. The state
-        // lives on SearchService (it owns the Bible import worker); reading it
-        // inside these functions is what lets the pane's bindings track the
-        // service's notify signals.
         readonly property var importing: () => SearchService.bibleImporting
         readonly property var progress: () => SearchService.bibleProgress
         readonly property var templateId: () => ScriptureService.templateId()
@@ -87,18 +56,7 @@ ReferencePane {
         readonly property var defaultTemplateId: () => ScriptureService.defaultTemplateId()
         readonly property var templates: () => ScriptureService.templates()
         // ---- User data (notes & highlights, the engine's §User Data store) ----
-        // Reads are ID-SHAPED and BATCHED (one chapterUserData call per open
-        // chapter — no reference synthesis, no per-row resolution in JS);
-        // writes take the pane's display reference, which the ENGINE resolves
-        // (the reference grammar lives engine-side, once).
         readonly property var chapterUserData: (src, bookId, ch) => ScriptureService.chapterUserData(src, bookId, ch)
-        // Same "src is the caller's job to pass, not ours to invent" contract
-        // as chapterUserData right above — these three called an undefined
-        // src() function (dead leftover from an earlier shape of this
-        // adapter), throwing a ReferenceError on every note save/highlight/
-        // notes-drawer open on the Scripture tab. ReferencePane.qml now
-        // passes its own root.sourceId through, matching chapterUserData's
-        // call site exactly.
         readonly property var setNote: (src, reference, text) => ScriptureService.setNote(src, reference, text)
         readonly property var setHighlighted: (src, reference, on) => ScriptureService.setHighlighted(src, reference, on)
         readonly property var notes: (src) => ScriptureService.notes(src)
@@ -108,15 +66,7 @@ ReferencePane {
             setHighlighted: ad.setHighlighted,
             notes: ad.notes
         })
-        // The shared pane re-syncs when this adapter signal fires (see below).
-        // (User-data notice is a revision counter, NOT a signal: the userData
-        // property already owns the change signal name `userDataChanged` — an
-        // explicit signal of that name is a QML duplicate-signal error.)
         signal changed()
-        // The service's published SEARCH answer landed for that text (see
-        // ScriptureService's header). Forwarded so the shared pane can re-ask a query
-        // that went through the SYNC fallback — a tab whose adapter has no async
-        // search — which is the one shape that has no token to match.
         signal searchCached(string text)
         property int userDataRevision: 0
     }
@@ -129,10 +79,6 @@ ReferencePane {
         // The async pill search's answer (searchAsync's token guard lives in
         // the pane — applySearchResults drops stale tokens).
         function onSearchResultsReady(token, rows) { pane.applySearchResults(token, rows) }
-        // The WORKER-BACKED corpus reads landed (ScriptureService's published
-        // books / chapter / resolve — see its header): the pane re-asks the two
-        // questions whose answer may have just changed (a hovered chapter's rows,
-        // whether the typed text is a reference). Both are cache reads by then.
         function onChapterCached(bibleId, bookId, chapter) { pane.corpusCacheLanded() }
         function onReferenceCached(bibleId, text) { pane.corpusCacheLanded() }
         // The sync search()'s worker answer (the pane's fallback path re-asks on it).
@@ -141,8 +87,4 @@ ReferencePane {
 
     // GO LIVE: pane -> adapter -> live service.
     onGoLiveRequested: (name, slides) => pane.adapter.goLive(name, slides)
-    // (templateEditRequested needs NO re-emit here: the host's handler on this
-    // pane instance receives the signal directly — a self-emit recursion
-    // ("Maximum call stack size exceeded") used to kill every pen click
-    // before the Edit screen ever opened.)
 }

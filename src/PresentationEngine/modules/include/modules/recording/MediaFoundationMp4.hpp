@@ -1,11 +1,5 @@
 #pragma once
 
-// The MP4 recording container, written by Windows Media Foundation's sink writer:
-// H.264 video and AAC audio, with the encoders Media Foundation selects (hardware
-// where the machine has one, the Microsoft software encoders otherwise). The
-// writer takes NV12 video and 16-bit PCM audio, so the packed RGBA frames and the
-// float mix are converted here, on the recording's pump thread.
-
 #include "modules/recording/RecordingPlugin.hpp"
 
 #include <memory>
@@ -13,7 +7,6 @@
 #include <string_view>
 
 namespace bps::recording {
-
 class MediaFoundationMp4 final : public IRecordingContainer {
 public:
     MediaFoundationMp4();
@@ -34,5 +27,4 @@ private:
 // names the missing encoder.
 Result<void> ProbeH264Encoder();
 Result<void> ProbeAacEncoder();
-
 } // namespace bps::recording

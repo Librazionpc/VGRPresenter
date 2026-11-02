@@ -1,11 +1,5 @@
 #pragma once
 
-// FlowEngine (docs/specs/26): the Phase 14 facade. Owns the flow registry,
-// the action/condition/trigger plugin registries, templates, macros, the
-// deterministic executor, execution history, variables, and crash recovery.
-// It coordinates the other engines through registered actions only — it never
-// renders, plays media, or composes scenes itself.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -22,7 +16,6 @@
 #include <vector>
 
 namespace bps::automation {
-
 class FlowEngine final : public IService {
 public:
     static FlowEngine& Instance();
@@ -96,9 +89,6 @@ public:
     Result<std::string> GetVariable(std::string_view executionId, std::string_view name) const;
     std::vector<std::string> Variables(std::string_view executionId) const;
 
-    // --- Event pump (docs/specs/26 §EventBus Integration) ---
-    // Notifies all waiting executions that an event topic arrived. EventBus
-    // subscriptions are forwarded here (WireEvents); actions use SendEvent.
     Result<size_t> Notify(std::string_view eventTopic, std::string_view executionId = "");
     // Deferred internal dispatch used by send_event actions (drained after the
     // current execution step — never re-entrant).
@@ -139,9 +129,6 @@ private:
         std::vector<std::string> activeConditions;
     };
 
-    // The executor. `lk` is the (recursive) engine lock. Registered actions and
-    // conditions run with it RELEASED (see Unlocker / RunActionUnlocked) so a
-    // blocking action never holds the engine lock.
     Result<size_t> Drain(std::unique_lock<std::recursive_mutex>& lk, Execution& exec);
     Result<void> ExecuteNode(std::unique_lock<std::recursive_mutex>& lk, Execution& exec,
                              FlowNode& node);
@@ -193,5 +180,4 @@ private:
     std::atomic<uint64_t> nodeCount_{0};
     uint64_t nextExecutionId_ = 1;
 };
-
 } // namespace bps::automation

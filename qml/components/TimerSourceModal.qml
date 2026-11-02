@@ -2,13 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// "Add Timer" configurator — pops up when "Timer" is picked from the Edit
-// screen's "+" Add Content menu, matching
-// 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Add_Timer.qml's timer_modal_*/
-// timer_mode_*/timer_{hh,mm,ss}_*/timer_toggle*_*/timer_btn_* elements.
-// Same convention as CameraSourceModal.qml/MediaSourceModal.qml: scrim +
-// centered card, `open` to show/hide, `applied`/`cancelled` signals, no
-// application state of its own beyond the picker UI.
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
@@ -51,9 +44,6 @@ Item {
 
     readonly property int durationSeconds: root.hh * 3600 + root.mm * 60 + root.ss
 
-    // { mode, durationSeconds, autoStart, showOnStage } — the consumer
-    // decides what a "timer" canvas item does with it (see LiveClock.qml's
-    // timerSeconds() for the shared countdown/count-up/time-of-day math).
     signal applied(var config)
     signal cancelled()
 
@@ -67,13 +57,6 @@ Item {
     anchors.fill: parent
     visible: root.open
 
-    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
-    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
-    // the whole app, not just that page's content column: parented in place its scrim
-    // covered one side of the settings card, so the dialog read as half-modal (user
-    // report: "the black box doesn't cover the whole settings modal, only one side").
-    // Reparented to the window overlay, this component has no scaled ancestor to
-    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
     parent: Overlay.overlay
 
     ModalScrim {

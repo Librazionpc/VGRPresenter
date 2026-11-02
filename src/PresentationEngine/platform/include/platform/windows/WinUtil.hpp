@@ -4,26 +4,9 @@
 // platform/windows/ sources.
 
 #ifdef _WIN32
-// Without this, <windows.h> pulls in the legacy Winsock 1 header itself —
-// which then blocks any LATER `#include <winsock2.h>` in the same
-// translation unit (its own guard trips against what windows.h already
-// dragged in), silently skipping everything gated behind it: NTDDI_VERSION-
-// dependent chunks of <iphlpapi.h> including its own `#include <netioapi.h>`
-// (MIB_IF_TABLE2/GetIfTable2/FreeMibTable — WindowsPlatform.cpp's network
-// telemetry) and <iphlpapi.h>'s GetAdaptersAddresses/IP_ADAPTER_ADDRESSES
-// (WindowsNetwork.cpp). WinUtil.hpp is the first header nearly every
-// Windows PAL .cpp includes, so this is the one place that fixes it for
-// all of them instead of each file having to get its own include order
-// exactly right.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-// WIN32_LEAN_AND_MEAN alone only stops <windows.h> auto-pulling the legacy
-// Winsock 1 header — it doesn't provide Winsock 2 itself. Callers that never
-// explicitly include <winsock2.h> (e.g. WindowsPlatform.cpp, which only
-// wants <iphlpapi.h>/<netioapi.h> for network telemetry) still need it
-// loaded before <windows.h> for the same NTDDI_VERSION-gated chunks to
-// unlock, so it's included here explicitly rather than left to each file.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -32,10 +15,6 @@
 #include <string_view>
 
 namespace bps::platform::win {
-
-// GetProcAddress hands back a generic FARPROC; casting it straight to a typed
-// function pointer trips -Wcast-function-type. Routing through void* is the
-// standard, warning-free way to say "I know this export's real signature".
 template <typename Fn>
 inline Fn ProcAddress(HMODULE module, const char* name) {
     return reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(module, name)));
@@ -74,14 +53,10 @@ inline std::string LastErrorString(DWORD code) {
     return out;
 }
 
-// The machine's main graphics adapter, from DXGI (the adapter with the most dedicated video memory that is not the
-// software renderer). name is empty and vramBytes 0 when DXGI is unavailable or there is no hardware adapter.
-// Asked once and remembered - the adapters do not change while the app runs.
 struct GpuInfo {
     std::string name;
     unsigned long long vramBytes = 0;
 };
 const GpuInfo& PrimaryGpu();
-
 } // namespace bps::platform::win
 #endif // _WIN32

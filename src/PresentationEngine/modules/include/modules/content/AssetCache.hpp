@@ -1,10 +1,5 @@
 #pragma once
 
-// AssetCache (docs/specs/13 §Asset Cache): LRU memory cache with capacity,
-// pinning, priority hints, and size/time eviction. Eviction skips pinned and
-// referenced entries. `Shrink(percent)` is called by ContentManager when the
-// ResourceManager reports memory pressure.
-
 #include "modules/content/RuntimeAsset.hpp"
 #include "core/common/Common.hpp"
 
@@ -17,7 +12,6 @@
 #include <unordered_map>
 
 namespace bps::content {
-
 struct CacheStats {
     size_t entries = 0;
     size_t bytes = 0;
@@ -60,5 +54,4 @@ private:
     std::list<std::pair<Uuid, std::shared_ptr<RuntimeAsset>>> lru_;
     std::unordered_map<Uuid, std::list<std::pair<Uuid, std::shared_ptr<RuntimeAsset>>>::iterator> map_;
 };
-
 } // namespace bps::content

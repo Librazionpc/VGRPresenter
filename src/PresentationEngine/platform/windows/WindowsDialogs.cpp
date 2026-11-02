@@ -10,12 +10,7 @@
 #include <vector>
 
 namespace bps::platform {
-
 namespace {
-
-// Per-call COM apartment; uninitializes on scope exit even when the caller
-// already initialized (we own the matching CoUninitialize for our
-// CoInitializeEx, which is the correct pairing).
 class ComApartment {
 public:
     ComApartment() { hr_ = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); }
@@ -40,11 +35,6 @@ std::string NormalizePattern(std::string tok) {
     return tok;
 }
 
-// Turns "Name (*.a *.b)" — the Qt-style filter the callers pass — into the
-// name/pattern pair IFileDialog::SetFileTypes needs. The Common Item Dialog
-// separates patterns with SEMICOLONS ("*.a;*.b"); space-separated patterns
-// arrive as one malformed token that matches nothing, which is why pickers
-// showed no files before. Returns false when the entry has no "(...)" part.
 bool SplitFilter(const std::string& f, std::string& nameOut, std::string& patternOut) {
     size_t open = f.find('(');
     size_t close = f.find(')', open);
@@ -123,12 +113,8 @@ Result<std::optional<std::string>> RunCommonDialog(REFCLSID clsid, DWORD options
     if (FAILED(hr) || !path) return std::optional<std::string>{};
     std::wstring ws(path);
     ::CoTaskMemFree(path);
-    // Result<optional<string>> needs an optional<string> value, not the
-    // bare string win::Utf8() returns — Result<T> converts from a plain T,
-    // but T here IS optional<string>, so it has to be wrapped explicitly.
     return std::optional<std::string>{win::Utf8(ws)};
 }
-
 } // namespace
 
 Result<std::optional<std::string>> WindowsDialogs::OpenFileDialog(
@@ -165,5 +151,4 @@ Result<bool> WindowsDialogs::QuestionDialog(std::string_view title, std::string_
     if (rc == 0) return Error::Make(Err::IoError, "Dialogs", "MessageBoxW failed");
     return rc == IDYES;
 }
-
 } // namespace bps::platform

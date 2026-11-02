@@ -1,10 +1,5 @@
 #pragma once
 
-// Effects engine (docs/specs/17 §Effects Engine). Blur, glow, shadow, opacity,
-// crop, mask, brightness, contrast, saturation. Effects attach to objects or
-// layers and are applied as pixel operations by the backend; the numbers below
-// are the canonical EffectType ids the backend understands.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/IGraphicsBackend.hpp"  // RgbaImage
 #include "modules/rendering/RenderTypes.hpp"
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 // Canonical effect ids (match SoftwareGraphicsBackend::ApplyEffect switch).
 enum class EffectType : int {
     Blur = 0,       // param = radius px
@@ -53,21 +47,6 @@ struct Effect {
 // ---------------------------------------------------------------------------
 // Slide-wide filters
 // ---------------------------------------------------------------------------
-// FreeShow's edit-panel filter set (its edit/values/filters.ts), with CSS
-// filter semantics because that is the model it was ported from: hue rotate,
-// invert, blur, grayscale, brightness, contrast, saturate — applied IN THAT
-// ORDER, exactly as a CSS `filter:` list applies its functions left to right.
-//
-// These are SLIDE-level, not per-object defs: the values ride the slide and the
-// filter pass runs on the composed frame for that slide, once, so every output
-// (HDMI/NDI/preview) shows the same picture and no object has to know about
-// filters at all. `FilterValues::IsIdentity()` lets the live path skip the pass
-// entirely for the ordinary unfiltered slide — the cost only exists while a
-// filter is actually dialled in.
-//
-// Units match the UI, not the internals: hue in DEGREES (0–360), blur in PIXELS,
-// invert and grayscale as 0–1 fractions, and brightness/contrast/saturate as
-// multipliers where 1.0 is identity (the rows show them as 0–200%).
 struct SlideFilterValues {
     double hueRotateDeg = 0.0;   // 0–360
     double invert = 0.0;         // 0–1
@@ -86,11 +65,6 @@ struct SlideFilterValues {
     }
 };
 
-// Applies `f` to every pixel of `img`, in the CSS order above. The blur is the
-// same box blur the effect path uses (a separable-friendly average over the
-// radius), so the software and GPU composites agree on what "blur 8px" is.
-// No-op for an identity filter set, and never touches alpha except through the
-// colour channels it transforms.
 void ApplyFilters(RgbaImage& img, const SlideFilterValues& f);
 
 // EffectStack: ordered list applied to an object/layer at composite time.
@@ -122,5 +96,4 @@ private:
     std::vector<Effect> effects_;
     Rect crop_;
 };
-
 } // namespace bps::rendering

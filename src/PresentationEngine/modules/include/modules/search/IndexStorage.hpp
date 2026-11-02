@@ -1,22 +1,5 @@
 #pragma once
 
-// IndexStorage (docs/specs/20 §Indexing). An in-memory inverted index:
-// term → postings (docId, term frequency, position). Supports full +
-// incremental updates and a JSON snapshot for persistence. The engine never
-// knows content types — only terms and documents.
-//
-// PERFORMANCE MODEL (2026-09-24 overhaul — the query-path audit):
-//  - Reads take a shared_lock, writes an exclusive one: concurrent queries no
-//    longer serialize behind each other or behind background indexing.
-//  - Each document keeps PRECOMPUTED lowercase title/content (DocRecord) at
-//    index time. Ranking and snippet building used to Lower() the full text of
-//    every candidate document per query — megabytes of fresh strings per
-//    keystroke; now they scan the ready-made bytes with zero allocation.
-//  - LookupDocIds returns just the ids of a term's postings (no Posting
-//    vector copies), and DocumentsById copies the docs once per QUERY (not
-//    once per candidate per term). GetDocument-by-value remains for the
-//    single-doc callers (services, snapshot, tests).
-
 #include "core/common/Common.hpp"
 #include "modules/search/SearchTypes.hpp"
 
@@ -30,7 +13,6 @@
 #include <vector>
 
 namespace bps::search {
-
 struct Posting {
     std::string docId;
     size_t frequency = 0;
@@ -45,11 +27,6 @@ struct DocRecord {
     std::string lowerContent;
     size_t tokenCount = 0;      // |D| for BM25 length normalization (all fields)
 };
-// (DocRecord carries TWO full text copies — doc.content + lowerContent — so
-// fetching one per candidate per keystroke was the Quick-search lag: a common
-// word registered thousands of candidates => hundreds of MB of string copies.
-// Queries now pre-score from the postings and fetch records for the top few
-// dozens only; DocMetas feeds that pre-score without touching the texts.)
 
 class IndexStorage {
 public:
@@ -74,12 +51,6 @@ public:
     struct TermTf { std::string docId; size_t tf = 0; };
     std::vector<TermTf> LookupTf(std::string_view term) const;
 
-    // JUST the doc frequency — no postings copies. LookupTf copies the whole
-    // postings map ("and" in a 209k-paragraph corpus: hundreds of thousands of
-    // string pairs, several MB) where callers only need the SIZE — fuzzy
-    // correction's emptiness checks and jam-splitting's df gates ran one of
-    // those copies per candidate split point per query word, per keystroke.
-    // 0 = the term is not in the vocabulary.
     size_t DfOf(std::string_view term) const;
 
     // Corpus stats for BM25: N and the average document length (avgdl).
@@ -90,13 +61,6 @@ public:
     // posting per term), missing ids silently dropped.
     std::vector<DocRecord> DocumentsById(const std::vector<std::string>& ids) const;
 
-    // Token count + type per doc WITHOUT copying any text (the lag fix:
-    // pre-scoring ranks the candidates from the index alone; only the top few
-    // dozen get full DocRecords with their two text copies each). The type is
-    // half the payload: with a type filter set, the pre-score must drop other
-    // types EARLY — a common word's top-48 global candidates are all short
-    // Bible verses (the length tiebreak favors them), which would leave zero
-    // sermon rows after the filter empties them.
     struct DocMeta { size_t tokens; std::string type; };
     std::unordered_map<std::string, DocMeta> DocMetas(
         const std::vector<std::string>& ids) const;
@@ -104,10 +68,6 @@ public:
     // All terms with a given prefix (suggestions / prefix search).
     std::vector<std::string> TermsWithPrefix(std::string_view prefix, size_t limit = 50) const;
 
-    // Visits every vocabulary term with its doc frequency under ONE shared lock
-    // (fuzzy-correction scans: the callback can cheap-filter by length, then run
-    // edit distance; df comes free from the postings size — no re-lookup, which
-    // would deadlock on the non-recursive shared_mutex).
     void ForEachTermWithDf(const std::function<bool(const std::string&, size_t)>& visit) const;
 
     // Document store access.
@@ -133,5 +93,4 @@ private:
     size_t totalTokens_ = 0;   // Σ tokenCount over live documents (avgdl denominator)
     bool initialized_ = false;
 };
-
 } // namespace bps::search

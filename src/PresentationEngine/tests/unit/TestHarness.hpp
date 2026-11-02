@@ -1,18 +1,5 @@
 #pragma once
-// Shared unit-test harness (docs/specs/00 §8). Split from tests/unit/main.cpp
-// so each phase compiles and runs independently: ./bps_unit_tests [phase]
-// Engine core unit tests (docs/specs/00 §8: unit + failure coverage).
-// Build: `cmake -B build && cmake --build build && ./build/bps_unit_tests`
 
-// The free space every suite starts with, as a SIMULATED number the runner
-// pins before each suite (RecordingEngine::SetSimulatedFreeBytes).
-// StartRecording refuses outright below 5% free (docs/specs/28 §17) — a real
-// product rule, correctly tested by the cases that set the number themselves.
-// What must never happen is a suite inheriting the DEVELOPER MACHINE's drive:
-// with C: at 96% used every recording check became Recording_DiskFull. Shared
-// with the suites that simulate disk pressure, so a test that means to be full
-// can re-pin the same number for whatever runs next instead of switching the
-// simulation off and handing the real drive back to its neighbours.
 #include <cstdint>
 
 constexpr int64_t kTestFreeBytes = static_cast<int64_t>(200) * 1000 * 1000 * 1000;

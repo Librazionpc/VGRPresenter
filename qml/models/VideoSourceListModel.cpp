@@ -42,18 +42,6 @@ VideoSourceListModel::VideoSourceListModel(QObject *parent)
                "wrong one");
     s_instance = this;
 
-    // Starts EMPTY — no seeded cards. Cameras/screens come from the ENGINE's
-    // video PAL (Media Foundation enumeration; the dialogs' Device selects
-    // read EngineBridge.videoDevices), so a hardcoded mock roster would lie
-    // about the hardware. Rows are user-added via Add Source and PERSISTED
-    // (session.videoRoster — the audio board's contract; a camera the user
-    // set up must not vanish on every launch).
-    //
-    // Restore must wait for the OTHER QML singletons (SettingsService may
-    // not exist when this model is built — singleton order follows QML
-    // import order), so the restore retries on the event loop until the
-    // store is reachable. Every attempt no-ops once rows exist, so a late
-    // retry can never clobber rows the user already added.
     for (int attempt = 0; attempt < 20; ++attempt) {
         QTimer::singleShot(attempt == 0 ? 0 : 100, this, [this]() {
             if (m_sources.isEmpty())
@@ -143,10 +131,6 @@ int VideoSourceListModel::restoreRoster()
     SettingsService *settings = SettingsService::instancePtr();
     if (!settings || !EngineBridge::instance().booted())
         return 0;
-    // The store has ANSWERED (see AudioInputListModel's twin): BusListModel's
-    // orphan sweep may now treat these rows as the authority for which
-    // "vsrc:<id>" nodes are still live. Set before the blob checks on purpose —
-    // "nothing saved" is an answer too.
     m_restoreDone = true;
     const QString blob = settings->value(QStringLiteral("session.videoRoster")).toString();
     if (blob.isEmpty())
@@ -172,21 +156,10 @@ int VideoSourceListModel::restoreRoster()
         it.mode = o.value(QStringLiteral("mode")).toString();
         it.muted = o.value(QStringLiteral("muted")).toBool();
         it.level = std::clamp(o.value(QStringLiteral("level")).toDouble(0.0), 0.0, 100.0);
-        // Per-side trims, same rule as AudioInputListModel's restore: a missing
-        // or short list means the sides it doesn't cover were never trimmed
-        // (unity) — so a roster from before these existed restores open.
         for (const QJsonValue &gv : o.value(QStringLiteral("channelGains")).toArray())
             it.channelGains.append(std::clamp(gv.toDouble(1.0), 0.0, 1.0));
-        // Rows saved before the trims existed have none: channelTrim() then
-        // falls back to the level the side holds open (unity beyond that), so an
-        // older roster cannot reopen a side at 0.
         for (const QJsonValue &tv : o.value(QStringLiteral("channelTrims")).toArray())
             it.channelTrims.append(std::clamp(tv.toDouble(0.0), 0.0, 1.0));
-        // Ids: keep the saved one (bus routing keys on it); renumber only
-        // broken/missing entries — picking from the ids is not already taken in
-        // this restore, the same rule the audio roster follows, so two rows can
-        // never end up sharing one node. A shared node draws one row's lines
-        // under the other's card and cuts the wrong edge when a row goes.
         if (it.id.isEmpty() || assigned.contains(it.id)) {
             while (assigned.contains(QStringLiteral("v%1").arg(nextId)))
                 ++nextId;
@@ -205,9 +178,6 @@ int VideoSourceListModel::restoreRoster()
     // The buses' cached routes may reference restored rows by id — re-derive.
     if (BusListModel *buses = BusListModel::Instance())
         buses->refreshRoutes();
-    // Restored rows that are already routed must carry their saved fader into
-    // the graph again (the node survives a restart inside the production doc;
-    // its VolumeControl is whatever the last push left — or unity).
     for (int row = 0; row < m_sources.size(); ++row)
         pushAudioOffThread(row);
     return m_sources.size();
@@ -352,12 +322,6 @@ void VideoSourceListModel::removeSource(int index)
     if (index < 0 || index >= m_sources.size())
         return;
 
-    // Cut this source's routing edges BEFORE the row disappears: routes key
-    // on the row's stable id, so no OTHER row's route is touched.
-    //
-    // Through the HEALING accessor, like the audio roster: an id-less row would
-    // make the cut a silent no-op, leaving its edges (and the bus's line to it)
-    // in the graph behind a row that is gone.
     const QString id = idForRow(index);
     BusListModel *buses = BusListModel::Instance();
     if (buses)
@@ -457,9 +421,6 @@ void VideoSourceListModel::setLevel(int index, qreal level)
 {
     if (index < 0 || index >= m_sources.size())
         return;
-    // Meaningful only for media rows (they carry audio) — but storing the
-    // value anyway is harmless and keeps the field honest if a row's kind
-    // is switched to media later.
     const qreal clamped = std::clamp(level, 0.0, 100.0);
     if (qFuzzyCompare(m_sources[index].level, clamped))
         return;
@@ -471,11 +432,6 @@ void VideoSourceListModel::setLevel(int index, qreal level)
     pushAudioOffThread(index);   // the fader IS the graph's gainDb
 }
 
-// One side of the row's audio trim — the video card's L/R pill, and the same
-// operation AudioInputListModel::setChannelGain performs on an input row:
-// gain 0 IS "this side is closed" (there is no separate enable bit anywhere
-// in the app). Deliberately NOT the row's `muted`: that flag closes the whole
-// row, which is why clicking one pill used to darken both.
 void VideoSourceListModel::setChannelGain(int index, int channel, qreal gain)
 {
     if (index < 0 || index >= m_sources.size() || channel < 0 || channel >= 2)
@@ -484,23 +440,14 @@ void VideoSourceListModel::setChannelGain(int index, int channel, qreal gain)
         pushAudioOffThread(index);   // the per-side trim rides the node's meta
 }
 
-// The one write of a side's gain (the public faces above only decide WHAT it
-// should be). Returns true when it changed anything — i.e. exactly when the
-// graph push that follows is worth making.
 bool VideoSourceListModel::writeChannelGain(int index, int channel, qreal gain)
 {
     if (index < 0 || index >= m_sources.size() || channel < 0 || channel >= 2)
         return false;
     const qreal clamped = std::clamp(gain, 0.0, 1.0);
-    QList<qreal> &gains = m_sources[index].channelGains;
-    while (gains.size() <= channel)
-        gains.append(1.0);   // absent = unity
-    if (qFuzzyCompare(gains[channel], clamped))
+    if (!channeltrim::setChannelValue(m_sources[index].channelGains, channel, clamped,
+                                      channeltrim::unity()))
         return false;
-    gains[channel] = clamped;
-    // Remember an OPEN level as this side's trim on the way past, so the pill
-    // that closed it can hand it back (models/ChannelTrim.h). A close (gain 0)
-    // records nothing — that would arm the next reopen with silence.
     if (channeltrim::remembersTrim(clamped))
         writeChannelTrim(index, channel, clamped);
     const QModelIndex changed = this->index(index);
@@ -511,10 +458,6 @@ bool VideoSourceListModel::writeChannelGain(int index, int channel, qreal gain)
 
 void VideoSourceListModel::toggleChannelGain(int index, int channel)
 {
-    // One policy for the app, one call here (see BusListModel's twin). It writes
-    // through writeChannelGain and then pushes HERE — the push is the part that
-    // must hop off the interface thread (see pushAudioOffThread), so this body
-    // names it rather than inheriting it from setChannelGain.
     const qreal target = channeltrim::isOff(channelGain(index, channel))
         ? channelTrim(index, channel)
         : channeltrim::closed();
@@ -543,22 +486,11 @@ bool VideoSourceListModel::writeChannelTrim(int index, int channel, qreal trim)
 {
     if (index < 0 || index >= m_sources.size() || channel < 0 || channel >= 2)
         return false;
-    QList<qreal> &trims = m_sources[index].channelTrims;
-    while (trims.size() <= channel)
-        trims.append(channeltrim::closed());   // absent = nothing remembered
-    if (qFuzzyCompare(trims[channel], trim))
-        return false;
-    trims[channel] = trim;
-    return true;
+    return channeltrim::setChannelValue(m_sources[index].channelTrims, channel, trim,
+                                        channeltrim::closed());
 }
 
 // ---------------------------------------------------------------------------
-// REAL PUSH — see the header. Mirrors AudioInputListModel::pushEffectsOffThread's
-// contract exactly (a no-op when the row is unrouted or the engine is not up)
-// so the two roster models can't drift on what "the row's audio state" means to
-// the engine — and, like it, the graph work runs on the engine worker: this one
-// runs on every fader tick, and each graph mutator serializes and re-validates
-// the graph.
 void VideoSourceListModel::pushAudioOffThread(int index)
 {
     if (!m_active)
@@ -588,9 +520,6 @@ void VideoSourceListModel::pushAudioOffThread(int index)
         if (!graph.HasNode(nodeStd))
             return;
 
-        // One edit window around the whole push (VolumeControl + the trims): every
-        // graph mutator serializes and flushes the production doc, so without it
-        // this wrote the document three-plus times per fader tick.
         const bool ownsEdit = graph.BeginEdit().ok();
 
         // VolumeControl: the row's fader + mute, keeping anything else the node

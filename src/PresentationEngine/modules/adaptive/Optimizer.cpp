@@ -3,7 +3,6 @@
 #include <algorithm>
 
 namespace bps::adaptive {
-
 namespace {
 constexpr uint64_t kGb = 1024ull * 1024ull * 1024ull;
 }
@@ -122,12 +121,7 @@ QualityLevel RuntimeOptimizer::GetQualityLevel() const {
 }
 
 void RuntimeOptimizer::Apply() {
-    // The optimizer owns the knobs it can apply today: budgets + quality
-    // settings are recomputed by the facade on the heartbeat; Apply() is where
-    // future subsystems (renderer, media) would re-read them. Kept as the
-    // documented extension point for Phase 6+.
     std::lock_guard<std::mutex> lock(mutex_);
     (void)GetQualityLevel();
 }
-
 } // namespace bps::adaptive

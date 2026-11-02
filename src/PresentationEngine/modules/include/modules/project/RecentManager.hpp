@@ -1,9 +1,5 @@
 #pragma once
 
-// RecentManager (docs/specs/15 §Recent Manager): recently opened projects,
-// assets, templates and searches — persisted so the UI can offer "recent"
-// lists on startup.
-
 #include "interfaces/IService.hpp"
 
 #include <mutex>
@@ -11,7 +7,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct RecentItem {
     std::string kind;     // "project" | "asset" | "template" | "search"
     std::string id;       // uuid / query text
@@ -39,5 +34,4 @@ private:
     std::vector<RecentItem> items_;
     size_t limit_ = 50;
 };
-
 } // namespace bps::project

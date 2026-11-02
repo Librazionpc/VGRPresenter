@@ -8,9 +8,7 @@
 #include <sstream>
 
 namespace bps::search {
-
 namespace {
-
 // Simple tokenizer: lowercase alphanumeric runs. Multibyte UTF-8 is preserved
 // as opaque runs (Bible/song content may be Unicode).
 std::vector<std::string> Tokenize(std::string_view text) {
@@ -55,7 +53,6 @@ std::string Lower(std::string_view s) {
         out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     return out;
 }
-
 } // namespace
 
 Result<void> IndexStorage::Initialize() {
@@ -151,9 +148,6 @@ std::vector<IndexStorage::TermTf> IndexStorage::LookupTf(std::string_view term) 
     return out;
 }
 
-// The doc frequency alone — map::size under a shared lock, zero copies (see
-// the header: LookupTf's full postings copy was the per-keystroke allocation
-// storm behind the search-path freeze).
 size_t IndexStorage::DfOf(std::string_view term) const {
     std::shared_lock lock(mutex_);
     auto it = index_.find(Lower(term));
@@ -177,10 +171,6 @@ std::vector<DocRecord> IndexStorage::DocumentsById(const std::vector<std::string
     return out;
 }
 
-// Metadata-only lookup — no text copies. The pre-score ranks candidates by
-// their indexed tf/idf evidence (length-normalized) and drops docs the filter
-// would reject anyway; full records (the two text copies) are fetched for the
-// few rows that will actually display.
 std::unordered_map<std::string, IndexStorage::DocMeta> IndexStorage::DocMetas(
     const std::vector<std::string>& ids) const {
     std::shared_lock lock(mutex_);
@@ -347,5 +337,4 @@ Result<size_t> IndexStorage::Restore(std::string_view json) {
     }
     return terms;
 }
-
 } // namespace bps::search

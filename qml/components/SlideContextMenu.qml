@@ -1,16 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// FreeShow's context menu (its contextMenus.ts + ContextMenu.svelte): a panel of rows, each with a coloured icon and a chevron where the
-// row opens a submenu (Item actions, Rearrange), then the plain rows with their shortcut hints (Duplicate, Delete, Paste, Select all).
-// Row icons are FreeShow's own glyphs, ported verbatim into IconGlyph.qml, so a row here means the same action it does there.
-//
-// It only draws and reports. `model` is a list of entries:
-//   { divider: true }
-//   { id, label, icon, color, big: true }                                     a big centred entry (Edit, Delete slide)
-//   { id, label, icon, color, shortcut }                                      a row
-//   { label, icon, color, children: [ { id, arg, label, checked, dot, disabled, divider } ] }   a row with a submenu
-// and `chosen(id, arg)` says what was picked. Opened at a point of a source item; it lifts itself to the window so nothing clips it.
 Item {
     id: root
 
@@ -24,10 +14,6 @@ Item {
 
     property int openSub: -1          // the row whose submenu is showing
     property real subY: 0             // where that row is, in the panel
-    // The panel rectangle itself, in window coordinates — where a caller anchors
-    // a second menu to this one (the slide row's "Change group…" picker opens
-    // beside it). The root Item is anchored fill, so its own origin is the
-    // window's corner, not the menu's.
     readonly property Item panelRect: panel
 
     function openAt(source, x, y) {
@@ -169,9 +155,6 @@ Item {
                     Rectangle { visible: subRow.modelData.divider !== true; anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; radius: 6; color: subHover.hovered && subRow.modelData.disabled !== true ? Theme.hoverBg : "transparent" }
                     // the group's colour, the row's own icon, or a check for the chosen one
                     Rectangle { visible: (subRow.modelData.dot ?? "") !== ""; x: 18; anchors.verticalCenter: parent.verticalCenter; width: 12; height: 12; radius: 6; color: subRow.modelData.dot ?? "transparent" }
-                    // FreeShow's submenus draw an icon per row (its ContextItem
-                    // template), tinted with the group's own colour; a row with
-                    // no icon falls back to the checked mark below.
                     IconGlyph {
                         visible: (subRow.modelData.icon ?? "") !== ""
                         x: 17; anchors.verticalCenter: parent.verticalCenter
@@ -180,9 +163,6 @@ Item {
                         opacity: subRow.modelData.disabled === true ? 0.4 : 1
                         fit: true; width: 15; height: 15
                     }
-                    // A toggled row keeps its icon and shows the tick on the
-                    // right — the shape FreeShow's own checked rows use, and
-                    // the only one that can carry both at once.
                     IconGlyph {
                         visible: subRow.modelData.checked === true
                         anchors.right: parent.right; anchors.rightMargin: 12

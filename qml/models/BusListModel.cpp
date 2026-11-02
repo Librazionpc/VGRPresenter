@@ -37,32 +37,7 @@ BusListModel *BusListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
     return s;
 }
 
-// The engine owns the buses. Every row here is a live view of bus nodes in
-// the kernel's production graph (docs/specs/27 — ProductionEngine owns the
-// graph; this model is a row-ordered relay for QML, per the app's standard
-// "kernel decides, bridge/model relays, UI renders" layering):
-//
-//   - A bus is a PAIR of graph nodes — an Audio plane and a Video plane —
-//     the same video-bus+audio-bus pairing the engine already gives every
-//     output. The UI's `type` ("audio" | "video" | "both") is routing
-//     POLICY on top (which rosters the dialog offers), not the nodes'
-//     existence.
-//   - Level 0-100 maps linearly onto the plane nodes' gainDb -60..0 dB;
-//     mute is the node's VolumeControl::mute.
-//   - A route is a graph EDGE from a stable per-source node ("asrc:<id>"/
-//     "vsrc:<id>" — the source row's STABLE id, not its roster row) into
-//     the matching plane node. Source nodes are created on demand at first
-//     route; deleting a roster row cuts only its own edges (the roster
-//     model calls back), so no other row's routes ever shift. Audio routes
-//     are additive (mixing); video sources may feed multiple buses, and each
-//     bus accepts one frame source.
-//
-// The model starts EMPTY: no buses exist until the user adds one (+ Add)
-// or the engine creates them. Nothing is seeded app-side — the graph is the
-// only truth, and a preset roster the user didn't build is just hardcoded
-// state wearing an engine costume.
 namespace {
-
 bps::production::ProductionGraph &graph()
 {
     return bps::production::ProductionEngine::Instance().Graph();
@@ -72,9 +47,6 @@ bps::production::ProductionGraph &graph()
 // 100 as unity — matching the board's "buses open silent, user raises".
 constexpr double kSilentDb = -60.0;
 
-// Stable per-source graph node ids: a source ROUTE is an edge from a node
-// named after the source row's stable id (never its roster row), so routes
-// survive every roster reorder/removal.
 constexpr const char *kAudioSourcePrefix = "asrc:";
 constexpr const char *kVideoSourcePrefix = "vsrc:";
 
@@ -96,12 +68,6 @@ QVariantList toVariantList(const QList<int> &indices)
     return list;
 }
 
-// Routes of one plane: the stable "asrc:<id>"/"vsrc:<id>" source nodes
-// feeding it. Reported as ROSTER ROWS (the QML contract): each upstream id
-// is translated through the owning roster model — a source whose row was
-// removed drops out (its edges get cut on removal anyway; this is the
-// belt to those braces). Ordering is irrelevant to consumers (membership
-// tests), but keep upstream order for stable output.
 QList<int> audioRoutesFromGraph(const std::string &planeNodeId)
 {
     QList<int> out;
@@ -138,9 +104,6 @@ bool feedsFrom(const std::string &planeNodeId, const std::string &sourceId)
     return std::find(ups.begin(), ups.end(), sourceId) != ups.end();
 }
 
-// How many video sources feed one bus's video plane. Read from the GRAPH, never
-// from the cached row list: the cache is a convenience, the edges are the truth,
-// and the one-video-provider rule must not be bypassable by a stale cache.
 int videoProviders(const std::string &planeNodeId)
 {
     int n = 0;
@@ -150,10 +113,6 @@ int videoProviders(const std::string &planeNodeId)
     return n;
 }
 
-// The audio half of videoProviders — read by a TEMPLATE bus's one-sound rule
-// (connectRefusal / connectAudioRoute): however many pictures it carries, a
-// template bus has one audio input, so a second input is refused where the
-// operator can read why instead of being summed in with no way to tell.
 int audioProviders(const std::string &planeNodeId)
 {
     int n = 0;
@@ -163,25 +122,6 @@ int audioProviders(const std::string &planeNodeId)
     return n;
 }
 
-// THE WINDOWS A TEMPLATE BUS ACTUALLY HAS. A window is a `bus` block on the
-// template design, and the routing rule follows from what each one can show:
-//
-//   total — every `bus` block on the template (the design's windows);
-//   open  — the ones that name NO bus (meta busId empty/0). Those are the ones
-//           that take the template bus's routed video sources, in route order
-//           (SceneBuilder::RecordTemplateWindows / LiveOutputService's
-//           addTemplateWindows: TemplateWindowPlaneKey per position). A window
-//           that NAMES a bus shows that bus and no route can land in it.
-//
-// So a template with no bus items at all has nowhere to put a picture: routing a
-// camera into it is a wire that can never show anything, and that is refused at
-// the source rather than drawn and left black.
-//
-// `known` is what keeps the rule from acting on ignorance: the template library
-// is a lazily-built QML singleton, so at boot (and for a moment after) the
-// design map is empty for a reason that has nothing to do with the template —
-// "not read yet" must not be mistaken for "no windows" and sweep away routes
-// that are still valid.
 struct TemplateWindows
 {
     bool known = false;
@@ -194,9 +134,6 @@ TemplateWindows templateWindows(const QString &templateId)
     TemplateWindows w;
     if (templateId.isEmpty())
         return w;
-    // The library answers with the DESIGN map (DesignLibraryService::toMap):
-    // blocks as QVariantMaps, each with `kind` and `meta` (a map — see
-    // ShowConverter::blockToVariant).
     const QVariantMap design = TemplateLibraryService::templates().design(templateId);
     if (design.isEmpty())
         return w;   // not readable yet (or gone) — nothing to judge
@@ -220,12 +157,6 @@ void logIfFailed(const char *op, const auto &r)
         qWarning() << "BusListModel:" << op << "failed:" << r.error().message.c_str();
 }
 
-// One atomic edit window around a multi-step graph mutation. Every graph
-// mutator serializes the WHOLE graph and flushes the database synchronously
-// (QueuePersist) — on the GUI thread, once per call — so a bus creation
-// (6 mutators) or a video re-route (N+1) would otherwise flush that many
-// times back to back. Inside an edit window the graph saves once, at commit.
-// A no-op when a window is already open (nesting), so helpers compose.
 class GraphEdit
 {
 public:
@@ -241,7 +172,6 @@ public:
 private:
     bool owns_;
 };
-
 } // namespace
 
 BusListModel::BusListModel(QObject *parent)
@@ -253,26 +183,8 @@ BusListModel::BusListModel(QObject *parent)
     s_instance = this;
     rebuildFromGraph();
 
-    // The board CACHES each bus's routes as ROSTER ROWS (the graph's edges are
-    // keyed by each row's stable id; QML wants row numbers). Every roster change
-    // can therefore invalidate those cached lists, and a stale list is not
-    // cosmetic: it decides what the drag gesture believes, so a route that was
-    // already in the graph read as "not connected" and the next drop turned it
-    // off. Re-derive the cache on every roster STRUCTURAL change instead of
-    // trusting each caller to remember — the two restores do call this, but a
-    // restores-while-you-watch (data-protection restore, duplicate, remove)
-    // used to leave the board's lines and "n src" counts behind.
-    //
-    // Only structural signals: a dataChanged from a fader drag does not move a
-    // row, and re-pulling every bus on every fader tick would rebuild the
-    // connector layer mid-drag for nothing.
     watchRosters();
 
-    // The ghost sweep (see pruneOrphanSourceEdges). Deferred well past the
-    // rosters' own restore attempts (they retry over ~2s from their
-    // constructors, which this one runs after), and retried in case the engine
-    // — and therefore the settings store the rows come from — booted late. The
-    // guard inside makes every run after the first a no-op.
     for (int attempt = 0; attempt < 12; ++attempt)
         QTimer::singleShot(2200 + attempt * 400, this, [this, attempt]() {
             pruneOrphanSourceEdges();
@@ -286,11 +198,6 @@ BusListModel::BusListModel(QObject *parent)
                 logBoardState();
         });
 
-    // Engine-side changes made without this model (production.restored, or a
-    // bus edited through the engine facade / a future IPC client) re-sync the
-    // rows. The model is otherwise a cached view refreshed only after its own
-    // mutations. Queued: the relay already marshals to the GUI thread, this
-    // just keeps a reset from happening inside a delegate's own event.
     connect(&EngineBridge::instance(), &EngineBridge::engineEvent, this,
             [this](const QString &topic, const QVariantMap &) {
                 if (topic == QLatin1String("production.restored")
@@ -305,12 +212,6 @@ BusListModel::~BusListModel()
         s_instance = nullptr;
 }
 
-// (Re-)aim the roster watch at the CURRENT roster singletons. The constructor
-// calls this; adoption calls it again (see adoptRoutingModels), because the
-// rosters to watch are not necessarily the instances the constructor saw. A
-// board that watches a roster nobody edits never re-derives its cached rows,
-// and a cached row is what a connection LINE is drawn from — which is exactly
-// how a line came to be drawn to a row that no longer exists.
 void BusListModel::watchRosters()
 {
     for (const QMetaObject::Connection &c : std::as_const(m_rosterConnections))
@@ -372,16 +273,6 @@ int BusListModel::rowForBusNumber(int busNumber)
     return -1;   // removed bus — callers treat as "no such route"
 }
 
-// Stable graph node id for a roster row — derived from the row's stable id
-// ("asrc:a3" / "vsrc:v7"), so it survives every row shift. Empty only for a
-// row that does not exist.
-//
-// idForRow(), NOT stableIdForRow(): it HEALS a row that somehow has no id yet
-// instead of answering empty for it. An empty answer here is read by the whole
-// connect path (canConnect, connectAudioRoute, pushRoutingOffThread) as "this row
-// has nothing to route", so a row without an id was unroutable, permanently and
-// silently — a drop onto a bus just refused, which is exactly how "a new audio
-// source refuses to connect" reads from the board.
 QString BusListModel::audioSourceNodeId(int rosterRow)
 {
     AudioInputListModel *roster = AudioInputListModel::Instance();
@@ -426,19 +317,6 @@ void BusListModel::cutAudioSourceEdges(const QString &stableId)
     }
 }
 
-// THE GHOST SWEEP. A source node is live only while a roster row owns its id
-// (the id is what a route keys on), so any other "asrc:"/"vsrc:" node in the
-// graph is a leftover — and leftovers are not harmless. The id counter restarts
-// from the RESTORED rows, so the next row added is handed a freed id and
-// inherits the ghost's edges: a line appears for a route nobody made, and the
-// line the deleted row was drawn with never goes away, because the edge it
-// stands for is still in the graph. This is the sweep the constructor comment
-// claimed ("any asrc:/vsrc: node found at startup is a leftover… Drop them
-// all") but which no code did.
-//
-// Each kind is swept only once its roster has ANSWERED (restoreDone): before
-// that a roster is empty because it has not loaded, not because it has no rows,
-// and sweeping then would cut live routes.
 void BusListModel::pruneOrphanSourceEdges()
 {
     if (!m_active)
@@ -505,11 +383,6 @@ void BusListModel::trimExtraVideoProviders()
             if (up.starts_with(kVideoSourcePrefix))
                 providers.append(up);
         }
-        // A TEMPLATE bus is the one bus that is SUPPOSED to carry several video
-        // sources, so the one-provider sweep leaves every route it has alone. It is
-        // not trimmed to its windows either: the windows name their own buses, and
-        // the feeds routed into the template bus are exactly the ones the operator
-        // chose to give it.
         if (templateBus)
             continue;
         if (providers.size() < 2)
@@ -558,11 +431,6 @@ void BusListModel::cutVideoSourceEdges(const QString &stableId)
     }
 }
 
-// The graph (already restored from the kernel's persisted production doc by
-// the time QML constructs this singleton) is rebuilt into rows here. Row
-// order follows the paired-plane node ids' numeric suffix so a restored
-// board looks exactly like the one the user left. Only planes whose twin
-// still exists form a row — a crashed remove can't strand a half-bus.
 void BusListModel::rebuildFromGraph()
 {
     std::set<int> seen;
@@ -614,9 +482,6 @@ void BusListModel::rebuildFromGraph()
             item.type = QString::fromStdString(
                 r.value().meta.count("uiBusType") ? r.value().meta.at("uiBusType")
                                                   : "audio");
-            // ON THE ROUTING BOARD? Absent meta = no (see BusItem::onBoard):
-            // every bus saved before the board had a membership reads as off it,
-            // which is the rule — only what the operator adds shows.
             const auto shown = r.value().meta.find("uiOnBoard");
             item.onBoard = shown != r.value().meta.end() && shown->second == "1";
         }
@@ -628,16 +493,6 @@ void BusListModel::rebuildFromGraph()
         pullRow(row);
 }
 
-// Roster rows are not persisted (they restart empty each launch, with fresh
-// stable ids a1/v1...), but the graph is — so any "asrc:"/"vsrc:" node found at
-// startup is a leftover from a PREVIOUS session. Left alone, a new source
-// "a1" would inherit last session's routes for the old "a1" (its first toggle
-// would DISconnect) and the orphans would pile up forever. Drop them all.
-// (When rosters are persisted with their ids, this must go — then only nodes
-// whose id is absent from the restored roster are orphans.)
-// Re-reads every row's routes (and level/mute/name) from the graph. Routes
-// are cached as roster ROWS, so ANY roster row shift (a removal) leaves every
-// bus's cached lists stale — the roster models call this after a removal.
 void BusListModel::refreshRoutes()
 {
     if (!m_active || m_buses.isEmpty())
@@ -648,23 +503,10 @@ void BusListModel::refreshRoutes()
                      { RoutedAudioInputsRole, RoutedVideoSourcesRole });
 }
 
-// The deferral-time repair (see the header): while any bus's cache and the
-// graph disagree about how many routes that bus has, re-pull. Counted, not
-// compared row by row: both sides come from the same translation, so the case
-// this exists for is a cache built before the rosters had rows (every edge
-// translating to "no such row": 0 against the graph's N). A roster ROW SHIFT
-// keeps the counts and is already covered by the roster's own structural
-// signals (watchRosters), which is why this does not drag every bus through a
-// full re-pull on every tick.
 void BusListModel::logBoardState() const
 {
     for (int row = 0; row < m_buses.size(); ++row) {
         const BusItem &item = m_buses[row];
-        // Level and per-side trims are on the line because they are the OTHER
-        // reason a bus card's L/R pair can sit dark: the pair reads the bus's
-        // POST-FADER mix, so a bus at volume 0 (where buses are created) is flat
-        // however healthy its routes are. "Not glowing" and "not connected" then
-        // look identical from outside, and only the numbers tell them apart.
         qInfo().noquote()
             << QStringLiteral("BusListModel: bus %1 \u201C%2\u201D (%3) routes audio %4 video %5 "
                               "level %6 muted %7 gains %8/%9")
@@ -704,13 +546,6 @@ void BusListModel::refresh()
     m_buses.clear();
     rebuildFromGraph();
     endResetModel();
-    // A document that just (re)arrived is held to the running rules in the same
-    // session, not on the next launch: an older graph can carry two video
-    // providers on one bus or an "asrc:"/"vsrc:" node its roster no longer
-    // lists, and until this, only the constructor's deferred sweep ever looked —
-    // so a doc restored late kept the extra route (and its line) all session.
-    // Both calls are cheap no-ops on a clean graph, and each guards its own
-    // readiness (a roster that has not reported is not "empty", it is unknown).
     pruneOrphanSourceEdges();
     trimExtraVideoProviders();
 }
@@ -745,9 +580,6 @@ int BusListModel::createBusRow(const QString &name, const QString &type,
                                                 name.toStdString(),
                                                 bps::production::BusRole::Custom,
                                                 bps::production::SignalType::Video));
-    // The routing-policy type rides engine-side as node meta so it comes
-    // back with the graph on the next boot. (After AddBus — SetMeta needs
-    // the node to exist.)
     logIfFailed("SetMeta(audio)",
                 graph().SetMeta(item.engineId.toStdString(), "uiBusType", type.toStdString()));
     logIfFailed("SetMeta(video)",
@@ -758,9 +590,6 @@ int BusListModel::createBusRow(const QString &name, const QString &type,
         logIfFailed("SetMeta(templateId video)",
                     graph().SetMeta(item.engineIdVideo.toStdString(), "templateId", templateId.toStdString()));
     }
-    // Board membership, written only when it is ON: an absent key reads as "off"
-    // everywhere (see rebuildFromGraph), so a bus made off the board carries no
-    // meta at all until the operator adds it.
     if (onBoard) {
         logIfFailed("SetMeta(uiOnBoard audio)",
                     graph().SetMeta(item.engineId.toStdString(), "uiOnBoard", "1"));
@@ -787,15 +616,7 @@ void BusListModel::pullRow(int row)
     }
     if (auto r = graph().GetNode(item.engineId.toStdString()); r.ok()) {
         item.name = QString::fromStdString(r.value().displayName);
-        // The per-side trim comes back off the AUDIO plane's meta — the same
-        // key the mixer reads (see channelGain/setChannelGain), so a restart
-        // restores which sides were closed. A key that is absent means unity
-        // (an older graph, or a bus nobody has trimmed), never 0.
         item.channelGains.clear();
-        // ...and the trim each side was closed at, off its OWN key. A graph
-        // saved before the trims existed has none: channelTrim() then falls back
-        // to the level the side holds open (unity beyond that), so a restored
-        // bus can never reopen a side at 0.
         item.channelTrims.clear();
         for (int channel = 0; channel < 2; ++channel) {
             auto readMeta = [&r](const std::string &key, qreal fallback) {
@@ -810,16 +631,9 @@ void BusListModel::pullRow(int row)
             item.channelGains.append(gain);
             item.channelTrims.append(readMeta("uiChannelTrim" + std::to_string(channel), 0.0));
         }
-        // The TEMPLATE this bus was created from ("" = an ordinary bus), off the
-        // templateId meta a template bus carries. Read here as well as at rebuild
-        // so a bus that comes back from an undo or a late document restore knows
-        // its template without a restart.
         const auto templateId = r.value().meta.find("templateId");
         item.templateId = templateId == r.value().meta.end()
             ? QString() : QString::fromStdString(templateId->second);
-        // ...and whether it is on the Routing board (absent = off, see
-        // BusItem::onBoard). Re-read here so adding it there takes effect without
-        // a restart, and so a document restored late carries its membership.
         const auto shown = r.value().meta.find("uiOnBoard");
         item.onBoard = shown != r.value().meta.end() && shown->second == "1";
     }
@@ -965,9 +779,6 @@ bool BusListModel::deleteBus(int index)
     if (index < 0 || index >= m_buses.size())
         return false;
 
-    // CAPTURE BEFORE THE ROWS GO: the item's own routing lists are ROSTER ROWS,
-    // and a row is a position in a list that can move. The node ids behind them
-    // are what an edge is really keyed on, so those are what a restore reconnects.
     RemovedBus back;
     back.row = index;
     back.item = m_buses.at(index);
@@ -988,9 +799,6 @@ bool BusListModel::deleteBus(int index)
         return false;   // the graph still held it — there is nothing to undo
     m_removedBus = back;
 
-    // The notice is raised HERE, not at each call site: every door onto "delete
-    // this bus" (the pane's menu, the board's own Delete, the bus dialog's) then
-    // offers the same one click back, and a new door cannot forget to.
     EventBus::instance().notify(tr("\u201c%1\u201d was removed \u2014 Undo puts it back.").arg(back.item.name),
                                 QStringLiteral("info"), tr("Buses"),
                                 QStringLiteral("ui.buses.removed"), QVariant(),
@@ -1011,10 +819,6 @@ bool BusListModel::restoreRemovedBus()
     const RemovedBus back = std::move(*m_removedBus);
     m_removedBus.reset();
 
-    // THE IDENTITY IS THE POINT: a restore that minted a new bus number would put
-    // back a STRANGER — a slide, a scene or a saved route that names the deleted
-    // bus would not find what came back. So the same node ids are reused, and if
-    // something else already answers to them this refuses instead of duplicating.
     const std::string audio = back.item.engineId.toStdString();
     const std::string video = back.item.engineIdVideo.toStdString();
     if (graph().HasNode(audio) || graph().HasNode(video)) {
@@ -1034,20 +838,12 @@ bool BusListModel::restoreRemovedBus()
                 graph().SetMeta(audio, "uiBusType", back.item.type.toStdString()));
     logIfFailed("SetMeta(video)",
                 graph().SetMeta(video, "uiBusType", back.item.type.toStdString()));
-    // ...and the template it came from, without which a restored template bus
-    // would come back as an ordinary one that accepts many video sources and
-    // composes none of them.
     if (!back.item.templateId.isEmpty()) {
         logIfFailed("SetMeta(templateId)",
                     graph().SetMeta(audio, "templateId", back.item.templateId.toStdString()));
         logIfFailed("SetMeta(templateId)",
                     graph().SetMeta(video, "templateId", back.item.templateId.toStdString()));
     }
-    // ...and its place on the Routing board. The membership lives in the same
-    // node meta as the template, so a restore that skips it puts the bus back
-    // into the roster and NOT onto the board it was deleted from: Undo would read
-    // as "it came back somewhere else", and every wire the operator had drawn to
-    // its card would point at a node the canvas no longer draws.
     if (back.item.onBoard) {
         logIfFailed("SetMeta(uiOnBoard audio)",
                     graph().SetMeta(audio, "uiOnBoard", "1"));
@@ -1067,9 +863,6 @@ bool BusListModel::restoreRemovedBus()
     }
     for (const QString &src : std::as_const(back.videoSources)) {
         const std::string node = src.toStdString();
-        // A video plane takes one provider: a source that has since been routed to
-        // this bus's replacement, or a bus that has become audio-only, is skipped
-        // rather than forced — the bus still comes back, just not that route.
         if (!graph().HasNode(node) || !graph().CanConnect(node, video,
                                                           bps::production::SignalType::Video))
             continue;
@@ -1101,19 +894,12 @@ int BusListModel::duplicateBus(int index)
     if (index < 0 || index >= m_buses.size())
         return -1;
 
-    // COPIED BY VALUE, not held by reference: createBusRow() APPENDS to m_buses,
-    // which reallocates it — a `const BusItem &` into the vector would dangle for
-    // every read after that call (the template id below was read from freed
-    // memory, and "duplicate" of a template bus then copied garbage).
     const BusItem src = m_buses.at(index);
     beginInsertRows(QModelIndex(), m_buses.size(), m_buses.size());
     // A copy lands wherever the original was: duplicating a card on the board
     // makes another card, duplicating a roster bus keeps it off the board.
     const int row = createBusRow(QStringLiteral("%1 · copy").arg(src.name), src.type,
                                  src.level, false, QString(), src.onBoard);
-    // A COPY OF A TEMPLATE BUS IS ONE TOO: the type alone would make it a
-    // template bus with no template — it would take many video sources and then
-    // have nothing to compose them into.
     if (!src.templateId.isEmpty()) {
         GraphEdit edit;
         m_buses[row].templateId = src.templateId;
@@ -1151,21 +937,11 @@ void BusListModel::setType(int index, const QString &type)
         return;
     if (m_buses[index].type == type)
         return;
-    // A TEMPLATE BUS KEEPS ITS KIND. Its many video inputs, its one audio input
-    // and the design it composes all follow from "template", and the dialogs
-    // that offer the three ordinary kinds know nothing about it — a save there
-    // would silently turn a layout back into a plain bus and lose its windows.
     if (m_buses[index].type == QStringLiteral("template"))
         return;
 
     GraphEdit edit;
     m_buses[index].type = type;
-    // Persist the policy engine-side (meta), then drop routes the narrowed
-    // type no longer accepts: a route to a roster the bus no longer accepts
-    // from is dead weight. Audio sources fit EVERY bus (a video bus carries
-    // the feed with its embedded audio — matches QML's sourceFitsBus, the
-    // one compat rule), so only video routes are ever dropped, when the
-    // type narrows to pure audio.
     logIfFailed("SetMeta(audio)",
                 graph().SetMeta(m_buses[index].engineId.toStdString(), "uiBusType",
                                 type.toStdString()));
@@ -1265,11 +1041,6 @@ qreal BusListModel::channelGain(int index, int channel) const
     return channel < gains.size() ? gains.at(channel) : 1.0;
 }
 
-// One side of the bus's own output trim — the bus-card pill's write, and the
-// same operation AudioInputListModel::setChannelGain performs on a source
-// row: gain 0 IS "this side is closed" (there is no separate enable bit
-// anywhere in the app), and the value is carried to the engine as the node
-// meta the mixer already understands.
 void BusListModel::setChannelGain(int index, int channel, qreal gain)
 {
     if (index < 0 || index >= m_buses.size() || channel < 0 || channel >= 2)
@@ -1282,18 +1053,12 @@ void BusListModel::setChannelGain(int index, int channel, qreal gain)
         return;
     gains[channel] = clamped;
 
-    // Written on the bus's AUDIO plane — the node the mixer actually sums,
-    // and the one whose meta is read back into channelGains. The video plane
-    // carries no audio signal type, so it needs no trim.
     GraphEdit edit;
     logIfFailed("SetMeta(channelGain)",
                 graph().SetMeta(m_buses[index].engineId.toStdString(),
                                 "uiChannelGain" + std::to_string(channel),
                                 std::to_string(clamped)));
 
-    // ...and remember an OPEN level as that side's trim while we are here, so a
-    // bus card reopened from its L/R pill gives back the level it was closed at
-    // (models/ChannelTrim.h). A close (gain 0) deliberately records nothing.
     if (channeltrim::remembersTrim(clamped) && writeChannelTrim(index, channel, clamped)) {
         logIfFailed("SetMeta(channelTrim)",
                     graph().SetMeta(m_buses[index].engineId.toStdString(),
@@ -1351,9 +1116,6 @@ bool BusListModel::writeChannelTrim(int index, int channel, qreal trim)
     return true;
 }
 
-// Add-only (idempotent). The graph edge is the truth: a route that is already
-// there is left alone and reported as connected, so a drag can never remove one
-// (see the header — this is the gesture's own call).
 bool BusListModel::connectAudioRoute(int busIndex, int inputIndex)
 {
     if (busIndex < 0 || busIndex >= m_buses.size())
@@ -1373,9 +1135,6 @@ bool BusListModel::connectAudioRoute(int busIndex, int inputIndex)
         emit dataChanged(changed, changed, { RoutedAudioInputsRole });
         return true;
     }
-    // A TEMPLATE BUS HAS ONE SOUND (see connectRefusal): the board's drop is
-    // refused before it gets here, this catches the bus dialog's toggle list and
-    // anything scripted.
     if (item.type == QStringLiteral("template") && audioProviders(plane) > 0) {
         qWarning() << "BusListModel: audio route refused —" << item.name
                    << "is a template bus and already carries its one audio input";
@@ -1397,10 +1156,6 @@ bool BusListModel::connectAudioRoute(int busIndex, int inputIndex)
         emit dataChanged(changed, changed, { RoutedAudioInputsRole });
         return false;
     }
-    // addInput() and its fader/effects setters run before a route creates
-    // this graph node. Push the saved row state now that the node exists;
-    // otherwise it keeps ProductionGraph's unity defaults and the live
-    // bus path disagrees with the source controls (including a 0 fader).
     if (AudioInputListModel *inputs = AudioInputListModel::Instance())
         inputs->pushEffectsOffThread(inputIndex);
 
@@ -1411,10 +1166,6 @@ bool BusListModel::connectAudioRoute(int busIndex, int inputIndex)
 
 void BusListModel::toggleAudioRoute(int busIndex, int inputIndex)
 {
-    // Existing edge -> the REMOVE half (the board's right-click on a line, the
-    // bus dialog's toggle list). Anything else is the add half, which must never
-    // remove — one implementation, see connectAudioRoute. The remove half is
-    // shared with the source ROW's own delete (disconnectAudioRoute).
     if (disconnectAudioRoute(busIndex, inputIndex))
         return;
     (void)connectAudioRoute(busIndex, inputIndex);
@@ -1439,11 +1190,6 @@ bool BusListModel::disconnectAudioRoute(int busIndex, int inputIndex)
     return true;
 }
 
-// Add-only (idempotent), the video half of connectAudioRoute — the drag calls
-// this, so dropping a source onto a bus it already feeds cannot unroute it.
-// Video sources fan out to multiple buses AND a bus takes several sources; the
-// graph's CanConnect() is the one policy answer (it was a one-provider-per-bus
-// rule, which refused a second video source with no explanation on screen).
 bool BusListModel::connectVideoRoute(int busIndex, int sourceIndex)
 {
     if (busIndex < 0 || busIndex >= m_buses.size())
@@ -1464,18 +1210,6 @@ bool BusListModel::connectVideoRoute(int busIndex, int sourceIndex)
         emit dataChanged(changed, changed, { RoutedVideoSourcesRole });
         return true;
     }
-    // ONE VIDEO PROVIDER PER BUS (the header's rule, see connectRefusal). The
-    // board's drag is refused before it gets here; this catches the other doors
-    // into a route — the bus dialog's toggle list and anything scripted — and
-    // says which bus is already spoken for. A route comes OFF through that same
-    // toggle, a line's right-click, or deleting the source row, never by
-    // stacking a second provider on top.
-    //
-    // A TEMPLATE bus is exempt from the ONE-video-provider rule: it takes many video
-    // sources, with no cap by window — the windows name their own buses, and routing
-    // those feeds into the template bus is how it gets them. Only a template with no
-    // bus items at all is refused (nothing to show). The board refuses that before it
-    // gets here; this catches the bus dialog's toggle list and anything scripted.
     if (m_buses[busIndex].type == QStringLiteral("template")) {
         const TemplateWindows windows = templateWindows(m_buses.at(busIndex).templateId);
         if (windows.known && windows.total == 0) {
@@ -1543,9 +1277,6 @@ bool BusListModel::disconnectVideoRoute(int busIndex, int sourceIndex)
     return true;
 }
 
-// THE board's policy, in one place (the header's contract). Order matters: the
-// answer names the FIRST reason, so "you already did this" reads differently
-// from "this bus is taken" and neither is reported as a generic refusal.
 QString BusListModel::connectRefusal(const QString &kind, int sourceRow, int busIndex) const
 {
     if (busIndex < 0 || busIndex >= m_buses.size() || sourceRow < 0)
@@ -1563,31 +1294,14 @@ QString BusListModel::connectRefusal(const QString &kind, int sourceRow, int bus
     const std::string plane = (audio ? bus.engineId : bus.engineIdVideo).toStdString();
     if (feedsFrom(plane, srcQ.toStdString()))
         return QStringLiteral("already-connected");
-    // A TEMPLATE BUS HAS ONE SOUND. Its pictures may be many (one per window),
-    // its audio is single: a second input would be summed with the first with
-    // nothing on screen saying which one the operator is hearing.
     if (audio && templateBus && audioProviders(plane) > 0)
         return QStringLiteral("template-bus-has-audio");
-    // A TEMPLATE BUS ACCEPTS ONLY WHAT ITS TEMPLATE HAS A WINDOW FOR. Its windows
-    // ARE the template's bus items (see templateWindows), so a feed routed into
-    // it lands in one — and a template with no free window has nowhere to put the
-    // picture. Refusing here is the board's red card AND its toast; the same rule
-    // is enforced again in connectVideoRoute for the doors that skip the board.
     if (!audio && templateBus) {
         const TemplateWindows windows = templateWindows(bus.templateId);
-        // Only a template with NO bus items is refused: there is nothing for the feed to
-        // show in. A template whose windows already name their buses still takes routes —
-        // those are the feeds the template bus carries — so there is no cap by window.
         if (windows.known && windows.total == 0)
             return QStringLiteral("template-has-no-windows");
     }
     if (!audio && !templateBus && videoProviders(plane) > 0) {
-        // ONE VIDEO PROVIDER PER BUS — the rule the header has always stated. A
-        // bus's video plane carries one picture (the preview and the mixer read
-        // the first route and ignore the rest), so a second video source is a
-        // route the operator can neither see nor use. It used to be refused by
-        // the graph with nothing on screen saying why; it is refused here now,
-        // where the board's red card and its toast can both read the answer.
         return QStringLiteral("bus-has-video");
     }
     if (!graph().CanConnect(srcQ.toStdString(), plane,
@@ -1608,13 +1322,6 @@ QVariantMap BusListModel::getBus(int index) const
         return {};
 
     const BusItem &item = m_buses.at(index);
-    // `id` is the bus's STABLE number, and callers pick/compare by it (a bus
-    // block on a slide carries it, the picker selects by it, a canvas item
-    // resolves its row from it). It was NOT in this map, so every reader got
-    // `undefined` — which is why every card in the Add Bus picker read as
-    // picked (all ids "equal" the default) and why a canvas bus item could
-    // never find its row. The engine node ids go with it for the same reason:
-    // they are the bus's identity in the graph, not its row here.
     return {
         { "id", item.id },
         { "name", item.name },
@@ -1625,9 +1332,6 @@ QVariantMap BusListModel::getBus(int index) const
         { "routedVideoSources", toVariantList(item.routedVideoSources) },
         { "engineId", item.engineId },
         { "engineIdVideo", item.engineIdVideo },
-        // "" for an ordinary bus; a template DESIGN id for a bus created from
-        // one (the Routing card's Template · N in subtitle and the output's
-        // composed picture both read it).
         { "templateId", item.templateId },
         // Whether this bus has a card on the Routing board (see BusItem::onBoard).
         { "onBoard", item.onBoard },

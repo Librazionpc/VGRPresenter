@@ -7,14 +7,11 @@
 #include <chrono>
 
 namespace bps::modules {
-
 namespace {
-
 constexpr int kStateStopped = static_cast<int>(MediaPlaybackState::Stopped);
 constexpr int kStatePlaying = static_cast<int>(MediaPlaybackState::Playing);
 constexpr int kStatePaused = static_cast<int>(MediaPlaybackState::Paused);
 constexpr int kStateFinished = static_cast<int>(MediaPlaybackState::Finished);
-
 } // namespace
 
 std::shared_ptr<MediaModule> MediaModule::Create() {
@@ -62,9 +59,6 @@ Result<void> MediaModule::Enqueue(MediaItem item) {
     if (item.id.empty() || item.durationSec <= 0.0)
         return Error::Make(Err::InvalidArgument, "MediaModule",
                            "a media item needs an id and a positive duration");
-    // Copy the key BEFORE the move: `playlist_[item.id] = make_shared(move(item))`
-    // leaves the subscript's key evaluation unsequenced with the move, which can
-    // store the item under a moved-from (empty) key.
     std::string key = item.id;
     std::lock_guard<std::mutex> lock(mutex_);
     if (playlist_.count(key) > 0)
@@ -209,11 +203,6 @@ Result<void> MediaModule::StartClock(double durationSec, const std::string& item
     }
     auto total = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::duration<double>(durationSec));
-    // Animation timer (07 §Animation): a 100 ms progress tick updates the
-    // position; `done` fires when the playback budget is spent. Both callbacks
-    // capture the item id and bail if a newer item started in the meantime —
-    // otherwise a stale callback from item A could mark item B finished and
-    // orphan B's clock.
     auto res = TaskScheduler::Instance().ScheduleAnimation(
         [this, durationSec, itemId](double p) {
             if (CurrentId() != itemId) return;   // a newer item started: drop stale ticks
@@ -257,5 +246,4 @@ Result<void> MediaModule::CancelPlaybackTask() {
     if (task != 0) (void)TaskScheduler::Instance().Cancel(task);
     return Ok();
 }
-
 } // namespace bps::modules

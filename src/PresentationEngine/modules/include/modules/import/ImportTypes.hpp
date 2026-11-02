@@ -1,14 +1,5 @@
 #pragma once
 
-// Importing (FreeShow's Import popup, ported into the engine): every file format the app can read, what each turns into, and
-// the neutral shape a converter produces before it becomes a show.
-//
-//   file(s) --[format's converter]--> ImportedShow ...  --ShowFromImported--> presentation::Presentation (a .vgr show)
-//                                     Bible verses ...  --> the BibleEngine (installed Bibles)
-//
-// The engine owns the whole list (ImportFormats()), so the UI draws its Import dialog from it and carries no format of its own;
-// a converter is a function from one file's text to imported shows and knows nothing of the UI, the library or the disk.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 
@@ -17,7 +8,6 @@
 #include <vector>
 
 namespace bps::import {
-
 // What a format produces.
 enum class ImportKind : int {
     Show = 0,       // songs / presentations -> shows
@@ -78,15 +68,7 @@ struct ImportedShow {
     std::string notes;
     std::vector<ImportedSection> sections;      // in the order they are sung / shown (a repeated chorus appears again)
     std::string origin;                         // the format it came from ("txt", "chordpro"...)
-    // The folder the file came from ("Only Believe SongBook"), or "" when it did not come from one.
-    // The import files each show under it, so a library arrives as a batch named after its source
-    // instead of thousands of loose shows in "song".
     std::string sourceFolder;
-    // Full paths of the pictures/videos the source document references and that exist on this
-    // machine: a ProPresenter deck's Media/Assets artwork (found by URL, by relative path or by
-    // the media NAME the cue carries), or a FreeShow slide's own image/video item. The import
-    // copies them into the media library, so the artwork arrives with the show instead of staying
-    // behind with the old library.
     std::vector<std::string> mediaRefs;
 };
 
@@ -96,5 +78,4 @@ struct ImportResult {
     std::vector<std::string> warnings;          // a file that could not be read, and why
     size_t files = 0;                           // how many files were handed in
 };
-
 } // namespace bps::import

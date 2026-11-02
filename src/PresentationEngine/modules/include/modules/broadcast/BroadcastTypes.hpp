@@ -1,11 +1,5 @@
 #pragma once
 
-// BroadcastTypes (docs/specs/29): the canonical NDI/SDI model. NDI (NewTek
-// SDK) and SDI (Blackmagic DeckLink SDK) are proprietary runtime libraries,
-// so the engine models sources/senders/receivers/devices generically and
-// resolves the SDKs at runtime through providers. The software provider
-// exercises the same contract in memory (tests + rehearsal).
-
 #include "core/common/Common.hpp"
 
 #include <cstdint>
@@ -13,7 +7,6 @@
 #include <vector>
 
 namespace bps::broadcast {
-
 enum class ProviderKind { Ndi, Sdi, Software };
 enum class ProviderState { Unavailable, Available, Active, Degraded, Failed };
 
@@ -68,5 +61,4 @@ struct BroadcastStats {
     uint64_t sourcesDiscovered = 0;
     uint64_t errors = 0;
 };
-
 } // namespace bps::broadcast

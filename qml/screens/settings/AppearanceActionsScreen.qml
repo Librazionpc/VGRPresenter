@@ -1,14 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// Settings · Appearance & Actions: the app's visual roster settings that
-// aren't a Style (Settings · Styles is per-output; this is app-wide), plus
-// the click/keypress Actions registry (FreeShow's Functions > Actions,
-// scoped to this app — see ActionListModel's own header comment). So far:
-// the group registry (FreeShow's groups — verse, chorus...) and the action
-// registry, each opened through its own row below. A future entry (accent
-// colour, theme) can land here too; this screen owns nothing itself, only
-// the entry points.
 Item {
     id: root
 
@@ -64,9 +56,6 @@ Item {
                         font.weight: Font.Medium
                     }
 
-                    // The live roster, pipe-separated, each name in its own
-                    // group's colour — a glance at what is actually set up
-                    // without opening the dialog.
                     Row {
                         id: previewRow
                         spacing: 6

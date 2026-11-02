@@ -3,69 +3,9 @@ import QtQuick.Shapes
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Routing — the routing canvas: Buses | Styles | Screens | Outputs.
-//
-// THE DESIGN (docs: "Routing design for Buses, Screens, Styles and Outputs") is
-// a node canvas in the Audio & Video screen's visual language where a signal
-// goes only where a wire puts it. Four layers, one column each:
-//
-//   Buses    carry audio and/or video; the sources feeding them are wired on
-//            Audio & Video, and each card shows how many it has
-//   Styles   a look; one style can sit on many screens, and it sits LEFT of the
-//            screens that wear it — see the note below
-//   Screens  the HDMI surfaces a show is sent to; each takes video from a bus
-//            and wears a style
-//   Outputs  the sinks (NDI, SDI, recording, streaming and the system output),
-//            each accepting only the signal types it can carry. This canvas is
-//            where a sink is CREATED, because it is where its buses are wired
-//
-// STYLES SIT BEHIND THE SIGNAL PATH — one column LEFT of the screens they dress.
-// A style is a property a screen wears, not a hop a signal makes, so its dashed
-// link never enters the bus → screen → output run that IS a signal: it ends at
-// the screen and nothing crosses it. (An earlier order put styles on the far
-// right, where every style link had to travel back past Outputs to reach the
-// screen it belonged to, which read as a signal going the wrong way.)
-//
-// ONE PORT PER SIGNAL. A bus that carries both has an audio dot and a video dot;
-// so does an output that takes both. The split is the whole point of a typed
-// graph: the audio half of a both-bus goes to Speakers while its video half goes
-// to the screen that shows it, and each half is a separate wire you can see,
-// hover, explain and cut on its own. A drag carries the signal it started on, so
-// an audio dot can only land on another audio dot — the refusal is structural,
-// not a rule checked after the fact.
-//
-// A WIRE HERE IS NOT A MEMORY. It is an OutputConfig entry in the engine's
-// production graph: each wire is that output node's VIDEO or AUDIO BUS
-// (ProductionGraph::AssignOutputBuses — the same pairing every output in
-// docs/specs/27 carries), and the style wire is the output's style id. Both are
-// validated by the engine, persisted with the production document, and read back
-// through RoutingService — so the canvas cannot drift from what the system is
-// configured to send. Nothing on this screen keeps a private copy of the
-// routing: RoutingService mirrors each roster row as "out:<stable id>" and reads
-// the assignments back, and this file only draws them.
-//
-// Dragging a port onto a card connects; dragging the same pair again takes it
-// back out; right-click removes a single wire. While a drag is live every card
-// that cannot take it steps back — "not wired, not sent" made visible instead of
-// refusing silently on release. A screen with nothing mapped to it reads
-// "No signal"; an output's dots fill in as its halves arrive, and an output with
-// neither reads "silent".
-//
-// A SCREEN HAS TWO SIDES. It takes video on its left dot (from a bus, and a style
-// beside that) and sends its picture from a dot on its RIGHT edge into a sink —
-// the design's "a screen feeds a video output". That feed is a video EDGE between
-// the two output nodes in the production graph (RoutingService::linkScreen), so
-// it validates and persists like every other wire here; today it records which
-// screen an output mirrors, and the sink's delivery side does not consume it yet.
-// A sink's video dot therefore has two possible sources — a bus, or a screen —
-// which is what an input dot on a destination really is.
 Item {
     id: root
 
-    // The canvas asks the settings shell to switch section when a node's
-    // right-click menu leads elsewhere (a bus to Audio & Video, a screen to
-    // Screens, a style to Styles). Same signal GeneralScreen already emits, so
-    // Settings navigation stays in one place.
     signal sectionRequested(string key)
     // "Edit this screen": a screen's editor is the Screens page's, so the canvas
     // reports WHICH row (it right-clicked it) and lets the shell open it there.
@@ -107,30 +47,14 @@ Item {
         function onRowsRemoved() { root.rostersChanged() }
         function onModelReset() { root.rostersChanged() }
     }
-    // The assignments themselves. RoutingService republishes its rows after
-    // every engine write, so a refused assignment (a dead bus, a signal the
-    // output does not take) shows up as the wire simply not appearing.
     Connections {
         target: RoutingService
         function onRoutingChanged() { root.modelsRev++ }
         function onRowsChanged() { root.modelsRev++ }
-        // A wire the ENGINE refused now says so. Before this the gesture was
-        // dropped in silence and the wire simply never appeared, which is
-        // indistinguishable from a broken canvas — or from a wire that landed and
-        // is producing nothing.
         function onRefused(reason) { EventBus.notify(String(reason)) }
     }
 
     // ---- THE BOARD IS A PATCH BAY, NOT A ROSTER DUMP -------------------------
-    // A card exists here only because the operator PUT it here (the column's
-    // "+", or the create flow that "+" opens). The roster is a different list:
-    // every bus Audio & Video knows about. Two properties, one meaning each —
-    //   busRoster — roster order, indexed by ROSTER ROW (what actions, wires and
-    //               the models speak in);
-    //   busRows   — the board, in the order it draws; `row` carries the roster
-    //               row, and the array INDEX is the slot the geometry uses.
-    // Without the split, a bus made on Audio & Video (or a style made on the
-    // Styles page) appeared on this canvas as if the operator had added it.
     readonly property var busRoster: {
         root.modelsRev
         const out = []
@@ -160,18 +84,6 @@ Item {
             if (root.busRoster[i].onBoard !== true) out.push(i)
         return out
     }
-    // One entry per roster row + the system output, from the service that
-    // mirrors them into the graph: { row, id, name, kind, res, styleId,
-    // enabled, screen, system, acceptsVideo, acceptsAudio, videoBus, videoBuses,
-    // audioBus, audioBuses, wired }.
-    //
-    // `videoBuses` / `audioBuses` are the WIRED SETS (every bus that side holds);
-    // `videoBus` is which of the video ones is ON AIR, because an output sends one
-    // picture. Both lists are the allow-list for "show this bus here".
-    // Screens are off the canvas for now (screensShown). With it off an HDMI row is an
-    // output like any other: it sits in the Physical group of the Outputs column, so a
-    // screen added from this page is visible where it was added. Turning it on brings
-    // back the SCREENS column, its cards, its ports and its style and feed wires.
     readonly property bool screensShown: false
     readonly property var outputRows: {
         root.modelsRev
@@ -185,10 +97,6 @@ Item {
             if (rows[i].screen && root.screensShown) out.push(rows[i])
         return out
     }
-    // The sinks: every non-screen row (NDI / SDI / REC / STREAM) plus the
-    // speaker endpoint, which is a real sink with a real audio port — the
-    // engine's mixer sums every audio bus WIRED to it, so the card is where
-    // those wires belong (a bus added after boot used to have nowhere to land).
     readonly property var sinkRows: {
         root.modelsRev
         const out = []
@@ -228,12 +136,6 @@ Item {
     }
 
     // ---- The Outputs column is SEGMENTED -------------------------------------
-    // A sink is one of a handful of DIFFERENT things — the mixer's audio
-    // endpoint, a network sender, a card, a file, a stream — and the operator
-    // looks for one of them by name ("where is the SDI?"). One undifferentiated
-    // run of cards answered that badly, so the column is read in labelled
-    // segments. The segments keep sinkRows' own order inside each one, so a
-    // wire's row index still means the roster's row.
     function sinkGroupOf(o) {
         if (o.system) return "audio"
         const kind = String(o.kind || "").toUpperCase()
@@ -274,11 +176,6 @@ Item {
     }
 
     // ---- The Buses column is SEGMENTED BY KIND -------------------------------
-    // The same markers the Outputs column wears. A bus card already says what it
-    // is (V / A / A+V / TPL), but a roster interleaved by kind is a list you read
-    // four times to find one camera: Video, Both, Audio and Template each get their
-    // own run with a marker above it. Inside a run the roster's own order is kept,
-    // so a wire's row number still means the roster's row.
     function busGroupOf(bus) {
         const t = String(bus && bus.type !== undefined ? bus.type : "audio")
         if (t === "video" || t === "both" || t === "template") return t
@@ -302,10 +199,6 @@ Item {
                 out.push({ key: keys[k], label: labels[keys[k]], rows: buckets[keys[k]] })
         return out
     }
-    // Roster row per DRAWN slot, in the order the column draws them — the bridge
-    // between a row (which every action and wire speaks in) and a slot (which the
-    // geometry speaks in). Built from busRows itself, so the two can never
-    // disagree about what is drawn.
     readonly property var busOrder: {
         root.modelsRev
         const out = []
@@ -356,16 +249,10 @@ Item {
         + root.rowGap
 
     // ---- Canvas geometry. ONE set of formulas for both the cards and the port
-    // points: this screen draws the ports (the cards do not), so a wire's
-    // endpoint and the dot it leaves from are computed from the same numbers and
-    // can never drift apart.
     readonly property int colHeaderH: 52
     readonly property int cardH: 56
     readonly property int rowGap: 10
     readonly property int gutter: 44
-    // Columns on the board: Buses, Styles and Outputs, plus Screens while screensShown
-    // is on. Cards are capped in width and the group is centred on the board, so a
-    // wide window grows the margins, not the cards.
     readonly property int columnCount: root.screensShown ? 4 : 3
     readonly property real minBoardW: root.columnCount * 130 + (root.columnCount - 1) * root.gutter
 
@@ -376,10 +263,6 @@ Item {
         (root.boardW - root.gutter * (root.columnCount - 1) - root.boardPad * 2) / root.columnCount)
     readonly property real groupLeft: Math.max(root.boardPad,
         (root.boardW - (root.columnCount * root.colW + root.gutter * (root.columnCount - 1))) / 2)
-    // EVERY column's "add" is a small "+" IN ITS HEADER, not a 40 px bar under its
-    // cards: four full-width accent buttons spent more vertical room than the
-    // cards they sat beneath, and the canvas is the wires. One control per column,
-    // exactly where the column's own name already is.
     readonly property int addBtnSize: 22
     function columnHeight(rows) {
         return root.colHeaderH + rows * (root.cardH + root.rowGap) + root.rowGap
@@ -401,16 +284,6 @@ Item {
         return root.groupLeft + slot * (root.colW + root.gutter)
     }
     function rowTop(row) { return root.colHeaderH + row * (root.cardH + root.rowGap) }
-    // TWO GATE CARDS ride at the HEAD of the STYLES column (Overlays, Media — see
-    // gateCards). They are not style rows: no style of their own, no swatch, so
-    // the style cards below them start past both the gate run and the marker that
-    // closes it. styleTop is the ONE place that add is made, so a style's dot can
-    // never end up above its own card or sitting on a gate card's rectangle.
-    //
-    // AND THE COLUMN IS SEGMENTED like Buses and Outputs: the gates are LAYERS
-    // (permission wires into an output), the cards beneath are STYLE TEMPLATES
-    // (the design an output paints). Two runs, two markers, so the eye can tell a
-    // gate from a style without reading the card.
     function gateTop(i) {
         return root.colHeaderH + root.groupLabelH + i * (root.cardH + root.rowGap)
     }
@@ -445,9 +318,6 @@ Item {
         }
         return y
     }
-    // The y of ANY card, in whatever column it lives in: the Outputs column is
-    // segmented, so it cannot use the flat rowTop — but the cards and the wires
-    // must still read their position from ONE function.
     function cardTopOf(key) {
         const c = root.columnOf(key)
         const r = root.rowOf(key)
@@ -463,20 +333,7 @@ Item {
     }
 
     // ---- Creating a layer from the canvas ------------------------------------
-    // Each column's "+" opens the picker that ALREADY owns that layer's creation,
-    // so the canvas never grows a second, thinner way to make the same thing:
-    //   Buses   -> BusSourceModal's create mode (Media › Inputs' "New bus"): pick
-    //              the source, and the bus is born already wired to it
-    //   Styles  -> StylePickerModal, the "Select Style" picker Outputs' Style row
-    //              used, so a style is picked from the roster, not drawn onto the canvas
-    //   Screens -> its own column, shown while screensShown is on (no picker yet)
-    //   Outputs -> the transport picker drawn below: a sink exists nowhere else,
-    //              because the canvas is where its signals are decided
     property string addMenu: ""
-    // The header box the open roster menu drops from (see beginAdd). Handing the
-    // panel its own column's header is what makes it land under that column at
-    // that column's width, instead of a fixed 480 px slab laid across the next
-    // column — the "this drop is not clean, align it" report.
     property Item addAnchor: null
     // Which panel a column's "+" owns: the two roster LISTS (buses, styles) and
     // the Outputs transport picker. Screens has no "+" yet.
@@ -485,16 +342,6 @@ Item {
              : column === 1 ? "style"
              : column === 3 ? "output" : ""
     }
-    // The roster panels are DropdownPanels driven from this ONE state, and they
-    // OPEN with openAt. Three things follow, and all three are the fix:
-    //   * openAt reparents the panel to the window layer, so the canvas's own
-    //     clip:true no longer cuts the list off at the canvas edge;
-    //   * it places the panel at the header it was opened from, with
-    //     matchAnchorWidth giving it that column's width;
-    //   * it lifts the MenuCatcher beside it to the same layer, so a click
-    //     ANYWHERE off the menu dismisses it. The board-scoped catcher this
-    //     replaced only covered the canvas, so a press on the page header (or
-    //     Refresh) left the list hanging open over the wiring.
     onAddMenuChanged: {
         if (root.addMenu === "bus" && root.addAnchor)
             busAddMenu.openAt(root.addAnchor, 0, root.addAnchor.height + 4, root)
@@ -505,24 +352,6 @@ Item {
         else if (styleAddMenu.visible)
             styleAddMenu.visible = false
     }
-    // A menu opened with openAt lives in the WINDOW OVERLAY from then on, not
-    // under this page (the Loader that hosts the settings sections deletes the
-    // page when the operator switches section). Without this, leaving Routing
-    // with a list open left that list floating over the next section — the same
-    // way GroupPickerField closes its own reparented menu on the way out.
-    // (Closed in this page's one Component.onDestruction, further down, with the
-    // meter holds: an object takes only one such handler.)
-    // One entry point per column, called by the header "+".
-    //
-    // BUSES and STYLES open a list first, because those two columns show the
-    // BOARD (only what the operator put there) while their popup is the ROSTER
-    // (everything that exists). The list offers what is not on the board yet, and
-    // one entry that makes something new — so "add" always means "put it here",
-    // and a card can never appear because it happened to exist.
-    //
-    // `anchorItem` is the header box the "+" sits in. The caller hands it in: the
-    // menu is placed from it, so nothing has to guess a position in board
-    // coordinates (which also drift once the board scrolls).
     function beginAdd(column, anchorItem) {
         const menu = root.addMenuFor(column)
         if (menu.length === 0)
@@ -587,9 +416,6 @@ Item {
     }
 
     // ---- Styles: picked from the roster, never drawn onto the canvas -------
-    // The Styles "+" opens the "Select Style" picker (StylePickerModal) that
-    // Outputs' Style row used. Picking a style marks it on the canvas, so the
-    // operator sees which look was chosen without a new card appearing.
     function openStylePicker() {
         stylePicker.selectedId = ""
         stylePicker.open = true
@@ -600,23 +426,7 @@ Item {
         root.hoveredNode = root.keyForStyle(at)
     }
 
-
     // ---- Configure an output: the OLD Outputs dialog, per transport ---------
-    // Picking HDMI in the Outputs "+" no longer drops a bare "HDMI" row on the
-    // canvas: it opens this first, because a physical output is not configured
-    // by its name — it is configured by WHICH DISPLAY it goes out on, at what
-    // resolution and refresh, with the window rules that decide whether it
-    // covers the monitor or starts half-size, and whether it stays on top.
-    //
-    // It is the same form Settings · Outputs' Add/Edit uses (ScreenForm: name,
-    // resolution, refresh, test pattern and the display picker that lists the
-    // real QScreens), so the two doors configure one row the same way. The
-    // window rules (bounds lock, stay on top) are shown for HDMI only — an NDI
-    // or recording sink has no window to place, and offering them there was
-    // how a row ended up carrying a display binding it could never use.
-    //
-    // `editOutputRow` < 0 = ADDING (the row is created on Save, so Cancel leaves
-    // no half-made output behind); >= 0 = editing that roster row.
     property int editOutputRow: -1
     property bool outputDialogShown: false
     property string outName: ""
@@ -627,9 +437,6 @@ Item {
     property string outDisplay: ""
     property bool outLocked: false
     property bool outStayOnTop: false
-    // Where this row's audio plays ("" = the program stream). Its own endpoint
-    // makes the row's mix leave on that device's stream, opened from the row's
-    // audio wires — see RoutingService::bindOutputAudio.
     property string outAudioDevice: ""
     // A Recording / Streaming output has no display, mode or test pattern: it is its
     // name and the PRESET it records / streams with. `outPresetId` is that pick.
@@ -637,9 +444,6 @@ Item {
     readonly property bool outIsPreset:
         root.outKind.toUpperCase() === "REC" || root.outKind.toUpperCase() === "STREAM"
     readonly property bool outIsHdmi: root.outKind.toUpperCase() === "HDMI"
-    // The transports that sit on a real display. ScreenForm's own placement
-    // section is gated the same way (HDMI/SDI), so these two are the rows where
-    // a display binding means something — see its `visible` rule.
     readonly property bool outHasDisplay:
         root.outKind.toUpperCase() === "HDMI" || root.outKind.toUpperCase() === "SDI"
 
@@ -661,10 +465,6 @@ Item {
     function openEditOutput(row) {
         if (row < 0 || row >= OutputListModel.rowCount())
             return
-        // The ROSTER row, not the routing snapshot: the dialog edits fields the
-        // engine's routing rows do not publish (refresh, test pattern, the
-        // display binding, the two window rules) — getOutput carries them, the
-        // same accessor Settings · Outputs' Edit dialog reads.
         const o = OutputListModel.getOutput(row)
         root.editOutputRow = row
         root.outName = String(o.name || "")
@@ -716,15 +516,6 @@ Item {
         root.editOutputRow = -1
         RoutingService.refresh()
     }
-    // What an output can BE. HDMI is here because it is the physical screen's
-    // transport — picking it makes a SCREEN (it appears in the Screens column);
-    // the rest are sinks that live in this column.
-    //
-    // RECORDING AND STREAMING ARE PICKED BY PRESET. A recording or a stream is not a
-    // transport with settings of its own: it is one of the presets made on Settings ·
-    // Recording, so the picker lists those presets (one entry each) and picking one
-    // puts an output on the canvas that records / streams with THAT preset. With no
-    // preset of a kind yet, the entry says so and opens the page that makes one.
     readonly property var outputKinds: {
         root.modelsRev
         const out = [
@@ -768,9 +559,6 @@ Item {
             root.sectionRequested("recording")
             return
         }
-        // A Recording / Streaming output is made straight from its preset: a name
-        // (the preset's own, kept unique by the model) and the preset it wears. Nothing
-        // else about it is configured here, so there is no dialog to cancel.
         if (k === "REC" || k === "STREAM") {
             root.addMenu = ""
             const row = OutputListModel.rowCount()
@@ -779,21 +567,10 @@ Item {
             RoutingService.refresh()
             return
         }
-        // The physical and network transports are configured before they exist: the
-        // row's identity is its transport, and each is addressed differently — an HDMI
-        // display, an NDI sender's name and mode, an SDI card's output — so the picker
-        // opens the dialog with that transport preset instead of dropping a bare row
-        // the operator then has to go and fill in on another page. Cancel leaves
-        // nothing behind (the row is created by Save).
         root.openAddOutput(k)
     }
 
-
     // ---- Card right-click ----------------------------------------------------
-    // The canvas WIRES; it does not host three editors. So a node's menu offers
-    // what can be done to it here (wire it, take a side out, delete it) plus the
-    // one hop to the layer's real editor — a bus on Audio & Video, a screen on
-    // Screens, a style on Styles.
     property string menuKey: ""
     property int deleteOutputRow: -1
 
@@ -821,11 +598,6 @@ Item {
         }
         const row = Number(key.substring(4))
         const o = root.outputByRow(row)
-        // THE OUTPUT'S OWN GATES, on BOTH kinds of output card. They used to be two
-        // cards at the head of the STYLES column writing the ON-AIR STYLE's flags —
-        // one close, every screen wearing that theme. Here they write THIS row
-        // (OutputListModel::setShowMedia / setShowOverlay), so the picture changes on
-        // this output and no other; a style's own gates still apply on top.
         const gateItems = []
         if (o) {
             gateItems.push({ id: "toggleOverlay", label: o.showOverlay === false
@@ -845,9 +617,6 @@ Item {
                 items.push({ divider: true })
                 items.push({ id: "unwireVideo", label: qsTr("Unwire video") })
             }
-            // The picture this screen shows: its one routed feed, or the design
-            // composed with each bus window painting its own assigned bus. A
-            // DISPLAY deserves the same choice a recorder or sender gets.
             if (o)
                 items.push({ id: "toggleCompose", label: String(o.videoMode || "") === "compose"
                     ? qsTr("Show direct feed") : qsTr("Compose design") })
@@ -857,9 +626,6 @@ Item {
             // its display binding and its window are in view.
             return items
         }
-        // A sink. It is configured HERE — the same dialog the canvas's picker
-        // opens — and the deeper settings (the recording or stream preset it wears)
-        // stay one hop away on the Recording page. Its wires are cut here.
         const kind = String(o ? o.kind : "").toUpperCase()
         const items = [{ id: "edit", label: qsTr("Configure output") }]
         // The preset it wears is edited on Settings · Recording.
@@ -884,10 +650,6 @@ Item {
         return items
     }
 
-    // The card's own name and what it is — the menu's header, so the panel says
-    // WHICH node it is about and what layer it belongs to (a DropdownPanel opens
-    // with headerTitle/headerSubtitle everywhere else in the app; a bare list of
-    // verbs was the only menu in Settings that did not).
     function nodeName(key) {
         const layer = root.columnOf(key)
         const row = root.rowOf(key)
@@ -927,9 +689,6 @@ Item {
             return
         if (layer === 3) {
             const o = root.outputByRow(Number(key.substring(4)))
-            // The speaker endpoint has nothing to open, rename or delete: the
-            // node is the engine's (AudioEngine makes it with the caps the mixer
-            // needs), so its card carries wires and no roster menu.
             if (o && o.system)
                 return
         }
@@ -940,10 +699,6 @@ Item {
         cardMenu.openAt(card, x, y)
     }
 
-    // OPEN A NODE'S EDITOR — the one action behind both the card's menu ("Edit
-    // …") and a DOUBLE-CLICK on the card itself. Each layer's editor lives where
-    // that layer is edited: a bus on Audio & Video, a style on Styles, an output
-    // in the dialog this canvas now owns (display, mode, window rules).
     function editNode(key) {
         // A gate card has no editor page to hop to (its setting is a wire).
         if (key.indexOf("gate:") === 0)
@@ -982,10 +737,6 @@ Item {
         }
         const rosterRow = Number(key.substring(4))
         if (layer === 2) {
-            // Its own editor is the OUTPUT DIALOG — the same form Settings ·
-            // Outputs uses, display picker included — opened on this row here on
-            // the canvas, so configuring a display no longer means leaving the
-            // wiring you are looking at.
             if (id === "edit") root.editNode(key)
             else if (id === "unwireVideo") RoutingService.assignBus(rosterRow, "video", -1)
             else if (id === "unwireStyle") OutputListModel.setStyle(rosterRow, "")
@@ -1016,24 +767,12 @@ Item {
         else if (id === "delete") root.deleteOutputRow = rosterRow
     }
 
-    // Where a signal's dot sits on its card, measured from the card's centre.
-    //
-    // A card with ONE dot keeps that dot on the centreline — FreeShow's own `.port`
-    // at `top: 50%`, so a bus or a style lines up with its neighbour instead of
-    // hanging above or below the middle. Only an output that carries BOTH signals
-    // draws two dots, and those straddle the same centre symmetrically: video
-    // above, audio below, which is the order every other surface in the app reads.
     function portOffset(key, kind) {
         if (!root.cardHasTwoDots(key)) return 0
         if (kind === "video") return -11
         if (kind === "audio") return 11
         return 0
     }
-    // Which cards stack TWO dots: every bus (it carries a video plane and an audio
-    // plane) and every output but the speaker endpoint (it takes both signals).
-    // Those pairs straddle the card's centreline; a STYLE card has one link dot, and
-    // so does the speaker endpoint, which takes audio and nothing else — for those
-    // the single dot IS the centre.
     function cardHasTwoDots(key) {
         const c = root.columnOf(key)
         // A BUS stacks two dots only when it carries both signals; an audio-only
@@ -1051,11 +790,6 @@ Item {
     }
 
     // ---- Node keys -----------------------------------------------------------
-    // A key names a row as the canvas draws it: "bus:<busRow>", "out:<rosterRow>"
-    // and "style:<styleRow>". They are gesture identities, not storage — every
-    // wire is re-derived from the engine's assignments on each revision, so a
-    // row that moves cannot leave a stale line behind (the failure a stored
-    // key graph has to prune its way out of).
     function outputByRow(row) {
         const rows = root.outputRows
         for (let i = 0; i < rows.length; ++i)
@@ -1084,14 +818,8 @@ Item {
         return -1
     }
 
-    // The column order IS the layer order (Buses → Styles → Screens → Outputs),
-    // and every gesture below is written in terms of it: a drag is normalised
-    // left-to-right, so moving a column is a change HERE, not in six handlers.
     function columnOf(key) {
         if (key.indexOf("bus:") === 0) return 0
-        // A GATE is a Styles-column node: the Overlays/Media cards sit at the head
-        // of that column and send their permission out of the same right edge a
-        // style's look leaves from.
         if (key.indexOf("style:") === 0 || key.indexOf("gate:") === 0) return 1
         if (key.indexOf("out:") === 0) {
             const o = root.outputByRow(Number(key.substring(4)))
@@ -1114,9 +842,6 @@ Item {
         }
         if (key.indexOf("out:") === 0) {
             const row = Number(key.substring(4))
-            // The Outputs column draws its rows GROUPED, so a sink's row index is
-            // its index in the flat, grouped order — the same list the
-            // "+" tile and the wires measure from.
             const list = root.columnOf(key) === 2 ? root.screenRows : root.sinkFlat
             for (let i = 0; i < list.length; ++i)
                 if (Number(list[i].row) === row) return i
@@ -1155,19 +880,10 @@ Item {
         const bus = root.busRoster[index]
         return bus ? String(bus.type || "audio") : "audio"
     }
-    // HAS THIS BUS A PICTURE? Its roster type decides: an "audio" bus sends sound
-    // only, so its card carries no video dot and no video strip. "video" and
-    // "both" send a picture. (This used to answer true for every bus, so an
-    // audio-only bus was drawn with a video port nothing could ever land on —
-    // BusListModel refuses a video route into it with "audio-only-bus".)
     function busHasVideo(index) {
         const bus = root.busRoster[index]
         return !bus || bus.type !== "audio"
     }
-    // HAS IT SOUND? Every bus can carry it: a "video" bus is a camera/feed bus,
-    // and the mixer sums its sources' OWN audio (AudioMixer::FeedsForBus reads the
-    // paired #v plane for the #a one), so its audio dot is a wire the engine really
-    // carries — hiding that dot was a bug this file has already fixed once.
     function busHasAudio(index) { void index; return true }
     function busSourceCount(index) {
         const bus = root.busRoster[index]
@@ -1188,9 +904,6 @@ Item {
         if (o === null) return false
         return kind === "audio" ? o.acceptsAudio === true : o.acceptsVideo === true
     }
-    // Every audio bus wired into one row. A row can hold several (the wires are
-    // an allow-list, not one assignment — see RoutingService::rows), and the
-    // speaker endpoint sums them, so the canvas reads one shape for every card.
     function audioBusesOf(o) {
         if (!o) return []
         if (o.audioBuses !== undefined && o.audioBuses !== null) {
@@ -1201,17 +914,9 @@ Item {
         }
         return Number(o.audioBus) >= 0 ? [Number(o.audioBus)] : []
     }
-    // THE AUDIO BUSES WIRED INTO A ROW THAT ARE ON THE BOARD. A bus can be wired in the
-    // graph (every audio bus is wired to the speaker endpoint when it is created, and the
-    // wiring is saved with the graph) without having a card on this canvas — then there is
-    // no wire to see. The row's "N buses in" and its L/R pair describe what the operator
-    // can see; counting the unseen ones read as "3 buses in" with nothing connected to it.
     function visibleAudioBusesOf(o) {
         return root.audioBusesOf(o).filter(row => root.busRoster[row] && root.busRoster[row].onBoard === true)
     }
-    // Every VIDEO bus wired into one row, same shape — and the set a click is
-    // allowed to pick from (RoutingService.showBusOn refuses anything else). One
-    // of them is on air: that is `o.videoBus`.
     function videoBusesOf(o) {
         if (!o) return []
         if (o.videoBuses !== undefined && o.videoBuses !== null) {
@@ -1222,9 +927,6 @@ Item {
         }
         return Number(o.videoBus) >= 0 ? [Number(o.videoBus)] : []
     }
-    // The SCREEN rows feeding one sink ("this output sends what that screen
-    // shows"), published from the graph's edges by RoutingService::linkScreen.
-    // Empty for a screen and for the speaker endpoint.
     function screenFeedsOf(o) {
         if (!root.screensShown || !o || o.screenFeeds === undefined || o.screenFeeds === null) return []
         const list = []
@@ -1255,14 +957,6 @@ Item {
     }
 
     // ---- IS DATA REALLY MOVING THROUGH THIS CARD? ---------------------------------------
-    // Every answer is a measured fact, never "it is wired":
-    //   bus      a routed video source that is DELIVERING frames (the camera is connected and
-    //            sending), or an audio level above silence on its stereo mix
-    //   overlays the overlay layer has something on air; media: a file is on air
-    //   style    the show is live, real text is on air, and an output wearing the style is
-    //            receiving frames
-    //   output   its render buffer presented a frame (a speaker endpoint: a wired bus has sound)
-    // 1 = live, 0 = idle (present but nothing moving), -1 = no opinion.
     function cardLiveState(key) {
         void root.modelsRev
         void LiveOutputService.inputRev
@@ -1316,12 +1010,6 @@ Item {
     }
 
     // ---- How fast a wire's data moves ---------------------------------------------
-    // The speed of the travelling dashes says how much the wire carries:
-    //   video and style wires   the FRAME RATE of the output they land on
-    //   audio wires             the AUDIO BITRATE of the output they land on
-    // so a 24 fps output crawls beside a 60 fps one, and a 96 kbps recording beads along slower
-    // than uncompressed sound. The rate comes from where the wire ends: a screen's refresh
-    // ("60 Hz"), or the preset a Recording / Streaming output wears.
     readonly property real kUncompressedKbps: 1536   // 48 kHz x 2 channels x 16 bit
     function outputFps(row) {
         if (row < 0 || row >= OutputListModel.rowCount()) return 60
@@ -1347,9 +1035,6 @@ Item {
         }
         return root.kUncompressedKbps   // a screen or sender gets the mix as it is
     }
-    // One full travel of the dash pattern, in ms. 60 fps = 700 ms (what a style wire always did);
-    // audio is 900 ms at 192 kbps and speeds up with the log of the bitrate, so the range between
-    // 96 kbps and uncompressed stays readable instead of a blur.
     function wireCycleMs(kind, toKey) {
         const key = String(toKey || "")
         const row = key.indexOf("out:") === 0 ? Number(key.substring(4)) : -1
@@ -1368,19 +1053,9 @@ Item {
         const out = []
         const rows = root.outputRows
 
-        // bus → output, one wire per assigned side — and per SIDE is literal
-        // here: the video wire leaves the bus's video dot and lands on the
-        // output's video dot, the audio wire does the same on the other pair, so
-        // a both-bus into a both-output is two parallel lines with four distinct
-        // endpoints instead of one ambiguous curve.
         for (let i = 0; i < rows.length; ++i) {
             const o = rows[i]
             const to = root.keyForOutput(Number(o.row))
-            // One video wire PER wired bus — a row can hold several, and every
-            // one of them lands on the same dot, because that is one input. The
-            // one ON AIR is marked (`onAir`), which is what the wire layer draws
-            // solid; the rest are dashed: wired, carried, not the picture going
-            // out. Clicking a wire makes its bus the one on air.
             const videos = root.videoBusesOf(o)
             const shown = Number(o.videoBus)
             for (let k = 0; k < videos.length; ++k) {
@@ -1391,12 +1066,6 @@ Item {
                                onAir: videos[k] === shown,
                                x1: a.x, y1: a.y, x2: b.x, y2: b.y })
             }
-            // One audio wire PER feeding bus: a roster row has one, the speaker
-            // endpoint has as many as are wired to it — and every one of them
-            // lands on the same dot, because that is literally one input.
-            // A screen's picture into this sink, drawn from the screen's OWN
-            // right edge to the same video dot a bus lands on (one input, two
-            // possible feeds — which is what the row actually is).
             const feeds = root.screenFeedsOf(o)
             for (let k = 0; k < feeds.length; ++k) {
                 const a = root.portPoint(root.keyForOutput(feeds[k]), "video", "out")
@@ -1431,12 +1100,6 @@ Item {
                        x1: a.x, y1: a.y, x2: b.x, y2: b.y })
         }
 
-        // GATE → OUTPUT: the allow list, drawn. The wire is not stored anywhere —
-        // the row's own flag IS the wire (OutputListModel::setShowOverlay), so this
-        // list is read from the rows and a wire can never disagree with what the
-        // engine is painting. It lands on the output's LEFT edge, where its style
-        // wire lands, because both answer the same question: what may this output
-        // show.
         for (let i = 0; i < rows.length; ++i) {
             const o = rows[i]
             if (o.system) continue
@@ -1450,9 +1113,6 @@ Item {
                 const a = root.portPoint(from, "gate", "out")
                 const b = root.portPoint(to, "style", "in")
                 if (a === null || b === null) continue
-                // The two permissions arrive a few pixels either side of the style
-                // line (overlay above, media below), so a row that wears a style AND
-                // allows both layers shows three lines, not one smudged one.
                 out.push({ from: from, to: to, kind: "gate",
                            x1: a.x, y1: a.y, x2: b.x,
                            y2: b.y + (gate === "overlay" ? -6 : 6) })
@@ -1477,29 +1137,12 @@ Item {
         }
         return out
     }
-    // A dot lights when ANY wire passes through that edge of the card: the dot is
-    // the CARD's, not a signal's, so a both-bus's video wire lights it while its
-    // audio half is still unwired.
     function portConnected(key, side) {
         return side === "out" ? root.wiresFrom(key).length > 0
                               : root.wiresInto(key).length > 0
     }
 
     // ---- The two GATES: Overlays and Media ------------------------------------
-    // The two chips that used to sit inside Styles · Edit Style. They are the
-    // ALLOW LIST, expressed the way every other decision on this canvas is: with a
-    // wire. They sit at the head of the Styles column because they are a look
-    // question (what may this output paint of the design), and the column to their
-    // right is the outputs that answer it.
-    //
-    // A GATE CARD IS A WIRE SOURCE, exactly like a bus: drag from its right-edge dot
-    // to an output and that output MAY paint the layer; the wire that appears IS the
-    // permission; cutting it (or dragging it again) takes the permission away. No
-    // wire, nothing paints. A style's own gate still applies on top, so a wire can
-    // open what its theme already offers and never what the theme forbids.
-    //
-    // The per-output chips on an output card (RoutingNodeCard::gateChips) write the
-    // SAME flag, so they are a shortcut for the wire, not a second rule.
     readonly property var gateCards: [
         { key: "overlay", title: qsTr("Overlays"), layer: qsTr("Overlay layer") },
         { key: "media", title: qsTr("Media"), layer: qsTr("Media layer") }
@@ -1530,14 +1173,6 @@ Item {
     }
 
     // ---- THE OVERLAYS / MEDIA GATES ARE PER OUTPUT ---------------------------
-    // They used to be two cards at the head of the STYLES column, writing the
-    // ON-AIR STYLE's own flags — so closing media for one screen closed it for
-    // every screen wearing that theme. They are now the two switches on an
-    // OUTPUT's own card menu ("Hide media on this output", "Hide overlays on this
-    // output"), which write that ROW's gates (OutputListModel::setShowMedia /
-    // setShowOverlay) and reach only that row's picture. A style's own gates still
-    // apply on top: both must allow, so a per-output switch can close what a
-    // theme offers but never open what it forbids.
 
     // ---- Ports: ONE list, so a card can never be missing a dot it should have
     // or show one for a signal it cannot carry. The bus/port rule lives here,
@@ -1561,33 +1196,17 @@ Item {
             })
         }
 
-        // A bus sends the halves it CARRIES from its right edge: a both-bus stacks
-        // them (video above the centre, audio below — see portOffset) and a bus
-        // that is only audio or only video has ONE dot, on the centreline, like
-        // every other single-signal card.
         for (let i = 0; i < root.busRoster.length; ++i) {
             const key = root.keyForBus(i)
             if (root.busHasVideo(i)) add(key, "video", "out")
             if (root.busHasAudio(i)) add(key, "audio", "out")
         }
-        // A screen takes video on its left edge and wears a style there too —
-        // the style column is immediately LEFT of it, so both dots face the
-        // things that feed them. Its RIGHT edge SENDS its picture: a screen is a
-        // layer, not just a destination ("a screen feeds a video output"), so it
-        // has an outgoing video dot for the sink beside it.
-        // Empty while screensShown is off (screenRows is then empty).
         for (let i = 0; i < root.screenRows.length; ++i) {
             const key = root.keyForOutput(Number(root.screenRows[i].row))
             add(key, "video", "in")
             add(key, "style", "in")
             add(key, "video", "out")
         }
-        // An output takes through one dot PER SIGNAL it can carry: a video-only
-        // transport (an HDMI display) has one, centred; one that carries both
-        // (NDI, recording, streaming) has two, stacked around the same centre by
-        // portOffset. The speaker endpoint takes audio and nothing else, so audio
-        // is its one dot. A sink wears its style through these same dots — a look
-        // is not a third input.
         for (let i = 0; i < root.sinkRows.length; ++i) {
             const o = root.sinkRows[i]
             const key = root.keyForOutput(Number(o.row))
@@ -1612,9 +1231,6 @@ Item {
     // The signal the live drag started on. A drag is typed from its first pixel:
     // the dot it left decides what it may land on.
     property string dragKind: ""
-    // The half a live drag would actually carry, resolved against the card under
-    // the pointer: one dot per card means the DROP decides whether a both-bus is
-    // sending its picture or its sound (see resolveKind).
     property string dropKind: ""
     property real dragStartX: 0
     property real dragStartY: 0
@@ -1635,13 +1251,6 @@ Item {
     }
 
     // ---- Live metering: what the AUDIO halves read --------------------------
-    // The bridge's taps are REFCOUNTED per device label, so holding one here never
-    // disturbs the Media pane's own hold on the same microphone — and this page
-    // releases ONLY what it took (never stopAllInputMeters, which is how a closed
-    // Settings used to kill the meters the Media pane still had on screen).
-    // A label is held while an audio bus on this canvas routes it in AND that bus
-    // is itself wired onward — exactly when its level strip is drawn: no tap is
-    // opened for a meter nobody can see.
     readonly property var meterTargets: {
         root.modelsRev
         const out = []
@@ -1664,19 +1273,6 @@ Item {
         return out
     }
     // ---- The OTHER carrier: a video row's own audio --------------------------
-    // A media file and an NDI stream carry audio no capture device can reach, so
-    // the bridge's STREAM tap is its carrier (IAudio::StartStreamTap through
-    // startStreamMeter). It publishes into the SAME inputLevels list under the
-    // row's own sublabel, which is why busChannelMix below needed no new lookup.
-    // Without this half, a bus fed only by a video row read "flat zero" on its
-    // strip while the engine was mixing that row's audio into the bus — the one
-    // thing a level strip exists to disprove. The hold discipline is the
-    // device meters': a tap is held only while a bus that carries audio routes
-    // the row in AND is itself wired onward, releases only this page's holds, and
-    // is refcounted per label so Audio & Video can hold the same row too.
-    // kind is the PAL's producer kind: "media" (the backend decodes the file's
-    // audio track) or "ndi" (a receiver pushes the samples); a camera or a screen
-    // capture has no audio at all, so it is never asked for.
     readonly property var streamMeterTargets: {
         root.modelsRev
         const out = []
@@ -1703,14 +1299,7 @@ Item {
     }
     property var heldMeters: []
     property var heldStreamMeters: []
-    // Idempotent diff, the same contract Audio & Video uses: release what left,
-    // start what arrived, leave the rest running. Both carriers are reconciled in
-    // one pass because they feed one reading (busChannelMix) — a bus that swaps a
-    // microphone for a media file must not lose its meter for a frame in between.
     function syncMeters() {
-        // The guard is belt beside the connections' own teardown: a model signal
-        // already in flight when this page is destroyed must not start a tap on a
-        // torn-down object.
         if (!root)
             return
         const wanted = root.meterTargets
@@ -1757,9 +1346,6 @@ Item {
         root.heldStreamMeters = []
     }
 
-    // Can a drag that started on `kind` at `aKey` land on `bKey`? Both directions
-    // are allowed (a wire can be drawn from either end), so the pair is
-    // normalised left-to-right first: the column order IS the signal path.
     function pairOk(aKey, aKind, bKey) {
         const ca = root.columnOf(aKey)
         const cb = root.columnOf(bKey)
@@ -1769,29 +1355,15 @@ Item {
         const fromKey = ca < cb ? aKey : bKey
         const toKey = ca < cb ? bKey : aKey
 
-        // A look is WORN, not sent: styles (col 1) feed a screen (col 2), and a
-        // screen is the only thing that can wear one. `toKey` is the screen
-        // because the pair was normalised left-to-right.
-        // A look is worn by an OUTPUT: a screen (when Screens is on) or any sink, but
-        // never the speaker endpoint, which has no picture to dress.
         if (aKind === "style")
             return fromCol === 1 && toCol >= 2 && !root.isSystem(toKey)
 
-        // A SCREEN feeds a sink: its picture leaves the screen's right edge and
-        // lands on an output that takes video. Only video travels this way — a
-        // screen has no audio of its own to send, and a screen never feeds a
-        // screen (each one is its own surface).
         if (fromCol === 2 && toCol === 3) {
             if (aKind !== "video") return false
             const sink = Number(toKey.substring(4))
             return sink !== Number(fromKey.substring(4)) && root.outputAccepts(sink, "video")
         }
 
-        // A GATE (col 1) reaches an OUTPUT — a screen or a sink — and that wire is
-        // the permission itself: "this output may paint the overlay layer" / "…the
-        // media layer". The speaker endpoint is refused: it has no picture to dress.
-        // (`fromKey` rather than `aKind`, so a wire pulled BACK from an output's dot
-        // onto the gate card is the same edge: the pair is normalised first.)
         if (aKind === "gate" || fromKey.indexOf("gate:") === 0) {
             if (fromCol !== 1 || toCol < 2) return false
             if (toKey.indexOf("out:") !== 0) return false
@@ -1810,12 +1382,6 @@ Item {
     }
 
     // ---- Connect gestures ----------------------------------------------------
-    // Which HALF a drop carries. The dot a card owns is one, so the drag is not
-    // committed to a signal until it lands: a bus carrying both, dropped on the
-    // speakers, is its audio half; the same dot dropped on a screen is its video
-    // half. The dot's own kind is tried first (so a video-only bus can never
-    // arrive as audio), and the sibling is accepted only when the card really
-    // carries it — pairOk owns both facts.
     function resolveKind(fromKey, kind, toKey) {
         if (kind === "" || toKey === "") return ""
         if (root.pairOk(fromKey, kind, toKey)) return kind
@@ -1876,13 +1442,7 @@ Item {
             root.toggleWire(key, over, wireKind)
     }
 
-    // Which node's card contains this canvas point — the cards' rects come from
-    // the same formulas that place them, so this can never disagree with what is
-    // drawn.
     function nodeAt(x, y) {
-        // THE GATE CARDS FIRST: they carry the output dot their permission leaves
-        // from, so a drop on one (a wire pulled back from an output) has to land on
-        // its key, not on the style card below it.
         for (let g = 0; g < root.gateCards.length; ++g) {
             const left = root.columnX(1)
             const top = root.gateTop(g)
@@ -1891,18 +1451,11 @@ Item {
                 return root.keyForGate(g)
         }
         for (let c = 0; c < 4; ++c) {
-            // ...in the same order the columns are drawn: buses, styles, screens,
-            // sinks. A card's rect comes from columnX/rowTop, so a hit test can
-            // never disagree with the card the pointer is on.
             const list = c === 0 ? root.busRows
                        : c === 1 ? root.styleRows
                        : c === 2 ? root.screenRows : root.sinkFlat
             for (let r = 0; r < list.length; ++r) {
                 const left = root.columnX(c)
-                // The Outputs column is segmented, so its cards sit where
-                // sinkSlotTop puts them, not where a flat rowTop would — and the
-                // Buses/Styles columns draw only their board, so a slot's y is the
-                // SLOT's, while the key carries the ROSTER row.
                 const top = c === 0 ? root.busSlotTop(r)
                           : c === 3 ? root.sinkSlotTop(r)
                           : c === 1 ? root.styleTop(r)
@@ -1917,23 +1470,12 @@ Item {
         return ""
     }
 
-    // Applying a wire twice takes it back out — the design's "not wired, not
-    // sent" from the other direction. Each side is a real engine write:
-    //   bus → output   AssignOutputBuses (or ClearOutputBusAssignment when it is
-    //                  already that bus), for THIS signal only — the other half
-    //                  of the bus is untouched
-    //   screen → style OutputListModel::setStyle (the output's style id)
     function toggleWire(a, b, kind) {
         const ca = root.columnOf(a)
         const cb = root.columnOf(b)
         const fromKey = ca < cb ? a : b
         const toKey = ca < cb ? b : a
 
-        // A GATE wire is the permission: applying it twice takes the permission
-        // away again, which is exactly what a bus wire does to its assignment.
-        // Detected by the FROM end, not by `kind`: a wire pulled BACK from an
-        // output's own dot arrives here typed as that dot's signal (resolveKind
-        // answers with the dot it started on), and it is still this same edge.
         if (kind === "gate" || fromKey.indexOf("gate:") === 0) {
             const gate = fromKey.substring(5)
             const row = Number(toKey.substring(4))
@@ -1948,9 +1490,6 @@ Item {
         }
 
         if (kind === "style") {
-            // Which end is which comes from the COLUMNS, never from the drag's
-            // direction — a wire can be pulled from either end, and a style is
-            // now the LEFT end of its link.
             const outKey = root.columnOf(a) === 1 ? b : a
             const styleKey = outKey === a ? b : a
             const row = Number(outKey.substring(4))
@@ -1965,9 +1504,6 @@ Item {
         const row = Number(toKey.substring(4))
         const o = root.outputByRow(row)
         if (o === null) return false
-        // A wire between two output columns is a SCREEN feeding a sink, not a
-        // bus assignment — a different engine write (a video edge between the two
-        // output nodes), so it is decided by the COLUMNS before anything else.
         if (root.columnOf(fromKey) === 2) {
             // The ROSTER row, not the column index — rowOf() answers the position
             // within the Screens column, and a sink's feed is a row id.
@@ -1980,9 +1516,6 @@ Item {
 
         const wired = kind === "audio" ? root.audioBusesOf(o).indexOf(bus) >= 0
                                        : root.videoBusesOf(o).indexOf(bus) >= 0
-        // Unwiring names the BUS, not just the side: the speaker endpoint carries
-        // several audio buses, and "clear the audio side" there would have taken
-        // every one of them instead of the wire that was dropped.
         if (wired) RoutingService.unwireBus(row, kind, bus)
         else RoutingService.assignBus(row, kind, bus)
         return true
@@ -1999,9 +1532,6 @@ Item {
         const list = root.wires
         for (let i = 0; i < list.length; ++i) {
             const w = list[i]
-            // The SAME direction-free geometry the wire is DRAWN with (see the
-            // wire delegate's `reversed`): a hit test that mirrored the drawing
-            // would leave a wire unclickable exactly where it curves.
             const reversed = w.x2 < w.x1
             const x1 = reversed ? w.x2 : w.x1
             const x2 = reversed ? w.x1 : w.x2
@@ -2017,11 +1547,6 @@ Item {
         }
         return -1
     }
-    // A LEFT-click on a video wire: show THAT bus here — the click is the picker,
-    // and the wire it lands on is by definition in the allow-list. Only wired
-    // buses are drawn, so this can only be refused against a stale frame (the
-    // service checks the engine's own edge set regardless, and says so out loud).
-    // A screen→sink wire is not a bus pick and is left alone.
     function showWireAt(x, y) {
         const at = root.wireAt(x, y)
         if (at < 0) return
@@ -2108,9 +1633,6 @@ Item {
     }
 
     // ---- A sink's own transport ---------------------------------------------
-    // The graph node a sink row's transport IS: RoutingService names every output
-    // node "out:<stable row id>" (a STREAM row's included — its node carries its
-    // preset's target). This is the node a take started from the card listens to.
     function sinkNodeId(o) {
         if (!o || o.system) return ""
         return o.id ? "out:" + String(o.id) : ""
@@ -2119,12 +1641,6 @@ Item {
     readonly property string takeNode: RecordingService.recording
                                        && RecordingService.recordingNode.length > 0
                                        ? RecordingService.recordingNode : ""
-    // Which sinks carry a transport pill, and what it says. A RECORDING card is the
-    // one transport you START and STOP here; every other card simply describes
-    // itself. A take is bound to the node it was started on, so only that card says
-    // Stop and the rest keep offering their own Start. A STREAM card has no pill:
-    // its preset's destination is written to its node (see RoutingService), but
-    // there is no RTMP sender in the engine yet to start or stop.
     function sinkActionLabel(o) {
         if (!o || o.system) return ""
         const kind = String(o.kind || "").toUpperCase()
@@ -2134,10 +1650,6 @@ Item {
         if (root.takeNode === node) return qsTr("Stop")
         return qsTr("Record")
     }
-    // Start/stop a take ON THIS CARD'S NODE, with THIS CARD'S PRESET: its container,
-    // encoder, bitrates, resolution and folder, not a global page of settings.
-    // startRecordingOn refuses a node with nothing wired (its own toast names the
-    // reason, which is the honest answer for an empty card).
     function transportSink(o) {
         const node = root.sinkNodeId(o)
         if (node.length === 0) return
@@ -2163,25 +1675,6 @@ Item {
     }
 
     // ---- What each WIRED HALF is doing --------------------------------------
-    // Under each dot that has a wire sits the half's own meter, so "the video
-    // arrives but the audio does not" is visible on the canvas instead of two
-    // wires that look equally alive — and each half is read with the control the
-    // app already owns for that kind of signal:
-    //
-    //   VIDEO half  a thin bar (LevelTrack). A picture has no level, so it is
-    //               full while frames arrive and empty when they stop:
-    //                 bus      its first routed video source is delivering
-    //                 sink     its own runtime (outputRuntime / outputFeedStalled),
-    //                          the same measured fact its Screens row prints
-    //   AUDIO half  the app's L/R pair (ChannelPill) — the SAME control a source
-    //               card and a bus card carry in Media › Inputs, so a side reads
-    //               (and closes) identically wherever it is shown. Its level is
-    //               the bus's stereo mix (busChannelMix), and a sink's pair reads
-    //               the bus wired into it, which is the only audio a sink has.
-    //
-    // The pair now STRADDLES the card's dot — L above it, R below it — because the
-    // dot itself moved to the card's centreline (see portOffset). A port is still
-    // one dot; the two pills are the meter/trim beside it, not a second port.
     readonly property int stripW: 30
     readonly property int stripH: 4
     readonly property int pillSize: 16
@@ -2191,9 +1684,6 @@ Item {
     readonly property int pillPairHeight: root.pillSize * 2 + root.pillGap
 
     readonly property var inputMeters: EngineBridge.inputLevels
-    // The bridge's published snapshot for one device label (null when it has no
-    // tap or no device behind it — an empty label is REFUSED by the bridge and
-    // must never match whatever was published under "").
     function meterSnapshotFor(label) {
         const want = String(label === undefined || label === null ? "" : label).trim()
         if (want === "")
@@ -2204,11 +1694,6 @@ Item {
                 return list[i]
         return null
     }
-    // A bus's own STEREO mix, per side, computed exactly the way the Media pane's
-    // bus card computes it (that card is where the operator's model of this was
-    // worked out, so the two can never disagree): the loudest routed audio input
-    // per channel, times that input's own gain and fader, times the bus's level,
-    // times the bus's own per-side trim. Returns [L, R] in 0..1.
     function busChannelMix(busRow) {
         const bus = root.busRoster[busRow]
         if (!bus)
@@ -2237,14 +1722,6 @@ Item {
                     mix[c] = level
             }
         }
-        // A VIDEO row routed into this bus carries its own audio (a media file's
-        // track, NDI's embedded audio) and the engine's mixer sums it into the
-        // bus — so the bus's own pair must read it too, or a bus whose only
-        // source is a video row sat at zero while it was audibly open. Same
-        // rules as Audio & Video's videoChannelLevels: a camera or screen feed
-        // carries no audio at all, a muted row is silence, each side takes its
-        // own trim and the row's fader, and a mono stream's single peak feeds
-        // both sides.
         const routedVideo = bus.routedVideoSources || []
         for (let r = 0; r < routedVideo.length; ++r) {
             const data = VideoSourceListModel.getSource(routedVideo[r])
@@ -2323,9 +1800,6 @@ Item {
         return false
     }
 
-    // One VIDEO strip per wired video half, in the gutter beside its own dot.
-    // Geometry only — the value lives in each delegate's binding (stripValue), so
-    // a frame tick does not rebuild this list twenty times a second.
     readonly property var signalStrips: {
         root.modelsRev
         const out = []
@@ -2334,14 +1808,6 @@ Item {
         return out
     }
 
-    // One L/R pair per wired audio half, straddling its own dot: L above the
-    // centreline dot, R below it (the pair is centred on that dot, and pillGap is
-    // wide enough for the dot to sit between the two). `bus` is the BUS ROW whose
-    // stereo mix the pair reads and whose per-side trim its clicks write: on a bus
-    // that is the bus itself, and on a screen or output it is the bus wired into
-    // it — a sink has no audio of its own, so the pair there is the feeding bus's
-    // own trim seen from the other end of the same wire (one fact, one model;
-    // nothing is duplicated).
     readonly property var audioPills: {
         root.modelsRev
         const out = []
@@ -2379,9 +1845,6 @@ Item {
         }
         return out
     }
-    // The buses one L/R pair stands for: a roster row's single bus, or every bus
-    // wired into the speaker endpoint. Reading through this is what lets the pair
-    // on the sum sink mean "the program mix" without a second control.
     function pillBuses(pair) {
         if (!pair) return []
         return pair.buses !== undefined && pair.buses !== null ? pair.buses : [Number(pair.bus)]
@@ -2406,10 +1869,6 @@ Item {
         // mix): a near-silent source still reads as a glow instead of vanishing.
         return Math.sqrt(Math.max(0, Math.min(1, mix)))
     }
-    // One gesture, every bus behind it: closing a side of the speaker pair closes
-    // that side on each bus feeding it (the only reading that makes "the left of
-    // the speakers is closed" true), and opening does the reverse. A bus already
-    // in the wanted state is left alone so a mixed pair is not needlessly flipped.
     function togglePill(pair, channel) {
         const buses = root.pillBuses(pair)
         const open = root.pillGain(pair, channel) > 0
@@ -2419,9 +1878,6 @@ Item {
                 BusListModel.toggleChannelGain(buses[i], channel)
         }
     }
-    // What the dot is receiving, per half: "video only" and "audio only" are
-    // half-wired outputs, which the single "silent" badge of a blind card could
-    // never show.
     function receivesLabel(o) {
         // A screen feeding this sink is video arriving, exactly like a video bus.
         const videoBuses = root.videoBusesOf(o)
@@ -2440,34 +1896,7 @@ Item {
         if (audio) return qsTr("audio only")
         return qsTr("silent")
     }
-    // WHAT KIND OF LAYOUT A TEMPLATE IS — "full" or "lower" — from where its main text
-    // block sits on the stage. The same rule, and the same words, as the Styles screen's
-    // layout chip (StylesScreen.layoutClassOf): the node under STYLE TEMPLATES used to
-    // print the style's stored base-layout key verbatim ("lowerThird" on every style,
-    // whatever its templates were).
-    function layoutClassOf(key) {
-        if (typeof key !== "string" || key === "")
-            return ""
-        if (key.indexOf("tpl-") !== 0)
-            return key === "lowerThird" ? "lower" : ""
-        const blocks = TemplateLibraryService.design(key).blocks ?? []
-        let best = null
-        let bestArea = 0
-        for (let i = 0; i < blocks.length; ++i) {
-            const b = blocks[i]
-            if (b.kind !== undefined && b.kind !== "text")
-                continue
-            const area = Number(b.width) * Number(b.height)
-            if (area > bestArea) {
-                bestArea = area
-                best = b
-            }
-        }
-        if (!best)
-            return ""
-        return (Number(best.y) >= StageGrid.h * 0.5 && Number(best.height) <= StageGrid.h * 0.5)
-               ? "lower" : "full"
-    }
+    function layoutClassOf(key) { return ScreenHelpers.layoutClassOf(key) }
     function styleSubtitle(style) {
         const keys = [style.familyTemplateShows, style.familyTemplateMedia,
                       style.familyTemplateScripture, style.familyTemplateTable]
@@ -2482,21 +1911,10 @@ Item {
         const kind = String(style.contentType || "")
         return kind.length > 0 ? kind : qsTr("Style")
     }
-    // A style's own background as its chip colour. "" and "transparent" both
-    // mean "no colour of its own", which is why they resolve to a transparent
-    // swatch (the card then draws its glyph instead).
     function styleSwatch(style) {
         const colour = String(style.backgroundColor || "")
         return colour.length > 0 ? colour : "transparent"
     }
-    // The one-line state under a screen's name: the style it wears, or the
-    // design's own "No signal" when nothing is mapped to it.
-    //
-    // WIRED IS NOT LIVE. `feedLive` is the render engine's own answer (did this
-    // output's buffer receive a frame in the last moment? — see
-    // RoutingService::refreshFeedHealth), and a wired row with no frames is the
-    // one state worth shouting about: it is exactly the case that used to read as
-    // healthy because the wire existed.
     function screenStatus(o) {
         if (!o.wired) return qsTr("No signal")
         if (o.feedLive !== true) return qsTr("no frames")
@@ -2507,10 +1925,6 @@ Item {
         if (!o.wired) return Theme.warningLight
         return o.feedLive === true ? Theme.textSecondary : Theme.warningLight
     }
-    // A GATE CHIP WAS PRESSED on an output card (RoutingNodeCard::gateToggled).
-    // The card reports its own key; the row is the tail of it. `on` reads from the
-    // row, not from the chip, so a press always flips the STORED flag even if the
-    // card's copy is a frame behind.
     function toggleCardGate(key, gate) {
         const row = Number(key.substring(key.indexOf(":") + 1))
         const o = root.outputByRow(row)
@@ -2588,10 +2002,6 @@ Item {
                             required property var modelData
                             spacing: 6
 
-                            // The swatch repeats the wire's own shape — one bar
-                            // for a signal, three dashes for a style link — so
-                            // the legend cannot describe a line the canvas draws
-                            // differently.
                             Row {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 3
@@ -2627,7 +2037,6 @@ Item {
                     }
                 }
             }
-
         }
     }
 
@@ -2664,17 +2073,11 @@ Item {
             contentHeight: board.height
             boundsBehavior: Flickable.StopAtBounds
             clip: true
-            // A connect-drag owns the gesture end-to-end — the page must not
-            // scroll away under the pointer (the ports' preventStealing is the
-            // other half of this).
             interactive: !root.dragging
 
             Item {
                 id: board
                 width: root.boardW
-                // A picker is CONTENT, not a popover that may hang off the canvas:
-                // its panel is taller than a nearly-empty column, so the board grows
-                // with an open picker instead of clipping the last entries.
                 height: Math.max(root.boardH,
                                  addPicker.showing ? addPicker.y + addPicker.height + Theme.space3
                                                    : 0)
@@ -2682,9 +2085,6 @@ Item {
                 // ---- Column headers ----
                 Repeater {
                     model: [
-                        // The order is the layer order the design asks for, left
-                        // to right: signal sources, the looks, the surfaces that
-                        // wear them, then the sinks.
                         { title: qsTr("BUSES"), column: 0 },
                         { title: qsTr("STYLES"), column: 1 },
                         // Shown only while screensShown is on.
@@ -2713,11 +2113,6 @@ Item {
                             font.letterSpacing: 0.8
                         }
 
-                        // THE column's add control. Small, in the header, one per
-                        // column: it opens that layer's own picker / form, so a
-                        // layer is still created where it is wired — it just no
-                        // longer costs the canvas a row of cards to say so.
-                        // Screens has no "+" yet: its screens are made on Settings · Screens.
                         Item {
                             id: headerAdd
                             visible: modelData.column !== 2
@@ -2774,23 +2169,12 @@ Item {
                             || (root.activeHoverKey.length > 0
                                 && (modelData.from === root.activeHoverKey || modelData.to === root.activeHoverKey))
                         readonly property bool dimmed: (root.hoveredWire >= 0 || root.activeHoverKey.length > 0) && !highlighted
-                        // THE SAME CURVE MATHS THE DRAG GHOST USES (see
-                        // draggedWire): plotted from the LEFT end, each handle to
-                        // the OUTSIDE of its own end, so a wire reads identically
-                        // whichever end drew it. Nothing here may assume x1 < x2 —
-                        // that is what made the reverse drag hook around the
-                        // cursor, and the same assumption on the committed line
-                        // would hook a wire the moment its ends swapped.
                         readonly property bool reversed: modelData.x2 < modelData.x1
                         readonly property real fromX: reversed ? modelData.x2 : modelData.x1
                         readonly property real fromY: reversed ? modelData.y2 : modelData.y1
                         readonly property real toX: reversed ? modelData.x1 : modelData.x2
                         readonly property real toY: reversed ? modelData.y1 : modelData.y2
                         readonly property real bend: Math.max(24, Math.abs(toX - fromX) * 0.5)
-                        // WIRED, BUT NOT THE PICTURE GOING OUT. A row can hold
-                        // several video buses and shows one of them; the others are
-                        // drawn dashed and fainter, so "carried" and "on air" stop
-                        // looking like the same line. Clicking one shows it.
                         readonly property bool offAir: modelData.onAir === false
         // ms for the pattern to travel once: the output's frame rate (video, style) or audio bitrate.
         readonly property int cycleMs: { root.modelsRev; return root.wireCycleMs(modelData.kind, modelData.to) }
@@ -2804,34 +2188,17 @@ Item {
                             strokeWidth: highlighted ? 3.4 : 2.2
                             fillColor: "transparent"
                             capStyle: ShapePath.RoundCap
-                            // A style link is not a signal, a gate wire is a
-                            // permission rather than a picture, and a video wire
-                            // that is not the one on air is not the picture going
-                            // out: dashed, all three.
                             strokeStyle: modelData.kind === "style"
                                          || modelData.kind === "gate"
                                          || wireShape.offAir
                                          ? ShapePath.DashLine : ShapePath.SolidLine
                             dashPattern: [4, 4]
-                            // DATA MOVING WHILE LIVE: a style wire's dashes travel from the
-                            // style toward the output while the show is on air, so the link
-                            // reads as carrying the look rather than sitting there. The
-                            // path is plotted from its left end, and a dash offset that
-                            // falls moves the dashes toward the far end; the pattern is
-                            // 4 + 4 stroke widths, so 8 -> 0 loops without a seam. Stopped,
-                            // the wire is the plain static dashed line it always was.
                             dashOffset: 0
                             NumberAnimation on dashOffset {
                                 from: 8
                                 to: 0
                                 duration: wireShape.cycleMs
                                 loops: Animation.Infinite
-                                // A STYLE WIRE MOVES THE MOMENT IT IS CONNECTED — it needs no GO LIVE.
-                                // Connecting a style restyles that output's own picture straight away
-                                // (its background, its template), so the link is carrying the look from
-                                // that instant; it only rests when the output itself is switched off.
-                                // A GATE wire (overlay / media) moves while that layer really has
-                                // something on air (cardLiveState reads the real overlay / media state).
                                 running: (wireShape.modelData.kind === "style"
                                           && (root.outputByRow(Number(String(wireShape.modelData.to).substring(4))) || {}).enabled !== false)
                                          || (wireShape.modelData.kind === "gate"
@@ -2849,14 +2216,6 @@ Item {
                             }
                         }
 
-                        // THE MOVING DATA, for the two signal wires. The solid line stays as the wire;
-                        // on top of it, while the show is live, a lighter pattern travels toward the
-                        // output — each kind in its own shape so they never read alike:
-                        //   video  long dashes, like frames going by
-                        //   audio  small round beads, like samples
-                        // (a style wire is the dashed line itself, animated above). Speed is the
-                        // rate the output runs at: see wireCycleMs. A video wire that is not the one
-                        // on air carries no picture, so nothing travels on it.
                         ShapePath {
                             id: dataFlow
                             readonly property bool isAudio: wireShape.modelData.kind === "audio"
@@ -2912,12 +2271,6 @@ Item {
                     onClicked: (mouse) => root.removeWireAt(mouse.x, mouse.y)
                 }
 
-                // LEFT-click = SHOW this bus here (a wired video wire only).
-                // A TapHandler, not a widening of the MouseArea above: a
-                // left-accepting MouseArea covering the canvas would press on
-                // every left button-down and starve the canvas's own drags and
-                // the drags that start on a port. This claims only a completed
-                // tap, so a press that turns into a drag falls straight through.
                 TapHandler {
                     acceptedButtons: Qt.LeftButton
                     enabled: !root.dragging
@@ -2925,15 +2278,6 @@ Item {
                                                               eventPoint.position.y)
                 }
 
-                // The two MEMBERSHIP menus (see beginAdd): under the column's own
-                // "+", so the list is unmistakably that column's, and only rows
-                // not on the board are offered (plus one create entry).
-                // Opening/placing is NOT done here — `visible` stays false and
-                // openAt (page-level onAddMenuChanged) puts the panel under its
-                // header. `matchAnchorWidth` makes the menu exactly the column's
-                // width, so it reads as that column's list rather than a slab
-                // over the wiring; the tighter row keeps the whole menu about the
-                // height of the cards it adds.
                 DropdownPanel {
                     id: busAddMenu
                     visible: false
@@ -2954,12 +2298,6 @@ Item {
                 }
                 MenuCatcher { menu: styleAddMenu }
 
-                // The catcher dismisses a panel by writing `visible`; the page's
-                // own state has to follow, or the column's "+" would stay lit and
-                // the next press would look like it did nothing. A Connections
-                // and not an `onVisibleChanged` on the panel: DropdownPanel's own
-                // handler is what claims the pointer (AppCursor) while a menu is
-                // open, and an inline handler would REPLACE it.
                 Connections {
                     target: busAddMenu
                     function onVisibleChanged() {
@@ -2976,10 +2314,6 @@ Item {
                 }
 
                 // ---- Buses, in labelled segments --------------------------
-                // Video / Both / Audio / Template, the same markers the Outputs
-                // column wears: a roster that mixes a camera, a mic and a
-                // template bus is one long list you have to read four times, and
-                // the kind is the first thing an operator sorts by.
                 Repeater {
                     model: root.busGroups
                     delegate: Text {
@@ -3022,9 +2356,6 @@ Item {
                         accent: modelData.type === "audio" ? Theme.wireAudio
                               : modelData.type === "video" ? Theme.wireVideo : Theme.accent
                         badge: root.typeBadge(modelData.type)
-                        // "unrouted" is about the BUS's own input: a bus nothing
-                        // feeds carries silence no matter how many outputs are
-                        // wired to it, and that is worth seeing here.
                         status: sources > 0 ? "" : qsTr("unrouted")
                         statusColor: Theme.textMuted
                         dropValid: root.dragging && root.dragFrom !== key
@@ -3053,9 +2384,6 @@ Item {
 
                         nodeKey: key
                         title: modelData.name
-                        // A row with no resolution (an NDI sender, a stream) must
-                        // not print a dangling separator: "NDI · " alone reads as
-                        // missing information that is not missing.
                         subtitle: (modelData.kind ? modelData.kind : "")
                                   + (modelData.res ? " · " + modelData.res : "")
                         iconName: "presentation"
@@ -3063,10 +2391,6 @@ Item {
                         enableToggle: true
                         outputEnabled: modelData.enabled !== false
                         onOutputEnabledToggled: (hoverKey) => root.toggleOutputEnabled(Number(hoverKey.substring(4)))
-                        // THE GATES THEMSELVES, on the card (RoutingNodeCard::gateChips):
-                        // one press flips this row's own overlay or media flag, so an
-                        // operator does not have to open a menu to answer "why is this
-                        // screen not showing the overlay".
                         gateChips: true
                         overlayOn: modelData.showOverlay !== false
                         mediaOn: modelData.showMedia !== false
@@ -3087,12 +2411,6 @@ Item {
                 }
 
                 // ---- Styles, in labelled segments ------------------------
-                // LAYERS first: the two gate cards (Overlays, Media — see
-                // gateCards). They are WIRE SOURCES: their output dot leaves the
-                // Styles column's right edge, and the wire that lands on an output
-                // is that output's permission to paint the layer. The card itself is
-                // not clickable — the line is the state, exactly as a bus's wire is
-                // its routing.
                 Text {
                     visible: root.gateCards.length > 0
                     x: root.columnX(1)
@@ -3122,9 +2440,6 @@ Item {
                         title: modelData.title
                         subtitle: modelData.layer
                         iconName: modelData.key === "overlay" ? "overlays" : "media"
-                        // Lit once ANY output is allowed through it, muted when no
-                        // wire leaves it — the same "wired / not wired" reading every
-                        // other node on this canvas gives.
                         accent: root.gateCount(modelData.key) > 0 ? Theme.accent
                                                                   : Theme.textMuted
                         status: root.gateSummary(modelData.key)
@@ -3138,9 +2453,6 @@ Item {
                     }
                 }
 
-                // STYLE TEMPLATES beneath: the design an output paints, wired
-                // from the same right edge. The marker is what separates a layer's
-                // permission from a template's look.
                 Text {
                     visible: root.gateCards.length > 0
                     x: root.columnX(1)
@@ -3195,10 +2507,6 @@ Item {
                 // header — see the column-headers Repeater above.)
 
                 // ---- Outputs (sinks), in labelled segments ------------------
-                // Audio / Network / Physical / Recording / Streaming: the operator
-                // looks for a TRANSPORT ("where is the SDI?"), so the column says
-                // which kind each run of cards is instead of showing one long
-                // undifferentiated list.
                 Repeater {
                     model: root.sinkGroups
                     delegate: Text {
@@ -3232,18 +2540,12 @@ Item {
                         title: modelData.name
                         subtitle: root.sinkSubtitle(modelData)
                         iconName: root.sinkIcon(modelData)
-                        // The port's own colour — the endpoint is an AUDIO sink now,
-                        // so it reads purple like the wire that lands on it instead
-                        // of grey like something that takes nothing.
                         accent: (modelData.acceptsAudio && modelData.acceptsVideo) ? Theme.accent
                               : modelData.acceptsAudio ? Theme.wireAudio : Theme.wireVideo
                         enableToggle: true
                         outputEnabled: modelData.enabled !== false
                         onOutputEnabledToggled: (hoverKey) => root.toggleOutputEnabled(Number(hoverKey.substring(4)))
                         status: root.receivesLabel(modelData)
-                        // ...and the same two chips, on every sink that is an output of
-                        // ours. The speaker endpoint (system) is the engine's node, not
-                        // a roster row, so it carries no gate to flip.
                         gateChips: !modelData.system
                         overlayOn: modelData.showOverlay !== false
                         mediaOn: modelData.showMedia !== false
@@ -3251,22 +2553,11 @@ Item {
                         // Outputs say WHAT is arriving as a compact badge, so the
                         // transport line beside the name is never cut for it.
                         statusBadge: true
-                        // A sink fed only by a SCREEN is fed, and a sink the engine
-                        // is delivering frames to reads ordinary; the colour now
-                        // also carries FEED HEALTH, so "wired but nothing arriving"
-                        // is visible on this card too (see sinkStatusColor).
                         statusColor: root.sinkStatusColor(modelData)
-                        // Every sink is a drop target for the signals it carries —
-                        // the speaker endpoint included, on its audio port alone
-                        // (pairOk asks outputAccepts, which answers from the row).
                         dropValid: root.dragging && root.dragFrom !== key
                                    && root.pairOk(root.dragFrom, root.dragKind, key)
                         dropInvalid: root.dragging && root.dragFrom !== key
                                      && !root.pairOk(root.dragFrom, root.dragKind, key)
-                        // The two transports you start and stop carry their own
-                        // transport, aimed at THIS card's node — the same node the
-                        // canvas wires buses into, so "record what is wired here"
-                        // needs no second selection.
                         actionLabel: root.sinkActionLabel(modelData)
                         actionActive: root.takeNode.length > 0
                                       && root.sinkNodeId(modelData) === root.takeNode
@@ -3279,17 +2570,9 @@ Item {
                 }
 
                 // ---- The "+" pickers ---------------------------------------
-                // One panel, positioned beside the tile that opened it, drawn in
-                // the shared DropdownPanel's visual language (card ground, border,
-                // hover row) rather than a second menu style.
                 Rectangle {
                     id: addPicker
                     readonly property var entries: root.addMenu === "output" ? root.outputKinds : []
-                    // ONLY THE OUTPUT "+" USES THIS PANEL. It used to show for ANY open add
-                    // menu, but the Buses and Styles menus are their own DropdownPanels
-                    // (busAddMenu / styleAddMenu) and hand this one no entries — so
-                    // opening either "+" drew this panel too, empty, floating over the
-                    // Overlays card beside the real menu.
                     readonly property bool showing: root.addMenu === "output"
 
                     visible: showing
@@ -3298,9 +2581,6 @@ Item {
                     height: pickerCol.height + Theme.space2
                            + (root.addMenu === "output" ? pickerFoot.height + Theme.space2 : 0)
                            + Theme.space3 * 2
-                    // Anchored to the HEADER it was opened from, at the full height it
-                    // needs: the panel is a menu, not a popover that has to fit above a
-                    // card that may no longer be there.
                     x: root.addMenu === "output" ? root.columnX(3) - width - 10
                                                  : root.columnX(0) + root.colW + 10
                     y: root.colHeaderH + root.rowGap
@@ -3368,9 +2648,6 @@ Item {
                         }
                     }
 
-                    // The one thing the picker cannot offer: there is exactly one
-                    // speaker endpoint and it is already on the canvas — adding a
-                    // second would be a second name for the same device.
                     Text {
                         id: pickerFoot
                         visible: root.addMenu === "output"
@@ -3385,9 +2662,6 @@ Item {
                     }
                 }
 
-                // A press anywhere off the picker closes it — the same "click
-                // away and it is gone" a menu owes, without a modal. Declared
-                // above the picker's own z so the picker keeps its clicks.
                 MouseArea {
                     anchors.fill: parent
                     z: 20
@@ -3397,10 +2671,6 @@ Item {
                 }
 
                 // ---- VIDEO level strips ---------------------------------------
-                // The bar alone (LevelTrack's own dot is off — the canvas already
-                // draws the port dot) in the video wire's colour: full while frames
-                // flow, empty when they stop. Declared BEFORE the ports so the dots
-                // and the wires stay on top of both these and the pills below.
                 Repeater {
                     model: root.signalStrips
                     delegate: LevelTrack {
@@ -3411,21 +2681,12 @@ Item {
                         height: root.stripH
                         value: root.stripValue(modelData)
                         showDot: false
-                        // A picture has no level to read: one flat colour that is
-                        // full while frames arrive and empty when they stop. (The
-                        // audio half's level is the L/R pill pair beside its dot.)
                         fixedColor: true
                         fillColor: modelData.color
                     }
                 }
 
                 // ---- AUDIO level: the app's L/R pair --------------------------
-                // ChannelPill — the SAME control a source card and a bus card carry
-                // in Media › Inputs, so a side glows, trims and closes identically
-                // here instead of growing a canvas-only meter. Stacked vertically,
-                // and centred on the audio dot: L sits above the dot and R below it,
-                // which is where they were before the dot itself moved to the middle
-                // of the card (see portOffset).
                 Repeater {
                     model: root.audioPills
                     delegate: Column {
@@ -3442,24 +2703,11 @@ Item {
                                 channelIndex: modelData
                                 compact: true
                                 diameter: root.pillSize
-                                // The BUS's own per-side trim — on a screen or
-                                // output that is the bus wired into it, and on the
-                                // speaker endpoint it is every bus feeding it (see
-                                // pillGain: a side is open when it is open
-                                // somewhere).
                                 gain: {
                                     void root.modelsRev
                                     return root.pillGain(pillPair.modelData, modelData)
                                 }
-                                // The summed mix, shaped the way every live meter
-                                // in the app shapes it (sqrt of the raw mix): a
-                                // near-silent source still reads as a glow
-                                // instead of vanishing.
                                 level: root.pillLevel(pillPair.modelData, modelData)
-                                // One gesture, every bus behind the pair: closing
-                                // a side of the speakers closes it wherever it is
-                                // open, so the control cannot disagree with the
-                                // reading beside it.
                                 onToggled: Qt.callLater(() =>
                                     root.togglePill(pillPair.modelData, modelData))
                             }
@@ -3468,9 +2716,6 @@ Item {
                 }
 
                 // ---- Ports: one list, one delegate. A card's dots are drawn at
-                // the same coordinates its wires end on (portPoint), so a dot and
-                // its line can never drift apart, and a card cannot end up with a
-                // dot for a signal it does not carry (the ports list decides).
                 Repeater {
                     model: root.ports
                     delegate: RoutingPort {
@@ -3481,10 +2726,6 @@ Item {
                         y: modelData.y - height / 2
                         portColor: modelData.color
                         connected: modelData.connected
-                        // A live drag lights the dot it left and the dot it would
-                        // land on. Keyed by CARD, not by kind: most cards own a
-                        // single dot whose signal is resolved on drop (dropKind),
-                        // so matching on the kind would light nothing at all.
                         dragOrigin: root.dragging && root.dragFrom === modelData.key
                         dragTarget: root.dragging && root.dropKey === modelData.key
                                     && root.dropKind.length > 0
@@ -3505,15 +2746,6 @@ Item {
                     // the ghost follows the cursor, the promise does not.
                     opacity: root.dropOk ? 1 : 0.55
 
-                    // THE GHOST IS THE WIRE IT IS ABOUT TO BECOME, so it is
-                    // plotted the way the wire layer plots one: LEFT to right,
-                    // with each handle to the OUTSIDE of its own end (a bus's dot
-                    // to a sink's dot). The ends swap when the drag runs
-                    // backwards — pulled from a sink's dot back towards a bus —
-                    // because keeping both handles pinned to the drag direction
-                    // hooked the curve around the cursor instead of following it:
-                    // the line went stiff exactly while you were dragging the way
-                    // the canvas is really read (right to left).
                     readonly property bool reversed: root.dragX < root.dragStartX
                     readonly property real fromX: reversed ? root.dragX : root.dragStartX
                     readonly property real fromY: reversed ? root.dragY : root.dragStartY
@@ -3522,9 +2754,6 @@ Item {
                     readonly property real bend: Math.max(24, Math.abs(toX - fromX) * 0.5)
 
                     ShapePath {
-                        // Drawn in the colour of the signal it carries, and
-                        // neutral the moment it is over nothing it can land on —
-                        // the canvas never promises a wire it will not make.
                         strokeColor: root.dragging
                                      ? root.wireColor(root.dropKind.length > 0
                                                       ? root.dropKind : root.dragKind)
@@ -3546,10 +2775,6 @@ Item {
                         }
                     }
                 }
-
-                // (An empty column needs no note: every column's header carries its
-                // own "+", so "nothing here yet" is answered by the one control
-                // that fixes it.)
             }
         }
 
@@ -3562,10 +2787,6 @@ Item {
     }
 
     // ---- Card context menu -------------------------------------------------
-    // The SHARED menu pair every roster in Settings uses (MenuCatcher dismisses
-    // it on any outside click or scroll, DropdownPanel draws it), so a
-    // right-click here behaves like one on a screen row instead of a
-    // canvas-only interaction nobody else has to learn.
     MenuCatcher {
         menu: cardMenu
     }
@@ -3578,20 +2799,12 @@ Item {
         // opening as a 480 px panel around six short lines.
         fitContentWidth: true
         model: []
-        // `item` is the row's own entry, so the action is picked by ID, not by
-        // comparing translated labels.
-        // The panel never closes itself — the caller does (the Screens list and Styles menus
-        // set visible = false first). Without it, a verb that leaves its card standing in
-        // place (Delete bus, with its Undo toast) left the menu hanging open over the canvas.
         onItemActivated: (label, item) => {
             cardMenu.visible = false
             root.actOnCard(item && item.id ? String(item.id) : "")
         }
     }
 
-    // Deleting a sink is destructive and leaves nothing to undo (removing a bus
-    // does — the model carries its own restore). Confirm it with the shared
-    // dialog rather than dropping a row on a single stray click.
     ConfirmDialog {
         id: deleteOutputDialog
         shown: root.deleteOutputRow >= 0
@@ -3628,10 +2841,6 @@ Item {
     }
 
     // ---- Add bus: the app's bus picker, in its create mode ------------------
-    // The same picker Media › Inputs' "New bus" opens, so a bus made from this
-    // canvas is made the one way buses are made: source first, bus second, the
-    // route between them already in the graph. The picker never closes itself
-    // (its header says so) — the caller closes it on both outcomes.
     BusSourceModal {
         id: busPicker
         objectName: "routingBusPicker"
@@ -3647,11 +2856,6 @@ Item {
     }
 
     // ---- Configure an output: the Outputs page's own form, on the canvas ----
-    // Add (from the "+" picker, HDMI) and Edit (a card's own menu) share it, so
-    // there is one dialog for "what is this output": its name, its mode, the
-    // test pattern, and — for a physical output — the display it leaves on and
-    // the two window rules that decide how it sits there. Cancel on an ADD
-    // leaves nothing behind: the row is created by Save, not by the pick.
     ModalCard {
         id: outputDialog
         shown: root.outputDialogShown
@@ -3665,13 +2869,6 @@ Item {
         }
         onAccepted: root.submitOutput()
 
-        // The form Settings · Screens uses — the display picker inside it lists
-        // the real QScreens, which is the "external monitor" choice this dialog
-        // exists for. `showType` is off: the transport was chosen in the picker
-        // that opened this, and it is the row's identity from then on.
-        // A RECORDING or STREAMING output is its name and the PRESET it records /
-        // streams with — there is no display, mode or test pattern to set. The
-        // presets themselves are made and edited on Settings · Recording.
         SettingsField {
             width: parent.width
             visible: root.outIsPreset
@@ -3731,9 +2928,6 @@ Item {
             onRefreshPicked: (v) => root.outRefresh = v
             onPlacementPicked: (screenName, res, refresh) => {
                 root.outDisplay = screenName
-                // A picked display brings its MODE with it, exactly as it does
-                // on Settings · Screens: the row starts at the resolution and
-                // refresh that screen is actually running, not at 1080p/60.
                 if (res !== "") {
                     root.outRes = res
                     root.outRefresh = refresh
@@ -3743,12 +2937,6 @@ Item {
             onPatternPicked: (k) => root.outPattern = k
         }
 
-        // WHAT THE TWO FIELDS MEAN FOR A SENDER. An NDI output is discovered by
-        // the NAME its network sender announces and is watched at the mode it
-        // sends, both of which this form already sets (the sender is named after
-        // the output row — see LiveOutputService's ndiSenderDisplayName), so the
-        // dialog says so instead of leaving "resolution" reading like something
-        // about a monitor it does not have.
         Text {
             width: parent.width
             visible: root.outKind.toUpperCase() === "NDI"
@@ -3759,9 +2947,6 @@ Item {
             font.pixelSize: Theme.textXs
         }
 
-        // The one thing ScreenForm does not carry: whether the real output
-        // window stays above other windows. Physical outputs only — a sink with
-        // no window has nothing to keep on top.
         Item {
             width: parent.width
             height: root.outIsHdmi ? 34 : 0
@@ -3784,5 +2969,4 @@ Item {
             }
         }
     }
-
 }

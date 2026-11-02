@@ -2,36 +2,12 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Smart Config — rebuilt from the reference screenshot
-// (1BBTIwaya's VGRPresenter_Settings_Smart_Config.qml is a PNG placeholder
-// export — a bare modal.png image like SizeStyleCard's source was — so the
-// visible design in the screenshot is ground truth): a Configuration mode
-// selector (Strict / Smart / Manual), a Hardware detected card whose rows
-// show a green check + a value, and Resource budgets meters.
-//
-// Same structure as GeneralScreen: an Item root (scrollbar stays fixed
-// at the edge while content scrolls), Flickable + Column inside, shared
-// AppScrollBar, Theme tokens throughout. Content is short enough that it
-// doesn't scroll at the dialog's default size, but the Flickable stays so
-// it degrades gracefully at small window sizes.
-//
-// It is the ENGINE's page: the hardware rows, their wording and the recommended profile come from the engine's own detection
-// (SettingsService.hardwareRows, from bps::settings::BuildHardwareReport), the three modes and their descriptions are the engine's
-// list, and the numbers are the engine's defaults - each resource profile has its own GPU / CPU share (80% / 60% for Performance),
-// which the engine applies to its adaptive runtime (the CPU share bounds the worker threads, the GPU share the texture budget).
-// In Manual mode the two budgets are yours to set; in Smart and Strict they follow the profile.
 Item {
     id: root
 
     readonly property var values: SettingsService.values
     readonly property var modeChoices: SettingsService.definitions["smart.mode"].choices
     readonly property bool manual: root.values["smart.mode"] === "manual"
-    // Lock In Mode (Settings · General) OUTRANKS the mode below: the engine's own
-    // applier puts the runtime in Presentation mode whenever it is on, whatever
-    // this page says (see bps::settings::ApplyToEngine). The mode cards cannot
-    // say that on their own, so the card states it — a choice that is stored but
-    // overridden is exactly what "the General toggle isn't connected to Smart
-    // Config" looks like from the outside.
     readonly property bool lockedIn: root.values["appearance.lockInMode"] === true
 
     function profileLabel(value) {
@@ -42,10 +18,6 @@ Item {
         return ""
     }
     // ---- Glow-dial thresholds ----
-    // The CPU / GPU dials are the BUDGET the sliders set: green while there is
-    // headroom, amber once usage is within 15% of the cap, red once it is past
-    // it. `cap` is the setting in force (the profile's number, or the slider's
-    // own in Manual) — so moving the slider moves the glow.
     function budgetColor(used, cap) {
         if (used === undefined || used < 0)
             return Theme.textMuted
@@ -129,10 +101,6 @@ Item {
                             delegate: Rectangle {
                                 id: modeCell
                                 required property var modelData
-                                // The CHOICE is still the highlighted one with Lock
-                                // In Mode on (so the row keeps showing what a click
-                                // would set); the card's locked-in note below says
-                                // that the engine is not running it.
                                 readonly property bool active: root.values["smart.mode"] === modeCell.modelData.value
 
                                 width: (parent.width - 32) / 3
@@ -169,10 +137,6 @@ Item {
                         }
                     }
 
-                    // The precedence, said out loud on the page it applies to:
-                    // with Lock In Mode on, the mode above is remembered but not
-                    // what the engine runs — and the click that turns it off is
-                    // one row away in General, named so nobody has to hunt for it.
                     Row {
                         visible: root.lockedIn
                         spacing: 6
@@ -276,9 +240,6 @@ Item {
                 border.width: 1
                 visible: SettingsService.recommendedProfile !== ""
 
-                // Is the engine running on the recommendation? Selecting the profile is only half of it: in Manual mode the
-                // caps IN FORCE are the sliders' own numbers, so moving one off the profile's numbers means the recommendation is
-                // no longer what the engine uses - the button goes back to "Apply" the moment you touch a slider.
                 readonly property bool inForce: {
                     if (root.values["resources.profile"] !== SettingsService.recommendedProfile)
                         return false
@@ -442,16 +403,6 @@ Item {
                             font.weight: Font.DemiBold
                         }
 
-                        // The live resource-health modal (CPU / GPU / memory /
-                        // temperature plus the throttling speedometer).
-                        //
-                        // A WRAPPING Item holds the hit area, NOT the Row: a Row
-                        // lays out its children horizontally and refuses the
-                        // left/right/fill/centerIn anchors a MouseArea needs to
-                        // cover the pill ("Row will not function"). The Row sits
-                        // inside the Item and keeps its own layout; the MouseArea
-                        // fills the Item (allowed), so the whole icon+caption is
-                        // the click target.
                         Item {
                             id: healthBtn
                             anchors.right: parent.right
@@ -502,9 +453,6 @@ Item {
                         wrapMode: Text.Wrap
                     }
 
-                    // One budget: the LIVE usage against the share allowed (the
-                    // profile's number, or — in Manual — your own, set with the
-                    // slider under the meter).
                     component BudgetRow: Item {
                         id: budget
                         property string label: ""
@@ -579,14 +527,6 @@ Item {
             }
 
             // ---- Live resource gauges card ----
-            // The glowing-dial readout, under the sliders: CPU, GPU and
-            // battery as the Audio & Video channel knob's glow arc. The CPU /
-            // GPU dials glow amber as usage nears the budget the sliders set
-            // and red once past it — the dial IS the budget, read live, not a
-            // separate number. Package temperature is NOT here: plenty of
-            // machines expose no package sensor, so that tile sat permanently
-            // empty next to three live ones. It stays in the health modal,
-            // where its own "Not measured" wording has room to explain itself.
             Rectangle {
                 width: parent.width
                 height: liveCol.height + 36
@@ -614,9 +554,6 @@ Item {
                         id: liveRow
                         width: parent.width
                         spacing: 12
-                        // Three dials now (the Package-temp tile was removed -
-                        // a desktop reports no package sensor on many machines,
-                        // so it sat empty while the rest of the row was live).
                         readonly property real dialW: (width - spacing * 2) / 3
                         // Every dial is the same height (arc + caption), so the
                         // row's baseline is one line, not three.

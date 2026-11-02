@@ -5,7 +5,6 @@
 #include <format>
 
 namespace bps {
-
 // Out-of-line definition of the thread_local declared in ThreadPool.hpp —
 // see that declaration's comment for why it isn't `inline` there.
 thread_local std::shared_ptr<ThreadPool::Task> ThreadPool::tlsCurrentTask_;
@@ -35,21 +34,6 @@ Result<void> ThreadPool::Initialize(size_t workerCount) {
 Result<void> ThreadPool::Shutdown() {
     if (!initialized_.load()) return Ok();
 
-    // The shutdown latch and the wake-up must be ordered by mutex_ — that
-    // ordering is what makes the notification impossible to miss.
-    //
-    // WorkerLoop evaluates its wait predicate while HOLDING mutex_ (inside
-    // cv_.wait). Setting shuttingDown_ outside the lock and notifying let a
-    // worker pass the predicate check (flag still false) and then park, after
-    // which the notify had already been delivered — nobody left to wake it. The
-    // observed cost: `bps_unit_tests core` parked one of the four pal-stress
-    // workers in WorkerLoop forever while this function sat in join, so the
-    // whole core phase hung with zero CPU use (gdb: main in ThreadPool::Shutdown
-    // → join, one worker in cv_.wait, three already exited).
-    //
-    // With the flag set under the lock, a worker either sees it on its way into
-    // the wait (and exits immediately) or is already parked when notify_all is
-    // delivered (and wakes, re-reads the predicate under the lock, and exits).
     std::vector<std::thread> toJoin;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -260,5 +244,4 @@ Metrics ThreadPool::MetricsSnapshot() const {
     m.health = GetHealth().state;
     return m;
 }
-
 } // namespace bps

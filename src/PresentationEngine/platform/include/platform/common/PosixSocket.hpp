@@ -1,15 +1,10 @@
 #pragma once
 
-// POSIX socket backend of the PAL ISocket interfaces (Linux; also usable on
-// macOS via SO_NOSIGPIPE). Lives in the PAL — the only place that includes
-// <sys/socket.h>. Errors carry nativeError = errno.
-
 #include "../ISocket.hpp"
 
 #include <string>
 
 namespace bps::platform {
-
 class PosixSocket final : public ISocket {
 public:
     explicit PosixSocket(int fd) : fd_(fd) {}
@@ -46,5 +41,4 @@ public:
                                              uint16_t port) override;
     Result<std::unique_ptr<ISocketListener>> Listen(uint16_t port) override;
 };
-
 } // namespace bps::platform

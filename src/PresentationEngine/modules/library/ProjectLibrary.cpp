@@ -13,9 +13,7 @@
 #include <system_error>
 
 namespace bps::library {
-
 namespace {
-
 constexpr const char* kModule = "ProjectLibrary";
 constexpr size_t kMaxItems = 5000;
 constexpr int64_t kFiveDaysMs = 5ll * 24 * 3600 * 1000;
@@ -76,7 +74,6 @@ J ItemToJson(const ProjectItem& i) {
     if (auto meta = json::Parse(i.metaJson); meta.ok() && meta.value().asObject() && !meta.value().asObject()->empty()) o["meta"] = meta.value();
     return J(std::move(o));
 }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -152,11 +149,6 @@ Result<void> ProjectLibrary::Load() {
                 return text.error();
             }
             auto parsed = json::Parse(text.value());
-            // A parse failure AND a document with no 'projects' section are the
-            // same loss: nothing here is loadable. Both are set aside as
-            // evidence and the library comes up empty (rebuilt on the next
-            // save), instead of failing every screen that lists projects — or
-            // silently overwriting the bytes with a save nobody was told about.
             const std::string problem =
                 parsed.ok()
                     ? recovery::DocumentShapeProblem(parsed.value(), "projects", J::Type::Array)
@@ -236,14 +228,6 @@ std::string ProjectLibrary::BuildStoreJsonLocked() const {
 
 Result<void> ProjectLibrary::CommitStore(const std::string& json) const {
     if (storageFile_.empty() || json.empty()) return Ok();
-    // ATOMIC: the project library index is the map to every project the user has;
-    // a half-written one orphans all of them. WriteAtomic creates the parent dir
-    // and swaps the new document in.
-    //
-    // PAL: this is the write that used to run INSIDE every mutator's lock (it
-    // hid one call deep in SaveLocked), so a disk write sat on the interface
-    // thread with the project tree parked behind it. Callers build the document
-    // under the lock and commit it here, after the lock is gone.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     return fs.WriteAtomic(storageFile_, json);
 }
@@ -334,10 +318,6 @@ Result<std::string> ProjectLibrary::Create(std::string_view name, std::string_vi
         projects_.push_back(std::move(p));
         json = BuildStoreJsonLocked();
     }
-    // The write is the only part that can fail, and it happens with the lock
-    // RELEASED; the undo re-takes it and removes THIS project by id (never
-    // "whatever is last", which is what pop_back() would mean once the lock is
-    // not held across the write).
     if (auto saved = CommitStore(json); !saved.ok()) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = std::find_if(projects_.begin(), projects_.end(), [&](const Project& p) { return p.id == id; });
@@ -537,11 +517,6 @@ Result<std::vector<std::string>> ProjectLibrary::AddItems(std::string_view proje
             if (i.ref.empty() && i.type != "section") return Invalid(std::format("a {} item needs to say what it is", i.type));
         }
 
-        // Skip anything already in the project (same type + ref) — a repeat
-        // click/drop of the same overlay/show/media used to pile up duplicate
-        // rows (e.g. "Clock (Analog)" added four times over) instead of doing
-        // nothing the second time. Sections have no ref and no natural identity
-        // to dedupe on, so they stay exempt — a project can hold several.
         std::vector<ProjectItem> deduped;
         for (const ProjectItem& i : items) {
             if (i.ref.empty()) { deduped.push_back(i); continue; }
@@ -555,11 +530,6 @@ Result<std::vector<std::string>> ProjectLibrary::AddItems(std::string_view proje
         for (const ProjectItem& i : project->items) {
             if (i.id.rfind("pi-", 0) != 0)
                 continue;
-            // std::from_chars, NOT std::stoll: an id whose suffix is not a
-            // number (a hand-edited .vgr, an id from a future scheme) must not
-            // throw, and the old `catch (...) {}` swallowed the failure so
-            // silently that a too-large suffix reset the counter to 0 and handed
-            // the next item an id an existing one already held.
             long long parsed = 0;
             const char* const first = i.id.data() + 3;
             const char* const last = i.id.data() + i.id.size();
@@ -687,5 +657,4 @@ Result<std::vector<std::string>> ProjectLibrary::DropOnProject(std::string_view 
     if (items.empty()) return Invalid("nothing that was dropped is something a project can hold");
     return AddItems(projectId, items, index);
 }
-
 } // namespace bps::library

@@ -2,20 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Recording — the PRESETS page. A preset is a named, reusable
-// configuration of one of two kinds: a RECORDING (container, encoder, bitrates,
-// resolution, output folder — how a take is written to disk) or a STREAMING one
-// (platform, RTMP server + key, bitrates, resolution, encoder — where a feed is
-// pushed). The page only keeps the list; Settings · Routing is where a preset
-// becomes an output (Outputs +) and where its take is started and stopped, so a
-// recording or a stream always uses THAT preset's configuration — several presets
-// live side by side.
-//
-// Laid out and behaving like Settings · Styles: pinned title + "Add preset"
-// button, rows in a card, right-click Edit / Duplicate / Delete (Delete asks first
-// while outputs still use the preset). The Add / Edit dialog follows Audio &
-// Video's Add Source: the type chips (Recording / Streaming) first, then that
-// type's own fields. The roster lives in PresetListModel (kernel store).
 Item {
     id: root
 
@@ -54,9 +40,6 @@ Item {
     readonly property var frameRates: ["24 fps", "30 fps", "50 fps", "60 fps"]
     readonly property var resolutions: ["720p", "1080p", "4K"]
 
-    // What the ENGINE of this build can write (RecordingService.available*): read from
-    // its registered providers, not from the machine's GPU. An empty list means the
-    // engine has not told us yet, so nothing is greyed out until it does.
     function containerOk(name) {
         const list = RecordingService.availableContainers
         return list.length === 0 || list.indexOf(String(name).toUpperCase()) >= 0
@@ -210,9 +193,6 @@ Item {
         if (plat.url !== "")
             root.setCfg("serverUrl", plat.url)
     }
-    // Why the last Add / Save was refused, per field ({ name, videoBitrate, serverUrl,
-    // ... }), printed UNDER the field it is about (SettingsField.error): a toast would
-    // sit behind the modal, which read as "the button does nothing".
     property var dlgErrors: ({})
     function errorOf(key) { return root.dlgErrors[key] ?? "" }
     function clearError(key) {
@@ -241,9 +221,6 @@ Item {
         if (ok)
             root.dlgShown = false
     }
-    // The native folder picker is modal and runs its own event loop, so it is
-    // opened AFTER the click handler returned (see Settings · Styles'
-    // pickBackgroundImage for the crash this avoids).
     function pickFolder() {
         Qt.callLater(root.applyPickedFolder)
     }
@@ -483,10 +460,6 @@ Item {
     }
 
     // ---- Add / Edit preset dialog ------------------------------------------
-    // The type chips come first, as on Audio & Video's Add Source; each type then
-    // shows only its own fields. Editing keeps the type (an output wired to a
-    // recording preset must not turn into a stream under it), so the other chip is
-    // greyed out there.
     ModalCard {
         id: presetDialog
         objectName: "selfTestPresetDialog"
@@ -506,7 +479,6 @@ Item {
             text: root.dlgName
             onTextEdited: (t) => { root.dlgName = t; root.clearError("name") }
         }
-
 
         Column {
             width: parent.width
@@ -661,9 +633,6 @@ Item {
                 }
             }
 
-            // A preset saved with a choice this build cannot do (an older preset, or one
-            // made before the engine's list was known) is refused when its take starts —
-            // say so here, not then.
             Text {
                 width: parent.width
                 visible: root.dlgKind === "recording" && root.unavailableNote("recording") !== ""
@@ -770,9 +739,6 @@ Item {
                 font.pixelSize: Theme.textXs
             }
 
-            // Free disk space — REAL, from the engine's storage seam (bytes free +
-            // hours of headroom at the current bitrate). Amber under 20%, red under
-            // 10% — the thresholds the engine's disk policy acts on.
             LabeledMeter {
                 width: 260
                 label: (RecordingService.storage.freeGb ?? 0).toFixed(0) + " GB free · "

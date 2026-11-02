@@ -1,9 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// Small status/label chip. Two modes:
-//  - tint: true  -> bg = baseColor @ tintAlpha, text = lightColor  (selected-state chips, badges)
-//  - tint: false -> bg = Theme.chip (flat neutral), text = textColor  (neutral tag chips)
 Rectangle {
     id: root
 

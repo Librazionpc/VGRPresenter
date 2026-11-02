@@ -13,7 +13,6 @@
 #include <vector>
 
 namespace bps {
-
 // Snapshot of machine resource state (docs/specs/10 §3).
 struct MachineTelemetry {
     uint64_t totalRamBytes = 0;
@@ -54,9 +53,6 @@ public:
     PressureLevel DiskPressure() const;
     PressureLevel GpuVramPressure() const;
 
-    // Cache / module-usage monitoring (10 §3): a per-owner byte ledger. Asset
-    // caches, module buffers, and plugin heaps report here so pressure rules
-    // can see who consumes what (e.g. AssetManager -> RecordUsage("assets", ..)).
     Result<void> RecordUsage(std::string_view owner, uint64_t bytes);
     Result<void> ClearUsage(std::string_view owner);
     std::vector<UsageEntry> UsageSnapshot() const;
@@ -78,16 +74,6 @@ public:
         return platform_ != nullptr;
     }
 
-    // Forget the alert latches (PressureLatch's SUSTAIN / HYSTERESIS / COOLDOWN
-    // state). The latches are what turn a stream of readings into ONE alert per
-    // sustained episode, and their state lives as long as the process does: an
-    // episode an earlier phase raised on this machine keeps `memLatch_` active,
-    // so the next Raise — the transition a test that drives the pressure path is
-    // waiting for — never arrives and the test fails for a reason that has
-    // nothing to do with the code under test (measured: the resource-dispatch
-    // suite passes alone and fails in a full run whenever real memory pressure
-    // had already raised the latch). Nothing in the app clears an alert this
-    // way; this exists so a suite can state its own precondition.
     void ResetPressureAlerts() {
         std::lock_guard<std::mutex> lock(mutex_);
         memLatch_ = PressureLatch{MemLatchConfig()};
@@ -119,9 +105,6 @@ private:
     void SampleLocked();                     // requires mutex_
     static PressureLevel LevelFor(double ratio);
     std::chrono::milliseconds SamplePeriodFor(ResourceMode mode) const;
-    // The two latches' rules, named once: the members are built from these and
-    // ResetPressureAlerts() rebuilds them, so the reset cannot drift from the
-    // construction.
     static PressureLatch::Config CpuLatchConfig() {
         return PressureLatch::Config{PressureLevel::High, PressureLevel::Medium,
                                      std::chrono::seconds(8), std::chrono::seconds(60)};
@@ -144,16 +127,10 @@ private:
     EngineTime lastNetSample_{};                            // guarded by mutex_
     PressureLevel lastMemPressure_{PressureLevel::None};    // guarded by mutex_
     PressureLevel lastCpuPressure_{PressureLevel::None};    // guarded by mutex_
-    // Alert state (see PressureLatch): an alert needs SUSTAINED pressure, clears with
-    // hysteresis, and is rate-limited — a CPU spike or a load hovering at the threshold
-    // is not an emergency and must not toast (or evict caches) on every sample.
-    // CPU is spiky, so it must hold 90%+ for 8 s and re-alerts at most once a minute;
-    // memory moves slowly, so a short 3 s hold and a 30 s cooldown are enough.
     PressureLatch cpuLatch_{CpuLatchConfig()};              // guarded by mutex_
     PressureLatch memLatch_{MemLatchConfig()};              // guarded by mutex_
     std::deque<AutoDecision> decisions_;                    // guarded by mutex_
     static constexpr size_t kMaxDecisions = 64;
     TaskId heartbeatTask_ = 0;
 };
-
 } // namespace bps

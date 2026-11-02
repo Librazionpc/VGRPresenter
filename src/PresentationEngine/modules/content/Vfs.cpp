@@ -8,9 +8,7 @@
 #include <format>
 
 namespace bps::content {
-
 namespace {
-
 std::string NormalizePath(std::string_view p) {
     std::string out;
     out.reserve(p.size());
@@ -66,7 +64,6 @@ void InitCrcTable() {
     }
     g_crcInit = true;
 }
-
 } // namespace
 
 uint32_t Crc32(const uint8_t* data, size_t len, uint32_t seed) {
@@ -143,12 +140,6 @@ Result<std::vector<std::string>> DiskVfs::List(std::string_view dir) const {
     if (!entries.ok()) return entries.error();
     std::vector<std::string> rel;
     rel.reserve(entries.value().size());
-    // Normalize the prefix AND compare against a normalized entry —
-    // fs.Enumerate() returns std::filesystem::path::string(), which is
-    // backslash-separated on Windows, so a raw starts_with() against a
-    // forward-slash prefix silently matched nothing on that platform (every
-    // entry fell out of the loop, not just misnormalized — List() returned
-    // an empty list for every real Windows directory).
     std::string prefix = NormalizePath(root_);
     if (prefix.empty() || prefix.back() != '/') prefix += '/';
     for (const auto& e : entries.value()) {
@@ -256,11 +247,6 @@ Result<void> ZipVfs::Open() {
     return OpenLocked();
 }
 
-// Opening is the ONE thing here that reads the whole archive from disk, and it
-// used to do it with mutex_ held — so every entry read (and every reader) waited
-// on that read. The body now: look under the lock, read + parse with NO lock
-// held, publish the finished table under it. The name stays because every caller
-// wants "make sure it is open", not "take the lock and do it".
 Result<void> ZipVfs::OpenLocked() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -472,5 +458,4 @@ Result<void> ZipWriter::WriteTo(std::string_view hostPath) const {
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     return fs.WriteBinary(hostPath, zip.value());
 }
-
 } // namespace bps::content

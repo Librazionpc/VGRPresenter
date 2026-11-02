@@ -11,7 +11,6 @@
 #include <utility>
 
 namespace bps::presentation {
-
 PresentationEngine& PresentationEngine::Instance() {
     static PresentationEngine instance;
     return instance;
@@ -316,10 +315,6 @@ Result<void> PresentationEngine::Prepare(std::string_view id) {
         auto r = Open(id);
         if (!r.ok()) return r.error();
     }
-    // The on-air output's style rides into every scene build — SceneBuilder
-    // keys styled scenes by a fingerprint of the spec, so a style change made
-    // while live is picked up by this 1s re-Prepare without any invalidation
-    // pass (stale styled scenes simply stop being asked for).
     OutputStyleSpec style;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -342,11 +337,6 @@ Result<void> PresentationEngine::PresentLive(const Presentation& content) {
         style = activeStyle_;
     }
 
-    // The runtime holds a RAW pointer — the caller's copy must outlive the run
-    // (the controller keeps its own; the registry mirror below is refreshed
-    // independently and never pointed at). A previous binding (any state — a
-    // prepared show, a finished run) is closed first: Open refuses while
-    // anything is bound.
     (void)runtime_.Close();
     auto open = runtime_.Open(content);
     if (!open.ok()) return open.error();
@@ -398,41 +388,17 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
             || activeStyle_.backgroundColor != style.backgroundColor
             || activeStyle_.backgroundImage != style.backgroundImage
             || activeStyle_.clearBackgroundOnText != style.clearBackgroundOnText
-            // THE FIT IS COMPARED EVEN THOUGH NOTHING COMPOSES FROM IT ANY MORE
-            // (a take's shape is the file's, else contain — see SceneBuilder
-            // ::AddCompositorLayers). Leaving it out is what made the Settings ·
-            // Outputs → Fill control look dead on the ACTIVE output: a push that
-            // differed only in mediaFit was called a no-op, so no revision bump,
-            // no rebuild, and the picture on air kept the old fit while the other
-            // outputs (whose set is re-read every frame) obeyed. Any field a
-            // frame can depend on belongs in this list.
             || activeStyle_.mediaFit != style.mediaFit
-            // The BAKED template blocks: an edit to the template design the
-            // style wears re-pushes the same key with different blocks — the
-            // comparison above alone would call that push a no-op and the
-            // output would keep rendering the old layout forever.
             || activeStyle_.showShows != style.showShows
             || activeStyle_.showMedia != style.showMedia
             || activeStyle_.showScripture != style.showScripture
             || activeStyle_.showTable != style.showTable
             || activeStyle_.templateBlocks != style.templateBlocks
-            // WHICH BUS WINDOWS THIS OUTPUT MAY PAINT (see OutputStyleSpec): a wire
-            // added or pulled changes the composed picture — the design's bus
-            // blocks stop or start painting — so leaving these out would call that
-            // push a no-op and leave the old set on screen. Same rule as mediaFit's
-            // note above: any field a frame can depend on belongs in this list.
             || activeStyle_.gateVideoBuses != style.gateVideoBuses
             || activeStyle_.allowedVideoBuses != style.allowedVideoBuses
-            // THE TEMPLATE BUS A ROW SHOWS (see OutputStyleSpec): a wire onto a
-            // template bus, a re-assignment inside its template or a template
-            // edit all re-push the same style with a different picture, so a
-            // push that only differs here must not read as a no-op.
             || activeStyle_.templateBus != style.templateBus
             || activeStyle_.templateBusBlocks != style.templateBusBlocks
             || activeStyle_.templateBusBackground != style.templateBusBackground
-            // PER-FAMILY templates: a family re-pick (or a template design
-            // edit under a family key) re-pushes with different per-family
-            // keys/blocks — that must rebuild scenes, not no-op.
             || !std::equal(std::begin(activeStyle_.familyTemplateKeys), std::end(activeStyle_.familyTemplateKeys),
                            std::begin(style.familyTemplateKeys))
             || !std::equal(std::begin(activeStyle_.familyTemplateBlocks), std::end(activeStyle_.familyTemplateBlocks),
@@ -442,9 +408,6 @@ Result<void> PresentationEngine::SetActiveOutputStyle(const OutputStyleSpec& sty
     if (!changed)
         return Ok();   // a no-op push must not thrash the live scenes
 
-    // Wake the live loop: the revision bump is its signal to rebuild every
-    // compiled slide's scene under the new spec (RebuildScenes runs from the
-    // loop thread, legal while LIVE — no state bounce).
     runtime_.AdvanceStyleRevision();
     Logger::Instance().Info(
         std::format("output style set: '{}' (bg '{}', layout '{}')",
@@ -473,9 +436,6 @@ Result<void> PresentationEngine::SetLiveOutputStyles(const std::vector<OutputSty
         liveOutputBuffers_ = bufferNames;
         liveOutputSizes_ = bufferSizes;
     }
-    // The live loop re-reads the set every frame and re-keys its passes on a
-    // hash of the set — a push lands within a frame, no revision bump needed
-    // (the main deck's scenes are unaffected).
     return Ok();
 }
 
@@ -624,5 +584,4 @@ void PresentationEngine::OnConfigReload(const events::ConfigHotReload& e) {
     (void)Reload();
     (void)e;
 }
-
 } // namespace bps::presentation

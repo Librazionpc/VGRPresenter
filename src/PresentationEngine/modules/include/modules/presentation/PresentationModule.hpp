@@ -7,12 +7,6 @@
 #include <atomic>
 
 namespace bps::modules {
-
-// Example feature module (docs/specs/08): listens for the canonical
-// `presentation.slide_changed` event and fans it out via the Logger, and runs
-// a real autoplay feature (07 §Autoplay) that advances slides on the
-// TaskScheduler. Demonstrates how modules plug into the core without the core
-// knowing them.
 class PresentationModule final : public IModule {
 public:
     static std::shared_ptr<PresentationModule> Create();
@@ -41,5 +35,4 @@ private:
     size_t autoplaySlides_ = 0;
     std::atomic<int> autoplayPosition_{0};
 };
-
 } // namespace bps::modules

@@ -1,13 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The window-level layer that carries a drag from one pane to another (FreeShow's drag and drop between the library dock, the
-// Projects panel and the centre page). A pane can't draw its drag itself: it is clipped to that pane. So a DragSource (any
-// draggable row or tile) asks this layer to carry the drag - it shows a small chip that follows the pointer above everything, and
-// tells whichever DropArea it is over. What may be dropped where is the ENGINE's rule (ProjectService.acceptsDrop); a DropArea
-// asks that in onEntered and only lights up for what the engine accepts.
-//
-// One instance lives at the root of the window, above every screen (see Main.qml, `window.dragLayer`).
 Item {
     id: root
     anchors.fill: parent
@@ -28,12 +21,6 @@ Item {
         ghost.visible = true
         ghost.Drag.active = true
     }
-    // (x, y) arrive as WINDOW coordinates of the pointer (every DragSource hands
-    // them over that way), but this layer is placed in the screens' scaled design
-    // space (Main.qml) so the chip matches the scale of the pane it came from.
-    // The pointer position is therefore converted into that space here — the two
-    // must stay in step: drawing the chip in window units over a scaled UI made it
-    // visibly larger than the row being dragged.
     function move(x, y) {
         const origin = root.mapToItem(null, 0, 0)
         const s = root.scale > 0 ? root.scale : 1

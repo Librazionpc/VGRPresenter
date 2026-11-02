@@ -13,7 +13,6 @@
 #include <vector>
 
 namespace bps {
-
 // Build identity of the engine binary (01 §3 Build information).
 struct BuildInfo {
     Version version;
@@ -47,10 +46,6 @@ struct BootOptions {
     uint16_t ipcPort = 0;                     // >0 boots the TCP+JSON IPC server (core/ipc)
 };
 
-// A subsystem that failed to initialize during Boot. The kernel runs without it
-// rather than refusing to start — see Kernel::Boot — so this is the honest record
-// of what the session is missing, and what a caller should turn into a visible
-// "this part is unavailable" message instead of a dead application.
 struct DegradedSubsystem {
     std::string system;   // the boot step's name, e.g. "Database"
     int code = 0;         // the Error code the step failed with
@@ -88,11 +83,6 @@ public:
     const BootOptions& Options() const noexcept { return options_; }
     std::vector<std::string> BootLog() const;   // systems initialized, in order
 
-    // Systems that FAILED to initialize during Boot and are therefore absent
-    // from this session (empty on a clean boot). Boot still reaches Running when
-    // this is non-empty: the engine comes up with a hole in it, and this is how
-    // a caller finds out which hole, instead of the whole UI answering "the
-    // engine is not running yet" because one data file was unreadable.
     std::vector<DegradedSubsystem> Degraded() const;
 
     // Identity (01 §3): engine UUID, build information, runtime information, context.
@@ -110,9 +100,6 @@ private:
     // more — see BootStep — so a failure has nowhere to go but degraded_.
 
     Result<void> TransitionState(KernelState next);
-    // Run one boot step. A failure — or a throw — records the system in
-    // degraded_ and lets Boot continue; true means the step succeeded and the
-    // caller may register/announce the system.
     bool BootStep(std::string_view system, const std::function<Result<void>()>& step);
     // Record + log + publish one degraded system (used by BootStep).
     void Degrade(std::string_view system, const Error& cause);
@@ -129,5 +116,4 @@ private:
     std::vector<DegradedSubsystem> degraded_;          // guarded by mutex_
     mutable std::mutex mutex_;
 };
-
 } // namespace bps

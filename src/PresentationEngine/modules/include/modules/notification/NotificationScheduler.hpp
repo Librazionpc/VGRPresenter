@@ -1,9 +1,5 @@
 #pragma once
 
-// NotificationScheduler (docs/specs/14 §Notification Scheduler): delayed
-// notifications, quiet hours, and presentation-mode suppression. Runs on the
-// Core TaskScheduler — no module owns a thread.
-
 #include "modules/notification/Notification.hpp"
 
 #include <functional>
@@ -12,7 +8,6 @@
 #include <string>
 
 namespace bps::notification {
-
 class NotificationScheduler {
 public:
     using DeliverFn = std::function<void(const Notification&)>;
@@ -47,5 +42,4 @@ private:
     mutable std::mutex mutex_;
     std::multimap<int64_t, Notification> due_;   // dueAtMs -> notification
 };
-
 } // namespace bps::notification

@@ -1,16 +1,8 @@
 #pragma once
 
-// Canonical engine events (docs/specs/05 §7). Every event used by the core
-// systems is declared here so topics stay consistent across the codebase.
-//
-// Events derive from IEvent (which carries no data members) and declare a
-// compile-time kTopic. Explicit constructors are provided so braced init
-// ({fields...}) works even though the events are not aggregates.
-
 #include "interfaces/IEvent.hpp"
 
 namespace bps::events {
-
 // --- Kernel (01) ---
 struct EngineBooted : IEvent {
     static constexpr const char* kTopic = "engine.kernel.booted";
@@ -45,11 +37,6 @@ struct KernelPanic : IEvent {
     explicit KernelPanic(const Error& e) : error(e) {}
 };
 
-// One subsystem could not initialize, so the kernel booted WITHOUT it: the
-// engine is up and the feature behind that system is not. Boot degrades rather
-// than aborting (see Kernel::Boot) — the abort is what turned one unreadable
-// data file into a session where every screen answered "the engine is not
-// running yet". Published once per degraded system, right after the boot walk.
 struct SubsystemDegraded : IEvent {
     static constexpr const char* kTopic = "engine.kernel.subsystem_degraded";
     std::string system;   // the boot step's name, e.g. "Database"
@@ -217,9 +204,6 @@ struct MediaStateChanged : IEvent {
           durationSec(dur) {}
 };
 
-// --- Domain: platform (PAL OS events, Phase 2 / SystemArchitecture §3.6) ---
-// Published by the Kernel's platform watcher, which drains
-// IPlatform::PollChanges() into the Event Bus on a scheduler tick.
 struct MonitorConnected : IEvent {
     static constexpr const char* kTopic = "platform.monitor_connected";
     std::string monitorId;
@@ -413,10 +397,6 @@ struct ContentValidationFailed : IEvent {
         : uuid(std::move(u)), reason(std::move(r)) {}
 };
 
-// --- Notification Service (Phase 4, docs/specs/14) ---
-// Published when a user triggers a notification action (Retry, Open Logs...).
-// The NotificationService carries the action identifier only; the owning
-// module subscribes and performs the work (no business logic in the service).
 struct NotificationActionInvoked : IEvent {
     static constexpr const char* kTopic = "notification.action_invoked";
     uint64_t notificationId = 0;
@@ -1690,5 +1670,4 @@ struct BroadcastError : IEvent {
     BroadcastError(std::string p, std::string m)
         : provider(std::move(p)), message(std::move(m)) {}
 };
-
 } // namespace bps::events

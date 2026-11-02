@@ -1,10 +1,5 @@
 #pragma once
 
-// IImporter (docs/specs/13 §Import Pipeline): the Open/Closed extension point
-// for file formats. The ImportManager knows nothing about PowerPoint, PDF, or
-// Bible files — it only discovers and executes registered importers. Adding a
-// new format = implement this interface + register. No CAMS code changes.
-
 #include "modules/content/AssetMetadata.hpp"
 #include "core/common/Common.hpp"
 
@@ -14,7 +9,6 @@
 #include <vector>
 
 namespace bps::content {
-
 struct ImportContext {
     std::string source;          // host path of the file being imported
     std::string fileName;        // base name with extension
@@ -64,5 +58,4 @@ public:
     virtual Result<ImportResult> Import(const ImportContext& ctx,
                                         const std::vector<uint8_t>& bytes) const = 0;
 };
-
 } // namespace bps::content

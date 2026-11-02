@@ -1,13 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One headline number with its bar: a small label, the percentage large, and a slim
-// meter under it, inside a quiet tile. Three of these side by side (Rendering /
-// Encoding / Output) read at a glance where the older label-left, percent-right
-// lines with a bar under each had to be read one by one.
-//
-// The bar and the number turn amber when the figure is high (default 90%), so a
-// stressed engine is the one thing on the card that changes colour.
 Rectangle {
     id: root
 

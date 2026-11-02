@@ -3,7 +3,6 @@
 #include "core/logging/Logger.hpp"
 
 namespace bps {
-
 LifecycleManager& LifecycleManager::Instance() {
     static LifecycleManager instance;
     return instance;
@@ -179,13 +178,6 @@ Result<void> LifecycleManager::Transition(std::string_view id, LifecycleState ta
         return Ok();
     }
 
-    // No direct edge: walk along the canonical path (12 §5). The linear path never
-    // passes through the side-branch states Paused/Suspended/Resumed, so
-    // Running -> Stopped goes Running -> Stopping -> Stopped.
-    //
-    // Reset edges jump backward in rank and are only honored for their canonical
-    // purpose: Stopped -> Running restarts (via the Stopped -> Registered edge),
-    // Destroyed -> <target> reinstalls (via Destroyed -> Discovered).
     LifecycleState cur = from;
     if (Order(target) <= Order(from)) {
         bool resetAllowed =
@@ -277,5 +269,4 @@ HealthReport LifecycleManager::GetHealth() const {
     r.detail = std::format("{} entities tracked", EntityCount());
     return r;
 }
-
 } // namespace bps

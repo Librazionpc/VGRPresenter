@@ -1,10 +1,5 @@
 #pragma once
 
-// MediaEngine (docs/specs/21): the Phase 10 facade. Owns the media library
-// (assets + metadata + thumbnails), the format registry, the background
-// pipeline, the playback engine, and the caches. Providers add formats/codecs/
-// decoders without engine changes.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -20,7 +15,6 @@
 #include <vector>
 
 namespace bps::media {
-
 class IMediaProvider {
 public:
     virtual ~IMediaProvider() = default;
@@ -53,9 +47,6 @@ public:
     Result<MediaFormat> ResolveFormat(std::string_view extension) const;
     bool IsFormatSupported(std::string_view extension) const;
 
-    // --- Library ---
-    // Imports a media file: registers the asset, extracts metadata, generates a
-    // thumbnail, publishes media.imported/media.ready.
     Result<std::string> Import(std::string_view path, std::string_view name = {});
     Result<void> Remove(std::string_view mediaId);
     Result<MediaAsset> Get(std::string_view mediaId) const;
@@ -120,5 +111,4 @@ private:
     std::atomic<uint64_t> errorCount_{0};
     std::atomic<uint64_t> processedCount_{0};
 };
-
 } // namespace bps::media

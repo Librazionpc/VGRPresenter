@@ -1,9 +1,5 @@
 #pragma once
 
-// Small Windows Media Foundation helpers shared by the recording providers (the H.264 /
-// AAC encoders, the Matroska writer). Internal to modules/recording — nothing outside
-// includes it. Windows headers are pulled in here so every user gets the same defines.
-
 #include "core/common/Common.hpp"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -32,7 +28,6 @@
 #include <vector>
 
 namespace bps::recording::mf {
-
 // Owns one COM interface pointer and releases it once.
 template <typename T>
 class ComRef {
@@ -162,5 +157,4 @@ inline int16_t ToPcm16(float sample) {
 inline int64_t MsToHns(double milliseconds) {
     return static_cast<int64_t>(std::llround(milliseconds * 10000.0));
 }
-
 } // namespace bps::recording::mf

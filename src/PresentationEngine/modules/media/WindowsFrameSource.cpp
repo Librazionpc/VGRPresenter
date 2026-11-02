@@ -1,7 +1,3 @@
-// Windows FrameSource: a video frame at any position from Media Foundation, and the
-// shell's own preview (the picture Explorer shows for a file) for photos and for any
-// video Media Foundation cannot open.
-
 #ifdef _WIN32
 
 #include "modules/media/FrameSource.hpp"
@@ -20,9 +16,7 @@
 #include <string>
 
 namespace bps::media {
-
 namespace {
-
 constexpr const char* kModule = "WindowsFrameSource";
 
 // Minimal COM smart pointer (no ATL/WRL dependency).
@@ -41,22 +35,6 @@ private:
     T* p_ = nullptr;
 };
 
-// COM and Media Foundation are per-thread/per-process state; the cache calls from its
-// own worker threads, so each request sets them up and tears them down again.
-//
-// WITH ONE EXCEPTION, and it is load-bearing: Media Foundation is started ONCE for
-// the process and never shut down from here — the same rule WindowsAudio.cpp
-// documents for its own reader. MFShutdown is process-wide, so a shutter must never
-// tear the platform out from under a video path that is decoding; and cycling it per
-// request turned out to LEAK. Measured in isolation (build/probe_mfcycle.cpp, which
-// reproduces this exact shape): 20 requests of "MFStartup + source reader + one frame
-// + MFShutdown" leaked ~17 kernel handles PER REQUEST — 7.7 WaitCompletionPacket,
-// 5 Event, 2 IRTimer, 1 TpWorkerFactory, 1 IoCompletion — because each cycle spun up
-// and dropped a fresh real-time work queue (Rtwq). The same cycle with MF started
-// once and left running costs ~2 handles per request (build/probe_mf.cpp), and those
-// are the two long-lived ones the process keeps anyway. Every thumbnail and preview
-// frame the UI asks for comes through here, so the old shape leaked for the life of
-// the process.
 class ComScope {
 public:
     ComScope() {
@@ -72,9 +50,6 @@ public:
     bool mediaFoundation() const { return mfStarted_; }
 
 private:
-    // Started once, result remembered — including failure, so a machine where MF
-    // cannot start does not retry the init on every single request. The function-local
-    // static is thread-safe (C++11), and this runs on the cache's worker threads.
     static bool StartMediaFoundationOnce() {
         static const bool started = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
         return started;
@@ -92,9 +67,6 @@ std::wstring Widen(const std::string& utf8) {
     return out;
 }
 
-// Scales BGRA rows (row 0 first, `stride` bytes apart) to `targetWidth` wide - never larger
-// than the source - and returns tightly packed RGBA with the alpha forced opaque (a preview
-// is opaque; the alpha of decoded video and of shell bitmaps is not reliable).
 Picture ScaleToRgba(const uint8_t* bgra, int sw, int sh, size_t stride, int targetWidth) {
     Picture out;
     if (!bgra || sw <= 0 || sh <= 0) return out;
@@ -237,9 +209,6 @@ Result<Picture> GrabVideo(const std::string& path, double fraction, int targetWi
 // Images: WIC, the Windows Imaging Component
 // ---------------------------------------------------------------------------
 
-// Decodes any format WIC has a codec for (JPEG, PNG, BMP, GIF, TIFF, ICO, and HEIC / WebP / AVIF
-// where the Windows extension is installed), scaled with WIC's own high-quality filter. Unlike the
-// shell preview this keeps the picture's transparency.
 Result<Picture> GrabImage(const std::string& path, int targetWidth) {
     ComScope scope;
     Com<IWICImagingFactory> factory;
@@ -340,9 +309,6 @@ public:
         if (kind == MediaKind::Video) {
             auto frame = GrabVideo(path, fraction, targetWidth);
             if (frame.ok()) return frame;
-            // Not decodable by Media Foundation (odd codec / container): the shell may still have
-            // a poster for it. That is a still, so it only stands in for the still (the middle),
-            // never for a specific position - moving frames would all show the same picture.
             if (fraction != 0.5) return frame.error();
             return GrabShell(path, true, targetWidth);
         }
@@ -353,13 +319,11 @@ public:
         return GrabShell(path, false, targetWidth);
     }
 };
-
 } // namespace
 
 std::shared_ptr<IFrameSource> MakeWindowsFrameSource() {
     return std::make_shared<WindowsFrameSource>();
 }
-
 } // namespace bps::media
 
 #endif // _WIN32

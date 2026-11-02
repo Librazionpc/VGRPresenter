@@ -1,11 +1,5 @@
 #pragma once
 
-// IBroadcastProvider (docs/specs/29 §3): the provider seam for NDI, SDI and
-// software loopback. Providers are registered with the BroadcastEngine and can
-// be added by plugins without modifying the engine. A provider owns the SDK
-// lifecycle for its technology (runtime dlopen for NDI/DeckLink) and reports
-// Unsupported when the library or hardware is absent.
-
 #include "modules/broadcast/BroadcastTypes.hpp"
 
 #include <cstdint>
@@ -14,7 +8,6 @@
 #include <vector>
 
 namespace bps::broadcast {
-
 // A send handle: opaque id owned by the engine.
 using BroadcastSenderId = std::string;
 using BroadcastReceiverId = std::string;
@@ -58,17 +51,9 @@ public:
         (void)senderId;
         return Ok();
     }
-    // How many receivers are currently CONNECTED to a sender (-1 = this
-    // provider can't tell). The NDI provider reads the SDK's own connection
-    // count for its NDI-shaped senders: "frames flowing but 0 receivers" is
-    // THE firewall/discovery symptom — frames go out, nothing accepts them.
     virtual int ConnectedReceiverCount(std::string_view /*senderId*/) const {
         return -1;
     }
-    // How many receivers are currently CONNECTED to this sender (-1 = the
-    // provider can't tell). The NDI provider reads the SDK's own connection
-    // count: "frames flowing but 0 receivers" is THE firewall/discovery
-    // symptom — frames go out, nothing on the network accepts them.
 
     // --- Receive ---
     virtual Result<BroadcastReceiverId> CreateReceiver(std::string_view sourceName) {
@@ -106,5 +91,4 @@ public:
 };
 
 using BroadcastProviderFactory = std::function<std::shared_ptr<IBroadcastProvider>()>;
-
 } // namespace bps::broadcast

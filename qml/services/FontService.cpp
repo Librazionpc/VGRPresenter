@@ -7,14 +7,12 @@
 #include <QString>
 
 namespace {
-
 constexpr const char *kDefaultKey = "\x01" "default";
 
 const bps::rendering::FontManager &fonts()
 {
     return bps::rendering::RenderEngine::Instance().Fonts();
 }
-
 } // namespace
 
 FontService &FontService::instance()
@@ -68,18 +66,10 @@ QString FontService::monoFamily() const
 QString FontService::resolve(const QString &requested) const
 {
     const QString family = requested.trimmed();
-    // A block with no fontFamily resolves to the CONTENT default (Cambria),
-    // not defaultFamily (the host's UI face, Theme.fontFamily's own value).
-    // Must match SceneBuilder.cpp's literal exactly — that is the real
-    // render path, this is the canvas/preview's, and the whole point of this
-    // service is that the two cannot draw a plain block with different fonts.
     if (family.isEmpty())
         return defaultContentFamily();
     if (const auto it = cache_.constFind(family); it != cache_.constEnd())
         return it.value();
-    // FontManager::SubstituteFamily: requested when installed, else the host's
-    // UI face, else "" — the caller keeps the requested name in that last case
-    // (there is no substitute, and Qt will draw *something*).
     const std::string resolved = fonts().SubstituteFamily(family.toStdString());
     const QString answer = resolved.empty() ? family : QString::fromStdString(resolved);
     cache_.insert(family, answer);

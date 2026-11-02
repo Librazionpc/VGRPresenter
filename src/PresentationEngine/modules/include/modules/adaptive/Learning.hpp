@@ -1,10 +1,5 @@
 #pragma once
 
-// Learning + startup + recommendations (docs/specs/16 §11–§13, §21). The engine
-// learns what the user actually uses (kind + id, per weekday), turns the pattern
-// into preload hints (SmartCacheManager) and a required-module set
-// (StartupOptimizer), and surfaces non-forcing recommendations.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 #include "modules/adaptive/Quality.hpp"
@@ -16,7 +11,6 @@
 #include <vector>
 
 namespace bps::adaptive {
-
 // --- UsageLearningEngine (docs/specs/16 §13) ---------------------------------
 class UsageLearningEngine {
 public:
@@ -51,9 +45,6 @@ private:
     uint64_t total_ = 0;
 };
 
-// --- SmartCacheManager (docs/specs/16 §12) -----------------------------------
-// Learns patterns (e.g. every Sunday: songs + bible + logo) and answers
-// ShouldPreload(kind, id) / PreloadCandidates().
 class SmartCacheManager {
 public:
     SmartCacheManager() = default;
@@ -70,9 +61,6 @@ private:
     std::atomic<bool> preloadEnabled_{true};
 };
 
-// --- StartupOptimizer (docs/specs/16 §10, §11) --------------------------------
-// Don't start everything. Returns the module set the user actually needs based
-// on learning + mode; modules not in the set are candidates for lazy loading.
 class StartupOptimizer {
 public:
     StartupOptimizer() = default;
@@ -109,5 +97,4 @@ public:
     std::vector<Recommendation> Recommend(bool gpuAvailable, QualityLevel currentLevel,
                                           uint64_t totalRamBytes, bool onBattery) const;
 };
-
 } // namespace bps::adaptive

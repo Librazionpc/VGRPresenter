@@ -8,7 +8,6 @@
 namespace bp = bps::presentation;
 
 namespace {
-
 std::string utf8(const QString &s) { return s.toStdString(); }
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
@@ -106,7 +105,6 @@ std::vector<bp::ContentBlock> blocksFromVariant(const QVariant &list)
     return out;
 }
 
-
 QString transitionName(bp::TransitionKind kind)
 {
     switch (kind) {
@@ -137,15 +135,8 @@ bp::OverlayScope scopeFromString(const QString &s)
     if (s == QLatin1String("slide"))    return bp::OverlayScope::Slide;
     return bp::OverlayScope::All;
 }
-
 } // namespace
 
-// The PLURAL block mapping is a ShowConverter symbol, not a file-local helper
-// like the ones above: the live preview builds its block list from the ENGINE's
-// own composition (SceneBuilder::ComposeSlide), so this has to be linkable from
-// LiveOutputService. It stays here, next to blockToVariant, because blockToVariant
-// is the single QML<->engine block mapping and a second copy of the pair would
-// be one more place for the two sides to drift.
 QVariantList ShowConverter::blocksToVariant(const std::vector<bp::ContentBlock> &blocks)
 {
     QVariantList out;
@@ -253,26 +244,10 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
         slide.tags.push_back(utf8(tag));
     const QString line1 = s.value(QStringLiteral("line1")).toString();
     const QString line2 = s.value(QStringLiteral("line2")).toString();
-    // A slide the FILL built brings its own body (SlideBuilder's `body`, from
-    // BookSlide::body). It has to: the design's blocks are filled SLOTS, and once
-    // they are filled nothing in them says which one is the content — so the
-    // engine's "first text-bearing block" guess handed a table design's date code
-    // to every bound block as the body (the outputs drew "47-0412 4" where the
-    // sermon text belonged, in the body's own size and colour, while the preview
-    // pane showed the text). A slide that knows its body is not guessed at. The
-    // line1/line2 pair stays for the slides that have only those.
     const QString body = s.value(QStringLiteral("body")).toString();
     slide.text = utf8(!body.isEmpty() ? body
                                       : (line2.isEmpty() ? line1 : line1 + QLatin1Char('\n') + line2));
-    // THE READING FLOW — the passage this page was cut from (see
-    // LiveOutputService's line step and Slide::flowText). Its own fields, not
-    // meta: a passage is full of the characters a JSON meta value must escape,
-    // and the engine has to receive it exactly as typed. Absent on every slide
-    // that is not part of a step-able pick, which is every ordinary slide.
     slide.flowText = utf8(s.value(QStringLiteral("flowText")).toString());
-    // WHERE IN THE PASSAGE (a character offset — see Slide::flowChar): a line
-    // number here would put different words at the top of two outputs styled at
-    // different sizes, which is exactly what the operator saw.
     slide.flowChar = s.contains(QStringLiteral("flowChar"))
                          ? static_cast<float>(s.value(QStringLiteral("flowChar")).toDouble())
                          : -1.0f;
@@ -282,15 +257,7 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
     if (s.contains(QStringLiteral("filters")))
         ShowConverter::applyFilters(slide, s.value(QStringLiteral("filters")).toMap());
     slide.categoryId = utf8(s.value(QStringLiteral("categoryId")).toString());
-    // A CLEAR carrier (Slide::clearStage): the engine paints an empty frame for
-    // it — no style colour, no style image. Clear all no longer sends one (it
-    // keeps the output's own look — see LiveOutputService::clearOnAirSlide), but
-    // a show saved while it did still round-trips honestly.
     slide.clearStage = s.value(QStringLiteral("clearStage"), false).toBool();
-    // The content family this slide belongs to ("scripture" | "table" | …)
-    // rides in the meta (the model has no dedicated field): the output
-    // style's own engine template only restyles ITS family, so a style keyed
-    // for scripture must not steamroll The Table's layouts.
     QVariantMap meta{
         { QStringLiteral("tagColor"), s.value(QStringLiteral("tagColor")) },
         { QStringLiteral("line1"), line1 },
@@ -300,14 +267,6 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
         { QStringLiteral("showCategory"), s.value(QStringLiteral("showCategory")) },
         { QStringLiteral("templateOverride"), s.value(QStringLiteral("templateOverride"), false) },
     };
-    // A slide the FILL built carries its whole placeholder vocabulary under
-    // `fill` (SlideBuilder::valuesToMeta). Merged AS GIVEN, empties included:
-    // the engine reads these keys to resolve an output style's own slots
-    // (SceneBuilder::SlideValues), so without this a design's
-    // {table_code_paragraphs} corner slot drew an EMPTY box on the outputs
-    // while the preview pane — which fills from the design's own values —
-    // showed "47-0412 3". An empty key is the fill saying "blank here", which
-    // is a different answer from a key that was never there.
     const QVariantMap fill = s.value(QStringLiteral("fill")).toMap();
     for (auto it = fill.constBegin(); it != fill.constEnd(); ++it)
         meta.insert(it.key(), it.value());
@@ -409,9 +368,6 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
             { QStringLiteral("showCategory"), meta.value(QStringLiteral("showCategory")).toString() },
             { QStringLiteral("templateOverride"), meta.value(QStringLiteral("templateOverride")).toBool() },
             { QStringLiteral("background"), qstr(s.background) },
-            // The slide's filter set travels with it, for the Edit panel's rows
-            // and for the canvas preview shader — the on-air pass applies the
-            // engine's own copy, so these numbers are what both sides read.
             { QStringLiteral("filters"), QVariantMap{
                 { QStringLiteral("hueRotate"), s.filters.hueRotateDeg },
                 { QStringLiteral("invert"), s.filters.invert },
@@ -422,12 +378,6 @@ QVariantMap ShowConverter::toVariant(const bp::Presentation &p)
                 { QStringLiteral("saturate"), s.filters.saturate } } },
             { QStringLiteral("categoryId"), qstr(s.categoryId) },
             { QStringLiteral("blocks"), blocksToVariant(s.blocks) },
-            // A SAVED SLIDE KEEPS ITS FILL. show slides whose content rode in
-            // the design's blocks (a table pick converted to a show) carry no
-            // line1/line2, so without these two keys reopening the show hands the
-            // engine a slide whose body and vocabulary are gone — and it guesses
-            // from block order instead (the outputs then draw the date code where
-            // the sermon text belongs). Read back by slideFromVariant.
             { QStringLiteral("body"), qstr(s.text) },
             { QStringLiteral("fill"), fillFromMeta(meta) },
             { QStringLiteral("nextTimer"), s.durationMs / 1000.0 },

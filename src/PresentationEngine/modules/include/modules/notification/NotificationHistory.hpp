@@ -1,9 +1,5 @@
 #pragma once
 
-// NotificationHistory (docs/specs/14 §Notification History): searchable,
-// filterable, exportable history of delivered notifications. Backed by an
-// INotificationStorage (memory + optional persistence).
-
 #include "modules/notification/Notification.hpp"
 #include "modules/notification/NotificationInterfaces.hpp"
 
@@ -12,7 +8,6 @@
 #include <vector>
 
 namespace bps::notification {
-
 struct HistoryQuery {
     std::string text;                 // substring match on title/message/source
     std::string category;             // empty = any
@@ -48,5 +43,4 @@ public:
 private:
     std::shared_ptr<INotificationStorage> storage_;
 };
-
 } // namespace bps::notification

@@ -17,15 +17,12 @@
 #include <format>
 
 namespace bps::content {
-
 namespace {
-
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
-
 } // namespace
 
 ContentManager& ContentManager::Instance() {
@@ -821,9 +818,6 @@ Result<void> ContentManager::LoadLibrary() {
 }
 
 void ContentManager::OnPressureHigh() {
-    // ResourceManager (10) says memory is tight: drop evictable cache bytes,
-    // clear thumbnail cache, and defer future indexing work (index rebuilt on
-    // next Reload/ReindexAll).
     size_t freed = ShrinkCache(0.5);
     size_t thumbs = thumbnails_.CacheCount();
     thumbnails_.ClearCache();
@@ -834,5 +828,4 @@ void ContentManager::OnPressureHigh() {
     (void)EventBus::Instance().Publish(events::ContentCacheUpdated{
         assets_.CachedCount(), assets_.GetCacheStats().bytes});
 }
-
 } // namespace bps::content

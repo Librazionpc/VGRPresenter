@@ -1,10 +1,5 @@
 #pragma once
 
-// Virtual File System (docs/specs/13 §Virtual File System). No module opens
-// files directly — content is addressed through a mount, which can back onto
-// the disk (PAL IFilesystem), a ZIP archive, or memory. Cloud mounts are a
-// documented future extension.
-
 #include "core/common/Common.hpp"
 
 #include <cstdint>
@@ -16,7 +11,6 @@
 #include <vector>
 
 namespace bps::content {
-
 // A mount is a named root. Paths inside a mount use forward slashes and no
 // leading slash, e.g. "images/worship/logo.png".
 class IVfs {
@@ -93,9 +87,6 @@ private:
     std::map<std::string, std::vector<uint8_t>> entries_;   // key: normalized rel path
 };
 
-// --- ZipVfs: read-only view of a ZIP archive (stored entries) ----------------
-// Reads standard .zip archives with compression method 0 (stored). Deflate
-// entries return Content_UnsupportedFormat (zlib-backed support is future).
 class ZipVfs final : public IVfs {
 public:
     explicit ZipVfs(std::string name, std::string archivePath);
@@ -138,10 +129,6 @@ private:
         uint16_t method = 0;
     };
 
-    // "Make sure it is open." It takes mutex_ ITSELF, and only to look and to
-    // publish: the archive read (PAL) and the central-directory parse run with
-    // the lock RELEASED (they used to run inside it, so every entry read waited
-    // on the whole-file read).
     Result<void> OpenLocked();
 
     mutable std::mutex mutex_;
@@ -178,5 +165,4 @@ private:
 
 // CRC-32 (IEEE), used by ZipWriter and AssetDatabase checksums.
 uint32_t Crc32(const uint8_t* data, size_t len, uint32_t seed = 0);
-
 } // namespace bps::content

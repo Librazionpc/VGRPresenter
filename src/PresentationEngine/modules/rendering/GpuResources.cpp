@@ -5,7 +5,6 @@
 #include <algorithm>
 
 namespace bps::rendering {
-
 // ===========================================================================
 // GPUResourceManager
 // ===========================================================================
@@ -129,13 +128,6 @@ void GPUResourceManager::Clear() {
 void GPUResourceManager::BindBackend(IGraphicsBackend* backend) {
     if (backend_ == backend)
         return;
-    // THE IDS BELONG TO THE BACKEND THAT MADE THEM. A switch — the engine's
-    // Initialize, or a Reload/SetBackend that moved a session from the CPU
-    // rasterizer to the GPU or back — has to destroy the old backend's textures
-    // and forget the names, so the next AcquireTexture uploads into the backend
-    // that is actually drawing. Skipped, the new backend is asked to blit ids it
-    // never created: it draws nothing, and a fully composed scene arrives on the
-    // outputs as background-only pixels.
     std::vector<TextureId> stale;
     IGraphicsBackend* previous = nullptr;
     {
@@ -151,9 +143,6 @@ void GPUResourceManager::BindBackend(IGraphicsBackend* backend) {
         textures_.clear();
         backend_ = backend;
     }
-    // Released OUTSIDE the registry lock: destroying a texture is the backend's
-    // own device work, and holding the registry mutex across a call into a device
-    // is exactly the pattern the lock-scope guard exists to catch.
     if (previous) {
         for (TextureId id : stale)
             (void)previous->DestroyTexture(id);
@@ -179,12 +168,6 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(float sizePx) {
 
 Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& style,
                                                                 const FontManager& fonts) {
-    // WHICH FACE THIS ATLAS IS FOR — resolved before the cache lock, because the
-    // substitution asks Qt's font database and no lock here may be held
-    // across that. A design naming a font this machine lacks lands on the
-    // substitute (see FontManager::SubstituteFamily) instead of the builtin 5x7
-    // bitmap, and the KEY carries the resolved family so two styles that named
-    // different missing fonts share ONE correct atlas instead of one wrong one.
     const std::string substituted = fonts.SubstituteFamily(style.fontId);
     const std::string drawFamily = substituted.empty() ? style.fontId : substituted;
     const bool useSystemFont = !drawFamily.empty() && drawFamily != "builtin"
@@ -199,11 +182,6 @@ Result<const RenderCache::AtlasEntry*> RenderCache::GlyphAtlas(const TextStyle& 
     if (it != fontAtlases_.end()) return it->second.get();
 
     auto entry = std::make_unique<AtlasEntry>();
-    // Real font first; an empty result (family unresolved, or "builtin"/""
-    // fontId — the common case for every style that never named a real
-    // font at all) falls back to the SAME builtin atlas every other caller
-    // already gets, so a style with no real font behaves exactly as before
-    // this cache existed.
     if (useSystemFont)
         entry->atlas = fonts.BuildSystemAtlas(drawFamily, style.size, style.bold,
                                               style.italic, entry->glyphs, style.fontWeight,
@@ -282,10 +260,6 @@ void ResourceUploader::Submit(std::string name, std::vector<uint8_t> bytes,
         job.done = std::move(done);
         queued_.push_back(std::move(job));
     }
-    // Decode on the core thread pool; the render thread only sees the result
-    // via Pump() — it never blocks on decoding. If the pool is unavailable
-    // (shutdown/not yet booted), decode inline as a graceful fallback so the
-    // job always completes and `done` always fires.
     auto decodeJob = [this](Job job) {
         RgbaImage img = job.decoder ? job.decoder(job.bytes) : RgbaImage{};
         Decoded d;
@@ -386,5 +360,4 @@ size_t FrameGraph::LiveCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return resources_.size();
 }
-
 } // namespace bps::rendering

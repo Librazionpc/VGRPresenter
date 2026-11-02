@@ -8,9 +8,7 @@
 #include <format>
 
 namespace bps::settings {
-
 namespace {
-
 constexpr uint64_t kGb = 1024ull * 1024ull * 1024ull;
 
 bool Contains(std::string text, std::string word) {
@@ -33,6 +31,20 @@ std::string EncoderName(const std::string& gpuName) {
 // A graphics adapter is there when the platform reported its video memory or, failing that, at least its name.
 bool HasGpu(const adaptive::HardwareInfo& hw) { return hw.gpuDetected || !hw.gpuName.empty(); }
 
+// The one place a stored log level reaches the logger. The preference decides what
+// engine.log KEEPS — it sets that sink's own filter — while the console keeps its level
+// and the global gate (set at boot from BootOptions) stays permissive. So "Error" gives a
+// quiet file without silencing the console a self-test reads back, and "Debug" really
+// does put the app's debug lines in the file (its descriptor promised exactly that).
+void ApplyLogLevel(std::string_view preference) {
+    auto& logger = Logger::Instance();
+    const LogLevel level = LogLevelEnvOverride().value_or(
+        LogLevelFromName(preference).value_or(LogLevel::Info));
+    // No File sink (a parts build, or a logger that never started): the preference then
+    // has to speak through the only gate there is.
+    if (!logger.SetSinkLevel("File", level)) logger.SetGlobalLevel(level);
+}
+
 std::string Plural(unsigned n, std::string_view one, std::string_view many) {
     return std::format("{} {}", n, n == 1 ? one : many);
 }
@@ -52,7 +64,6 @@ std::string StorageSummary(const adaptive::HardwareInfo& hw) {
 bool StorageIsLow(const adaptive::HardwareInfo& hw) {
     return hw.diskTotalBytes > 0 && hw.diskFreeBytes < 5 * kGb;
 }
-
 } // namespace
 
 std::string RecommendProfile(const adaptive::HardwareInfo& hw) {
@@ -100,11 +111,6 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
                             hw.displayCount > 0 ? std::format("{} connected", hw.displayCount) : std::string("None found"),
                             hw.displayCount > 0 });
 
-    // A desktop has no battery row (nothing to say); a laptop always does.
-    // THREE states, because "plugged in" was hiding one the user needs: while the
-    // pack is topping up the machine is on AC AND still charging, which is not
-    // the same as sitting at 100% — the row (and the Smart Config battery dial,
-    // which reads the same flag) says "Charging".
     if (hw.hasBattery)
         report.rows.push_back({ "battery", "Battery",
                                 hw.batteryPercent >= 0
@@ -131,9 +137,6 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
         report.detail = "We checked your graphics, video, sound and screens. This computer can run the Performance profile.";
 
     // ---- What that means for running the app (the config advice) ----
-    // Written the way a helpful engineer would: name the finding, then say what
-    // to do about it. `warnings` is what the summary counts - the "info" lines
-    // are things worth knowing, never things to fix.
     int warnings = 0;
     const auto advise = [&report](std::string key, std::string severity, std::string text) {
         report.advice.push_back({ std::move(key), std::move(severity), std::move(text) });
@@ -215,10 +218,7 @@ Result<void> ApplyToEngine(const AppSettings& settings, adaptive::AdaptiveRuntim
     if (auto r = runtime.SetResourceCaps(static_cast<unsigned>(caps.gpuPct), static_cast<unsigned>(caps.cpuPct)); !r.ok()) return r;
 
     const std::string level = settings.GetString("notifications.logLevel");
-    Logger::Instance().SetGlobalLevel(level == "error" ? LogLevel::Error
-                                    : level == "warning" ? LogLevel::Warning
-                                    : level == "debug" ? LogLevel::Debug : LogLevel::Info);
+    ApplyLogLevel(level);
     return {};
 }
-
 } // namespace bps::settings

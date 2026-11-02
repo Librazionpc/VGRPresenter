@@ -2,9 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// One movable/resizable text object on the slide canvas (title, verse,
-// reference, ...). Literal colors, pending migration to Theme.* (the old
-// "AOT singleton-resolution" reason is disproven — see DropdownPanel.qml).
 Item {
     id: root
 
@@ -14,33 +11,15 @@ Item {
     property real minHeight: 20
     readonly property int edgeMargin: 16
 
-    // The item's persistent style (padding + border), as one CanvasItemStyle
-    // object shared with the rest of the app — EditScreen creates one per
-    // canvas item and hands the same instance here and to SizeStyleCard, so
-    // a slider move shows up here with no mirroring layer. Null means "no
-    // styling": defaults below apply (no padding, no border).
     property CanvasItemStyle style: null
-    // True when the content draws its OWN body from that style - a circle, a line or a glyph shape, a vignette, screen corners.
-    // The plain box fill and border below are then not drawn: they are a rectangle, and a rectangle behind a circle is
-    // exactly what makes a circle read as a box.
     property bool drawsOwnBody: false
 
-    // Drives the hover-wash Rectangle below. Set externally from whichever
-    // content MouseArea is actually present (EditableCanvasLabel.hovered,
-    // or a CanvasDragArea's own containsMouse) — not tracked by a second
-    // MouseArea of this item's own layered on top of content: two stacked
-    // hoverEnabled MouseAreas over the same region is exactly what made
-    // click delivery flaky after a hover-leave/hover-enter cycle.
     property bool contentHovered: false
 
     signal selectedRequested(var modifiers)
     // (NO contextMenuRequested: the canvas's right-click item menu is gone by
     // request — see the note where its MouseArea used to be.)
     signal resizing(var geom)
-    // Shift+drag-the-ring — per-event incremental deltas (not total-since-
-    // press), matching EditableCanvasLabel.moveRequested's exact contract so
-    // both feed the same consumer-side applyCanvasMove(key, dx, dy, ...)
-    // accumulation logic identically.
     signal moving(real dx, real dy, bool snapDisabled)
     signal dragEnded()
 
@@ -48,15 +27,6 @@ Item {
     height: contentHolder.childrenRect.height
 
     // ---- the resize affordance stays INSIDE the edit canvas ------------------
-    // mCanvas clips (EditScreen: clip: true), and the dots straddle the item's
-    // edge by convention — half in, half out. An item that touches, or overflows,
-    // the canvas edge therefore had half (or all) of its dots clipped away and its
-    // edge strips (which reach edgeMargin OUTSIDE the item) hidden outright, so
-    // the adjustment points were simply not on the canvas the user was looking at
-    // (report: "the adjustment point of edit are not in the edit canvas"). Each
-    // dot now straddles the edge while the canvas leaves room for it and slides
-    // fully INSIDE the item when it does not, and every strip is clamped to the
-    // room left; nothing on this item is ever drawn past the canvas again.
     readonly property real handleDotSize: 7
     readonly property real handleHalf: root.handleDotSize / 2
     // How far OUTSIDE one side of the item still lies inside the canvas: 0 when
@@ -74,20 +44,12 @@ Item {
     readonly property real roomRight: root.roomFor("right")
     readonly property real roomTop: root.roomFor("top")
     readonly property real roomBottom: root.roomFor("bottom")
-    // The dot's own coordinate on each side: straddling the edge (the FreeShow
-    // convention, so it reads as sitting ON the outline) while at least the dot's
-    // half fits outside, else tucked fully inside the item — where it is still
-    // drawn, still grabbable, and still says "resize".
     readonly property real dotAtLeft: root.roomLeft >= root.handleHalf ? -root.handleHalf : 0
     readonly property real dotAtRight: root.roomRight >= root.handleHalf ? root.width - root.handleHalf
                                                                         : root.width - root.handleDotSize
     readonly property real dotAtTop: root.roomTop >= root.handleHalf ? -root.handleHalf : 0
     readonly property real dotAtBottom: root.roomBottom >= root.handleHalf ? root.height - root.handleHalf
                                                                           : root.height - root.handleDotSize
-    // The Repeater delegate in EditScreen names the item ("canvasItem_<key>");
-    // every handle and dot hangs its own name off that, so a scenario (or a
-    // cursor probe) can address THIS item's affordances rather than another
-    // item's — findItem returns the first name match in the tree.
     readonly property string handleSuffix: root.objectName !== "" ? "_" + root.objectName : ""
 
     // Local shorthands so every consumer below reads one name instead of
@@ -101,18 +63,8 @@ Item {
     readonly property real styleCornerRadius: style ? style.cornerRadius : 0
     readonly property real styleOpacity: style ? style.opacity : 1
 
-    // Applied at the root so the whole item — content, fill/border, the
-    // demarcation line above — fades together, same as the selection/resize
-    // chrome fading lightly along with a very transparent item is standard
-    // editor behaviour. (Live output never sees this item at all — see
-    // DesignPreview.qml, which reads the SAME style.opacity for its own
-    // rendering independently.)
     opacity: root.styleOpacity
 
-    // Fill, full bounds (not inset by padding — same footprint as the
-    // border below it shares corner radius with). Declared before
-    // contentHolder so the fill sits behind the actual text/content. No
-    // visible: check needed — "transparent" already renders as nothing.
     Rectangle {
         visible: !root.drawsOwnBody
         anchors.fill: parent
@@ -127,9 +79,6 @@ Item {
         clip: true
     }
 
-    // Rectangle.border has no dash option, hence Shape; PathRectangle
-    // handles the rounded corners directly. antialiasing: true so the
-    // rounded corners render as a smooth curve, not a faceted polygon.
     Shape {
         anchors.fill: parent
         visible: !root.drawsOwnBody && root.styleBorderEnabled && root.styleBorderWidth > 0
@@ -141,9 +90,6 @@ Item {
             strokeStyle: root.styleBorderStyle === "line" ? ShapePath.SolidLine : ShapePath.DashLine
             dashPattern: root.styleBorderStyle === "dotted" ? [1, 2] : [4, 3]
             capStyle: ShapePath.RoundCap
-            // Without this, corners default to a bevel/round join at the
-            // stroke level even when radius is 0 and the path itself is a
-            // true sharp corner — miter is what actually gives a square.
             joinStyle: ShapePath.MiterJoin
 
             PathRectangle {
@@ -156,24 +102,6 @@ Item {
         }
     }
 
-    // NO RIGHT-CLICK HANDLER (user request: "the edit canvas should not have a
-    // right click feature that shows edit, delete"). The canvas used to open a
-    // shared item menu from here; nothing listens for a right-click on an item
-    // any more, on the canvas or anywhere else.
-
-    // DEMARCATION LINE — brought back by a later user request ("I need all
-    // items to have demarcation lines that only show in edit canvas... it
-    // does[n't] get to show in monitor output or anywhere else, only in edit
-    // canvas"), reversing the earlier "remove it completely" call above this
-    // component still uses for the right-click menu. Same shape as before (a
-    // faint white frame around EVERY item, regardless of the item's own
-    // fill/border or drawsOwnBody), just without the hover wash, which
-    // nobody has asked to have back. Drawn by DraggableCanvasText itself —
-    // the ONE place every edit-canvas item passes through and the ONLY
-    // consumer of this component (see its own header) — so it is
-    // structurally impossible for this line to reach DesignPreview's
-    // rendering (the monitor tile, the output window, design-card
-    // thumbnails all go through DesignPreview instead, never this file).
     Rectangle {
         anchors.fill: parent
         color: "transparent"
@@ -197,9 +125,6 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
     }
 
-    // One hit area per edge/corner. Manual press/positionChanged tracking
-    // (not drag.target) since resize grows one property while shrinking
-    // another. Shift+drag moves instead of resizing.
     component ResizeHandle: MouseArea {
         id: handle
         // Not "left"/"right"/"top"/"bottom" — collide with Item's anchor
@@ -221,12 +146,6 @@ Item {
 
         enabled: root.selected
         hoverEnabled: true
-        // Cursor via the AppCursor override stack (see EditableCanvasLabel's
-        // dragArea for the full why): the canvas sits under a scale (zoom)
-        // transform and per-MouseArea cursorShape silently stops applying
-        // there — push the computed shape instead; Main.qml's unscaled
-        // AppCursorCatcher renders it. cursorShape remains as the zoom==1
-        // fallback and computes the identical shape.
         function targetShape() {
             if (handle.moving)
                 return Qt.ClosedHandCursor
@@ -237,18 +156,6 @@ Item {
             return h ? Qt.SizeHorCursor : Qt.SizeVerCursor
         }
         function syncCursor() {
-            // AppCursor.hovered(handle) — position truth — covers
-            // select-under-a-stationary-pointer AND is the only hover signal
-            // besides `pressed`: containsMouse latches in this build
-            // (hover-exit never delivers — KNOWN_ISSUES.md), so gating on it
-            // left the size cursor stuck after leaving the handle.
-            //
-            // priorityHandle/priorityPressed — NOT the default hover claim: the
-            // content area under this dot (the label's I-beam, a camera's
-            // pointing hand) is hovered at the same moment and re-pushes on the
-            // same pointer events, so push order alone decided the winner and the
-            // I-beam won on every corner. A hovered dot is the finer target, and
-            // a pressed one owns the pointer outright.
             if (visible && enabled && (pressed || AppCursor.hovered(handle)))
                 AppCursor.push(handle.targetShape(), handle,
                                pressed ? AppCursor.priorityPressed : AppCursor.priorityHandle)
@@ -262,15 +169,7 @@ Item {
             target: AppCursor
             function onPointerMoved() { handle.syncCursor() }
         }
-        // Handles disable on deselect while the pointer may still be over
-        // them — a disabled MouseArea stops receiving hover events, so
-        // containsMouse can stay stale-true with nobody left to clear it.
-        // Pop explicitly on disable (the visible flip inside editing also
-        // routes here) so the pushed shape can't outlive the handle.
         onEnabledChanged: {
-            // Deselect (and the editing visible-flip) route here: drop the
-            // pushed size shape immediately; re-enabling re-checks with
-            // position truth (syncCursor above).
             if (enabled)
                 syncCursor()
             else
@@ -305,11 +204,6 @@ Item {
             const dy = g.y - pressMouseY
 
             if (handle.moving) {
-                // Per-event delta, not total-since-press: reset the tracked
-                // point after every emit so this matches
-                // EditableCanvasLabel's dragArea exactly (see the `moving`
-                // signal's header comment — the consumer's applyCanvasMove
-                // expects per-event increments, not absolute totals).
                 if (dragMoved || Math.abs(dx) > 3 || Math.abs(dy) > 3) {
                     dragMoved = true
                     root.moving(dx, dy, (mouse.modifiers & Qt.AltModifier) !== 0)
@@ -322,12 +216,6 @@ Item {
             if (Math.abs(dx) > 3 || Math.abs(dy) > 3)
                 dragMoved = true
 
-            // Computed into locals, never self-assigned onto root — a
-            // consumer may bind root.x/y/width/height one-way to external
-            // data (e.g. a Repeater delegate's modelData); self-assigning
-            // here would permanently break that binding the first time a
-            // resize happens (the same footgun LabeledSlider.qml's
-            // controlled-component rewrite exists to avoid).
             let newX = root.x, newY = root.y, newWidth = root.width, newHeight = root.height
 
             if (handle.resizeRight) {
@@ -354,9 +242,6 @@ Item {
         }
     }
 
-    // The strips reach edgeMargin OUTSIDE the item; each is clamped to the room
-    // the canvas actually leaves (see roomFor), so a flush item never has a strip
-    // drawn past the canvas — where the dot's own grab area carries that edge.
     ResizeHandle {
         objectName: "canvasHandleEdgeTop" + root.handleSuffix
         resizeTop: true

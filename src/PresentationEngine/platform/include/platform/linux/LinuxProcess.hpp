@@ -8,7 +8,6 @@
 #include <unordered_map>
 
 namespace bps::platform {
-
 class LinuxProcess final : public IProcess {
 public:
     Result<int> Start(std::string_view command, std::vector<std::string> args = {}) override;
@@ -25,11 +24,7 @@ public:
     Result<void> SetEnvironment(std::string_view variable, std::string_view value) override;
 
 private:
-    // Reaped exit statuses; a running (unreaped) child is simply absent.
-    // Both members are mutable: the const read APIs (ExitCode/IsRunning) still
-    // record reaping when a child exits between polls.
     mutable std::mutex mutex_;
     mutable std::unordered_map<int, int> statuses_;
 };
-
 } // namespace bps::platform

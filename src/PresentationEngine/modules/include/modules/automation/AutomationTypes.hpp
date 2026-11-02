@@ -1,12 +1,5 @@
 #pragma once
 
-// Service Flow, Playlist & Automation Engine (Phase 14, docs/specs/26).
-// Canonical model: a Flow is an ordered, executable graph of nodes with
-// triggers, conditions, actions, waits, branches, parallel groups, macros,
-// templates, and variables. The engine is deliberately generic —
-// Trigger → Condition → Action → Event → Next Action — so it never knows
-// whether a node controls a song, a video, MIDI, or a camera.
-
 #include "core/common/Common.hpp"
 
 #include <map>
@@ -14,7 +7,6 @@
 #include <vector>
 
 namespace bps::automation {
-
 enum class FlowState {
     Idle,
     Validating,
@@ -139,5 +131,4 @@ struct FlowSnapshot {
     std::vector<std::string> completedNodes;
     std::map<std::string, std::string, std::less<>> variables;
 };
-
 } // namespace bps::automation

@@ -14,7 +14,6 @@
 #include <unordered_map>
 
 namespace bps {
-
 using TaskId = uint64_t;
 
 enum class TaskKind : int { OneShot = 0, Recurring, Cron, Heartbeat, Countdown, Animation, Sequence };
@@ -47,17 +46,11 @@ public:
     Result<TaskId> ScheduleCountdown(std::function<void()> tick, std::chrono::microseconds period,
                                      std::chrono::microseconds total, std::function<void()> done);
 
-    // Animation timer (07 §Animation): `tick` fires every `period` with a
-    // normalized progress in [0,1] until `total` elapses; `done` fires once.
-    // Microsecond resolution for 60/120/144 Hz work.
     Result<TaskId> ScheduleAnimation(std::function<void(double progress)> tick,
                                      std::chrono::microseconds period,
                                      std::chrono::microseconds total,
                                      std::function<void()> done = {});
 
-    // Sequence / autoplay (07 §Autoplay): `step(i)` fires once for each i in
-    // [0, items) at `perItem` intervals, then the task removes itself. The
-    // handle supports the usual Pause / Resume / Cancel control.
     Result<TaskId> ScheduleSequence(std::function<void(size_t index)> step, size_t items,
                                     std::chrono::microseconds perItem);
 
@@ -117,5 +110,4 @@ private:
     std::atomic<bool> shuttingDown_{false};
     std::atomic<uint64_t> nextId_{1};
 };
-
 } // namespace bps

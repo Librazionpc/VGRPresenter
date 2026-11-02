@@ -7,9 +7,7 @@
 #include <format>
 
 namespace bps::recovery {
-
 namespace {
-
 // `<path>.corrupt-<unix-seconds>`, with `-N` appended only if that exact name is
 // already taken (two failures inside one second, or an operator's own file).
 std::string QuarantineName(const platform::IFilesystem& fs, const std::string& path) {
@@ -32,7 +30,6 @@ const char* TypeName(json::Value::Type t) {
     }
     return "a value";
 }
-
 } // namespace
 
 std::string DocumentShapeProblem(const json::Value& root, std::string_view requiredKey,
@@ -68,15 +65,9 @@ DamageReport SetAsideDamagedDocument(std::string_view path, std::string_view mod
     }
 
     report.quarantine = QuarantineName(fs, report.path);
-    // Rename first: it is the one operation that both preserves the bytes and
-    // frees the original path in a single step, and it keeps the evidence on the
-    // same volume as the document.
     if (auto moved = fs.RenameRetry(report.path, report.quarantine); moved.ok()) {
         report.preserved = true;
     } else if (auto copied = fs.CopyAtomic(report.path, report.quarantine); copied.ok()) {
-        // The rename was refused (a lock or a sync filter holds the file): keep
-        // the copy as the evidence, then free the path for the rebuild. A failed
-        // Remove still leaves the copy, so the bytes are never lost here.
         report.preserved = true;
         (void)fs.Remove(report.path);
     }
@@ -95,5 +86,4 @@ DamageReport SetAsideDamagedDocument(std::string_view path, std::string_view mod
     }
     return report;
 }
-
 } // namespace bps::recovery

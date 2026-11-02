@@ -6,7 +6,6 @@
 #include "modules/presentation/SceneBuilder.hpp"
 
 namespace bps::presentation {
-
 PresentationRuntime::PresentationRuntime() = default;
 
 // ---------------------------------------------------------------------------
@@ -84,9 +83,6 @@ Result<void> PresentationRuntime::Prepare(SceneBuilder& builder, rendering::Rend
                                    "no presentation open");
     auto r = sm_.TransitionTo(PresentationState::Prepared);
     if (!r.ok()) return r;
-    // Pre-build every compiled slide's scene (cache). Styled builds key on a
-    // fingerprint of `style` (StyledSceneIdFor), so a style change lands as
-    // new scene ids — nothing stale is served and nothing needs purging.
     for (auto& cs : compiled_.slides) {
         auto it = std::find_if(pres_->slides.begin(), pres_->slides.end(),
                                [&](const Slide& s) { return s.id == cs.slideId; });
@@ -105,11 +101,6 @@ Result<void> PresentationRuntime::RebuildScenes(SceneBuilder& builder,
                                    "no presentation open");
     if (compiled_.slides.empty()) return Ok();
 
-    // Same build loop as Prepare, but NO state transitions — legal while the
-    // presentation is LIVE (the state machine forbids Live → Prepared, and a
-    // style change must never bounce the show off air). cs.sceneId moves to
-    // the new style's fingerprinted id; RenderOnce reads it through Compiled()
-    // so the very next frame carries the new look.
     for (auto& cs : compiled_.slides) {
         auto it = std::find_if(pres_->slides.begin(), pres_->slides.end(),
                                [&](const Slide& s) { return s.id == cs.slideId; });
@@ -126,9 +117,6 @@ Result<void> PresentationRuntime::SwapLive(const Presentation& content,
     if (sm_.State() != PresentationState::Live)
         return Error::Make(Err::Presentation_InvalidState, "PresentationRuntime",
                            "SwapLive is only legal while live");
-    // Rebind the raw pointer + navigator, reset the clock, recompile — with the
-    // state machine never leaving Live. Content is owned by the caller and must
-    // outlive the run (same contract as Open).
     pres_ = &content;
     nav_.Open(content);
     clockSec_.store(0.0);
@@ -374,5 +362,4 @@ void PresentationRuntime::UnwireEvents() {
 void PresentationRuntime::OnConfigReload(const events::ConfigHotReload&) {
     // Nothing to reconfigure at runtime level today (themes are Phase 11).
 }
-
 } // namespace bps::presentation

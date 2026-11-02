@@ -1,11 +1,5 @@
 #pragma once
 
-// PresentationEngine (docs/specs/19): the Phase 8 facade. Manager
-// (create/open/save/duplicate/delete/validate/compile/register/close),
-// runtime + controller (Next/Previous/JumpTo/GoLive/Black/Logo/Pause/Resume/
-// Stop), queue, session + recovery. Orchestrates the live presentation
-// workflow without containing rendering or display logic.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -49,13 +43,6 @@ public:
 
     // --- Manager ---------------------------------------------------------------
     Result<std::string> CreatePresentation(std::string_view name);
-    // Registers (or refreshes) a full presentation copy under its own id and
-    // returns that id. The WORKING SHOW path: ShowService edits the
-    // PresentationDocument, and the live loop needs the same content in the
-    // registry — without this, StartFromOpenShow's Open(id) failed with
-    // "presentation not found" and nothing ever went on air. Idempotent: an
-    // id that is already registered is overwritten in place (same id, fresh
-    // content), so live re-syncs see edits.
     Result<std::string> PutPresentation(const Presentation& presentation);
     Result<void> Open(std::string_view id);
     Result<void> Close();
@@ -76,50 +63,14 @@ public:
     Result<void> Compile(std::string_view id);
     Result<void> Prepare(std::string_view id);   // builds scenes via SceneBuilder
 
-    // --- Live binding (any content on air) ---------------------------------------
-    // Binds the RUNTIME to the caller's copy (the caller keeps it alive for the
-    // whole live run — the registry mirror churns, so the runtime must never
-    // point into it), runs compile -> prepare (under the active output style)
-    // -> GoLive. This is the honest fix for go-live: the working show used to
-    // be opened by registry id it was never registered under.
     Result<void> PresentLive(const Presentation& content);
-    // Swaps the live content in place — no state-machine transitions, legal
-    // while LIVE. Rebinds, recompiles and rebuilds every scene under the
-    // active output style; playback restarts at the first slide.
     Result<void> SwapLiveContent(const Presentation& content);
 
-    // --- Output style (Settings · Styles applied to the on-air output) -----------
-    // The ONE spec the live render loop composes with (empty = unstyled). The
-    // UI pushes a style change the moment it's edited; the next frame's 1s
-    // re-Prepare rebuilds the affected scenes under the new spec (SceneBuilder
-    // keys styled scenes by a fingerprint of the spec, so nothing stale can be
-    // served). Thread-safe: the live loop runs on its own thread.
     Result<void> SetActiveOutputStyle(const OutputStyleSpec& style);
     OutputStyleSpec ActiveOutputStyle() const;
-    // PER-OUTPUT STYLE SET: the distinct specs of every output that will
-    // receive live frames (the UI pushes one entry per style-wearing live
-    // output, plus the active one). The live loop renders ONE EXTRA PASS per
-    // entry into that output's own frame buffer, so two live outputs with
-    // opposite content rules each get frames composed under their OWN spec
-    // (the main pass still feeds the active output + preview feed). Empty
-    // entries (or a singleton set equal to the active style) render nothing
-    // extra — the zero-overhead case every single-output setup is.
-    // `bufferSizes` is a THIRD parallel vector (optional — default empty):
-    // each output's own configured frame resolution (width, height), parsed
-    // from its Settings · Outputs "Resolution" field. {0,0} or a short vector
-    // means "use the engine's own default" for that entry — every existing
-    // caller that doesn't pass it keeps today's fixed-size behavior. This is
-    // what an NDI/SDI/real-window output's pushed frame actually gets sized
-    // to (RenderPerOutputPasses registers the per-output FrameBufferOutput at
-    // this size instead of always kFrameBufferWidth/Height) — a 4K-configured
-    // output no longer gets silently downscaled to 1080p on its way out.
     Result<void> SetLiveOutputStyles(const std::vector<OutputStyleSpec>& styles,
                                      const std::vector<std::string>& bufferNames,
                                      const std::vector<std::pair<int, int>>& bufferSizes = {});
-    // The loop's read side: the specs plus (when outBuffers != nullptr) the
-    // parallel buffer names, plus (when outSizes != nullptr) the parallel
-    // configured sizes. Copy under the lock — the loop thread must not hold
-    // mutex_ while rendering.
     std::vector<OutputStyleSpec> LiveOutputStyles(std::vector<std::string> *outBuffers = nullptr,
                                                   std::vector<std::pair<int, int>> *outSizes = nullptr) const;
     // The scene builder, for the live loop's style rebuilds (RebuildScenes
@@ -182,9 +133,6 @@ private:
     // The on-air output's style (Set/Active below). Guarded by mutex_, read
     // every frame by PresentationEngine::Prepare's builder call path.
     OutputStyleSpec activeStyle_;
-    // The per-output pass set (SetLiveOutputStyles): parallel vectors of the
-    // extra specs and the frame-buffer output names each renders into.
-    // Guarded by mutex_; consumed by the live loop.
     std::vector<OutputStyleSpec> liveOutputStyles_;
     std::vector<std::string> liveOutputBuffers_;
     std::vector<std::pair<int, int>> liveOutputSizes_;
@@ -200,5 +148,4 @@ private:
     std::atomic<uint64_t> cueCount_{0};
     std::atomic<uint64_t> recoveredCount_{0};
 };
-
 } // namespace bps::presentation

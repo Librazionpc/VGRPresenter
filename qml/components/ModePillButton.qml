@@ -2,20 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// The video dialogs' preview-pane mode pill — a BUTTON, not a label: click
-// the "1920x1080p60" chip and the capture-mode list drops down right from
-// the pill. The panel reparents to the window root on open
-// (DropdownPanel.openAt), so the preview's clip:true never cuts it.
-//
-// The list is the ENGINE's device capability truth, not a curated set:
-// `modes` comes from EngineBridge.videoDevices for the picked device, and
-// `maxFps` is that device's own ceiling — any mode with a faster rate is
-// still SHOWN but greyed and unclickable (OBS does the same), so the user
-// sees the device can't do it rather than the option vanishing.
-//
-// Controlled component: `text` mirrors the current mode; picking reports
-// via modePicked(label) — the consumer owns the value. Same DropdownPanel
-// wiring as SelectField (window-root popup, wheel-contained list).
 Item {
     id: root
 
@@ -33,10 +19,6 @@ Item {
         return isNaN(v) ? -1 : v
     }
 
-    // Size from the LABEL, not from a child Rectangle: a plain Rectangle
-    // has no implicit size, so sizing root from the pill (which fills
-    // root) was a zero-size cycle — invisible background, 0x0 hit area,
-    // unclickable, text overflowing onto neighbors.
     implicitWidth: pillLabel.implicitWidth + 16
     implicitHeight: pillLabel.implicitHeight + 8
 

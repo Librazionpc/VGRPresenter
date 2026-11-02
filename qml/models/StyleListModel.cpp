@@ -18,22 +18,6 @@
 
 QPointer<StyleListModel> StyleListModel::s_instance = nullptr;
 
-// The one instance, for C++ AND QML.
-//
-// QML_SINGLETON alone lets QML construct the object itself, LAZILY, on the
-// first property access — which means a C++ reader that runs earlier gets
-// null and quietly does nothing. That was the reported bug: nothing in the
-// boot scene touched the Styles screen, StyleListModel::instance() stayed
-// null for the whole session, and every style-resolving read returned "no
-// style" (the monitor tile fell back to the transparency checkerboard and
-// the engine rendered unstyled). A warm-up property in Main.qml papered over
-// it; this removes the class of bug instead. create() below was meant to hand
-// QML the SAME static object, but the engine does not call it (measured
-// 2026-10-11: the generated module registration is
-// qmlRegisterTypesAndRevisions<...>(), so QML default-constructs its own
-// instance) — the Styles screen and every C++ reader therefore ended up on two
-// different rosters. Main.qml now hands QML's instance to OutputListModel at
-// startup (OutputListModel::adoptStyleRoster), which is the roster C++ uses.
 StyleListModel *StyleListModel::instance()
 {
     static StyleListModel s;
@@ -52,46 +36,27 @@ StyleListModel *StyleListModel::create(QQmlEngine *engine, QJSEngine *jsEngine)
 }
 
 namespace {
-
-// Formats the new style's resolution from the primary screen the same way
-// OutputListModel seeds the Main Output's res — a new style describes the
-// screen it will most likely be shown on, not a mock 1920×1080.
 QString defaultRes()
 {
     if (const QScreen *screen = QGuiApplication::primaryScreen())
         return QStringLiteral("%1×%2").arg(screen->size().width()).arg(screen->size().height());
     return QStringLiteral("1920×1080");
 }
-
 } // namespace
 
 StyleListModel::StyleListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
-    // TEMPORARY, env-gated (VGR_STYLEBG_TEST): one line per construction and
-    // one per create() call, so a run can tell how many rosters exist and
-    // whether QML reaches this class through its own factory. Qt's Q_ASSERT
-    // is compiled out of this build (QT_NO_DEBUG), so a duplicate instance is
-    // otherwise silent — the style-background scenario found the UI and the
-    // output model resolving styles through different rosters, and this is
-    // what names the mechanism. Remove once the duplicate is gone.
-    if (qEnvironmentVariableIsSet("VGR_STYLEBG_TEST"))
-        fprintf(stderr, "[SELFTEST-STYLEBG-ID] ctor this=%p s_instance=%p\n",
-                static_cast<void *>(this), static_cast<void *>(s_instance.data()));
+    if (qEnvironmentVariableIsSet("VGR_STYLEBG_TEST")) {
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StyleBgId"),
+                            QStringLiteral("StyleListModel ctor this=%1 s_instance=%2")
+                                .arg(quintptr(this)).arg(quintptr(s_instance.data())));
+    }
     Q_ASSERT_X(!s_instance || s_instance == this, "StyleListModel",
                "a second StyleListModel was constructed — instance() would "
                "silently rebind and every C++ reader would hold the wrong one");
     s_instance = this;
 
-    // THE BOOT GAP (found live: "my styles don't show after a rebuild"): the
-    // kernel's DatabaseManager only OPENS <dataDir>/kernel.json during Boot,
-    // which the app defers until after the QML load — but this singleton is
-    // constructed AT QML load, so the hydrate below read an EMPTY store every
-    // launch (the styles were saved the whole time; the UI just never saw
-    // them again) and the first post-boot mutation flushed the empty roster
-    // over the real one. So: hydrate now for the already-booted case, and
-    // RE-HYDRATE the moment boot completes (TheTableService::loadLibrary's
-    // contract).
     connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this, [this] {
         if (EngineBridge::instance().booted())
             reloadFromStore();
@@ -104,9 +69,6 @@ void StyleListModel::reloadFromStore()
     beginResetModel();
     m_styles.clear();
 
-    // A missing document (first run) or a corrupt one reads as an empty
-    // roster — the app starts fresh, never a failed boot (same contract as
-    // the production graph's restore).
     for (const bps::project::StoredStyle &s : bps::project::StyleStore::Instance().Get()) {
         StyleItem item;
         item.id = QString::fromStdString(s.id);
@@ -121,10 +83,6 @@ void StyleListModel::reloadFromStore()
         item.backgroundImageExists =
             !item.backgroundImage.isEmpty() && QFile::exists(item.backgroundImage);
         item.clearBackgroundOnText = s.clearBackgroundOnText;
-        // Walked through the ONE family table (FamilySlots.h): the engine's slot
-        // order is the storage order, so the families do not need spelling out
-        // here — and the overlay gate, which is a different axis, is named once
-        // in StyleItem instead of at index 4.
         for (int slot = 0; slot < FamilySlots::kCount; ++slot) {
             item.setShowForSlot(slot, s.showTemplates[static_cast<std::size_t>(slot)]);
             item.familyTemplateKeys[slot] = QString::fromStdString(s.templateKeys[static_cast<std::size_t>(slot)]);
@@ -210,9 +168,6 @@ QHash<int, QByteArray> StyleListModel::roleNames() const
 
 int StyleListModel::nextIdNumber() const
 {
-    // "s<n>" — n is one past the highest seen, and never reused within the
-    // session even after removals (deleting the last style then adding must
-    // not resurrect the old id: a persisted output could still reference it).
     int max = 0;
     for (const StyleItem &item : m_styles) {
         if (!item.id.startsWith(QLatin1String("s")))
@@ -257,9 +212,6 @@ void StyleListModel::save()
         s.onBoard = item.onBoard;
         stored.append(s);
     }
-    // The kernel's store owns the vector-based API here; a failed flush (disk
-    // full, permissions) logs through StyleStore's own path — the in-memory
-    // roster stays authoritative for the session either way.
     (void)bps::project::StyleStore::Instance().Save(
         std::vector<bps::project::StoredStyle>(stored.cbegin(), stored.cend()));
     emit rosterChanged();
@@ -295,10 +247,6 @@ void StyleListModel::removeStyle(int index)
     if (index < 0 || index >= m_styles.size())
         return;
 
-    // Model-side backstop: every output that pointed here goes to "None"
-    // (empty id) first, so a stale UI caller can't orphan a reference. (The
-    // Styles screen hides Delete only while an output still uses the style;
-    // this keeps the invariant without trusting the UI.)
     const QString doomedId = m_styles.at(index).id;
     OutputListModel *outputs = OutputListModel::instance();
     if (outputs)
@@ -413,12 +361,6 @@ void StyleListModel::setBackgroundImage(int index, const QString &path)
         return;
 
     m_styles[index].backgroundImage = normalized;
-    // Optimistic: assume the path the picker handed us is there, and let the
-    // stat below correct it a moment later. The check HOPS to the engine worker
-    // because a style's background can live on a network share, and a stat on a
-    // share that has gone away parks the interface thread for the whole SMB
-    // timeout — the picker accepts any path the user can reach, so this is the
-    // one place the app must not ask the filesystem synchronously.
     m_styles[index].backgroundImageExists = !normalized.isEmpty();
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { BackgroundImageRole });
@@ -430,9 +372,6 @@ void StyleListModel::setBackgroundImage(int index, const QString &path)
     vgr::EngineWorker::instance().runOffThread([this, row, normalized] {
         const bool exists = QFile::exists(normalized);
         vgr::EngineWorker::onInterfaceThread(this, [this, row, normalized, exists] {
-            // The row may have moved, been removed, or been pointed somewhere else
-            // while the stat was in flight: only publish it when this is still
-            // THAT row and still THAT path.
             if (row < 0 || row >= m_styles.size())
                 return;
             if (m_styles.at(row).backgroundImage != normalized)
@@ -450,9 +389,6 @@ void StyleListModel::setShowTemplate(int index, const QString &contentType, bool
 {
     if (index < 0 || index >= m_styles.size())
         return;
-    // The four slide families go through the shared table; "overlay" is not one
-    // of them (it gates the Overlays pane's layer, not a content family), so it is
-    // the one tag this function still names.
     StyleItem &style = m_styles[index];
     if (contentType == QLatin1String("overlay")) {
         if (style.showOverlay == on)
@@ -475,9 +411,6 @@ void StyleListModel::setFamilyTemplateKey(int index, const QString &contentType,
 {
     if (index < 0 || index >= m_styles.size())
         return;
-    // A content type that names no family has no slot to pick into (an unknown
-    // tag, or "overlay" — an overlay has no template; it always renders from its
-    // own design's blocks).
     const int slot = FamilySlots::SlotFor(contentType);
     if (slot < 0)
         return;
@@ -553,11 +486,6 @@ QVariantMap StyleListModel::getStyle(int index) const
         // Whether this style has a card on the Routing board.
         { "onBoard", item.onBoard },
     };
-    // The four families' gates and template picks, named from the ONE table
-    // (FamilySlots.h) instead of by hand: these are the property names the QML
-    // style editor and the output model read, so they are built here and nowhere
-    // else. An output model used to build its own key by capitalising a content
-    // type, which named nothing for a tag that did not follow the convention.
     for (int slot = 0; slot < FamilySlots::kCount; ++slot) {
         const FamilySlots::Family &fam = FamilySlots::Rows()[static_cast<std::size_t>(slot)];
         out.insert(QString::fromLatin1(fam.showProperty), item.showForSlot(slot));
@@ -580,9 +508,6 @@ QString StyleListModel::pickImageFile() const
         return {};
     auto r = bps::platform::PlatformAccessor::Get().Dialogs().OpenFileDialog(
         "Pick a background image",
-        // Decodable images only: the background picker below rejects anything
-        // else, so letting the picker offer every file just relocated the
-        // rejection.
         { "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)" });
     return r.ok() && r.value() ? QString::fromStdString(*r.value()) : QString();
 }

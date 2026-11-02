@@ -2,9 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// Monochrome icon glyphs, rendered from the exact Lucide SVG path data pulled
-// from the Figma-to-Qt export (see .design-ref/icon_paths.json), so these are
-// pixel-identical to the source design rather than hand-approximated.
 Item {
     id: root
     property string name: "search"
@@ -12,11 +9,6 @@ Item {
     // Line width of the stroked (StrokeIcon) glyphs — lower it when the glyph is
     // enlarged with `scale` so the line keeps its weight.
     property real strokeWidth: 1.5
-    // The glyphs draw at their own natural sizes (the mic at 24 px, the camera and speaker at 14),
-    // so icons of different kinds never line up. With fit, a glyph drawn on the Lucide 24-unit grid
-    // (mic, micOff, camera, volume2, clock, timer...) is scaled so that grid fills this item instead -
-    // use it where icons of different kinds sit side by side. (Not for the smaller hand-sized glyphs
-    // such as folder or search: their natural size is not a 24 grid.)
     property bool fit: false
     // The glyphs drawn on the Lucide 24-unit grid (the ones `fit` can scale). The others are hand-sized.
     readonly property bool grid24: ["camera", "mic", "micOff", "volume2", "clock", "play", "bookOpen", "wrench", "music", "star", "info", "cash", "lock", "sliders", "zoomIn", "gridView", "listView", "textLines", "download", "pencil", "flag", "link", "typeCase", "blend", "ban", "copy", "trash", "actions", "clickAction", "lineReveal", "timeIn", "timeOut", "rearrange", "toFront", "toBack", "moveUp", "moveDown", "paste", "selectAll", "duplicate", "delete", "edit", "groups", "alignLeft", "alignCenter", "alignRight", "alignJustify", "alignTop", "alignMiddle", "alignBottom", "listBullets", "transition", "locked", "unlocked", "image", "overlays", "audio", "slide", "scripture", "timerFill", "previous", "next", "shows", "newShow", "media", "template", "bible", "book", "calendar", "overlay", "layoutDashboard", "layers", "folder", "penTool", "fileText", "close", "presentation", "home", "cpu", "activity", "memoryStick", "thermometer", "gauge", "eye", "eyeOff", "cornerDownLeft", "zap"].indexOf(name) >= 0
@@ -137,23 +129,12 @@ Item {
             }
     }
 
-    // Hand-sized glyphs: the loaded item is resized to this box, and the glyph
-    // centres ITSELF inside that box (StrokeIcon/FillIcon carry the Shape
-    // alignment properties that do it — see their own comments; the rectangle /
-    // row based glyphs below centre with anchors). Do not "fix" a glyph that
-    // looks high by sizing its box to the glyph: the box is meant to be the
-    // icon's target size, and the centring belongs to the glyph.
     Loader {
         active: !root.grid24
         anchors.fill: parent
         sourceComponent: root.glyph
     }
 
-    // Lucide 24-grid glyphs. Their path is drawn on a 24 x 24 design box, so the item has to KEEP that size: a
-    // Loader that filled a smaller box would resize it, the path's centre would stop being the box's centre, and the
-    // glyph would sit low and to the right of where it is placed (that is what made the camera / mic / speaker
-    // look misaligned beside their labels). It is centred here and, with `fit`, scaled so its grid fills this item;
-    // without `fit` it keeps its own built-in scale (14/24 for most, 1 for the mic).
     Item {
         visible: root.grid24
         anchors.centerIn: parent
@@ -171,17 +152,6 @@ Item {
     component StrokeIcon: Shape {
         anchors.centerIn: parent
 
-        // These paths are written in ABSOLUTE coordinates (an 8 x 4.5 chevron
-        // is literally "M 0 0 L 4 4.5 L 8 0"), and Shape.fillMode defaults to
-        // NoResize — "the shape is rendered at its native size, independent of
-        // the size of the item", aligned top-left. Combined with the Loader
-        // above (which resizes its item to the glyph's box), that left every
-        // path glyph's ink in its box's TOP-LEFT corner instead of its middle:
-        // the section-header chevrons read ~3.75 px high in their 12 px boxes
-        // (and every other glyph sat high/left by half the difference between
-        // its ink and its box). These two properties centre the shape in the
-        // item, which is what every hand-sized glyph actually wants.
-        // (Qt 6.7+; this builds against 6.11.)
         horizontalAlignment: Shape.AlignHCenter
         verticalAlignment: Shape.AlignVCenter
 
@@ -216,15 +186,6 @@ Item {
     }
 
     // ---- The app's own icon assets (qml/assets/*.svg), on the 24 grid -------
-    // Tabler "library" (shows icon.svg) and "library-plus" (new show add.svg):
-    // two stacked cards holding the lines of a rundown, the second with a plus.
-    // Rebuilt from the assets' own path data rather than loaded through Image:
-    // an SVG drawn as an Image can't be recoloured (its currentColor resolves to
-    // black), and every glyph in this app has to follow root.color. The strings
-    // below are the assets' verbatim - Qt's PathSvg takes Tabler's relative
-    // commands, implicit repetition and leading-dot numbers (checked against its
-    // own parser) - so a re-exported asset only ever means swapping the string
-    // here, never touching a call site.
     Component {
         id: showsC
         StrokeIcon {
@@ -272,13 +233,6 @@ Item {
         }
     }
 
-    // The Templates mark, redrawn from the reference glyph: a SOLID rounded
-    // frame split into a tall left pane and two stacked right panes — the shape
-    // a slide template actually is (a panes layout), and solid so it reads at
-    // 14px where the old stroked "title bar over a box" dissolved into lines.
-    // Three filled blocks on the same 24 grid, with the 14/24 scale the other
-    // 24-grid glyphs use, so it lines up with its neighbours and still honours
-    // the icon's `fit` sizing (the grid24 wrapper reads this item's `scale`).
     Component {
         id: templateC
         Item {
@@ -290,10 +244,6 @@ Item {
         }
     }
 
-    // Tabler "brand-booking" (bible .svg): the app's own Scripture mark - the
-    // open book with the lettered page, from the asset of that name. Scripture
-    // wore the generic shared "bookOpen" before, which The Table also uses, so
-    // the two tabs read alike; this gives Scripture its own mark.
     Component {
         id: bibleC
         StrokeIcon {
@@ -309,10 +259,6 @@ Item {
         }
     }
 
-    // Tabler "layers-intersect" (overlay.svg): two overlapping rounded frames -
-    // an overlay laid over what is behind it. The Overlays tab's own mark,
-    // from the asset of that name (it wore the shared hand-sized "layers"
-    // glyph, the last tab still off the 24 grid).
     Component {
         id: overlayC
         StrokeIcon {
@@ -454,9 +400,6 @@ Item {
         }
     }
 
-    // Lucide "zoom-in".
-    // Lucide "corner-down-left" — the return/Enter mark beside a keypress
-    // field (the action editor's "press the key this runs on" affordance).
     Component {
         id: cornerDownLeftC
         StrokeIcon {
@@ -568,9 +511,6 @@ Item {
         }
     }
 
-    // Migrated onto the 24 grid (DesignCard's action row, beside the 24-grid
-    // `copy`). Non-square ink: the LONGER side is mapped to 24 so the aspect
-    // is preserved; see layoutDashboardC for the rationale.
     Component {
         id: fileTextC
         StrokeIcon {
@@ -581,9 +521,6 @@ Item {
         }
     }
 
-    // Migrated onto the 24 grid (SidebarRow's default icon, and DesignCard's
-    // action row beside the 24-grid `copy`). Non-square ink; see
-    // layoutDashboardC for the rationale.
     Component {
         id: folderC
         StrokeIcon {
@@ -618,10 +555,6 @@ Item {
         }
     }
 
-    // FreeShow's own Material transport glyphs (src/frontend/values/icons.ts),
-    // pulled path-for-path like the align icons above: the preview toolbar's
-    // previous/next skip chevrons and the ClearButtons' clear X. Filled 24-grid
-    // Material shapes, scaled to the shared 14px box.
     Component {
         id: previousC
         FillIcon {
@@ -652,9 +585,6 @@ Item {
         }
     }
 
-    // Migrated onto the 24 grid: it is the templates' "Presentation" CATEGORY
-    // icon, sharing a SidebarRow with the 24-grid music / book / bookOpen. Its
-    // non-square ink maps its LONGER side to 24; see layoutDashboardC.
     Component {
         id: presentationC
         StrokeIcon {
@@ -676,9 +606,6 @@ Item {
         }
     }
 
-    // Tabler "home" (home.svg, the FILLED variant): a house with a door. The
-    // header's Preview tab wears it — the screen whose centre is the live
-    // preview of whatever you pick — from the asset of that name.
     Component {
         id: homeC
         FillIcon {
@@ -687,11 +614,6 @@ Item {
         }
     }
 
-    // Migrated onto the 24 grid (it sits in a SidebarRow beside the 24-grid
-    // `camera`): the Figma path is in its own 10.5-unit space, so it is scaled
-    // up to fill the 24 grid and the item scaled back down by the same ratio.
-    // Ink is unchanged when drawn naturally, but `fit` and the 24-grid box
-    // math now apply, so mixed icon rows line up.
     Component {
         id: layoutDashboardC
         StrokeIcon {
@@ -730,11 +652,6 @@ Item {
         }
     }
 
-    // Tabler "book" (book.svg, the FILLED variant): the closed book The Table
-    // wears, from the asset of that name. This replaces the hand-sized 8 x 10
-    // stroked book the "book" name used to hold - nothing referenced it, and a
-    // closed book is what the tab wants - so it now lives on the 24 grid with
-    // every other tab glyph and scales with `fit`. Filled, hence FillIcon.
     Component {
         id: bookC
         FillIcon {
@@ -743,10 +660,6 @@ Item {
         }
     }
 
-    // Tabler "calendar-event" (calendar-event.svg, the FILLED variant): the
-    // Calendar tab's mark. Replaces the hand-sized 9 x 10 stroked calendar this
-    // name used to hold, so - like book / shows / media / template / bible - it
-    // lives on the 24 grid and scales with `fit`. Filled, hence FillIcon.
     Component {
         id: calendarC
         FillIcon {
@@ -757,11 +670,6 @@ Item {
 
     Component {
         id: musicC
-        // Lucide "music" on the NATIVE 24 grid — same family, scale, and
-        // 2px stroke as camera/clock/timer/shape, so it matches them
-        // everywhere with NO per-consumer scale boost (the old 9px export
-        // glyph needed 1.6×/1.3× boosts that also fattened its strokes —
-        // "the media audio icons are too big").
         StrokeIcon {
             width: 24; height: 24; scale: 0.5833 // 14/24
             ShapePath {
@@ -787,16 +695,6 @@ Item {
         ShapePath {
             fillColor: root.color
             strokeColor: "transparent"
-            // ShapePath defaults to OddEvenFill, but every one of these paths is an
-            // SVG's verbatim data and SVG's default rule is the NON-ZERO winding one
-            // (none of our assets set fill-rule). The two agree on a simple cut-out —
-            // a hole drawn with the opposite winding, which is how Material's icons do
-            // it — but they disagree the moment two subpaths overlap in the SAME
-            // direction, which is what Tabler's filled assets do (a filled page plus
-            // the outline it sits in). There, odd-even empties whatever is covered
-            // twice and the glyph comes out with holes in it instead of solid; the
-            // winding rule fills it the way the asset is drawn. Hence the rule below:
-            // it is what makes a `fill="currentColor"` asset render filled.
             fillRule: ShapePath.WindingFill
             PathSvg { id: svgElement }
         }
@@ -804,10 +702,6 @@ Item {
 
     Component {
         id: playC
-        // Lucide "play" on the NATIVE 24 grid — STROKED, replacing the old
-        // filled Figma triangle: a filled glyph reads visibly bigger/heavier
-        // than every stroked sibling at any shared size. Now matches the
-        // camera/clock/timer/shape family 1:1 with no scale boost.
         StrokeIcon {
             width: 24; height: 24; scale: 0.5833 // 14/24
             ShapePath {
@@ -840,9 +734,6 @@ Item {
                 strokeWidth: 2 // Lucide's native 2px @ 24px grid
                 capStyle: ShapePath.RoundCap
                 joinStyle: ShapePath.RoundJoin
-                // Lucide "volume-2" — speaker cone + one near arc + two
-                // far arcs (the "sound waves" pair the reference's
-                // Channels header shows next to the label).
                 PathSvg { path: "M 11 5 L 6 9 L 2 9 L 2 15 L 6 15 L 11 19 L 11 5 Z M 15.54 8.46 a 5 5 0 0 1 0 7.07 M 19.07 4.93 a 10 10 0 0 1 0 14.14" }
             }
         }
@@ -923,10 +814,6 @@ Item {
         Rectangle { anchors.centerIn: parent; width: 9; height: 9; radius: 1.5; color: root.color }
     }
 
-    // Migrated onto the 24 grid (DesignCard's action row, beside the 24-grid
-    // `copy`). Not a path but two bars, so they are authored here directly in
-    // 24-space and the item scaled 12/24: the natural 12px X is unchanged, and
-    // `fit` now applies like every other glyph.
     Component {
         id: closeC
         Item {
@@ -940,10 +827,6 @@ Item {
     }
 
     // ---- 24x24-grid icons (Lucide path data) -----------------------------
-    // These four back the Edit screen's "+" Add Content chips and the
-    // generic canvas placeholder. Authored in Lucide's native 24x24 grid
-    // (unlike the pre-scaled export icons above), so they're shrunk to the
-    // same ~14px visual box via `scale` — PathSvg has no viewBox auto-fit.
     Component {
         id: cameraC
         StrokeIcon {
@@ -1127,10 +1010,6 @@ Item {
     }
 
     // ---- FreeShow's preview chrome glyphs (values/icons.ts, path-for-path) ----
-    // The preview toolbar's ShowActions + ClearButtons rows draw these exact
-    // Material shapes: transport (transition, lock), and the clear group's
-    // layers (image/slide/scripture/overlays/audio/timer).
-    // "transition": the two interlocking rings (FreeShow's popup.transition icon).
     Component {
         id: transitionC
         FillIcon {
@@ -1203,12 +1082,6 @@ Item {
     }
 
     // ---- FreeShow's own menu glyphs (its values/icons.ts) ------------------
-    // The icons FreeShow draws in its right-click menus, ported verbatim: the
-    // same Material path data, filled the same way. They exist so a menu row
-    // here reads as the SAME action it is there — an operator moving between
-    // the two apps sees one visual language — and so the app has one glyph per
-    // action instead of a second, differently-shaped one per surface. Names
-    // match FreeShow's icon keys, camel-cased for QML.
 
     // "actions" — a flagged bookmark; the Item-actions submenu's own mark.
     Component {
@@ -1338,10 +1211,6 @@ Item {
     }
 
     // ---- Resource-health glyphs (Lucide 24 grid, stroke 2) -----------------
-    // The CPU / GPU-load / memory / temperature / throttle marks the Settings
-    // resource-health modal wears. Lucide "cpu", "activity", "memory-stick",
-    // "thermometer", "gauge" — the rects in the source assets are written here
-    // as path subpaths, since a StrokeIcon carries one PathSvg.
     Component {
         id: cpuC
         StrokeIcon {
@@ -1446,5 +1315,4 @@ Item {
             }
         }
     }
-
 }

@@ -2,18 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// The Add/Edit screen form (VGRPresenter · Settings · Outputs · Add/Edit):
-// Screen name, Resolution + Refresh rate selects, Screen
-// placement (a geometry mini-map of the REAL displays — FreeShow's Screens
-// model: tiles sit at each display's actual x/y, resolution derives from the
-// assigned display, Identify flashes the number on every physical screen,
-// Lock freezes the assignment), Test patterns. One implementation so the Add
-// and Edit dialogs can't drift — Edit appends its style/content sections
-// below this form in the dialog.
-//
-// Contract: consumer binds the plain properties (seeding current values) and
-// handles the *Edited/*Picked signals by writing its own state back. The form
-// never assigns its own properties, so the consumer's bindings stay intact.
 Item {
     id: root
 
@@ -21,12 +9,6 @@ Item {
     property string name: ""
     // "HDMI" | "NDI" | "SDI" | "REC" | "STREAM"
     property string type: "HDMI"
-    // Whether this form asks for a KIND at all. Settings · Screens sets it
-    // false: a row there is a screen (an HDMI display surface), and the
-    // transports that are not screens (NDI, SDI, recording, streaming) are
-    // created and wired on Settings · Routing, where the signal that reaches
-    // them is decided. The picker stays available for any form that really is
-    // choosing a transport.
     property bool showType: true
     property string res: "1920 × 1080"
     property string refresh: "60 Hz"
@@ -38,12 +20,6 @@ Item {
     property bool locked: false
     // "smpte" | "gradient" | "checker" | "solidred"
     property string pattern: "smpte"
-    // Where this output's AUDIO plays: the audio roster's own endpoint id
-    // ("waveout:<n>"), or "" for the program stream — the engine's single
-    // playout, which is where every row's audio went before this existed. Picking
-    // an endpoint gives the row a render stream of its own (RoutingService opens
-    // it from the row's audio wires), so an HDMI output's sound comes out of that
-    // monitor instead of the booth speakers.
     property string audioDevice: ""
 
     // ---- Change signals (consumer writes state on each) ----
@@ -51,10 +27,6 @@ Item {
     signal typePicked(string key)
     signal resPicked(string value)
     signal refreshPicked(string value)
-    // Picking a display carries its current mode so the consumer can snap
-    // res/refresh to it (resolution derives from the display, like
-    // FreeShow's outputLabel). Picking "windowed" carries "" for both —
-    // the consumer keeps whatever resolution is already set.
     signal placementPicked(string screenName, string res, string refresh)
     signal lockToggled(bool locked)
     signal patternPicked(string key)
@@ -64,9 +36,6 @@ Item {
     readonly property var refreshOptions: ["60 Hz", "50 Hz", "30 Hz", "24 Hz"]
 
     // ---- Output endpoints ----
-    // Outward devices only: a microphone is not somewhere to play a mix, so the
-    // engine's capture half of the roster is filtered out here. "Same as program"
-    // comes first because it is what an unset row MEANS.
     readonly property var audioDeviceOptions: {
         const out = [{ label: qsTr("Same as program"), key: "" }]
         void root.deviceRev
@@ -82,10 +51,6 @@ Item {
         }
         return out
     }
-    // The chosen endpoint's NAME, or "Same as program". A saved device that is no
-    // longer attached says so instead of silently reading as the program — that
-    // would be the form telling the operator their sound is going somewhere it
-    // is not.
     readonly property string audioDeviceLabel: {
         const opts = root.audioDeviceOptions
         for (let i = 0; i < opts.length; ++i)
@@ -103,12 +68,6 @@ Item {
     }
 
     // ---- Real displays ----
-    // OutputListModel enumerates QGuiApplication::screens(). Q_INVOKABLE
-    // reads aren't binding-tracked, so this revision counter is what makes
-    // the map and its LIVE marker follow model changes while open. It also
-    // bumps on screensChanged (a monitor hot-plugged/unplugged, or re-moded)
-    // — WITHOUT that, a monitor plugged in while the app was running only
-    // showed up after a restart.
     property int displayRev: 0
     Connections {
         target: OutputListModel
@@ -131,11 +90,6 @@ Item {
         return ""
     }
 
-    // Identify (FreeShow's): flash each display's number on the physical
-    // screen for a few seconds. One frameless topmost window per display,
-    // sized exactly to its geometry — real windows, but only CREATED while
-    // identifying (an Instantiator with active:false builds nothing, and
-    // fresh Window objects each time avoids re-showing stale ones).
     property bool identifying: false
     Timer {
         interval: 3000
@@ -326,11 +280,6 @@ Item {
         }
 
         // ---- Where this output's sound comes out ----------------------------
-        // The row's audio is its own mix (whatever buses are wired to it on
-        // Settings · Routing), so the endpoint is a real destination the operator
-        // picks: a stage monitor, the HDMI panel's speakers, or the program. It
-        // sits under Resolution/Refresh because it is a property OF the output,
-        // like them — not a global preference.
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -384,13 +333,6 @@ Item {
         Column {
             width: parent.width
             spacing: Theme.space2
-            // HDMI/SDI outputs sit on a real physical display; NDI/REC/
-            // STREAM don't (see `placement`'s own doc comment above) — the
-            // whole mini-map + Identify/Lock section only makes sense for
-            // the two that do. Showing it for NDI let you "bind" a network
-            // output to a monitor, which does nothing real and reads as the
-            // form still being the HDMI one underneath (live report: pick
-            // NDI, it still shows "the HDMI own").
             visible: root.type === "HDMI" || root.type === "SDI"
 
             Text {
@@ -400,16 +342,6 @@ Item {
                 font.pixelSize: Theme.textXs
             }
 
-            // A plain Item, not a Row — mapArea's width used to be computed
-            // as `parent.width - placeControls.width - spacing`, which
-            // looks equivalent to anchoring but isn't quite: any transient
-            // moment where placeControls hasn't settled its own width yet
-            // (or simply not enough room at a narrower card width) let
-            // placeControls get pushed outside the row's own bounds, where
-            // the card's clip:true silently cut it off — exactly the
-            // "Lock position" chip clipping that was reported. Anchoring
-            // mapArea's right edge directly to placeControls' actual left
-            // edge can't drift out of sync the same way.
             Item {
                 id: placementRow
                 width: parent.width
@@ -456,9 +388,6 @@ Item {
                         (bounds.w <= 0 || bounds.h <= 0)
                             ? 0
                             : Math.min((width - 12) / bounds.w, maxH / bounds.h)
-                    // Keep the smallest display tile large enough to recognize
-                    // and click. If the desktop's full layout no longer fits,
-                    // the Flickable below scrolls it instead of overlapping tiles.
                     readonly property real minScale:
                         (smallestDisplay.w <= 0 || smallestDisplay.h <= 0)
                             ? 0
@@ -633,14 +562,6 @@ Item {
                 }
 
                 // ---- Identify + Lock (FreeShow's Screens controls) ----
-                // A matched pair of icon+label rows (fixed width, consistent
-                // height, a border that lights up on the active state) —
-                // previously a plain ghost AppButton stacked over a generic
-                // SelectableChip, which read as an unstyled afterthought
-                // next to the mini-map. Icons are hand-drawn from
-                // primitives (a target ring for Identify, a padlock body +
-                // shackle for Lock), matching NavIcon.qml's own icon
-                // language rather than reaching for emoji glyphs.
                 Column {
                     id: placeControls
                     anchors.right: parent.right
@@ -807,12 +728,6 @@ Item {
             resMenu.visible = false
         }
     }
-    // Unlike SelectField's own menu (the shared pattern this box otherwise
-    // copies), resMenu/refreshMenu had no outside-click dismiss layer at
-    // all — clicking elsewhere in the dialog, or the OTHER box, left this
-    // one standing open (user report: both lists visible at once after
-    // picking Resolution then Refresh rate). closesOnWheel: false matches
-    // SelectField's own field-attached combobox feel.
     MenuCatcher { menu: resMenu; closesOnWheel: false }
 
     DropdownPanel {
@@ -826,10 +741,6 @@ Item {
     }
     MenuCatcher { menu: refreshMenu; closesOnWheel: false }
 
-    // The endpoint list, read live from the engine's own roster each time it
-    // opens (a device plugged in while the dialog is up must be pickable), with
-    // the pick reported as an ID rather than a label — two panels can carry the
-    // same name, and a name is not a stable thing to store.
     DropdownPanel {
         id: audioDeviceMenu
         visible: false

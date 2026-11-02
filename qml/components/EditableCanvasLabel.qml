@@ -1,20 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// A canvas text label: single click selects it (see selectRequested below),
-// click-and-drag moves the object it belongs to (see moveRequested below),
-// double click enters inline edit — an I-beam cursor while hovering signals
-// "click to select or drag, double-click to edit". Editing swaps the label
-// for a TextInput pre-filled with the current text, focused and
-// select-all'd immediately. Enter or losing focus commits via
-// `committed(value)`; Escape cancels and reverts.
-//
-// Dragging the label body (not just DraggableCanvasText's border ring)
-// moves the object — the border ring alone was an easy-to-miss, undiscoverable
-// way to reposition something, especially since resizing lives there too and
-// moving needed a Shift modifier to disambiguate. Now plain drag-anywhere-
-// on-the-text moves it, matching how most editors actually work; the ring
-// still handles resize.
 Item {
     id: root
 
@@ -28,117 +14,32 @@ Item {
     property alias color: displayText.color
     property alias font: displayText.font
     property alias horizontalAlignment: displayText.horizontalAlignment
-    // Defaults to centered (every existing template/overlay relies on that); a template whose body text
-    // reads better anchored to the top of a tall box (a sermon paragraph, say - centering floats short
-    // text in dead space and, worse, drifts the FIRST line down as the text grows) sets this explicitly.
     property alias verticalAlignment: displayText.verticalAlignment
     property alias wrapMode: displayText.wrapMode
-    // Display-only (TextInput has no lineHeight of its own in QtQuick) —
-    // an acceptable gap since editing mode is transient and doesn't need
-    // pixel-identical line spacing to the committed display.
     property alias lineHeight: displayText.lineHeight
     property alias fontSizeMode: displayText.fontSizeMode
     property alias minimumPixelSize: displayText.minimumPixelSize
-    // The text's own natural size at the current font/content, regardless
-    // of whatever box it's actually confined to — what a consumer's "grow"
-    // auto-size mode needs to resize the box to fit the text (see
-    // EditScreen.qml's onContentWidthChanged/onContentHeightChanged at the
-    // itemTextLabel instantiation).
     readonly property alias contentWidth: displayText.contentWidth
     readonly property alias contentHeight: displayText.contentHeight
-    // The text as it was the moment editing began. Live per-keystroke
-    // propagation (edited()) writes each change into the consumer's model
-    // as it happens, and displayText follows the model — so by Escape time
-    // displayText.text is already the TYPED text, and restoring from it
-    // would restore nothing. The pre-edit capture is what makes Escape a
-    // real cancel.
     property string preEditText: ""
     property bool editing: false
-    // Set by the owning DraggableCanvasText from its own `selected` (the
-    // canvas's selection state, not tracked here) — a plain click on an
-    // ALREADY-selected item goes straight to editing instead of requiring a
-    // double-click (see onClicked below: the user has already told us which
-    // item they mean, so re-selecting it does nothing new).
     property bool selected: false
-    // Exposed so the owning DraggableCanvasText can drive its hover-wash
-    // highlight from this MouseArea's own hover tracking instead of
-    // layering a second, overlapping hoverEnabled MouseArea on top of it
-    // (two stacked hover-tracking MouseAreas over the same region is what
-    // made click delivery flaky after a hover-leave/hover-enter cycle).
     readonly property alias hovered: dragArea.containsMouse
 
     signal committed(string value)
-    // Fired on EVERY keystroke while editing (not on programmatic text
-    // changes) so the consumer can push live text into its data model —
-    // which is what makes bound thumbnails/update-watching surfaces update
-    // as you type instead of only on commit. `committed` still fires at the
-    // end, reconciling the final value.
     signal edited(string value)
-    // Fired on every single click (regardless of modifiers) so the
-    // consumer can commit this object into its durable selection state
-    // (see DraggableCanvasText's selectedRequested / EditScreen.qml's
-    // handleCanvasSelect) — not just the ephemeral `editing` flag below.
-    // That matters because `editing` can flip back to false mid-gesture
-    // (grabbing this object's own resize ring calls forceActiveFocus,
-    // which commits/exits an in-progress edit) — if selection depended on
-    // `editing` alone, the object would go from selected to unselected
-    // right as you started dragging its ring, disabling the very MouseArea
-    // handling that drag and aborting it.
-    // Carries the pointer position (in THIS label's coordinates) beside the
-    // modifiers: the canvas uses it to tell a click on an item from a click
-    // that should reach through to the item underneath (see EditScreen's
-    // canvasCycleKey), and only a real position can make that decision.
     signal selectRequested(var modifiers, real x, real y)
-    // Fired repeatedly (in scene-coordinate deltas) while dragging the
-    // label body past a small threshold — the consumer (EditScreen.qml)
-    // adds these straight onto the owning DraggableCanvasText's x/y (and,
-    // for a multi-selection, every other selected object's too), optionally
-    // running them through alignment snapping first (snapDisabled is true
-    // while Alt is held, matching the resize ring's Alt-to-disable-snap).
-    // Suppresses the click/double-click below for that same gesture so a
-    // drag never also toggles selection or starts editing.
     signal moveRequested(real dx, real dy, bool snapDisabled)
     // Fired on release of a body-drag (whether or not it actually moved),
     // so a consumer can clear its snap-guide/group-drag state.
     signal dragEnded()
-    // Fired when the user presses an undo/redo chord (Ctrl+Z / Ctrl+Shift+Z
-    // / Ctrl+Y) while editing. A focused TextEdit ACCEPTS the ShortcutOverride
-    // for those chords (it's editable), so the EditScreen-level Shortcuts
-    // never activate and the TextEdit's own INTERNAL undo would eat them —
-    // exactly the "undo doesn't work while the item is in edit mode; it
-    // works once I click away" report. The edit forwards the chords out
-    // instead (see editInput's Keys.onPressed); the consumer routes them to
-    // its real history. Deferred execution is the CONSUMER's job — this
-    // signal is emitted from inside the TextEdit's own key-event dispatch,
-    // and an undo applies a snapshot that destroys this very delegate.
     signal undoRedoRequested(bool undo)
 
-    // Fills whatever box it's placed in (the owning DraggableCanvasText's
-    // full content area), not just its own text's natural size — content-
-    // driven sizing (the old width/height: displayText.width/height) meant
-    // an empty or short text item's interactive MouseArea below collapsed
-    // to near-zero height, leaving most of the visible box with nothing
-    // clickable in it (exactly why a fresh, still-empty text item wouldn't
-    // hover or select while camera/placeholder items, which always fill
-    // their box via anchors.fill: parent, worked fine).
     anchors.fill: parent
 
     // ---- the per-LINE background band (the Lines card's "Background color") --
-    // `bandColor` is a CSS colour; "" means none. It is drawn by the SAME text
-    // in a transparent rich-text Text UNDER the glyphs: Qt paints a span's
-    // background per line fragment, so the bands follow this font's own
-    // wrapping exactly — no second wrap engine, and no hand-placed rectangles
-    // that would drift from the words the moment a line broke elsewhere.
-    //
-    // `bandCase` is the item's textCase, applied to the band's own string: the
-    // label draws its case through font.capitalization, which a rich-text Text
-    // ignores, and an UPPERCASED verse bands at the lower-case widths without
-    // it (bands narrower than the words they sit behind).
     property string bandColor: ""
     property string bandCase: "none"
-    // The band's corner radius (FreeShow's lineRadius). 0 keeps the cheap
-    // rich-text band; above 0 each line is drawn as a rounded rectangle from the
-    // label's own measured line boxes (see LineBandLayer.qml).
     property real bandRadius: 0
 
     LineBandLayer {
@@ -157,11 +58,6 @@ Item {
         text: TextFormatService.applyList(root.text, root.listStyle)
     }
 
-    // TextEdit, not TextInput — TextInput is inherently single-line (it has
-    // no representation for an embedded newline at all), so Enter could
-    // never insert one; it could only ever end the edit. TextEdit accepts
-    // Enter as a real newline like any multi-line editor, matching
-    // displayText's own wrapMode-based multi-line rendering.
     TextEdit {
         id: editInput
         anchors.fill: parent
@@ -173,37 +69,13 @@ Item {
         horizontalAlignment: displayText.horizontalAlignment
         wrapMode: displayText.wrapMode
         selectByMouse: true
-        // The theme's own accent, not Qt's platform-default blue (user call:
-        // "this selector all around the app should be blue[,] it sh[oul]d
-        // [use] the base color from the[me]") — the select-all on entering
-        // edit mode (onVisibleChanged below) is exactly where this showed.
         selectionColor: Theme.accent
         selectedTextColor: Theme.controlInk
 
-            // Fixed-color blinking caret — TextEdit draws its cursor using its
-            // own `color` (the text color) unless given a cursorDelegate, so
-            // without one, changing the text's color also changed the caret's
-            // color, making it hard to see (or invisible) against some colors.
-            // TextEdit positions this automatically; a CUSTOM delegate is only
-            // responsible for its own visual AND its own blink — the built-in
-            // automatic blink is specifically a property of the default cursor,
-            // not something TextEdit keeps driving once you supply your own.
-            //
-            // NOTE: every binding here reads `editInput` (this TextEdit), NOT
-            // displayText — the display Text is always focus:false, so a
-            // displayText-bound caret sat at opacity 0 with its blink stopped
-            // forever: the "edit mode shows no caret" regression.
             cursorDelegate: Rectangle {
                 id: caret
                 width: Math.max(1, Math.round(editInput.font.pixelSize / 16))
                 color: "#ffffff"
-                // Blink ONLY while the field is actually being edited. The
-                // old delegate ran a loops: Animation.Infinite blink for the
-                // item's whole lifetime — an animation ticking on the scene
-                // graph forever (frame pacing + battery cost) even on a
-                // dozen idle, unfocused labels. Anchored blink instead:
-                // restarts on focus/position changes, holds fully visible
-                // when not editing.
                 opacity: editInput.activeFocus && editInput.cursorVisible ? 1 : 0
                 SequentialAnimation on opacity {
                     running: editInput.activeFocus
@@ -213,22 +85,7 @@ Item {
                 }
             }
 
-        // Hover-scoped edit cursor: the I-beam override is only on the
-        // stack while the pointer is actually over the field. Pushing it
-        // unconditionally for the whole edit session made it stick
-        // everywhere after clicking away — a click on a non-focusable
-        // panel doesn't steal focus, so `visible` never flipped and the
-        // pop never ran (same scale limitation as ever: TextInput's
-        // built-in cursor can't apply under the zoom transform).
         function syncEditCursor() {
-            // AppCursor.hovered(editInput) — position truth — is the ONLY
-            // signal here now. The old editHoverArea.containsMouse
-            // disjunct is a trap in this build: hover-exit never delivers
-            // to MouseAreas (KNOWN_ISSUES.md), so containsMouse latches
-            // true and the I-beam stuck after leaving the field. The
-            // catcher's pointer-position stream covers both directions —
-            // including the edit-opens-under-a-stationary-pointer case
-            // that motivated the original disjunct.
             if (visible && AppCursor.hovered(editInput))
                 AppCursor.push(Qt.IBeamCursor, editInput)
             else
@@ -244,22 +101,9 @@ Item {
         }
         Component.onDestruction: AppCursor.pop(editInput)
         Keys.onEscapePressed: {
-            // Restore the pre-edit text before exiting — onEditingFinished
-            // (focus loss from becoming invisible) then commits the RESTORED
-            // value back through the same path a real edit would, so the
-            // model (and its bound thumbnail) revert cleanly.
             text = preEditText
             root.editing = false
         }
-        // Intercept the undo/redo chords BEFORE the TextEdit's own key
-        // handling (Keys priority is BeforeItem by default): a focused,
-        // editable TextEdit accepts the ShortcutOverride for them, so the
-        // app-level Shortcuts never fire and the internal QQuickTextEdit
-        // undo would otherwise run instead — the canvas history would never
-        // see the chord (probe-verified: with focus on a TextEdit, a
-        // window-level Ctrl+Z Shortcut fires 0 times). accepted: true both
-        // blocks the internal undo and keeps the Shortcut suppressed
-        // (ShortcutOverride was accepted by us, the focused item).
         Keys.onPressed: (e) => {
             const ctrl = (e.modifiers & Qt.ControlModifier) !== 0
             if (!ctrl)
@@ -284,16 +128,6 @@ Item {
         }
     }
 
-    // Tracks the pointer over the label while editing (the drag area below
-    // hides itself then, so it can't do it) — feeds syncEditCursor above.
-    // Declared after editInput so it's topmost. acceptedButtons: NoButton
-    // keeps it invisible to clicks — presses still reach editInput below.
-    // Trigger is the pointer-POSITION stream, not containsMouse: exit never
-    // delivers to MouseAreas in this build (KNOWN_ISSUES.md), so a
-    // containsMouse-driven trigger latched and the I-beam stuck after the
-    // pointer left the field. Position truth covers both directions, and
-    // onVisibleChanged still covers edit-open/close under a stationary
-    // pointer.
     MouseArea {
         id: editHoverArea
         anchors.fill: parent
@@ -313,13 +147,6 @@ Item {
         property real pressMouseX: 0
         property real pressMouseY: 0
         property bool dragMoved: false
-        // A press is LIVE (cleared on release). Distinct from dragMoved, which
-        // LATCHES for the rest of the gesture to keep a drag from also reading
-        // as a click (onClicked/onDoubleClicked below) — using it for the
-        // cursor left the grab on screen after the button came up, the
-        // scenario's `released got=18 want=4` (a closed hand where the I-beam
-        // belongs). The grab is a function of "a press is down AND it became a
-        // drag", never of a latch.
         property bool dragging: false
 
         anchors.fill: parent
@@ -327,25 +154,7 @@ Item {
         hoverEnabled: true
         cursorShape: dragArea.dragging ? Qt.ClosedHandCursor : Qt.IBeamCursor
 
-        // Cursor via the AppCursor override stack, not cursorShape alone:
-        // the canvas sits under mCanvas's scale (zoom) transform, and
-        // cursorShape silently stops applying under scaled ancestors while
-        // hover delivery (containsMouse) keeps working — so hover IS known
-        // here but the OS cursor never changed. Pushing the shape onto the
-        // app-wide stack (rendered by Main.qml's unscaled AppCursorCatcher)
-        // forces it at any zoom. cursorShape stays as the zoom==1 fallback;
-        // the pushed shape is identical so the two can't disagree.
         function syncCursor() {
-            // Position truth + pressed. The old containsMouse disjunct is a
-            // latch trap: hover-exit never delivers to MouseAreas in this
-            // build (KNOWN_ISSUES.md), so containsMouse stuck true and this
-            // push outlived the pointer forever. `pressed` still covers the
-            // active drag (the grab keeps press alive outside the item); on
-            // release, AppCursor.hovered decides from where the pointer IS.
-            // `pressed` shows the GRAB straight away (a live drag owns the
-            // pointer — priorityPressed), instead of staying an I-beam until the
-            // 4px drag threshold tripped and then jumping: that jump mid-gesture
-            // was the "cursor transition" that read as a stutter.
             if (visible && (pressed || AppCursor.hovered(root)))
                 AppCursor.push((pressed && dragging) ? Qt.ClosedHandCursor : Qt.IBeamCursor,
                                dragArea, pressed ? AppCursor.priorityPressed : AppCursor.priorityHover)
@@ -359,11 +168,6 @@ Item {
             target: AppCursor
             function onPointerMoved() { dragArea.syncCursor() }
         }
-        // While editing, this area hides itself — an invisible MouseArea
-        // stops receiving hover events, so containsMouse can stay true with
-        // nobody left to clear it. Pop explicitly on hide (syncCursor only
-        // re-pushes from live hover/press events, never on restore, so a
-        // stale containsMouse can't resurrect the cursor after editing).
         onVisibleChanged: {
             // Reappear (edit ended / zoom flip): re-check with position
             // truth so a stale hover state can't resurrect the override.
@@ -397,9 +201,6 @@ Item {
             }
         }
         onReleased: {
-            // Clear the live-press flag BEFORE the re-claim, so the release
-            // lands on the I-beam in the same tick (the scenario reads the
-            // cursor right after releasing).
             dragging = false
             syncCursor()
             root.dragEnded()
@@ -408,11 +209,6 @@ Item {
             if (dragMoved)
                 return
             root.forceActiveFocus()
-            // Already selected, plain click (no multi-select modifiers):
-            // one more click now enters editing directly — user call ("when
-            // the item is selected just one click should make it enter edit
-            // mode"). A modified click still just extends/toggles the
-            // selection, same as a fresh click always has.
             if (root.selected && !(mouse.modifiers & (Qt.ShiftModifier | Qt.ControlModifier))) {
                 root.editing = true
                 return

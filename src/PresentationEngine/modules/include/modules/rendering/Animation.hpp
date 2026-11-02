@@ -1,11 +1,5 @@
 #pragma once
 
-// Animation + Transition engines (docs/specs/17 §Animation Engine / §Transition
-// Engine). Timeline-based property animation (position/scale/rotation/opacity/
-// color/mask/custom) with easing, plus the built-in transition types
-// (fade/slide/push/zoom/reveal/wipe/crossfade). All interpolation is
-// deterministic and unit-testable.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/RenderObject.hpp"
 #include "modules/rendering/RenderTypes.hpp"
@@ -17,7 +11,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 // --- Easing functions ------------------------------------------------------
 enum class Easing : int {
     Linear = 0,
@@ -134,5 +127,4 @@ public:
         return p < 0 ? 0.0 : (p > 1 ? 1.0 : p);
     }
 };
-
 } // namespace bps::rendering

@@ -3,7 +3,6 @@
 #include <cstdio>
 
 namespace bps::notification {
-
 void NotificationScheduler::Schedule(const Notification& n, int64_t delayMs) {
     int64_t due = n.timestampMs + delayMs;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -18,7 +17,6 @@ void NotificationScheduler::SetQuietHours(bool enabled, std::string start, std::
 }
 
 namespace {
-
 // "HH:MM" (24h) → minutes since midnight. Returns -1 on malformed input.
 int ParseClock(std::string_view s) {
     if (s.size() != 5 || s[2] != ':') return -1;
@@ -27,7 +25,6 @@ int ParseClock(std::string_view s) {
     if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
     return h * 60 + m;
 }
-
 } // namespace
 
 bool NotificationScheduler::InQuietHours(int64_t nowMs) const {
@@ -45,10 +42,6 @@ bool NotificationScheduler::InQuietHours(int64_t nowMs) const {
 }
 
 void NotificationScheduler::Tick(int64_t nowMs) {
-    // The due list is taken under the lock; the DELIVERY is not. `deliver_` is a
-    // foreign callback (the notification provider), and invoking it with this
-    // lock held is how one slow or re-entrant provider turns the scheduler's
-    // lock into an app-wide pile-up.
     std::vector<Notification> ready;
     std::function<void(const Notification&)> deliver;
     {
@@ -76,5 +69,4 @@ void NotificationScheduler::Clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     due_.clear();
 }
-
 } // namespace bps::notification

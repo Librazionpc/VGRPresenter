@@ -17,30 +17,15 @@
 #include <thread>
 
 // ============================================================================
-// See CallTrace.h for the contract. Two properties shape this implementation:
-//
-//   * The instrumented path must be cheap and must NOT allocate: it runs on
-//     every QML-facing service entry point, and — for the GUI thread — a
-//     breadcrumb may well be the last thing that ran before a hang. So the
-//     chain lives in a thread_local array of `const char*` and the snapshots
-//     readers see are fixed char buffers published with one release store.
-//
-//   * The CRASH path (CrashHandler's SEH/signal handler) may not allocate,
-//     lock, or call into Qt. It reaches the GUI snapshot through
-//     guiChainRaw(), which only reads an already-published buffer.
 // ============================================================================
 
 namespace calltrace {
 namespace {
-
 constexpr int kMaxDepth   = 32;    // deepest chain recorded (a diagnostic, not a stack)
 constexpr int kSlotBytes  = 512;   // per-slot text; deeper chains are truncated with ">+…"
 constexpr int kGuiSlots   = 8;     // GUI snapshot ring: one slot per publish, so a
 constexpr int kLastSlots  = 16;    // reader is never reading the slot being rewritten
 
-// The live chain on THIS thread (outermost first). Plain pointers — the names
-// are string literals passed by every VGR_CALL_TRACE site, so they outlive any
-// push/pop pair.
 thread_local const char *t_names[kMaxDepth];
 thread_local int t_depth = 0;
 
@@ -49,18 +34,9 @@ thread_local int t_depth = 0;
 char g_guiRing[kGuiSlots][kSlotBytes];
 std::atomic<int> g_guiSlot{-1};
 
-// Last-ENTERED snapshot, republished on ENTRY only, from any thread. This is
-// what reportException() reads: an exception unwinds and pops every Scope, so
-// by the time it is caught the live chain is empty and the only witness left is
-// the deepest breadcrumb that was ever entered.
 char g_lastRing[kLastSlots][kSlotBytes];
 std::atomic<int> g_lastSlot{-1};
 
-// GUI-thread liveness, in steady_clock ticks, plus how many ticks have been
-// seen. The COUNT is what keeps the watchdog honest during startup: the tick
-// only comes from a running event loop, so until a few ticks have landed the
-// GUI thread has not yet proved it can tick at all — and the long synchronous
-// boot that happens before the loop starts must not read as a hang.
 std::atomic<long long> g_lastHeartbeat{0};
 std::atomic<long long> g_heartbeatCount{0};
 constexpr long long kTicksBeforeWatchdogArms = 3;
@@ -99,9 +75,6 @@ int renderChain(char *out)
     return written;
 }
 
-// NOTE: the count parameter is NOT called `slots` — Qt defines that as a
-// keyword macro, and `next % slots` then expands to `next %` (a build error
-// that reads like a parser bug rather than a name collision).
 void publish(char (*ring)[kSlotBytes], int slotCount, std::atomic<int> &slot)
 {
     const int next = slot.load(std::memory_order_relaxed) + 1;
@@ -109,7 +82,6 @@ void publish(char (*ring)[kSlotBytes], int slotCount, std::atomic<int> &slot)
     renderChain(dst);
     slot.store(next, std::memory_order_release);
 }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -134,9 +106,6 @@ Scope::Scope(const char *what)
 Scope::~Scope()
 {
     if (t_depth > 0) --t_depth;
-    // On exit the GUI snapshot tracks the LIVE chain again (so guiChain() reads
-    // as the current nesting); the last-entered ring deliberately keeps the
-    // deeper snapshot — see its comment.
     if (onGuiThread_)
         publish(g_guiRing, kGuiSlots, g_guiSlot);
 }
@@ -218,18 +187,11 @@ void installHangWatchdog(int stallSeconds)
             reported = true;
             const QString where = guiChain();
             const double secs = std::chrono::duration<double>(stalled).count();
-            // The stall may be permanent (a deadlock), and this watchdog tick
-            // is the only moment the live thread stacks exist. Snapshot them
-            // into a minidump NOW — an unattributable hang is what happens
-            // without it. Best-effort; see CrashHandler.h.
             {
                 const QByteArray reason = QStringLiteral("GUI thread has not ticked for %1 s")
                                               .arg(secs, 0, 'f', 1).toUtf8();
                 WriteHangDump(reason.constData());
             }
-            // The log is the durable half; the toast is what an operator sees
-            // without a log viewer. Both name the call in flight, which is the
-            // piece every previous hang report was missing.
             EngineBridge::write(
                 QStringLiteral("error"), QStringLiteral("HangWatchdog"),
                 QStringLiteral("GUI thread has not ticked for %1 s — it was inside: %2")
@@ -277,11 +239,6 @@ void reportException(const char *what, const char *detail)
 
 void runEnvSelfTest()
 {
-    // THREE probes with ONE env var each, none implying another: the breadcrumb
-    // wiring (VGR_CALLTRACE_SELFTEST), the watchdog (VGR_HANG_SELFTEST), and the
-    // per-event exception boundary (VGR_BOUNDARY_SELFTEST). Each is inert
-    // without its own var — this is called once from main() after the message
-    // handler and the watchdog exist.
     const bool wantTraceProbe = qEnvironmentVariableIsSet("VGR_CALLTRACE_SELFTEST");
     const bool wantHangProbe = qEnvironmentVariableIsSet("VGR_HANG_SELFTEST");
     const bool wantBoundaryProbe = qEnvironmentVariableIsSet("VGR_BOUNDARY_SELFTEST");
@@ -293,15 +250,8 @@ void runEnvSelfTest()
         Scope outer("CallTraceSelfTest.outer");
         {
             Scope inner("CallTraceSelfTest.inner");
-            // A warning from inside the chain: the message handler appends
-            // "[in flight: CallTraceSelfTest.outer > CallTraceSelfTest.inner]"
-            // to THIS line in engine.log, which is the whole point of the
-            // module (a bare warning says nothing about which call it was in).
             qWarning("CallTrace self-test: a warning raised inside a breadcrumb");
         }
-        // A caught exception from inside the chain: reportException() must name
-        // the breadcrumb it came from. The inner breadcrumb is already popped,
-        // so the sticky last-entered slot is what supplies the answer.
         try {
             throw std::runtime_error("CallTrace self-test exception");
         } catch (const std::exception &e) {
@@ -311,14 +261,6 @@ void runEnvSelfTest()
                             QStringLiteral("self-test done"));
     }
 
-    // The WATCHDOG probe: the watchdog is the one path that otherwise only ever
-    // runs for real. It has to fire from INSIDE the event
-    // loop (the heartbeat counts ticks the loop actually made, and the watchdog
-    // stays unarmed until a few have landed), so it is scheduled rather than
-    // done here: by the time it runs the loop has ticked many times and the
-    // watchdog is armed. The GUI thread then blocks past the stall threshold,
-    // inside a breadcrumb, so the watchdog's report must name the call it was
-    // inside — exactly the scenario the module exists for.
     if (wantHangProbe) {
         QTimer::singleShot(2000, [] {
             Scope stall("HangSelfTest.blockingTheGuiThread");
@@ -328,11 +270,6 @@ void runEnvSelfTest()
         });
     }
 
-    // The BOUNDARY probe (VGR_BOUNDARY_SELFTEST=1): an exception thrown from a
-    // handler delivered by the event loop must be caught at
-    // GuardedApplication::notify(), reported with this breadcrumb, and the app
-    // must KEEP RUNNING. Scheduled rather than thrown here so it runs with an
-    // event in flight — the only condition the per-event boundary covers.
     if (wantBoundaryProbe) {
         QTimer::singleShot(2500, [] {
             Scope throwing("BoundarySelfTest.throwingFromEventHandler");
@@ -342,5 +279,4 @@ void runEnvSelfTest()
         });
     }
 }
-
 } // namespace calltrace

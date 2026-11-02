@@ -1,19 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One labeled usage meter — label left, percentage right, rounded bar
-// underneath filling to the percentage. Shared by the Settings screens that
-// show resource usage (General's Resource profile row, Smart Config's
-// Resource budgets, the resource-health modal); extracted so the meter visual
-// can't drift between them. Hand `label`, `pct`, and a width; the height is
-// intrinsic.
-//
-// CAP-VS-USAGE: pass `capPct` (0-100) as well and the bar becomes two layers —
-// a soft "allowance" band reaching the cap, the bright fill showing what is
-// actually used now, and a tick marking the cap — with the readout reading
-// `used% / cap%`. That is what Smart Config's budgets want: a live number
-// against the share the profile allows. Leave it at -1 (the default) for a
-// plain single-value meter, which is what every other caller passes.
 Item {
     id: root
 
@@ -23,13 +10,7 @@ Item {
     // band + cap tick and prints "pct% / cap%".
     property int capPct: -1
     readonly property bool capped: root.capPct >= 0
-    // Accent by default; a health-style meter (e.g. free disk space) can
-    // pass Theme.success instead. With a cap it is the USAGE fill's colour;
-    // the allowance band stays a quiet wash so the two never read as one.
     property color barColor: Theme.accent
-    // Replaces the right-hand percentage when the caller has something better
-    // to say — e.g. "Not measured · cap 80%" where the platform cannot report
-    // a usage figure at all. Empty keeps the numeric readout.
     property string readout: ""
 
     implicitWidth: 200

@@ -1,9 +1,5 @@
 #pragma once
 
-// Built-in presentation cues (docs/specs/19 §Cue system). Each cue implements
-// IPresentationCue. Adding a cue type never requires changing existing engine
-// code — plugins register new cue implementations with the engine.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/IPresentationCue.hpp"
 
@@ -11,7 +7,6 @@
 #include <string>
 
 namespace bps::presentation {
-
 // Jumps the runtime to a slide by its stable id.
 class SlideCue final : public IPresentationCue {
 public:
@@ -118,5 +113,4 @@ private:
     double atSec_ = 0.0;
     Fn fn_;
 };
-
 } // namespace bps::presentation

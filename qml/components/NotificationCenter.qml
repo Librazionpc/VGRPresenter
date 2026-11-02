@@ -2,20 +2,6 @@ pragma Singleton
 import QtQuick
 import VGRPresenterUI
 
-// Turns EventBus traffic into transient toasts. Deliberately has no publish
-// API of its own — everything (the C++ CrashHandler's log, Qt's own
-// qWarning/qCritical forwarded from main.cpp, QQmlApplicationEngine's own
-// `warnings` signal, and eventually real engine-bridge events) goes through
-// EventBus.publish() instead, so this stays a pure subscriber and any of
-// those producers work without knowing NotificationCenter exists.
-//
-// Convention: an event only becomes a toast when its payload carries a
-// non-empty "message" — topics without one (e.g. future state-change
-// telemetry like "av.routeChanged") are still delivered to every other
-// EventBus subscriber, just not shown here. See EventBus.h.
-// Item, not QtObject — QtObject has no default property, so it can't hold
-// the Connections {} child below (this singleton is never placed in the
-// visual tree, so being an Item has no visible effect).
 Item {
     id: root
 
@@ -31,12 +17,6 @@ Item {
     // one, so its card stands longer than a plain one (hovering holds it anyway).
     readonly property int actionDurationMs: 15000
 
-    // WHAT A NOTICE'S ACTION DOES, by id. A payload is data — it cannot carry a
-    // function — so the component that owns the work registers it here under the
-    // id its notice names ("recovery.open"), and the card's button runs it. Small
-    // on purpose: this is a lookup for buttons, not a second event bus, and an id
-    // with nothing registered simply has no button (the card falls back to the
-    // plain notice it was before).
     property var actions: ({})
     function registerAction(id, run) {
         if (!id || typeof run !== "function")
@@ -50,24 +30,15 @@ Item {
         if (root.hasAction(id))
             root.actions[id]()
     }
-    // Drop one, for an action registered FOR ONE NOTICE (an Undo whose id carries the
-    // thing it gives back): once that notice is gone the entry can only ever fire
-    // twice. A long-lived id (the recovery offer) is simply never unregistered.
     function unregisterAction(id) {
         if (id && root.actions[id] !== undefined)
             delete root.actions[id]
     }
 
-    // The identity of a notice is what the operator can SEE: identical level,
-    // title and message coalesce even when different producers raised them.
-    // Coalescing preserves the first occurrence's place in the FIFO.
     function groupKeyOf(level, title, message) {
         return (level || "info") + "\u001f" + (title || "") + "\u001f" + message
     }
 
-    // Push a notice. A repeated notice coalesces with its existing queue entry,
-    // but never restarts its timer or changes its place in the FIFO. Distinct
-    // notices wait behind the current card and each gets its own reading time.
     function push(level, title, message, topic, crux, action) {
         const key = root.groupKeyOf(level, title, message)
         const seen = root.items.find((e) => e.groupKey === key)
@@ -76,13 +47,7 @@ Item {
                 ? Object.assign({}, e, {
                       groupCount: (e.groupCount || 1) + 1,
                       topic: topic || e.topic,
-                      // Purely presentational, so a repeat may refresh it: the
-                      // newest occurrence of the same sentence knows its crux
-                      // best (and an older producer may not have had one).
                       crux: crux || e.crux,
-                      // Same rule for the action: the newest producer's is the
-                      // one still worth offering (an id nobody registered draws
-                      // no button — see the registry above).
                       action: action || e.action,
                   })
                 : e)
@@ -96,9 +61,6 @@ Item {
             level: level || "info",
             title: title || "",
             message: message,
-            // The names the notice is about — bolded by the toast card (see
-            // NotificationToast.crux). Not part of the identity above: the same
-            // sentence is the same notice however it was decorated.
             crux: crux || [],
             // What the notice offers, if anything (see NotificationToast.action);
             // also not part of the identity, for the same reason.

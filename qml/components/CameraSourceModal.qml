@@ -2,21 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// "Select Camera Source" picker — pops up when "Camera" is picked from the
-// Edit screen's "+" Add Content menu, matching
-// 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Add_Camera.qml's cam_modal_*/
-// cam_card*/cam_btn_* elements (a flat Figma export with no reusable QML of
-// its own — rebuilt here as a real, model-driven component, same convention
-// as BackgroundColorModal.qml: scrim + centered card, `open` to show/hide,
-// `applied`/`cancelled` signals, no application state of its own beyond the
-// picker UI itself).
-//
-// `sources` is a plain list of { id, name, description, status } — status
-// is "live" or "offline"; an offline source is still shown (browsable) but
-// visually dimmed and not selectable, matching the ground truth's greyed
-// "Webcam · Not connected" card. Consumers read `applied`'s payload (the
-// picked source object) and decide what a "camera" canvas item does with it
-// (e.g. label it) — this component doesn't own canvas state.
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
@@ -67,16 +52,6 @@ Item {
     anchors.fill: parent
     visible: root.open
 
-    // Dim scrim behind the card; clicking it cancels, same as every other
-    // overlay in this app (see BackgroundColorModal.qml). Shared ModalScrim
-    // — also consumes wheel so the page behind can't scroll through it.
-    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
-    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
-    // the whole app, not just that page's content column: parented in place its scrim
-    // covered one side of the settings card, so the dialog read as half-modal (user
-    // report: "the black box doesn't cover the whole settings modal, only one side").
-    // Reparented to the window overlay, this component has no scaled ancestor to
-    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
     parent: Overlay.overlay
 
     ModalScrim {
@@ -126,30 +101,9 @@ Item {
                         font.weight: Font.DemiBold
                     }
 
-                    Rectangle {
+                    ModalCloseButton {
                         id: closeBtn
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 28
-                        height: 28
-                        radius: 7
-                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✕"
-                            color: Theme.textSecondary
-                            font.pixelSize: 14
-                        }
-
-                        MouseArea {
-                            id: closeArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.cancelled()
-                        }
+                        onClicked: root.cancelled()
                     }
                 }
 
@@ -255,10 +209,6 @@ Item {
                             }
                         }
 
-                        // Simple centered lens glyph standing in for the
-                        // ground truth's rendered camera-lens artwork — a
-                        // real live-preview visual is future work (same
-                        // status as the canvas's own camera placeholder).
                         IconGlyph {
                             anchors.centerIn: parent
                             anchors.verticalCenterOffset: -14

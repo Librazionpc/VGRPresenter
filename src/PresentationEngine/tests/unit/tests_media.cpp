@@ -1,6 +1,3 @@
-// Unit tests: Media Engine (docs/specs/21).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests media
 #include "TestHarness.hpp"
 
 #include "core/config/Json.hpp"
@@ -64,7 +61,6 @@ void TestMediaEngine() {
 // ---------------------------------------------------------------------------
 
 namespace {
-
 // A frame source with no codec: a flat picture, and a log of what was asked of it.
 class FakeFrameSource final : public bps::media::IFrameSource {
 public:
@@ -96,21 +92,14 @@ void MakeFile(const std::string& path, const std::string& content = "x") {
     CHECK(fs.Write(path, content).ok());
 }
 
-// Separator-agnostic suffix test: the paths the library stores come back in the PAL's
-// own spelling ("C:\\dir/sub/sunrise.png" on Windows), so an assertion about WHICH
-// file an item names compares the folded tail rather than the whole string.
 bool PathEndsWith(const std::string& path, const std::string& tail) {
     std::string folded = path;
     std::replace(folded.begin(), folded.end(), '\\', '/');
     return folded.size() >= tail.size()
            && folded.compare(folded.size() - tail.size(), tail.size(), tail) == 0;
 }
-
 } // namespace
 
-// The file-level CRUD the Media pane's item menu drives: rename, move, delete.
-// Every branch is a REAL file operation, so each one is checked on disk AND in
-// the remembered index (which is what the next start lists).
 void TestMediaLibraryItemEdit() {
     namespace mm = bps::media;
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -193,10 +182,6 @@ void TestMediaLibraryItemEdit() {
         MakeFile(root + "/clips/sunrise.png");
         CHECK(!lib.MoveItem(root + "/photos/sunrise.png", clipsDir).ok());
         (void)fs.Remove(root + "/clips/sunrise.png");
-        // A folder INSIDE a library folder is allowed, and the file stays on the shelf.
-        // (An EMPTY nested folder is not a row yet — Subfolders lists folders that hold
-        // media — so the target is addressed the way the tree will spell it once it is
-        // there: the PAL's own join onto the library folder.)
         const std::string subDir = fs.Join(photosDir, "sub");
         CHECK(lib.Subfolders(photosDir).empty());
         CHECK(lib.MoveItem(root + "/photos/sunrise.png", subDir).ok());
@@ -234,10 +219,6 @@ void TestMediaLibraryItemEdit() {
     (void)fs.RemoveAll(root);
 }
 
-// The operator's Delete: the file leaves the grid but is NOT destroyed, so the
-// notice that follows can put it back. What has to hold is the whole round trip —
-// off the disk, into the trash, back to the SAME path, re-filed in its folder's
-// own order — and every refusal that must not lose the file on the way.
 void TestMediaLibraryUndoDelete() {
     namespace mm = bps::media;
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
@@ -482,10 +463,6 @@ void TestMediaLibraryFolders() {
         mm::MediaLibrary third(storage);
         CHECK(third.Load().ok() && third.Folders().size() == 1);
         CHECK(third.Count() == 2 && third.Items().size() == 2);           // the removed folder's items are gone
-        // A DAMAGED index is set aside as evidence and the read goes on: the
-        // folder list still loads, scanning fills the grid again, and the bytes
-        // that were there are kept under `.corrupt-<stamp>` rather than being
-        // overwritten by the next save.
         const std::string index = root + "/state/media-index.json";
         CHECK(fs.Write(index, "{ not json").ok());
         mm::MediaLibrary fourth(storage);
@@ -716,27 +693,6 @@ void TestMediaLibraryNestedFolders() {
 }
 
 // ---------------------------------------------------------------------------
-// Empty-path safety (regression, 2026-10-01).
-//
-// WHY THIS TEST EXISTS: the app was crashing on GO LIVE with an NDI output
-// enabled, with five byte-identical crash records reading
-//
-//   signal=0 (filesystem error: cannot make absolute path: Invalid argument [])
-//
-// On Windows, std::filesystem::absolute() calls GetFullPathNameW, which
-// fails with ERROR_INVALID_PARAMETER (22) for an EMPTY path. The error_code
-// overload returns that as an error code (harmless); the THROWING overload
-// raises std::filesystem::filesystem_error, which escaped into
-// std::terminate and killed the process.
-//
-// The PAL's own Absolute() always used the error_code overload and so never
-// threw — but it turned an empty query into an Err::IoError, which callers
-// treat as fatal, and it made the "empty path" case look like a disk
-// failure in the log. Both are now handled explicitly: an empty path is a
-// question with no answer, answered with an empty string.
-//
-// The media library is the reachable path: MediaLibrary::CanonicalKey("") and
-// Items("") both route an empty folder name into Absolute().
 // ---------------------------------------------------------------------------
 void TestEmptyPathSafety() {
     namespace mm = bps::media;
@@ -781,9 +737,6 @@ void TestEmptyPathSafety() {
         CHECK(lib.AddFolder(root).ok());
         CHECK(lib.Scan(root).ok());                // items_ is filled by Scan, not AddFolder
 
-        // CanonicalKey()/MatchKey() are private; their empty-path guard is
-        // exercised through the public callers below (Scan/RemoveFolder/
-        // Subfolders all route their argument through them).
         CHECK(lib.Items("").size() == 1);          // empty = "everything"
         CHECK(!lib.Scan("").ok());                 // empty is not a library folder
         CHECK(!lib.RemoveFolder("").ok());
@@ -793,13 +746,6 @@ void TestEmptyPathSafety() {
 }
 
 // ---------------------------------------------------------------------------
-// A FILE'S OWN FILL (Contain / Cover / Stretch) lives on the FILE.
-//
-// The operator's ask: "per-media fill override on the file itself that wins over
-// the output's default fit". So the choice has to survive everything the library
-// does to its items — a rescan rebuilds every item from the disk, a rename moves
-// the path, a restart reloads from storage — and it has to be readable on the
-// item the grid lists, because that is what the take pushes into the compositor.
 // ---------------------------------------------------------------------------
 void TestMediaLibraryItemFit() {
     namespace mm = bps::media;

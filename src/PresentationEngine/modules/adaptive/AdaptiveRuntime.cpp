@@ -15,7 +15,6 @@
 #include <format>
 
 namespace bps::adaptive {
-
 AdaptiveRuntime& AdaptiveRuntime::Instance() {
     static AdaptiveRuntime instance;
     return instance;
@@ -102,13 +101,6 @@ Result<void> AdaptiveRuntime::Initialize() {
     ndiContract.estimatedStartupMs = 300;
     ndiContract.supportsLazyLoading = true;
     ndiContract.supportsSuspension = true;
-    // ON by default: the firewall ask (EngineBridge::requestNdiFirewall
-    // Access, raised once by the Outputs screen) covers the inbound-rule
-    // concern; an off-by-default here made every fresh boot start with NDI
-    // refused ("NDI is switched off") even when the user had toggled ON —
-    // the persisted replay couldn't rescue it because the store had rejected
-    // the undeclared "plugins.featureStates" key (now registered). A user
-    // who switches OFF still gets that honored via the same replay.
     (void)features_.Register({"ndi", "NDI Output", ndiContract, FeatureState::Enabled, true});
 
     ModuleContract sdiContract;
@@ -121,12 +113,6 @@ Result<void> AdaptiveRuntime::Initialize() {
     sdiContract.estimatedStartupMs = 200;
     sdiContract.supportsLazyLoading = true;
     sdiContract.supportsSuspension = true;
-    // OFF by default, deliberately: probing SDI resolves the DeckLink SDK,
-    // and on a machine without it every device refresh published "DeckLink
-    // SDK not installed" as an error toast plus a WARN log line (the "add it
-    // to plugins and disable so it stops spamming me until we are ready for
-    // it" report). The Plugins screen's switch opens the gate when a
-    // DeckLink device is actually in play; the persisted replay honors it.
     (void)features_.Register({"sdi", "SDI Capture (DeckLink)", sdiContract,
                               FeatureState::Disabled, false});
 
@@ -426,10 +412,6 @@ Result<void> AdaptiveRuntime::LoadLearning() { return learning_.Load(); }
 // ---------------------------------------------------------------------------
 
 namespace {
-// The notification bodies live OUT here, away from any lock scope: the deferred
-// queue in ApplyOptimization calls them after applyMutex_ is released, so no
-// dispatch ever happens under that lock (tools/check_lock_scope.mjs reads the
-// lock scope textually, and keeping the publish out of it keeps both truthful).
 void PublishQualityChanged(const std::string& quality, const std::string& why) {
     (void)EventBus::Instance().Publish(events::AdaptiveQualityChanged{quality, why});
 }
@@ -440,17 +422,6 @@ void PublishOptimizationApplied(const std::string& detail) {
 } // namespace
 
 Result<void> AdaptiveRuntime::ApplyOptimization(std::string_view reason) {
-    // The events this pass produces are COLLECTED under the lock and published
-    // after it is released. A subscriber that re-enters the runtime (the
-    // ResourceManager pressure path, Telemetry) would otherwise wait on
-    // applyMutex_ while this thread holds it — the self-deadlock that froze the
-    // GUI thread's next settings write.
-    //
-    // Deferred as DATA, not as closures: a lambda's body is physically inside
-    // the locked scope (this guard reads lock scope textually, and a reader
-    // should not have to prove the lambda only runs later), so collecting the
-    // payload and dispatching in a loop below keeps the publish CALLS outside
-    // the lock where they belong.
     struct DeferredEvent {
         std::string quality, why, detail;
         bool isQuality = false;
@@ -521,10 +492,6 @@ Result<void> AdaptiveRuntime::ApplyOptimization(std::string_view reason) {
 // ---------------------------------------------------------------------------
 
 void AdaptiveRuntime::Recompute(uint64_t totalRamBytes, PressureLevel pressure) {
-    // Custom mode keeps the previous settings as the base (user overrides are
-    // applied on top of a profile per docs/specs/16 §6); every other mode
-    // recomputes from its base level. One lock scope: settings_ write + budgets
-    // derive from the same consistent snapshot.
     std::lock_guard<std::mutex> lock(settingsMutex_);
     if (optimizer_.GetQualityLevel() != QualityLevel::Custom) {
         settings_ = SettingsFor(optimizer_.GetQualityLevel(), totalRamBytes,
@@ -585,12 +552,6 @@ void AdaptiveRuntime::OnPowerChanged(const events::PowerChanged& e) {
     } catch (...) {
     }
     power_.Update(true, onBattery, pct);
-    // RE-READ the hardware view: the AC/battery state is part of the profiled
-    // hardware (hasBattery / onBattery / batteryPercent), and it feeds the
-    // recommended profile and the Battery row of the Smart Config report.
-    // Without this the snapshot kept whatever the boot refresh saw, so
-    // unplugging the charger left the Settings card reading "Plugged in"
-    // forever — correct at boot, never again.
     RefreshHardware(hardware_, hwSnapshot_, caps_, gpu_);
     if (onBattery) {
         // Battery saver quality profile (docs/specs/16 §14).
@@ -724,5 +685,4 @@ RuntimeSnapshot AdaptiveRuntime::Snapshot() const {
         gpu_.GpuAvailable(), activeQuality_.load(), hw.totalRamBytes, power_.ShouldThrottle());
     return s;
 }
-
 } // namespace bps::adaptive

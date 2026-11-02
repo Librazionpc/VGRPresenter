@@ -1,9 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One test-pattern option chip: a small swatch rendering the actual pattern
-// (SMPTE bars / gradient / checker / solid) + a label. Selectable; the
-// swatch is pure Canvas-free QML (Rectangles + a gradient), no JS needed.
 Rectangle {
     id: root
 

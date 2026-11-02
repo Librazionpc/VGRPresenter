@@ -3,10 +3,6 @@
 #include "core/common/Common.hpp"
 
 namespace bps {
-
-// Base interface for every service in the engine (docs/specs/04).
-// Systems are registered into the ServiceManager and resolved through it;
-// nothing depends on concrete implementations (00 §2).
 class IService {
 public:
     IService() : created_(Now()) {}
@@ -20,10 +16,6 @@ public:
         return std::chrono::duration_cast<std::chrono::microseconds>(EngineClock::now() - created_);
     }
 
-    // Engine-wide lifecycle contract (00 §Engine-wide manager contract): every
-    // service supports Initialize/Start/Stop/Shutdown/Reload/Reset. Defaults are
-    // safe no-ops; services override the phases they own. No exceptions are
-    // thrown across this boundary — failures travel as Result<T> (00 §1).
     virtual Result<void> Initialize() { return Ok(); }
     virtual Result<void> Start() { return Ok(); }
     virtual Result<void> Stop() { return Ok(); }
@@ -38,5 +30,4 @@ public:
 protected:
     EngineTime created_{};
 };
-
 } // namespace bps

@@ -16,14 +16,6 @@
 #include <vector>
 
 namespace bps {
-
-// Minimal TCP + JSON-line IPC server (SystemArchitecture.md §2 Communication
-// layer, core/ipc/).
-//   Request:  {"id":1,"method":"engine.ping","params":{...}}
-//   Response: {"id":1,"result":{...}} or {"id":1,"error":{"code":9,"message":".."}}
-// One JSON document per line. gRPC / WebSocket / named-pipe transports are
-// future work exposed behind the same handler API (docs/architecture §2).
-// Transport is the PAL ISocket interface — no OS socket code lives in the core.
 class IpcServer final : public IService {
 public:
     static IpcServer& Instance();
@@ -43,10 +35,6 @@ public:
     using Handler = std::function<json::Value(const json::Value& params)>;
     Result<void> RegisterHandler(std::string method, Handler h);
 
-    // Remote log streaming (02 §3 Remote sink): a client that sends
-    // `{"method":"log.subscribe"}` starts receiving every log record as a
-    // JSON line; `log.unsubscribe` stops the stream. Broadcast() fans a line
-    // out to all current subscribers (used by the Logger's RemoteSink).
     Result<void> Broadcast(std::string_view jsonLine);
     size_t SubscriberCount() const;
 
@@ -72,9 +60,6 @@ private:
     std::vector<std::thread> connThreads_;                 // guarded by threadsMutex_
     std::map<std::string, Handler> handlers_;              // guarded by handlersMutex_
     mutable std::mutex handlersMutex_;
-    // Subscribers keyed by socket pointer but holding a shared_ptr reference:
-    // Broadcast snapshots shared_ptrs so a socket stays alive through a send
-    // even while its connection thread is tearing down (no use-after-free).
     struct SocketPtrHash {
         size_t operator()(const std::shared_ptr<platform::ISocket>& p) const {
             return std::hash<platform::ISocket*>{}(p.get());
@@ -90,5 +75,4 @@ private:
         subscribers_;
     mutable std::mutex subscribersMutex_;
 };
-
 } // namespace bps

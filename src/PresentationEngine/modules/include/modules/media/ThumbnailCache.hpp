@@ -1,28 +1,5 @@
 #pragma once
 
-// ThumbnailCache: the preview pictures of media files, cached on disk. The rules follow
-// FreeShow's thumbnail pipeline (src/electron/data/thumbnails.ts), which is what makes a
-// grid of thousands of files feel instant after the first look:
-//
-//   * one PNG per file AND size in a cache folder, named "<path hash>-<size>.png"
-//     (sizes 100, 250, 500, 900 px wide - a request is rounded up to the next one);
-//   * a cached picture is used only while it is at least as new as its source - an edited
-//     file is regenerated, a vanished file has all its cached pictures deleted;
-//   * a picture is made once even if it is asked for many times at once: the other
-//     callers wait for the first, then read the cache;
-//   * only a few pictures are made at the same time (FreeShow caps this at 20; the
-//     engine decodes on its own threads, so the default is smaller), and a file that
-//     failed is not retried for a moment, so a grid scrolling past a bad file does not
-//     hammer the decoder.
-//
-// Two kinds of picture:
-//   STILL  - the file's poster. An image is itself; a video is its frame at 50% (the
-//            middle, where a black opening frame is unlikely), like FreeShow's seek 0.5.
-//   FRAME  - "moving" thumbnails. A video also has kFrameSteps frames, at 10%, 20% ...
-//            100% of its length; the UI shows the one under the mouse as it moves across
-//            a tile, which is FreeShow's hover-scrub (its steps = 10) - no video decoder
-//            is needed in the UI, it only swaps pictures.
-
 #include "core/common/Common.hpp"
 #include "modules/media/FrameSource.hpp"
 
@@ -38,7 +15,6 @@
 #include <string_view>
 
 namespace bps::media {
-
 class ThumbnailCache {
 public:
     static constexpr int kFrameSteps = 10;
@@ -85,5 +61,4 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> failedAt_;
     std::atomic<size_t> generated_{0};
 };
-
 } // namespace bps::media

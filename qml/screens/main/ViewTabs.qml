@@ -2,38 +2,14 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// The Show / Edit / Stage tab switcher in the app header. Extracted out of
-// VGRPresenterMainScreen.qml (which stays a static, byte-faithful copy of
-// the Figma export) so hover/click interactivity lives in one small,
-// focused file — same pattern as AppMenuBar.qml.
-//
-// Colors read the Theme singleton, so the tab strip recolours with the app
-// when Light is chosen. It carried literal hex only while Theme was
-// registered as an ordinary type and `Theme.*` resolved to undefined (fixed
-// via QT_QML_SINGLETON_TYPE in CMakeLists.txt), not because of any
-// nesting/AOT limit.
 Item {
     id: root
 
     property string activeTab: "show" // "show" | "edit" | "stage"
     signal tabSelected(string tab)
-    // Whether Edit has anything to open. The header owns what that means (a
-    // show picked in the centre preview, or one already open in the editor);
-    // with neither, Edit is greyed and inert — reaching the editor with
-    // nothing picked used to create an untitled show on the spot, which is a
-    // document the operator never asked for (and one the recovery store then
-    // tried to write). A new show is made with New show, not by pressing Edit.
     property bool editAvailable: true
-    // Stage has no screen behind it yet (Main's tab handler accepts the click
-    // and does not switch the view), so it is greyed and inert by default —
-    // the same rule Edit follows when there is nothing to open. Flip this to
-    // true the moment a Stage screen exists.
     property bool stageAvailable: false
 
-    // The buttons are ICONS: each is a rounded pill with the icon centred in it, and the
-    // pill is the only hover/click target. The label is just a caption under it. Same
-    // footprint as the header's Search / Settings buttons, and 84 px slots with 60 px pills
-    // leave a 24 px gap between neighbouring pills.
     height: 52
     width: 268
 
@@ -43,10 +19,6 @@ Item {
         property string tabKey: ""
         property string label: ""
         property string iconPath: ""
-        // An IconGlyph NAME. When set it REPLACES the inline Shape path above —
-        // the icon bank is the single source for the app's icons, so a tab whose
-        // mark already lives there (Preview's house) draws from it rather than
-        // carrying its own copy of the path in this file.
         property string glyph: ""
         property real iconShapeX: 1.75
         property real iconShapeY: 1.75
@@ -58,19 +30,8 @@ Item {
         // click (see PositionHoverArea below).
         readonly property bool available: (tabRoot.tabKey !== "edit" || root.editAvailable)
                                             && (tabRoot.tabKey !== "stage" || root.stageAvailable)
-        // Position truth, not containsMouse - hover-exit never delivers to
-        // MouseAreas in this build (see KNOWN_ISSUES.md); a containsMouse
-        // wash sticks forever after a click. PositionHoverArea derives hover
-        // from the AppCursorCatcher's pointer-position stream, which clears
-        // the instant the pointer moves off.
-        // ... and none at all on a tab with nothing to open: a wash would say
-        // "press me" about a tab whose click is ignored.
         readonly property bool isHover: tabHover.hovered && tabRoot.available
 
-        // How much the icon path is enlarged (the Stage icon is a 10.5 px design-size path;
-        // the 24 px-grid Show/Edit icons use about 1). Every header icon is sized to
-        // roughly the same 22 x 22 (screenshot px) footprint. The stroke is divided by it so lines stay
-        // 2 px like the Search magnifier.
         property real iconScale: 1.5
         // Filled glyph (play), the stroke width used with it, and an optional extra
         // stroke-only path (the pencil's underline).
@@ -108,10 +69,6 @@ Item {
                 width: 24
                 height: 24
 
-                // The tab's mark from the ICON BANK when it names one (Preview's
-                // "home"), otherwise the inline path below. An 18px `fit: true`
-                // draws the Tabler house at ~14.5 px of ink — the same footprint
-                // the inline play / pencil reach through their iconScale.
                 IconGlyph {
                     visible: tabRoot.glyph !== ""
                     anchors.centerIn: parent
@@ -161,10 +118,6 @@ Item {
                 onClicked: {
                     if (!tabRoot.available)
                         return
-                    // No self-assignment here: activeTab is owned by the parent
-                    // (AppHeader <- Main.currentView). Assigning it imperatively
-                    // would break the binding chain and let a dead "stage" click
-                    // visually latch the tab strip.
                     root.tabSelected(tabRoot.tabKey)
                 }
             }
@@ -172,16 +125,9 @@ Item {
 
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            // Icon pill (4..34) + caption ink centred as one unit in the 52 px
-            // row: ink runs ~35.7..50, leaving even 2 px margins above the pill
-            // and below the caption. Was y: 33, which pushed the caption's
-            // descenders onto the row's bottom border.
             y: 32
             color: !tabRoot.available ? Theme.textMuted : Theme.controlInk
             font.family: Theme.fontFamily
-            // The header's one caption style (same as Search / Settings / GO LIVE), so the
-            // whole row reads as one set. One weight for every tab: mixing weights shifts the
-            // glyphs by a pixel.
             font.pixelSize: 14
             font.weight: Font.DemiBold
             font.letterSpacing: 0.2
@@ -191,13 +137,6 @@ Item {
         }
     }
 
-    // Preview: a house, from the icon bank (IconGlyph "home", qml/assets/
-    // home.svg) — it no longer carries its own play-triangle path here.
-    // The caption is "Preview", not "Show": the screen it opens is the one
-    // whose centre is the live preview of whatever you pick, and "Show" is
-    // this app's word for the show ENTITY (a rundown in the library), so the
-    // tab read as "open a show" instead of "go to the preview". tabKey stays
-    // "show" - it is the routing key (Main.currentView / activeTab), not a label.
     TabButton {
         tabKey: "show"
         label: "Preview"

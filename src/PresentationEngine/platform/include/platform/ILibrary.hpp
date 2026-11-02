@@ -1,16 +1,10 @@
 #pragma once
 
-// PAL dynamic library loader (Phase 2): the only way the engine loads shared
-// libraries (.so / .dll / .dylib). PluginManager consumes this — it never calls
-// dlopen/LoadLibrary directly. Handles are opaque pointers; never exposed to
-// feature modules.
-
 #include "core/common/Common.hpp"
 
 #include <string>
 
 namespace bps::platform {
-
 class ILibrary {
 public:
     using Handle = void*;
@@ -32,5 +26,4 @@ public:
     // Unload `handle` then re-load `path`; returns the new handle.
     virtual Result<Handle> Reload(Handle handle, std::string_view path) = 0;
 };
-
 } // namespace bps::platform

@@ -1,16 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// Settings · Resource health — the live-health modal (Smart Config's "Live
-// health" action). One screen's worth of honesty about the machine the engine
-// is running on: two dials (how hard it is throttling, how warm it is), the
-// live CPU / GPU / memory readings, and what the adaptive runtime is doing
-// about all of it.
-//
-// Everything comes from TelemetryService.health / .engine, which sample the
-// platform and the runtime on the poll timer — so this modal is LIVE (it keeps
-// moving while open) and reads "Not measured" wherever the machine cannot
-// answer rather than inventing a number. Nothing here computes health itself.
 ModalCard {
     id: root
 

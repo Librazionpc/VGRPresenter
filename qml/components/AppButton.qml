@@ -18,9 +18,6 @@ Rectangle {
     implicitHeight: 34
     radius: Theme.radiusMd
 
-    // The RESTING fill only — hover is the shared layer below, so a button
-    // lights the same way a card or a row does instead of lightening its own
-    // fill by a hand-picked factor.
     color: {
         if (!root.enabled) return Theme.inset
         if (root.variant === "primary")
@@ -33,9 +30,6 @@ Rectangle {
     }
     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
-    // Over a filled button the wash is the app's own ink (white) — a white
-    // lift is what "lighter(accent, 1.1)" was approximating; a ghost button
-    // keeps its faint textPrimary tint.
     HoverGlow {
         anchors.fill: parent
         radius: parent.radius

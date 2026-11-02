@@ -2,20 +2,9 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Styles — the presentation "themes" an output renders with,
-// promoted from a card inside Outputs to its own section. Roster lives in
-// the StyleListModel C++ singleton (starts empty — nothing hardcoded, same
-// rule as slides). Rows are inline-editable; each shows its live
-// "applied by N outputs" count from the shared OutputListModel.
 Item {
     id: root
 
-    // Bumped on any change to either model so the usage counts (and the
-    // empty-state text below) recompute. Plain Q_INVOKABLE reads in
-    // bindings aren't tracked, so the revision counter is the honest
-    // dependency — StyleListModel is watched too now, not just
-    // OutputListModel: adding/removing a style is exactly the kind of
-    // change "No styles yet" needs to react to.
     property int modelsRev: 0
     Connections {
         target: OutputListModel
@@ -42,11 +31,6 @@ Item {
         return count
     }
 
-    // A style's templateKey as a NAME: engine-template ids ("tpl-…") resolve
-    // through the Template library (the picker's same catalog), legacy preset
-    // keys show their friendly names, anything else falls back to the raw
-    // key. Reads modelsRev so a catalog load / rename re-renders — a binding
-    // over an invokable alone wouldn't.
     readonly property var templateCatalogRev: TemplateLibraryService.totalCount
     function templateNameFor(key) {
         void root.templateCatalogRev
@@ -58,10 +42,6 @@ Item {
         }
         return templatePicker.nameFor(key)
     }
-    // The template's own ACCENT from the engine design (its category chip
-    // colour) — the card's template chip takes it, so the row reads as "this
-    // exact engine design", not a grey label. Legacy presets get the slate
-    // fallback (they have no design to read).
     function templateColorFor(key) {
         void root.templateCatalogRev
         if (typeof key === "string" && key.indexOf("tpl-") === 0) {
@@ -70,40 +50,7 @@ Item {
         }
         return ""
     }
-    // WHAT KIND OF LAYOUT A TEMPLATE IS — "full" or "lower" — from where its main text
-    // block sits on the stage: a block in the bottom half that is no taller than half the
-    // stage is a lower third; anything else fills the screen. (Measured on the shipped
-    // and saved designs: full-screen ones put their text at 0-8% from the top and 83-100%
-    // tall; lower thirds at 70%+ from the top and 10-29% tall, so nothing sits near the
-    // line.) A legacy preset key has no design to measure: "lowerThird" is a lower third,
-    // any other is unknown. "" = no layout to speak of.
-    function layoutClassOf(key) {
-        if (typeof key !== "string" || key === "")
-            return ""
-        if (key.indexOf("tpl-") !== 0)
-            return key === "lowerThird" ? "lower" : ""
-        const blocks = TemplateLibraryService.design(key).blocks ?? []
-        let best = null
-        let bestArea = 0
-        for (let i = 0; i < blocks.length; ++i) {
-            const b = blocks[i]
-            if (b.kind !== undefined && b.kind !== "text")
-                continue
-            const area = Number(b.width) * Number(b.height)
-            if (area > bestArea) {
-                bestArea = area
-                best = b
-            }
-        }
-        if (!best)
-            return ""
-        return (Number(best.y) >= StageGrid.h * 0.5 && Number(best.height) <= StageGrid.h * 0.5)
-               ? "lower" : "full"
-    }
-    // DELETE A STYLE: straight away when nothing wears it, after a confirmation when
-    // outputs do (they go back to "None"; the one on air is named, because deleting its
-    // style blanks what is on screen).
-    // The row the right-click menu was opened on.
+    function layoutClassOf(key) { return ScreenHelpers.layoutClassOf(key) }
     property int contextStyleIndex: -1
     property string contextStyleId: ""
     property string contextStyleName: ""
@@ -177,11 +124,6 @@ Item {
         void root.modelsRev
         if (styleId === "" || !LiveOutputService.live)
             return false
-        // EVERY ENABLED OUTPUT THAT WEARS THE STYLE, while the show is live — not only
-        // the one output the app has selected. It used to answer for the selected output
-        // alone, so two styles worn by two enabled outputs (the HDMI screen and the NDI
-        // lower third) read differently — one "ON AIR", the other not — and it said
-        // "ON AIR" for the selected output's style even when nothing was live.
         const rows = OutputListModel.rowCount()
         for (let i = 0; i < rows; ++i) {
             const out = OutputListModel.getOutput(i)
@@ -191,11 +133,6 @@ Item {
         return false
     }
 
-    // One shared FAMILY map — the style cards' content pills AND the Edit
-    // dialog's content chips read the same labels/accents from here, so the
-    // two surfaces can't drift. `bg` values are pre-tinted 8-digit ARGB
-    // literals (plain JS strings — QML `color` values have no .r/.g/.b to
-    // read for compositing).
     readonly property var familyInfo: ({
         shows:     { label: qsTr("Shows"),     color: "#9b8ff5", bg: "#2e6c5ce7" },
         media:     { label: qsTr("Media"),     color: "#5eead4", bg: "#2e14b8a6" },
@@ -207,9 +144,6 @@ Item {
     }
 
     // ---- Edit Style dialog ----
-    // Editable copies loaded when the dialog opens — the model is only
-    // written on Save, matching every other dialog's Cancel/Save contract
-    // (see OutputsScreen.qml's openEdit/saveEdit for the same pattern).
     property int editStyleIndex: -1
     property string editStyleName: ""
     property string editStyleContentType: "shows"
@@ -217,24 +151,9 @@ Item {
     property string editStyleBackgroundColor: "transparent"
     property string editStyleBackgroundImage: ""
     property bool editStyleClearOnText: false
-    // The three content chips (shows/scripture/table) — buffer the EDITED flags,
-    // loaded from the row on open. The dialog starts them INACTIVE so a brand-new
-    // style's chips read as an empty slate (the row itself carries the same
-    // default; the open overwrites these anyway).
-    //
-    // MEDIA AND OVERLAY ARE NOT HERE ANY MORE. Those two gates moved to the
-    // Routing canvas — the Overlays and Media cards at the head of the STYLES
-    // column — because they are allow-list facts about an output, and the canvas
-    // is where every other allow-list already lives. Their values still ride this
-    // dialog's save path untouched (nothing here writes them), so a style's
-    // stored gates are never clobbered by opening its editor.
     property bool editShowShows: false
     property bool editShowScripture: false
     property bool editShowTable: false
-    // PER-FAMILY template picks — each active content type carries its OWN
-    // template ("" = none for that family). NO INHERIT: a family only ever
-    // renders a template picked for IT (Shows alone falls back to the Bible
-    // template, baked engine-side).
     property string editFamilyShows: ""
     property string editFamilyMedia: ""
     property string editFamilyScripture: ""
@@ -246,11 +165,6 @@ Item {
     property string editTemplateFamily: "shows"
     // Shows-only category (free text).
     property string editStyleCategory: ""
-    // The picked family's template key: its own pick when it has one, else
-    // the whole-style key (what the Template row shows and edits).
-    // The picked family's OWN template key ("" = no template for it — the
-    // row shows None). No inherit: a family never falls back to the
-    // whole-style key.
     readonly property string editActiveFamilyKey: {
         if (root.editTemplateFamily === "shows") return root.editFamilyShows
         if (root.editTemplateFamily === "media") return root.editFamilyMedia
@@ -279,10 +193,6 @@ Item {
             templateKey: String(entry.templateKey ?? ""),
             overrideEnabled: !!entry.overrideEnabled
         }))
-        // A clicked card pill pre-targets ITS family in the dialog. MEDIA has no
-        // template (its gate moved to Routing, and media never wore a family
-        // template), so a media style opens on Shows rather than a family the
-        // Template row cannot edit.
         const wanted = family || String(data.contentType || "")
         root.editTemplateFamily = (wanted === "shows" || wanted === "scripture"
                                    || wanted === "table") ? wanted : "shows"
@@ -298,9 +208,6 @@ Item {
         StyleListModel.setBackgroundColor(root.editStyleIndex, root.editStyleBackgroundColor)
         StyleListModel.setBackgroundImage(root.editStyleIndex, root.editStyleBackgroundImage)
         StyleListModel.setClearBackgroundOnText(root.editStyleIndex, root.editStyleClearOnText)
-        // The MEDIA and OVERLAY gates are NOT written here: they belong to the
-        // Routing canvas's two gate cards now, and writing a value this dialog
-        // never edited is how a stale buffer would silently undo a card click.
         StyleListModel.setShowTemplate(root.editStyleIndex, "shows", root.editShowShows)
         StyleListModel.setShowTemplate(root.editStyleIndex, "scripture", root.editShowScripture)
         StyleListModel.setShowTemplate(root.editStyleIndex, "table", root.editShowTable)
@@ -336,26 +243,6 @@ Item {
         templatePicker.open = true
     }
 
-    // Native file picker for the style background image (same engine dialogs
-    // ShowService/ScriptureService use). Non-image files simply fail to
-    // decode later and the colour shows instead — a second dialog would be
-    // kinder but this keeps the flow one click.
-    //
-    // DEFERRED on purpose (fixed 2026-10-10 — the reported crash "the app
-    // crashes when i update the styles and go back to output"): the picker is a
-    // NATIVE modal dialog, so it runs its own nested event loop inside this
-    // call. Run straight from the button's click handler, that handler sat on
-    // the stack for the whole loop, and anything the loop tears down takes the
-    // handler's own object with it — engine.log carried exactly that verdict:
-    // "Object 0x… destroyed while one of its QML signal handlers is in
-    // progress … StylesScreen.qml:1166: function() { [native code] }", one
-    // line before the process died of an access violation. A section switch
-    // (Settings · Outputs) destroys this page, and the section Loader can run
-    // while the nested loop is still pumping events. Through Qt.callLater the
-    // click handler has already RETURNED when the picker opens, so there is no
-    // QML handler for the teardown to collide with — and if this page is gone
-    // by the time the deferred call comes round, Qt simply drops it instead of
-    // writing to a dead object.
     function pickBackgroundImage() {
         Qt.callLater(root.applyPickedBackgroundImage)
     }
@@ -378,9 +265,6 @@ Item {
         Column {
             id: layout
             x: Theme.space6
-            // Below the fixed title/Add-style header (pinned to root, same
-            // as Outputs' own header) so the styles card flows underneath
-            // it instead of scrolling the title away with it.
             y: Theme.space6 * 2 + addStyleBtn.height
             width: flick.width - Theme.space6
             spacing: 16
@@ -401,12 +285,6 @@ Item {
                     width: parent.width - 40
                     spacing: 14
 
-                    // Empty state — the roster starts empty by design.
-                    // root.modelsRev is read (not used) purely to establish
-                    // a reactive dependency — rowCount() is a plain
-                    // Q_INVOKABLE call, so this wouldn't otherwise notice a
-                    // style being added or removed (see modelsRev's own
-                    // header comment).
                     Text {
                         visible: (root.modelsRev, StyleListModel.rowCount() === 0)
                         width: parent.width
@@ -435,9 +313,6 @@ Item {
                             required property bool showScripture
                             required property bool showTable
                             required property string category
-                            // backgroundColor is a model STRING role (Qt
-                            // role values arrive as strings, not color) — the
-                            // string comparison is correct here.
                             readonly property bool isTransparent: styleRow.backgroundColor === "transparent"
                             // The row's content-type chip wears the SHARED
                             // family map (the pills below use the same one).
@@ -458,11 +333,6 @@ Item {
                             border.width: 1
                             border.color: Theme.borderSubtle
 
-                            // Background preview swatch — the style's IMAGE
-                            // when it has one (cover-cropped), else a checkerboard
-                            // behind "transparent" (same convention as
-                            // BackgroundColorModal's own swatches), a real picked
-                            // color renders solid otherwise.
                             Rectangle {
                                 id: swatch
                                 x: 12
@@ -507,11 +377,6 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 3
 
-                                // Inline-editable name — looks like a label,
-                                // commits on Enter / focus loss. Quick
-                                // renames stay inline; content type/template/
-                                // background need the full Edit Style dialog
-                                // (right-click the row, then Edit).
                                 TextInput {
                                     width: Math.max(implicitWidth + 2, 120)
                                     text: styleRow.name
@@ -526,22 +391,6 @@ Item {
                                 Row {
                                     spacing: 6
 
-                                    // (No content-type chip any more: it repeated one of the
-                                    // family pills below under a different colour and showed a
-                                    // different family on every row — "The Table" here,
-                                    // "Shows" there. The pills already say, for every family,
-                                    // whether the style serves it and with which template.)
-                                    // The template as a CHIP wearing the ENGINE
-                                    // design's own accent (its category colour),
-                                    // not a grey text label — the row now reads
-                                    // "this exact engine design" at a glance.
-                                    // THE KIND OF LAYOUT THIS STYLE IS, not a template name: "Full Screen"
-                                    // when the templates it uses fill the screen (Big Bold, Scripture,
-                                    // Table), "Lower Third" when they sit in the bottom band, "Mixed"
-                                    // when they disagree, and no chip when it has none. Worked out from
-                                    // where each template puts its text (layoutClassOf), so it follows
-                                    // the templates instead of a stored preset name that no longer
-                                    // meant anything (every seeded style carried "Lower Third").
                                     Rectangle {
                                         readonly property string layoutClass: {
                                             root.modelsRev
@@ -577,9 +426,6 @@ Item {
                                         }
                                     }
 
-                                    // ON AIR — engine truth (this style is the
-                                    // active output's): a live-red chip, not a
-                                    // dot the eye has to hunt for.
                                     Rectangle {
                                         visible: root.isOnAir(styleRow.styleId)
                                         anchors.verticalCenter: parent.verticalCenter
@@ -601,25 +447,11 @@ Item {
                                         }
                                     }
 
-                                    // Content pills — one per family, FULL
-                                    // names in each family's own accent:
-                                    // coloured = the style serves that tab,
-                                    // dimmed = off. A family with its OWN
-                                    // template spells it out on the pill
-                                    // ("Scripture · Lower Third 2"), so the
-                                    // per-family overrides read right on the
-                                    // card instead of hiding in the Edit
-                                    // dialog. Clicking an active pill opens
-                                    // the dialog pre-targeted to that family.
                                     Row {
                                         anchors.verticalCenter: parent.verticalCenter
                                         spacing: 16
 
                                         Repeater {
-                                            // Override names ride the model so a
-                                            // template pick/rename re-renders the
-                                            // pills (modelsRev + the catalog rev
-                                            // are the honest dependencies).
                                             model: {
                                                 root.modelsRev
                                                 root.templateCatalogRev
@@ -640,9 +472,6 @@ Item {
                                                 required property var modelData
                                                 readonly property var info: root.familyInfoFor(modelData.key)
                                                 readonly property bool overridden: modelData.overrideName !== ""
-                                                // QUIET, not boxed: a coloured dot and the family's name, with its
-                                                // template in muted text. Four filled, bordered pills per row were the
-                                                // loudest thing on the page.
                                                 anchors.verticalCenter: parent.verticalCenter
                                                 height: 20
                                                 width: pillContent.implicitWidth
@@ -720,11 +549,6 @@ Item {
                                     }
 
                                     Text {
-                                        // modelsRev referenced inside the
-                                        // binding keeps this count honest. BOLD
-                                        // when this style is actually on air —
-                                        // the usage line carries state now, not
-                                        // just a count.
                                         text: {
                                             root.modelsRev
                                             const u = root.styleUsage(styleRow.styleId)
@@ -738,9 +562,6 @@ Item {
                                 }
                             }
 
-                            // RIGHT-CLICK MENU (Edit / Duplicate / Delete) — the same drop-down
-                            // the Screens list and the slide rows use, so the row keeps the whole
-                            // width for its pills instead of sharing it with three buttons.
                             MouseArea {
                                 anchors.fill: parent
                                 acceptedButtons: Qt.RightButton
@@ -759,9 +580,6 @@ Item {
         }
     }
 
-    // The header's own ground — without this, a scrolled-up card would show
-    // straight through the pinned title/button (see Outputs' own header,
-    // which this mirrors).
     Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
@@ -770,9 +588,6 @@ Item {
         color: Theme.surface
     }
 
-    // "Styles" title — pinned alongside the Add-style button (sits above
-    // the Flickable in paint order, same as that button) so the header
-    // stays put while the roster scrolls underneath it.
     Text {
         anchors.left: parent.left
         anchors.leftMargin: Theme.space6
@@ -784,11 +599,6 @@ Item {
         font.weight: Font.DemiBold
     }
 
-    // "+ Add style" pinned top-right — always visible no matter how far the
-    // roster scrolls. Same drawn-plus-glyph button Outputs uses, not the
-    // ghost AppButton this used to be (that lived inside the card as a
-    // secondary action; pinned beside the title it is the page's one
-    // primary call-to-action, same as "+ Add Output").
     Rectangle {
         id: addStyleBtn
         objectName: "selfTestAddStyle"
@@ -845,13 +655,6 @@ Item {
     }
 
     // ---- Edit Style dialog ----
-    // Matches 1BBTIwaya/VGRPresenter_Settings_Outputs_Edit.qml's
-    // style_dialog reference, scoped down deliberately: video/audio bus
-    // routing (no bus concept exists in this app) and screen behavior/
-    // geometry (always-on-top, locked, transparent, cropping — all
-    // per-OUTPUT window concerns, not shared-theme concerns, and already
-    // live on OutputListModel/OutputsScreen.qml) are left out rather than
-    // duplicated here.
     ModalCard {
         id: editStyleDialog
         shown: root.editStyleIndex >= 0
@@ -868,18 +671,6 @@ Item {
             onTextEdited: (t) => root.editStyleName = t
         }
 
-        // CONTENT TYPE = ACTIVATION (user request): a chip ON means an output
-        // wearing this style ALLOWS that content type; OFF refuses it on air
-        // (OutputListModel::activeStyleAllows reads these flags). Multi-select
-        // — a style serves any subset. The style's template family
-        // (editStyleContentType, what the Template picker below edits) follows
-        // the chips: picking a chip re-targets the family, deactivating the
-        // family's own chip migrates it to another active one.
-        //
-        // MEDIA AND OVERLAY LEFT THIS ROW: they are gates an OUTPUT reads, so
-        // they moved to Settings · Routing's two gate cards at the top of the
-        // STYLES column (Overlays, Media) — one allow-list, one place to read it.
-        // Media has no template, so its family is not one the Template row edits.
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -914,12 +705,6 @@ Item {
                             if (modelData.key === "shows") root.editShowShows = next
                             else if (modelData.key === "scripture") root.editShowScripture = next
                             else root.editShowTable = next
-                            // The template family must stay on an ACTIVE
-                            // type: picking a chip targets it (the Template
-                            // row edits THAT family now); switching one OFF
-                            // moves the target to another still-active chip
-                            // (unchanged when it wasn't the target or when
-                            // nothing else is active).
                             if (next) {
                                 root.editStyleContentType = modelData.key
                                 root.editTemplateFamily = modelData.key
@@ -936,12 +721,8 @@ Item {
                     }
                 }
             }
-
         }
 
-        // SHOWS-ONLY CATEGORY — a dropdown over the shows library's own
-        // categories (was free text: a typo silently filed a style under a
-        // category that never matched any real show). "None" clears it.
         SelectField {
             width: parent.width
             visible: root.editShowShows
@@ -1006,11 +787,6 @@ Item {
             }
         }
 
-        // TEMPLATE — PER CONTENT TYPE: the row edits the family picked by the
-        // chips above and shows THAT family's own pick (None when it has
-        // none). Picking sets the family's own template; the None chip
-        // clears it back to no template (Shows then falls back to the Bible
-        // template).
         Column {
             width: parent.width
             spacing: Theme.space2
@@ -1033,10 +809,6 @@ Item {
                       ? qsTr("None") : root.templateNameFor(root.editActiveFamilyKey)
                 dim: root.editActiveFamilyKey === ""
 
-                // Clear: visible when the picked family carries its own template;
-                // clicking drops it back to no template. Picking via Change sets the
-                // family's own pick. Every styling choice is explicit — nothing is
-                // inherited.
                 PillButton {
                     visible: root.editActiveFamilyKey !== ""
                     text: qsTr("Clear")
@@ -1060,13 +832,6 @@ Item {
                             "shows": qsTr("Shows"), "media": qsTr("Media"), "scripture": qsTr("Scripture"),
                             "table": qsTr("The Table")
                         }[root.editTemplateFamily] ?? qsTr("Shows")
-                        // The ENGINE's template catalog — the same Template library the
-                        // Templates tab edits — for EVERY content type (ReferencePane's
-                        // mapping, category filter included). The style saves the design's
-                        // id as its templateKey, and the engine renders that design as the
-                        // style's layout (baked into the pushed spec). Legacy preset keys
-                        // from older rosters still resolve through the picker's
-                        // legacyPresetNames until re-picked here.
                         const categoryNames = {}
                         for (const c of TemplateLibraryService.categories)
                             categoryNames[c.id] = c.name
@@ -1110,9 +875,6 @@ Item {
                 }
             }
 
-            // Background IMAGE (absolute path, "" = none) — painted cover-fit
-            // on air BEHIND all content, over the colour (FreeShow's
-            // style backgroundImage). The preview shows the file name.
             Column {
                 width: parent.width
                 spacing: Theme.space2
@@ -1148,12 +910,6 @@ Item {
                 }
             }
 
-            // FreeShow's clearStyleBackgroundOnText: slides that carry their own
-            // background keep it when this style is on air; plain text slides
-            // get the style's background. SettingsToggle is the pill only —
-            // The dialog owns the state; the pill reports its value.
-            // FreeShow's clearStyleBackgroundOnText toggle: the dialog owns the state; the
-            // pill reports its value.
             Item {
                 width: parent.width
                 height: 34

@@ -10,14 +10,12 @@
 #include "modules/settings/SmartConfig.hpp"
 
 namespace {
-
 namespace st = bps::settings;
 using J = bps::json::Value;
 
 const std::string kRoot = "/tmp/bps_settings_test";
 
 bps::platform::IFilesystem& Fs() { return bps::platform::PlatformAccessor::Get().Filesystem(); }
-
 } // namespace
 
 void TestAppSettings() {
@@ -186,9 +184,6 @@ void TestAppSettings() {
     }
 
     // ---- the Shows template inspector: the All default plus ONE JSON key for the per-category picks ----
-    // (a category's name only exists at runtime, so a per-name "shows.categoryTemplate.<name>" key could
-    // never be declared — every pick was refused and nothing was remembered. The overrides ride a single
-    // declared key, the session.audioRoster shape.)
     CHECK(s.Set("shows.defaultTemplate", J::String("tpl-default")).ok());
     CHECK(s.Set("session.showsCategoryTemplates", J::String(R"({"Verse":"tpl-verse"})")).ok());
     CHECK(s.Set("song.template", J::String("tpl-default")).ok());               // Quick Lyrics' song profile
@@ -202,12 +197,6 @@ void TestAppSettings() {
     }
 
     // ---- the library tabs' remembered PLACE (user call: "make the app remember its
-    // state and position ... if i go to another page and come back it will go number
-    // one and i was in para 35") ------------------------------------------------
-    // One declared JSON key per tab. DECLARED is the whole point: an undeclared key
-    // refuses every write, so the place would silently never come back — the same trap
-    // session.audioRoster / session.recordingConfig document. The value has to survive a
-    // reload too, or "come back to paragraph 35" only ever works within one run.
     const std::string scripturePlace =
         R"({"source":"ENGLISHK21","book":"Psalms","chapter":119,"picked":[35],"row":{"number":35,"partIndex":0}})";
     const std::string tablePlace =
@@ -268,9 +257,6 @@ void TestSmartConfig() {
     namespace ad = bps::adaptive;
 
     // ---- what the report says about a strong machine, a modest one, and a laptop on battery ----
-    // Rows are looked up BY KEY, not by position: the report grows as the
-    // engine learns to see more of the machine, and a test pinned to row 3
-    // breaks every time it does.
     const auto rowOf = [](const st::HardwareReport& r, const char* key) {
         for (const auto& row : r.rows)
             if (row.key == key) return row;
@@ -398,12 +384,23 @@ void TestSmartConfig() {
     CHECK(s.Set("appearance.lockInMode", J::Bool(false)).ok() && st::ApplyToEngine(s, rt).ok());
     CHECK(rt.GetUserMode() == ad::UserMode::Balanced && rt.BackgroundWorkAllowed());
 
-    const auto before = bps::Logger::Instance().GlobalLevel();
+    // The stored level filters engine.log ITSELF (that sink's own level), not the global
+    // gate: a quiet file must not silence the console, and "Debug" has to reach the file
+    // to mean anything. VGR_LOG_LEVEL overrides both, so the expectation includes it.
+    CHECK(bps::LogLevelFromName("DEBUG") == bps::LogLevel::Debug);
+    CHECK(bps::LogLevelFromName("warning") == bps::LogLevel::Warning);
+    CHECK(!bps::LogLevelFromName("loud").has_value());   // not a level, not a default
+    auto& log = bps::Logger::Instance();
+    CHECK(log.Initialize().ok());          // seeds the File sink when no earlier test did
+    const auto forced = bps::LogLevelEnvOverride();
+    const auto before = log.GlobalLevel();
+    const auto beforeFile = log.SinkLevel("File");
     CHECK(s.Set("notifications.logLevel", J::String("error")).ok() && st::ApplyToEngine(s, rt).ok());
-    CHECK(bps::Logger::Instance().GlobalLevel() == bps::LogLevel::Error);
+    CHECK(log.SinkLevel("File") == forced.value_or(bps::LogLevel::Error));
+    CHECK(log.GlobalLevel() == before);    // the gate is not the preference's business
     CHECK(s.Set("notifications.logLevel", J::String("debug")).ok() && st::ApplyToEngine(s, rt).ok());
-    CHECK(bps::Logger::Instance().GlobalLevel() == bps::LogLevel::Debug);
-    bps::Logger::Instance().SetGlobalLevel(before);
+    CHECK(log.SinkLevel("File") == forced.value_or(bps::LogLevel::Debug));
+    CHECK(log.SetSinkLevel("File", beforeFile));
 
     CHECK(rt.Stop().ok());
     CHECK(rt.Shutdown().ok());
@@ -521,14 +518,6 @@ void TestDataProtection() {
     (void)Fs().RemoveAll(kRoot);
 }
 
-// THE SHIPPED BASELINE FILLS, IT NEVER OVERRIDES.
-//
-// The installer packages the operator's own configuration as
-// assets/settings.shipped.json (tools/make_seed_config.mjs), and every build
-// replaces it. A store adopts a baseline value ONLY for a setting it has no
-// value for, which is the answer to "update the app without making anyone
-// reconfigure": new settings arrive configured, a key the install already chose
-// keeps its value, and settings.json itself is never rewritten at load.
 void TestAppSettingsShippedBaseline() {
     (void)Fs().RemoveAll(kRoot);
     const std::string file = kRoot + "/settings.json";

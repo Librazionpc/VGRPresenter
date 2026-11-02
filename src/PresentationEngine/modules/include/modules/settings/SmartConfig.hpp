@@ -1,9 +1,5 @@
 #pragma once
 
-// Smart Config: what the engine found on this machine, which resource profile suits it, and putting the user's settings
-// (configuration mode, resource profile, budgets, Lock In Mode, log level) to work in the engine. The screens only show
-// what these return - the wording of a row, the recommendation and the mapping onto the adaptive runtime live here.
-
 #include "core/common/Common.hpp"
 #include "modules/adaptive/AdaptiveRuntime.hpp"
 #include "modules/adaptive/Hardware.hpp"
@@ -13,7 +9,6 @@
 #include <vector>
 
 namespace bps::settings {
-
 struct HardwareRow {
     std::string key;     // gpu | encoder | audio | displays
     std::string label;
@@ -49,19 +44,7 @@ HardwareReport BuildHardwareReport(const adaptive::HardwareInfo& hw, bool hardwa
 // The report for THIS machine: the adaptive runtime's hardware view, its encode capability, and the PAL's audio devices.
 AudioCounts CountAudioDevices();
 HardwareReport CurrentHardwareReport();
-// The same report with CALLER-SUPPLIED audio counts, for a caller that already
-// holds the platform's device roster: the Qt bridge caches it and refreshes it
-// off the GUI thread, so building a report from it costs nothing. Prefer this
-// from UI paths — CurrentHardwareReport() calls IAudio::Enumerate() inline,
-// which queries device caps and mix formats per endpoint on the calling thread.
 HardwareReport CurrentHardwareReport(AudioCounts audio);
 
-// Applies the settings to the running engine:
-//   configuration mode  Smart -> Automatic layer, Strict -> Assisted layer (prefers a low memory footprint), Manual -> Expert
-//   resource profile    Performance / Balanced / Power Saver -> the runtime's Performance / Balanced / Battery mode
-//   Lock In Mode        the runtime's Presentation mode (background work paused) while it is on
-//   budgets             the profile's own GPU / CPU caps (Smart, Strict) or the user's numbers (Manual)
-//   log level           the logger's global level
 Result<void> ApplyToEngine(const AppSettings& settings, adaptive::AdaptiveRuntime& runtime);
-
 } // namespace bps::settings

@@ -1,12 +1,5 @@
 #pragma once
 
-// ProductionGraph (docs/specs/27 §Production Graph): the universal node graph
-// for the Phase 15 engine. Owns sources, processors, buses, mixers, scenes,
-// outputs, virtual sources, data and control nodes, plus the directed routing
-// edges between them. Circular routing is rejected at Connect time; bus scenes
-// and production snapshots capture/restore state; BeginEdit/CommitEdit/Rollback
-// give atomic live changes.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 #include "modules/production/ProductionTypes.hpp"
@@ -20,10 +13,6 @@
 #include <vector>
 
 namespace bps::production {
-
-// An immutable copy of the graph's nodes and edges, published on every committed
-// change. The audio render thread reads only this, never the live maps the GUI
-// thread edits.
 struct GraphSnapshot {
     std::map<std::string, NodeInfo, std::less<>> nodes;
     std::map<std::string, std::set<std::string>, std::less<>> edges;
@@ -51,20 +40,8 @@ public:
     Result<std::string> AddControlNode(std::string_view id, std::string_view name);
     Result<void> RemoveNode(std::string_view id);
 
-    // --- Routing ---
-    // Directed edge from -> to. Rejects circular routes (DFS) and signal
-    // mismatches. Data/Control nodes accept any signal type.
     Result<void> Connect(std::string_view from, std::string_view to, SignalType type);
     Result<void> Disconnect(std::string_view from, std::string_view to);
-    // THE one validity answer, for optimistic UI (drag-connect affordances)
-    // and callers that must not attempt: the same checks Connect() enforces
-    // (type compatibility, cycle, an audio-only bus refusing video). Every
-    // other edge is valid: a source may feed multiple buses AND a bus may take
-    // several sources — a video bus used to accept a single provider, which
-    // made a second video source's drag refuse with nothing on screen to
-    // explain why ("two video sources can't be connected to one bus").
-    // Everything Connect() would reject answers false here; one rule, one
-    // home.
     bool CanConnect(std::string_view from, std::string_view to, SignalType type) const;
     bool WouldCreateCycle(std::string_view from, std::string_view to) const;
     // Deterministic dependency order (Kahn) used by planner + inspector.
@@ -130,26 +107,12 @@ public:
     size_t NodeCount() const;
     size_t EdgeCount() const;
 
-    // --- Persistence (full-graph durability) ---
-    // Serialize captures EVERYTHING user-visible: all nodes (kind, signal,
-    // role, name, enabled, states, volume, layout, processing, cost, meta),
-    // all routing edges, all output configs + assignments, all bus scenes
-    // and named production snapshots. Restore() rebuilds exactly that state
-    // on an empty graph. Auto-save: InstallSaver registers a sink invoked
-    // after every successful mutation (except during BeginEdit windows —
-    // commit saves once); ProductionEngine wires it to the kernel's
-    // DatabaseManager so the graph survives restarts.
     Result<json::Value> Serialize() const;
     Result<void> Restore(const json::Value& doc);
     // Flush a pending auto-save immediately (called at engine shutdown).
     Result<void> PersistDirty();
     void InstallSaver(std::function<void(json::Value)> saver);
 
-    // --- Atomic live changes (user brief §23, §24) ---
-    // BeginEdit snapshots state; CommitEdit validates the current graph and
-    // keeps it (errors roll back); RollbackEdit restores the snapshot.
-    // Rollback restores nodes, edges, reverse edges, bus scenes and snapshots,
-    // so a failed commit never leaves the graph half-mutated.
     Result<void> BeginEdit();
     Result<void> CommitEdit();
     void RollbackEdit();
@@ -201,5 +164,4 @@ private:
     mutable std::mutex snapshotMutex_;         // guards published_ only
     std::shared_ptr<const GraphSnapshot> published_;
 };
-
 } // namespace bps::production

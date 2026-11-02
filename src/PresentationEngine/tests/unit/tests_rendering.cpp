@@ -1,6 +1,3 @@
-// Unit tests: Rendering Engine (docs/specs/17).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests rendering
 #include "TestHarness.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/presentation/SceneBuilder.hpp"
@@ -8,22 +5,16 @@
 #include "modules/rendering/PngCodec.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 
+#include <QFont>
+#include <QTextLayout>
+#include <QTextOption>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 
-// Glyph-atlas TEXTURE identity. Two styles whose pixel sizes collide under a
-// truncated font-atlas texture name (88.42 and 88.62 both truncate to "88")
-// land in DIFFERENT RenderCache buckets (int(size+0.5) -> 88 and 89) and so
-// have DIFFERENT cell geometry (cellPx 91 vs 92, atlas 1616x846 vs 1632x846).
-// Sharing one uploaded texture made the second style sample the first style's
-// atlas with its OWN per-glyph source rectangles, shifting every cell by its
-// column index (source x = col*(cellPx+gap)) — a round vowel like 'o'
-// (column 15) visibly narrowed/garbled while early-column letters looked fine.
-// The fix folds the rounded size AND the atlas dimensions into the texture
-// name; this asserts the second style uploads its OWN texture, not a reuse.
 void TestGlyphAtlasTextureIdentity() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -125,10 +116,6 @@ void TestRenderBackends() {
         r::Color::Black().Pack(), r::Color::Red().Pack(), r::BlendMode::Additive);
     CHECK(r::Color::Unpack(out).r > 0.9f);
 
-    // THE CSS BLEND SET (the MEDIA tab's dropdown) composites against the
-    // destination, not just its alpha — the difference between a stored value
-    // and a mode the outputs actually draw.
-    // Screen: any source over black is the source itself.
     out = r::SoftwareGraphicsBackend::BlendPixel(
         r::Color::Black().Pack(), r::Color(0.4f, 0.6f, 0.8f, 1).Pack(), r::BlendMode::Screen);
     CHECK(std::abs(r::Color::Unpack(out).r - 0.4f) < 0.02f);
@@ -150,10 +137,6 @@ void TestRenderBackends() {
     out = r::SoftwareGraphicsBackend::BlendPixel(
         r::Color::White().Pack(), r::Color::Black().Pack(), r::BlendMode::Difference);
     CHECK(r::Color::Unpack(out).r > 0.98f);
-    // The four non-separable modes are not per-channel: Luminosity keeps the
-    // backdrop's hue and takes the SOURCE's luminance — a mid-grey source on a
-    // red backdrop stays red (r still high) while the whole colour's luma is the
-    // source's 0.5 (g and b come down to ~0.29).
     out = r::SoftwareGraphicsBackend::BlendPixel(
         r::Color(1.0f, 0.0f, 0.0f, 1).Pack(), r::Color(0.5f, 0.5f, 0.5f, 1).Pack(),
         r::BlendMode::Luminosity);
@@ -395,13 +378,6 @@ void TestRenderText() {
     CHECK(f.ok());
     CHECK(fm.Resolve("missing-font").id == "builtin");   // falls back
 
-    // FONT AGNOSTIC: a block that names a font this machine does not have has to
-    // resolve to an INSTALLED face, never to the builtin 5x7 bitmap — the draw
-    // path pixel-doubles that bitmap to the requested size, which is the giant
-    // blocky verse an install without the design's font painted on air (the
-    // "HDMI fine, NDI wrong, fine on my laptop" report: the design named a
-    // trial font only the authoring machine had). ""/"builtin" still mean "the
-    // bitmap font, deliberately".
     CHECK(fm.SubstituteFamily("").empty());
     CHECK(fm.SubstituteFamily("builtin").empty());
     CHECK(!fm.DefaultFamily().empty());
@@ -419,11 +395,43 @@ void TestRenderText() {
     // Stable across calls (the answer is cached, so painting and measuring
     // cannot disagree between two frames).
     CHECK(fm.SubstituteFamily("VGR Definitely Not An Installed Font 42") == absent);
+    if (fm.HasSystemFont("Segoe UI")) {
+        r::TextStyle qtStyle;
+        qtStyle.fontId = "Segoe UI";
+        qtStyle.size = 19.0f;
+        qtStyle.wrap = true;
+        qtStyle.wrapWidth = 105.0f;
+        qtStyle.letterSpacing = 0.35f;
+        qtStyle.wordSpacing = 1.25f;
+        const std::string sample = "The monitor preview wraps these words the same way.";
+        const auto measured = r::TextLayout::Measure(sample, qtStyle, fm);
+
+        QFont font(QStringLiteral("Segoe UI"));
+        font.setPixelSize(r::FontManager::QtPixelSize(qtStyle.size));
+        font.setWeight(qtStyle.fontWeight);
+        font.setLetterSpacing(QFont::AbsoluteSpacing, qtStyle.letterSpacing);
+        font.setWordSpacing(qtStyle.wordSpacing);
+        QTextLayout qtLayout(QString::fromStdString(sample), font);
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        qtLayout.setTextOption(option);
+        qtLayout.beginLayout();
+        std::vector<std::string> qtLines;
+        while (true) {
+            QTextLine line = qtLayout.createLine();
+            if (!line.isValid())
+                break;
+            line.setLineWidth(qtStyle.wrapWidth);
+            qtLines.push_back(QString::fromStdString(sample)
+                                  .mid(line.textStart(), line.textLength())
+                                  .toUtf8().toStdString());
+        }
+        qtLayout.endLayout();
+        CHECK(measured.lines.size() == qtLines.size());
+        for (size_t i = 0; i < qtLines.size() && i < measured.lines.size(); ++i)
+            CHECK(measured.lines[i].text == qtLines[i]);
+    }
 #ifdef _WIN32
-    // ...and the LAYOUT must use that same face: a style naming a font this
-    // machine lacks measures exactly like the substitute it is painted with, not
-    // like the builtin bitmap's uniform estimate. Measure/paint agreement is
-    // what keeps the auto-fit solver honest for such a design.
     if (!absent.empty() && absent != "builtin") {
         r::TextStyle missingStyle;
         missingStyle.fontId = "VGR Definitely Not An Installed Font 42";
@@ -452,19 +460,6 @@ void TestRenderText() {
     CHECK(!glyphs.empty());
     CHECK(glyphs.count(static_cast<uint8_t>('A')) == 1);
 
-    // What a system-font atlas has to guarantee for the engine's distributed
-    // frame to agree with what the Qt preview implies:
-    //   (a) the pen step the painter takes for a glyph IS the advance the
-    //       layout measured — FontManager's typographic measure reports the
-    //       Qt's measured advance, so a drift here would re-space every
-    //       painted line, and
-    //   (b) each cell holds its glyph's COMPLETE ink — nothing cut at the
-    //       cell's edges and nothing of that glyph left lying in the gap beside
-    //       it. Ink overshoots the advance for round letters and for display
-    //       faces ("TT Nooks Trial"'s 'W' rasterizes 98px wide at size 90
-    //       against a 95.85px advance), and the pre-fix cell WAS the advance
-    //       box, so that overshoot was cut — the clipped look reported on the
-    //       engine-rendered outputs.
 #ifdef _WIN32
     for (const char* fam : {"Segoe UI", "Arial", "TT Nooks Trial"}) {
         if (!fm.HasSystemFont(fam))
@@ -474,9 +469,6 @@ void TestRenderText() {
         CHECK(!sysAtlas.empty() && !sys.empty());
         CHECK(sys.size() == 95);   // ASCII 32..126
         const std::string probeChars = "aoimtruWHoj'g";
-        // Widest advance the layout can hand this font at this size — the cell
-        // has to be at least this wide PLUS the atlas's own margin, because the
-        // sampled cell is shared by every glyph.
         float maxAdvance = 0.0f;
         for (char ch : probeChars)
             maxAdvance = std::max(maxAdvance, fm.SystemCharAdvance(fam, 90.0f, false, false,
@@ -494,21 +486,9 @@ void TestRenderText() {
                                                         static_cast<uint8_t>(ch));
             CHECK(measured > 0.0f);
             CHECK(std::abs(static_cast<float>(gl.advance) - measured) <= 1.0f);
-            // (b) THE CELL IS THE ADVANCE BOX PLUS A MARGIN, and the painter is
-            // told where that margin sits (bearing) so it can put the advance
-            // origin back on the pen. Asserting the EXTRA WIDTH is what pins the
-            // clipped-glyph regression: with a cell equal to the advance box
-            // (the pre-fix geometry) the widest glyph's cell is only ~1.5px
-            // wider than its own advance, and any ink overshooting the advance
-            // — round-letter overshoot, display faces like TT Nooks Trial's 'W'
-            // (98px of ink against a 95.85px advance) — was cut off in the
-            // distributed frame.
             CHECK(static_cast<float>(gl.width) - gl.advance >= 6.0f);
             CHECK(static_cast<float>(gl.width) >= maxAdvance + 2.0f);
             CHECK(gl.height > 0);
-            // The cell starts up-left of the pen by exactly the atlas margin, and
-            // the painter must re-anchor by it (RenderEngine::DrawTextObject) —
-            // a bearing left at 0 would paint every glyph one margin too low-right.
             CHECK(gl.bearingX < 0 && gl.bearingY < 0);
             // (c) the cell actually holds ink, and the glyph ink sits INSIDE it
             // (a cell sampled from empty atlas space renders an invisible glyph).
@@ -552,10 +532,6 @@ void TestRenderText() {
     CHECK(!justifiedLayout.lines.front().paragraphEnd);
     CHECK(justifiedLayout.lines.back().paragraphEnd);
 
-    // Unicode punctuation folds to the ASCII the glyph atlases actually
-    // contain (regression: U+2019 reached the byte-wise draw loop as UTF-8
-    // E2 80 99 — three atlas misses, three 0.6×size blank gaps, live symptom
-    // "that     s when" for "that's" on engine-rendered output).
     auto apostrophed = r::TextLayout::SplitLines("that\xE2\x80\x99s", false);
     CHECK(apostrophed.size() == 1);
     CHECK(apostrophed[0] == "that's");
@@ -861,15 +837,6 @@ void TestRenderGpu() {
     CHECK(drained);
     up.Shutdown();
 }
-// A LIVE VIDEO LAYER MUST RE-UPLOAD ITS FRAME. The video draw path acquired
-// its texture create-once (GPUResourceManager::AcquireTexture dedups by name),
-// so a VideoObject that pushed a new frame every tick — media on air, a camera
-// tap — kept blitting the FIRST frame's texture forever: the real NDI/HDMI
-// output froze on whatever the decoder's first frame was (typically the black
-// opening frame) while the QML preview tile, which reads the live QImage
-// through its own provider, kept showing the moving picture. Structural
-// rebuilds (adding a text block) created the texture at a moment when the
-// frame was already live, which is why the media "appeared" then.
 void TestVideoLayerFrameRefresh() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -950,11 +917,6 @@ void TestRenderOutputs() {
     CHECK(st->FramesReceived() == 1);
     CHECK(st->LastFrame().width == 32);
 
-    // A PER-OUTPUT-PASS buffer owns its own frames: the main pass's distribute
-    // must skip it. Two writers on one buffer meant the NDI sender and the real
-    // output window (both sampling snapshots on their own cadence) caught
-    // whichever write landed last — the live "output glitching between the two
-    // templates" report.
     auto own = std::make_shared<r::FrameBufferOutput>(r::OutputKind::Audience, "own",
                                                       r::Size(64, 64));
     CHECK(own->AcceptsDistributedFrames());   // default: the program feed may write it
@@ -994,18 +956,6 @@ void TestRenderOutputs() {
     auto empty = std::make_shared<r::ScreenshotOutput>("e", r::Size(4, 4));
     CHECK(!empty->SavePpm("/tmp/nope.ppm").ok());
 }
-// TWO BANDS THAT TOUCH ON THE STAGE MUST TOUCH ON THE FRAME — no seam.
-//
-// A template authors its blocks in stage units (754x428) and the frame maps them
-// onto the output axis by axis. Every shipped stacked layout has neighbours that
-// share an edge exactly (The Table's code chip ends at y = 303.6428572 and its
-// paragraph band starts at the same number), and at 1920x1080 that edge is
-// fractional (766.2). The backends used to round x/y and w/h SEPARATELY, so the
-// lower box started on 766 while the upper one's rounded height stopped on 765:
-// one row of the camera feed showed through between two translucent bands. On the
-// Edit canvas (Qt snaps a Rectangle's own four edges) they are flush, which is
-// why the light seam only ever appeared on the outputs — the reported "the top
-// one is not sitting flush as it is in the edit canvas".
 void TestShapeEdgeSeams() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -1140,13 +1090,6 @@ void TestRenderEngine() {
         CHECK(bright > 0);
     }
 
-    // WHERE THE FRAME'S COST WENT (FrameCostProfile, and with it the element the
-    // live curve NAMES when the show slows down). The currency is pixel work:
-    // each element is charged for the area its own commands touch, the scene's
-    // own clear is charged as an element of its own so the shares add up to the
-    // whole frame, and each share is turned into a part of the frame's MEASURED
-    // cost. Asserted here because the profile is what a slowdown report is read
-    // from — a silent zero would leave the curve shapely and nameless.
     {
         const r::FrameCostProfile cost = engine.CostProfileFor("s1");
         CHECK(cost.frame > 0);                // the frame it describes
@@ -1155,10 +1098,6 @@ void TestRenderEngine() {
         CHECK(cost.items.size() >= 2);        // the 64x64 background + the rest
         CHECK(cost.Heaviest() == &cost.items.front());   // heaviest first
         if (!cost.items.empty()) {
-            // The scene is a full-frame background, so the top element is at
-            // least a whole frame's work however the equal-sized clear /
-            // background pair happens to sort (both are exactly the frame's
-            // area).
             CHECK(cost.items.front().pixels >= 64ull * 64ull);
             CHECK(!cost.items.front().Label().empty());   // a name to report
         }
@@ -1175,11 +1114,6 @@ void TestRenderEngine() {
             lastShare = c.sharePct;
             lastPixels = c.pixels;
         }
-        // The scene's own clear is one of the accounted elements (not a hidden
-        // overhead the shares silently omit) — but it is flagged, so the element
-        // a slowdown report NAMES (HeaviestContent) is a layer the scene drew.
-        // Without that flag a report would name "Background clear" every single
-        // time: a full frame's pixels outrank everything before any layer draws.
         const r::ElementCost* background = nullptr;
         for (const r::ElementCost& c : cost.items)
             if (c.objectId == "scene:background") background = &c;
@@ -1227,9 +1161,6 @@ void TestRenderEngine() {
             return i;
         },
         [&](bps::Result<r::TextureId>) { asyncDone++; });
-    // TEMP DIAGNOSTIC (apostrophe/stray-tick probe): render the exact live
-    // chorus (Segoe UI bold, wrapped, centered) at full output size and dump
-    // a PNG so the engine's actual glyphs can be inspected pixel-level.
     {
         CHECK(engine.CreateScene("probe", "Probe", r::Size(1920, 1080)).ok());
         CHECK(engine.AddLayer("probe", r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
@@ -1299,12 +1230,6 @@ void TestRenderEngine() {
         (void)engine.DestroyScene("probe");
     }
 
-    // TEMP DIAGNOSTIC (style-font probe): the user's actual template font
-    // (TT Nooks Trial — installed per-user) with folded apostrophes. This
-    // font has no U+2019, so before the FontOwnsGlyph fallback every
-    // apostrophe cell drew blank .notdef ink and vanished; now each one
-    // draws the ASCII quote the font DOES own. Self-contained viewer:
-    // fontprobe.html (the preview server serves exactly one file).
     {
         CHECK(engine.CreateScene("fontprobe", "Probe", r::Size(1920, 1080)).ok());
         CHECK(engine.AddLayer("fontprobe", r::Layer("bg", "Background", r::LayerKind::Background, 0)).ok());
@@ -1422,19 +1347,6 @@ void TestRenderEngine() {
     CHECK(engine.GetHealth().state == HealthState::Degraded);
 }
 // ---------------------------------------------------------------------------
-// WHICH RENDERER A RUN PICKS — the app's own switch vs an explicit choice.
-//
-// The report behind it: "can add a toggle in general so in case a user want to
-// turn it by them self but it should [be] software by default as not all laptops
-// have gpu". The PRECEDENCE is the part that needs pinning, because both writers
-// are real: Settings · General writes the app's preference, and an installed
-// profile or a config file may name `render.backend` outright — and the explicit
-// choice has to keep winning, or the switch would silently defeat a profile.
-//
-// Two thirds of this phase are pure (ResolveBackendName: no GPU, no config
-// store, so the rule is pinned on a machine of any kind), and the third drives
-// the REAL selection through the very keys the app writes, so the wiring the
-// General row depends on is asserted rather than assumed.
 // ---------------------------------------------------------------------------
 void TestRenderBackendPreference() {
     namespace J = bps::json;
@@ -1457,10 +1369,6 @@ void TestRenderBackendPreference() {
     CHECK(engine.Initialize().ok());
     CHECK(engine.Start().ok());
 
-    // Start from "nobody has asked for anything": the styles phases pin
-    // `render.backend` for their own runs (and this phase puts exactly that back
-    // at the end), so the default the app's switch is measured against has to be
-    // re-established first rather than inherited from whatever ran before.
     CHECK(config.Reset(bps::ConfigScope::Runtime).ok());
 
     CHECK(config.Set("render.hardwareAcceleration", J::Value::Bool(false)).ok());
@@ -1471,9 +1379,6 @@ void TestRenderBackendPreference() {
     CHECK(config.Set("render.hardwareAcceleration", J::Value::Bool(true)).ok());
     CHECK(engine.Reload().ok());
     CHECK(engine.RequestedBackendName() == "directx11");   // the GPU was asked for
-    // ...and a machine without one answers with the fallback rather than a dead
-    // run: this is the laptop the report is about, and the active name is what
-    // the General row reports instead of the switch's position.
     CHECK(engine.ActiveBackendName() == "directx11" || engine.ActiveBackendName() == "software");
     // The app's read of "what is drawing" is the backend that is really installed.
     CHECK(engine.Backend() != nullptr);
@@ -1531,11 +1436,6 @@ void TestRenderStress() {
 #endif
 
 #ifdef BPS_HAVE_ZLIB
-// Builds a minimal valid PNG (RGBA8, no interlace, unfiltered scanlines) from
-// raw pixels using zlib's deflate, then decodes it with PngCodec to prove the
-// full encode -> decode round trip. (Whole definition guarded: it is the only
-// user of zlib here, and a bare definition in a zlib-less build failed to
-// compile — crc32/uLongf undeclared.)
 static std::vector<uint8_t> MakeTestPng(int w, int h,
                                         const std::vector<uint32_t>& rgba) {
     std::vector<uint8_t> out = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
@@ -1608,9 +1508,6 @@ void TestPngCodec() {
     if (!corrupt.empty()) corrupt[20] ^= 0xFF;   // flip a byte inside IHDR
     auto bad = r::DecodePng(corrupt.data(), corrupt.size());
     CHECK(!bad.ok());
-    // Decompression-bomb guard: a tiny valid deflate payload behind a huge
-    // IHDR must fail fast (IDAT expands beyond the image dimensions), never
-    // allocate gigabytes.
     {
         auto bomb = MakeTestPng(1, 1, {0xFFFFFFFFu});
         // Rewrite IHDR width/height to 16384x16384 (bytes 16..23 of the file)
@@ -1645,22 +1542,6 @@ void TestPngCodec() {
 // Phase 7 — Display & Output Engine (docs/specs/18)
 // ===========================================================================
 
-// A PICTURE DRAWN AT ANOTHER SIZE — the shared scale filter (ImageScale).
-//
-// The software backend is the engine's only real rasterizer, and a media frame,
-// a camera tap or a style's background image almost never arrives at the exact
-// pixel size it is drawn at: a 720p sermon into a 1080p output, a 4K photo
-// cover-fit onto the stage. Every one of those used to be answered with the
-// NEAREST source pixel, which is why such a picture read blocky when the source
-// is smaller than the draw and aliased/moiré ("meshed") when it is larger — the
-// reported "the media frame looks pixel like, not crispy clear".
-//
-// What is pinned here is that the filter is chosen from the ratio and nothing
-// else: a 1:1 draw is the source pixel untouched, a magnified draw is
-// interpolated (a ramp, not blocks), a minified one AVERAGES its footprint
-// (never aliasing to an extreme), averaging happens in premultiplied space so a
-// transparent pixel cannot tint its neighbours, and both places a picture gets
-// resized — the blit and the output's own frame resize — ride that one filter.
 void TestImageScale() {
     r::RgbaImage ramp;   // 2 x 1: red | blue, opaque
     ramp.width = 2;
@@ -1693,9 +1574,6 @@ void TestImageScale() {
     CHECK(d2.b > 0.5f && d2.r > 0.1f && d2.r < 0.5f);
     CHECK(d1.r > d2.r);   // interpolated: the blend MOVES, it is not a block edge
 
-    // --- MINIFIED: the footprint is averaged, not point-sampled ---
-    // A 4x4 black/white checker into ONE destination pixel: point sampling
-    // answers pure white (its corner pixel); the box average answers mid grey.
     r::RgbaImage checker;
     checker.width = 4;
     checker.height = 4;
@@ -1711,10 +1589,6 @@ void TestImageScale() {
     CHECK(avg.r > 0.4f && avg.r < 0.6f);   // eight white of sixteen
     CHECK(avg.a > 0.98f);                  // opaque black is still opaque
 
-    // --- PREMULTIPLIED: a transparent pixel must not tint its neighbours ---
-    // White opaque beside a FULLY TRANSPARENT red: averaging straight alpha
-    // would leave red's green/blue out of the result (a pink edge), so the
-    // blend must stay white and only lose alpha.
     r::RgbaImage edge;
     edge.width = 2;
     edge.height = 1;
@@ -1789,15 +1663,6 @@ void TestImageScale() {
 }
 
 // ---------------------------------------------------------------------------
-// The D3D11 backend (docs/specs/17 §Backends): the GPU rasterizer sits behind the
-// same IGraphicsBackend seam the CPU one implements, so this test drives it with
-// the SAME scene and compares the FRAME the two produce, pixel for pixel. That
-// comparison is the whole claim — "live frames are drawn on the GPU" is only
-// true if what comes back is the picture the CPU path would have drawn.
-//
-// It also pins the FALLBACK: asking for the GPU must never fail the boot. On a
-// machine whose device cannot be made the engine keeps the software rasterizer
-// and says so, and this test asserts that shape instead of skipping.
 void TestD3D11Backend() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -1825,12 +1690,6 @@ void TestD3D11Backend() {
     img->SetBounds(r::Rect(8, 8, 16, 16));   // scaled blit: 8x8 -> 16x16
     CHECK(engine.AddObject(sceneId, img, "img").ok());
 
-    // Text through the glyph atlas, carrying the Lines card's two extras: a
-    // PER-LINE background band (one alpha-blended FillRect per laid-out line)
-    // and a line GAP (real layout, see TextLayout::Measure). Both matter here
-    // because the CPU rasterizer is the reference every machine WITHOUT a GPU
-    // falls back to — a band or a gap the GPU path drew differently (or only
-    // there) would be wrong on exactly the laptops this test protects.
     auto text = std::make_shared<r::TextObject>("g_txt", "Title", "HI\nHI");
     text->SetBounds(r::Rect(2, 34, 60, 26));
     r::TextStyle textStyle;
@@ -1858,10 +1717,6 @@ void TestD3D11Backend() {
     CHECK(soft.value().width == 64 && soft.value().height == 64);
     CHECK(!soft.value().empty());
 
-    // --- The GPU ----------------------------------------------------------
-    // "directx11" asks for the D3D11 device; "auto" (the engine's default) asks
-    // for "the GPU when there is one". Both must SUCCEED — a machine without a
-    // device falls back to software with a log line, never an error.
     CHECK(engine.SetBackend("directx11").ok());
     const bool gpu = engine.BackendCaps().gpuAccelerated;
     const std::string active = engine.BackendCaps().name;
@@ -1888,10 +1743,6 @@ void TestD3D11Backend() {
     CHECK(gpuFrame.value().height == soft.value().height);
     CHECK(gpuFrame.value().pixels.size() == soft.value().pixels.size());
 
-    // THE COMPARISON. A hardware blend quantizes at 8 bits per draw where the CPU
-    // path keeps floats until the end, so the two are compared with a tolerance
-    // and REPORTED as a distribution: what matters is that the picture is the
-    // same (every pixel close) rather than that every byte is identical.
     size_t exact = 0;
     size_t within3 = 0;
     int worst = 0;
@@ -1913,9 +1764,6 @@ void TestD3D11Backend() {
     std::fprintf(stderr,
                  "[d3d11] frame match: %zu/%zu pixels exact, %zu within +-3, worst channel delta %d\n",
                  exact, total, within3, worst);
-    // WHERE the two disagree, when they do: the bounding box of the pixels more
-    // than 8 apart, so a mismatch names the region that produced it (the glyph
-    // area, the scaled blit, the blended shape) instead of only a count.
     if (gpuFrame.value().pixels.size() == soft.value().pixels.size() && within3 != total) {
         int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
         size_t shown = 0;
@@ -1948,9 +1796,6 @@ void TestD3D11Backend() {
     // tolerance of the CPU path (and in practice nearly all of them exact).
     CHECK(within3 == total);
 
-    // And it really is the GPU backend doing the drawing: the capabilities the
-    // rest of the engine reads (AdaptiveRuntime's budgets, RenderEngine's health
-    // line) say so.
     CHECK(engine.GetHealth().state == HealthState::Healthy);
     CHECK(engine.BackendCaps().supportsShaders);
 
@@ -1962,25 +1807,6 @@ void TestD3D11Backend() {
 }
 
 // ---------------------------------------------------------------------------
-// THE GPU PATH AT THE SIZE THE OUTPUTS ACTUALLY RENDER (2026-10-16).
-//
-// The report: "when i turn on hardware acceleration the output becomes black,
-// but if i turn it off the output becomes clear again". The evidence in
-// engine.log for that session is a frame whose command list is non-empty —
-//     render dispatch: [..._tpl-table_...] objects=5 cmds=122 glyph=95 shape=2
-// — coming back holding NOTHING BUT ITS CLEAR:
-//     output frame sanity: '__live_preview__' meanLuma=0.0 maxLuma=0 allBlack=yes
-// ...while the SAME live scene painted correctly on the GPU twelve seconds
-// earlier (meanLuma=22.6) and paints correctly at 64x64 in the probe above.
-//
-// So the fault is not the D3D11 pipeline in general: it is something about a
-// LARGE, object-dense frame. This phase builds the app's own scene shape —
-// an opaque background fill, a SCALED image blit (the style's backdrop), a
-// glyph-atlas text run and an alpha shape — at the stage size every real
-// output uses, renders it on both backends, and requires the picture to be
-// the same. A backend that returns only its clear fails here, in a suite that
-// runs with every build, instead of in the app where only the NDI feed (which
-// reads ENGINE pixels) shows it.
 // ---------------------------------------------------------------------------
 void TestD3D11StageFrame() {
     auto& engine = r::RenderEngine::Instance();
@@ -2036,13 +1862,6 @@ void TestD3D11StageFrame() {
         image->SetBounds(scaled(0, 0, 1920, 1080));
         CHECK(engine.AddObject(id, image, "img").ok());
 
-        // A run of LARGE text — ninety-odd glyphs of it, like the content slide
-        // that went black — through the shared glyph atlas.
-        // THE SIZE THE APP'S TABLE TEMPLATE USES: the failing frame's own glyph
-        // cells were 150x217 on the 1920x1080 grid (see the dispatch line in
-        // engine.log for 11:21:07), i.e. a ~200px font — an atlas an order of
-        // magnitude bigger than a 17x24 probe glyph's, and the reason a 64x64
-        // probe cannot see whatever this is.
         const char* lines[] = { "FAITH IS THE SUBSTANCE OF THINGS HOPED FOR",
                                 "AND THE EVIDENCE OF THINGS NOT SEEN BUT BELIEVED",
                                 "HEBREWS ELEVEN ONE THROUGH THREE",
@@ -2062,13 +1881,6 @@ void TestD3D11StageFrame() {
         shape->SetBounds(scaled(60, 60, 420, 90));
         CHECK(engine.AddObject(id, shape, "img").ok());
 
-        // A BLENDED PICTURE — the Edit screen's MEDIA tab "Blend mode" on a
-        // media item. Screen is one of the modes a fixed-function blend state
-        // CANNOT express, so on the GPU it is computed per pixel against a copy
-        // of the frame underneath; if that path were missing (or wrong) the two
-        // rasterizers would disagree here instead of in a live session. The
-        // source is FLAT on purpose: filtering differences between the paths
-        // would mask the blend itself.
         r::RgbaImage swatch;
         swatch.width = 8;
         swatch.height = 8;
@@ -2106,20 +1918,12 @@ void TestD3D11StageFrame() {
             CHECK(engine.BackendCaps().name == std::string("software"));
             continue;   // no D3D11 device on this machine: nothing to compare
         }
-        // AND THE SECOND FRAME IS THE ONE THAT MATTERS. The first render after a
-        // size change is the one the D3D11 backend has just rebuilt and bound its
-        // target for; a live session renders the SAME size frame after frame, and
-        // that is where the frame came back holding only its clear (Submit
-        // unbound the target and nothing re-bound it). Both are compared.
         auto firstFrame = engine.Render(id, opts);
         CHECK(firstFrame.ok());
         auto frame = engine.Render(id, opts);
         CHECK(frame.ok());
         if (!frame.ok()) continue;
 
-        // What the frame HOLDS, in the terms the report uses: how much of it is
-        // not the clear (the fault: only the clear), and how much of the text
-        // really made it.
         const auto countNonBlack = [](const r::RgbaImage& f) {
             long long n = 0;
             for (uint32_t px : f.pixels)
@@ -2134,9 +1938,6 @@ void TestD3D11StageFrame() {
                     ++n;   // the text is white — this is the glyphs, specifically
             return n;
         };
-        // EVERY frame against the software reference: the two software passes,
-        // then the GPU's first AND second pass (see above: the second is the one
-        // a live session actually runs, frame after frame).
         const auto compare = [&](const r::RgbaImage& reference, const r::RgbaImage& candidate,
                                  const char* label) {
             std::fprintf(stderr,
@@ -2146,10 +1947,6 @@ void TestD3D11StageFrame() {
                          countNonBlack(candidate), countWhite(candidate));
             // THE FAULT, named: a frame holding only its clear.
             CHECK(countNonBlack(candidate) > 0);
-            // ...and the same PICTURE, not merely a non-empty one. The glyphs
-            // are checked on their own because "the background is there and the
-            // text is not" is exactly how a silently failed glyph-atlas upload
-            // (or a missing draw) reads on a screen.
             CHECK(countWhite(candidate) == countWhite(reference));
             CHECK(candidate.pixels.size() == reference.pixels.size());
             if (candidate.pixels.size() != reference.pixels.size())
@@ -2172,15 +1969,7 @@ void TestD3D11StageFrame() {
         };
         CHECK(countNonBlack(soft.value()) > 0);
         CHECK(countWhite(soft.value()) > 0);      // the reference really has its text
-        // AND THE BLEND REALLY RAN. Screen over the dark backdrop is far
-        // lighter than the swatch itself, so a picture drawn with plain alpha
-        // (the "stored but ignored" behaviour this mode used to have, and what
-        // a missing blend pass would look like) fails right here — the parity
-        // comparison alone would still pass if BOTH sides ignored the mode.
         {
-            // Same scale buildScene derived its own sx/sy from (c.w/c.h over the
-            // 1920x1080 grid) — that pair is local to buildScene's lambda body
-            // and out of scope here, at the outer per-size-case loop.
             const float sx = static_cast<float>(c.w) / 1920.0f;
             const float sy = static_cast<float>(c.h) / 1080.0f;
             const int bx = static_cast<int>((1200.0f + 310.0f) * sx);
@@ -2208,12 +1997,7 @@ void TestD3D11StageFrame() {
 // ---------------------------------------------------------------------------
 // FEED HEALTH — the two engine questions behind the automatic stall blackout
 // ---------------------------------------------------------------------------
-// The live loop decides a stalled feed from OutputFeedAges() and then hands the
-// stalled outputs a black frame (BlackoutOutputs). Both are exercised here with
-// a probe output that keeps its own present stamp, so the arithmetic and the
-// pixels are checked without a live session or a display device.
 namespace {
-
 int64_t SteadyNowMsForTest()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2249,7 +2033,6 @@ private:
     uint64_t presented_ = 0;
     int64_t stamp_ = 0;   // 0 = never presented, which the engine reports as -1
 };
-
 } // namespace
 
 void TestFeedHealth() {
@@ -2264,9 +2047,6 @@ void TestFeedHealth() {
     CHECK(engine.AddOutput(cold).ok());
     CHECK(engine.AddOutput(off).ok());
 
-    // NEVER PRESENTED is not a stall: the age is -1, which the service reads as
-    // "warming" (a fresh session's buffers are empty for a moment). Treating it
-    // as stalled would black every output on the first second of every service.
     const auto findAge = [](const std::vector<r::RenderEngine::OutputFeedAge>& ages,
                             const std::string& name) -> int64_t {
         for (const auto& row : ages)
@@ -2295,11 +2075,6 @@ void TestFeedHealth() {
         CHECK(findAge(ages, "feed-probe-cold") == -1);
     }
 
-    // THE COUNT ON THE ROW IS THE OUTPUT'S OWN, whatever its kind: the Outputs
-    // screen prints "N frames delivered" from this field, and it used to print a
-    // line only for the kinds with a sender of their own (the report "the
-    // notification is only instantiated in one output"). FramesReceived is the
-    // number here, so the row cannot drift from the feed it describes.
     {
         const auto framesOf = [](const std::vector<r::RenderEngine::OutputFeedAge>& ages,
                                  const std::string& name) -> uint64_t {
@@ -2313,9 +2088,6 @@ void TestFeedHealth() {
         CHECK(framesOf(ages, "feed-probe-off") == 0);    // disabled: nothing sent
     }
 
-    // BLACKOUT: an opaque black frame at the output's own target size. Opaque,
-    // not transparent — a keyer behind a transparent hole would fill it with
-    // something, and the point is that nothing reaches the audience.
     {
         const int blacked = engine.BlackoutOutputs({"feed-probe-fed", "feed-probe-off"});
         CHECK(blacked == 1);   // the disabled one is refused
@@ -2353,22 +2125,11 @@ void TestFeedHealth() {
     CHECK(engine.RemoveOutput("feed-probe-off").ok());
 }
 
-// LINE SPACING (the Lines card's second field) + the PER-LINE background band.
-//
-// Two claims, both about the ENGINE side of a control whose other half is QML:
-// a gap between line boxes must be real LAYOUT (measured, not a paint-time
-// nudge), and a line band must paint one rectangle per laid-out line with the
-// gap left as clear air between them — the whole point of splitting the two
-// controls is that the band follows a line box while the gap stays empty.
 void TestLineSpacingAndLineBands() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
     CHECK(engine.SetBackend("software").ok());
 
-    // --- 1. the gap is LAYOUT ---------------------------------------------
-    // Measure's per-line step and the block's total height both move by it;
-    // DrawTextObject steps by the measured lineStep, so a paint-time-only gap
-    // would have left these numbers untouched.
     r::FontManager fonts;
     fonts.RegisterBuiltin();
     r::TextStyle plainStyle;
@@ -2385,10 +2146,6 @@ void TestLineSpacingAndLineBands() {
     // three lines = TWO gaps of air
     CHECK(std::abs((spaced.totalHeight - plain.totalHeight) - 24.0f) < 0.01f);
 
-    // --- 2. the band PAINTS, one per line, gap clear ----------------------
-    // Blank lines on purpose: spaces carry advance width but paint no ink, so
-    // every pixel inside a band is the band's own colour and no glyph can be
-    // mistaken for it.
     const auto frame = [&](bool withBand, float radius = 0.0f) {
         const std::string id = withBand ? (radius > 0.0f ? "lineBandRound" : "lineBandOn")
                                         : "lineBandOff";
@@ -2428,9 +2185,6 @@ void TestLineSpacingAndLineBands() {
     CHECK(at(off, 4, 4).r < 0.1f);
     CHECK(at(off, 4, 36).r < 0.1f);
 
-    // --- 3. a RADIUS rounds the band (FreeShow's lineRadius) --------------
-    // The band is 20px tall, so a radius of 10 is a stadium: the corner is cut
-    // away while the middle of the same band is still the band's own colour.
     const auto round = frame(true, 10.0f);
     CHECK(at(round, 4, 10).r > 0.9f);          // middle of the first band
     CHECK(at(round, 0, 1).r < 0.1f);           // top-left corner, cut by the arc
@@ -2438,16 +2192,6 @@ void TestLineSpacingAndLineBands() {
     CHECK(at(round, 2, 10).r > 0.9f);          // ...but the band's edge, mid-height
 }
 
-// A READING BLOCK COSTS ITS VIEWPORT, NOT ITS PASSAGE.
-//
-// DrawTextObject used to walk every line of the FLOW TEXT — the whole passage a
-// reading walk draws, hundreds of lines for a sermon — and build one draw command
-// per glyph, then throw the invisible ones away inside ClipQuad. Measured on a real
-// walk, the reading column was 37% of a composed frame (~150-400 ms of it), and the
-// work for every line above and below the page was done and discarded at 60 Hz: the
-// "scrolling The Table pins the CPU" report. The pass is culled to the lines the
-// viewport can see now; this pins that, so a future edit to the clipping cannot
-// quietly put the passage's whole cost back on every frame.
 void TestReadingFlowDrawCost() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
@@ -2512,10 +2256,6 @@ void TestReadingFlowDrawCost() {
     CHECK(shortCalls > 0);
     CHECK(longCalls > 0);
 
-    // THE COST IS THE WINDOW'S, NOT THE PASSAGE'S: the same six-line viewport over a
-    // ten-times-longer passage costs what the page costs (a line of slack each side
-    // is the cull's own allowance). Before the cull this was the whole passage's
-    // glyphs — ten times this number and more.
     std::fprintf(stderr, "[reading-flow] draw calls: short=%u long@40=%u long@0=%u\n",
                  shortCalls, longCalls, longStartCalls);
     CHECK(longCalls <= shortCalls * 2);
@@ -2524,9 +2264,6 @@ void TestReadingFlowDrawCost() {
     // more than 1300 glyphs, so a frame drawing them all would dwarf this bound.
     CHECK(longCalls < 400);
 
-    // The cull still DRAWS: the scrolled frame carries ink, and the two positions are
-    // different pictures — a "cheap" frame that drew nothing, or drew the top of the
-    // passage at every offset, would pass the cost checks and fail these.
     const auto ink = [](const r::RgbaImage& img) {
         if (img.empty()) return size_t{0};
         const uint32_t base = img.pixels.front();

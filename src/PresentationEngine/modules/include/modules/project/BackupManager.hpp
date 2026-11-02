@@ -1,11 +1,5 @@
 #pragma once
 
-// BackupManager (docs/specs/15 §Backup Manager): automatic and scheduled
-// backups with retention policies. Full backups capture the project file;
-// incremental backups record the delta since the last full backup. Backups are
-// JSON documents in the DatabaseManager (collection "backups") so they survive
-// restarts; cloud backups are a documented future extension.
-
 #include "modules/project/Project.hpp"
 #include "interfaces/IService.hpp"
 
@@ -14,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct BackupRecord {
     std::string id;
     std::string projectId;
@@ -59,5 +52,4 @@ private:
     uint64_t taskId_ = 0;
     std::string destDir_;
 };
-
 } // namespace bps::project

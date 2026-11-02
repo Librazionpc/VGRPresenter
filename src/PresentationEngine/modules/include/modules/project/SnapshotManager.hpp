@@ -1,10 +1,5 @@
 #pragma once
 
-// SnapshotManager (docs/specs/15 §Snapshot Manager): manual and automatic
-// snapshots / version checkpoints of project state. A snapshot captures the
-// project's persisted representation at a point in time and can be restored.
-// Auto-snapshots are created by the DataManager on a scheduler cadence.
-
 #include "core/config/Json.hpp"
 #include "interfaces/IService.hpp"
 
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct Snapshot {
     std::string id;
     std::string projectId;
@@ -45,5 +39,4 @@ private:
     std::vector<Snapshot> snapshots_;
     size_t limitPerProject_ = 50;
 };
-
 } // namespace bps::project

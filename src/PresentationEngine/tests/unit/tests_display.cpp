@@ -1,6 +1,3 @@
-// Unit tests: Display Engine (docs/specs/18).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests display
 #include "TestHarness.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 
@@ -48,9 +45,6 @@ void TestDisplayDevices() {
     extra.virtual_ = true;
     extra.provider = "Virtual";
     CHECK(vp.AddVirtualDevice(extra).ok());
-    // Hot-plug: the provider's Probe reports the added device; the engine then
-    // applies it to its registry (a provider may only be registered once, so
-    // we exercise add/remove through the local provider instance directly).
     auto probe = vp.Probe();
     CHECK(probe.ok());
     bool sawAdded = false;
@@ -174,13 +168,6 @@ void TestDisplayRecovery() {
     (void)eng.RemoveOutput("lost-out");
 }
 void TestDisplayNdi() {
-    // The NDI display provider enumerates a program device and pushes RGBA
-    // frames through the BroadcastEngine (software loopback when the NDI SDK
-    // is absent — so this runs on any host).
-    // The "ndi" feature switch defaults OFF now (see AdaptiveRuntime's own
-    // registration comment) — this test exercises real sending/receiving,
-    // so it sets up its own precondition rather than relying on a default
-    // some OTHER test file's run order happened to leave enabled.
     broadcast::BroadcastEngine::Instance().SetNdiEnabled(true);
     d::NdiDisplayProvider ndi;
     CHECK(std::string(ndi.Name()) == "Ndi");
@@ -192,10 +179,6 @@ void TestDisplayNdi() {
     auto cap = ndi.Capabilities();
     CHECK(cap.supportsVirtualOutputs);
 
-    // SetFrameRate drives BOTH the advertised metadata fps AND the listed
-    // refreshRateHz of the ndi-program device — Settings · Outputs' Refresh
-    // rate select reaches the wire and the engine's display enumeration
-    // through this one call. The guard clamps 0/negative to the 30 default.
     ndi.SetFrameRate(60.0f);
     CHECK(ndi.FrameRate() == 60.0f);
     devices = ndi.Enumerate();
@@ -211,11 +194,6 @@ void TestDisplayNdi() {
     d::RenderFrameView bad;
     CHECK(!ndi.SendFrame(bad).ok());
 
-    // A real frame round-trips through the engine's sender -> receiver path.
-    // The rate under test is 24 (set above): the fps the sender advertises
-    // must survive to the receiver — the loopback copies VideoFrameInfo
-    // verbatim, the real SDK encodes frame_rate_N/D from it, both exact at
-    // integer rates.
     constexpr int W = 16, H = 8;
     std::vector<uint32_t> px(static_cast<size_t>(W) * H, 0xFF0000FFu);   // solid red
     d::RenderFrameView view;
@@ -237,9 +215,6 @@ void TestDisplayNdi() {
         if (got.ok() && got.value()) {
             CHECK(info.width == W && info.height == H);
             CHECK(info.fps == 24.0);   // the advertised refresh survives the wire
-            // Native RGBA on the wire now (was UYVY): 4 bytes per pixel, and
-            // the alpha-forcing pass leaves a fully opaque source frame's
-            // bytes untouched — solid red round-trips bit-exact.
             CHECK(info.fourCC == 0x41424752u);
             CHECK(out.size() == static_cast<size_t>(W) * H * 4);
             const auto first = *reinterpret_cast<const uint32_t*>(out.data());
@@ -249,10 +224,6 @@ void TestDisplayNdi() {
     }
 
     // ---- SELF-HEAL: a sender the engine no longer knows -------------------
-    // The reported failure: an NDI row created after the feed had armed sat at
-    // 0 frames until the app was restarted, because every send failed against a
-    // sender id the engine had forgotten. The provider must notice the failure,
-    // drop the dead id, and let the NEXT frame recreate the sender by itself.
     {
         auto& bc = broadcast::BroadcastEngine::Instance();
         const std::string dead = ndi.SenderId();
@@ -269,14 +240,6 @@ void TestDisplayNdi() {
     CHECK(ndi.FrameRate() == 30.0f);
     CHECK(ndi.Enumerate()[0].refreshRateHz == 30);
 
-    // THE RULE ITSELF, named and pinned: what a provider accepts as a cadence
-    // and what it falls back to. One home — the NDI send clock in the app asks
-    // this same call (`bps::display::AcceptedOutputFrameRate`) instead of
-    // keeping its own copy of the bound, and a clock and a provider that
-    // disagree about the accepted rate is a feed at the wrong cadence.
-    // Literals, not the constants: 30/240 are the CONTRACT an operator's
-    // refresh pick is measured against; the constants are just how it is
-    // written down. Pinning only the constants would let a changed cap pass.
     CHECK(d::kDefaultOutputFrameRateHz == 30.0f);
     CHECK(d::kMaxOutputFrameRateHz == 240.0f);
     CHECK(d::AcceptedOutputFrameRate(60.0f) == 60.0f);

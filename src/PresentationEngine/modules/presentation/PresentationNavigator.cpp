@@ -4,9 +4,7 @@
 #include <cctype>
 
 namespace bps::presentation {
-
 namespace {
-
 std::string Lower(std::string_view s) {
     std::string out;
     out.reserve(s.size());
@@ -17,7 +15,6 @@ std::string Lower(std::string_view s) {
 bool ContainsCI(std::string_view haystack, std::string_view needle) {
     return Lower(haystack).contains(Lower(needle));
 }
-
 } // namespace
 
 void PresentationNavigator::Open(const Presentation& presentation) {
@@ -109,13 +106,6 @@ Result<void> PresentationNavigator::JumpByTag(std::string_view tag) {
         const auto& tags = pres_->slides[order_[visibleIndex]].tags;
         return std::find(tags.begin(), tags.end(), tag) != tags.end();
     };
-    // CYCLE, not "always the first" — a live operator pressing the same
-    // shortcut repeatedly (FreeShow's own group-shortcut behavior: press V
-    // to walk verse 1, 2, 3...) must advance each time, landing on the NEXT
-    // tagged slide after wherever playback is now, wrapping past the end.
-    // Starts the search one past the current slide so a press while ALREADY
-    // on a tagged slide moves on rather than re-landing on itself — unless
-    // it is the only match, where wrapping brings the search back to it.
     for (size_t step = 1; step <= order_.size(); ++step) {
         const size_t i = (current_ + step) % order_.size();
         if (hasTag(i)) return JumpTo(i);
@@ -163,5 +153,4 @@ size_t PresentationNavigator::HistoryDepth() const {
 void PresentationNavigator::ClearHistory() {
     history_.clear();
 }
-
 } // namespace bps::presentation

@@ -6,10 +6,6 @@
 #include "platform/IProcess.hpp"
 
 #ifdef _WIN32
-// WinUtil.hpp pulls in <winsock2.h> BEFORE <windows.h> (and sets
-// WIN32_LEAN_AND_MEAN). Including <windows.h> here first made every later
-// <winsock2.h> in the same translation unit warn "include winsock2.h before
-// windows.h".
 #include "platform/windows/WinUtil.hpp"
 #endif
 
@@ -17,7 +13,6 @@
 #include <unordered_map>
 
 namespace bps::platform {
-
 class WindowsProcess final : public IProcess {
 public:
     Result<int> Start(std::string_view command, std::vector<std::string> args = {}) override;
@@ -38,5 +33,4 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<int, HANDLE> handles_;   // NOLINT (Windows HANDLE = void*)
 };
-
 } // namespace bps::platform

@@ -12,9 +12,7 @@
 #include <format>
 
 namespace bps::project {
-
 namespace {
-
 int64_t MsNow() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -49,7 +47,6 @@ std::string SanitizeName(std::string_view name) {
     }
     return out.empty() ? "Untitled" : out;
 }
-
 } // namespace
 
 ProjectManager& ProjectManager::Instance() {
@@ -93,11 +90,6 @@ Result<Project> ProjectManager::Open(std::string_view hostPath) {
     auto p = parsed.ok() ? ProjectFromJson(parsed.value())
                          : Result<Project>(parsed.error());
     if (!p.ok()) {
-        // A SHOW is the user's own authored document, so it is NOT rebuilt behind
-        // their back — an empty show standing in for their work would be worse
-        // than the error. But it must not be a dead end either: a damaged file is
-        // set aside as evidence, and the error says WHERE, so the bytes survive
-        // the open attempt instead of being overwritten by the next save.
         const auto report = recovery::SetAsideDamagedDocument(
             hostPath, "ProjectManager", p.error().message);
         return Error::Make(p.error().code, "ProjectManager",
@@ -148,9 +140,6 @@ Result<void> ProjectManager::Save(std::string_view id, bool autosave) {
         proj.path = path;
     }
     auto bytes = ProjectToJson(proj).ToString();
-    // ATOMIC: a project file is the user's work. Written in place, a save that
-    // died mid-write left the project file unreadable with nothing to fall back
-    // to; the swap means Open() sees the previous save or this one.
     if (auto r = fs.WriteAtomic(path, bytes); !r.ok()) return r.error();
 
     if (auto r = registry_.Update(proj); !r.ok()) return r.error();
@@ -309,5 +298,4 @@ Result<void> ProjectManager::AutosaveAll() {
     }
     return Ok();
 }
-
 } // namespace bps::project

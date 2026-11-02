@@ -1,9 +1,5 @@
 #pragma once
 
-// RuntimeAsset: the in-memory representation of a loaded asset (docs/specs/13
-// §Asset Manager). Bytes live here once loaded; reference counting + pinning
-// are tracked by the AssetRegistry.
-
 #include "modules/content/AssetMetadata.hpp"
 
 #include <cstdint>
@@ -11,7 +7,6 @@
 #include <vector>
 
 namespace bps::content {
-
 struct RuntimeAsset {
     AssetMetadata meta;
     std::vector<uint8_t> bytes;
@@ -22,5 +17,4 @@ struct RuntimeAsset {
     bool pinned = false;
     bool dirty = false;                  // modified in memory, not yet saved
 };
-
 } // namespace bps::content

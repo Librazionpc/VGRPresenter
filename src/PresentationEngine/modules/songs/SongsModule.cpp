@@ -8,7 +8,6 @@
 #include <format>
 
 namespace bps::modules {
-
 std::shared_ptr<SongsModule> SongsModule::Create() {
     return std::shared_ptr<SongsModule>(new SongsModule());
 }
@@ -51,9 +50,6 @@ Result<void> SongsModule::RegisterSong(Song song) {
     if (song.id.empty() || song.verses.empty())
         return Error::Make(Err::InvalidArgument, "SongsModule",
                            "a song needs an id and at least one verse");
-    // Copy the key BEFORE the move: `library_[song.id] = make_shared(move(song))`
-    // leaves the subscript's key evaluation unsequenced with the move, which can
-    // store the song under a moved-from (empty) key.
     std::string key = song.id;
     std::lock_guard<std::mutex> lock(mutex_);
     if (library_.count(key) > 0)
@@ -156,5 +152,4 @@ Result<void> SongsModule::PublishVerse() {
                             "Songs");
     return Ok();
 }
-
 } // namespace bps::modules

@@ -5,11 +5,6 @@
 #include <QUrl>
 
 namespace {
-
-// A picture that cannot be made is answered with a 1x1 transparent image rather than an error:
-// a null image makes QML's Image log a warning per tile (which this app turns into a toast), and
-// a media folder can hold many files no decoder on the machine understands. The tile treats a
-// 1-pixel picture as "no picture" and shows its placeholder.
 QImage noPicture(QSize *size)
 {
     QImage blank(1, 1, QImage::Format_ARGB32);
@@ -18,7 +13,6 @@ QImage noPicture(QSize *size)
         *size = blank.size();
     return blank;
 }
-
 } // namespace
 
 MediaThumbnailProvider::MediaThumbnailProvider()

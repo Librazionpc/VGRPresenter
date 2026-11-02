@@ -13,7 +13,6 @@
 #include <utility>
 
 namespace bps::presentation {
-
 namespace {
 namespace textmatch = bps::search::textmatch;
 
@@ -64,7 +63,6 @@ bool ValidFolderName(std::string_view name) {
     if (name.front() == ' ' || name.back() == ' ' || name.back() == '.') return false;
     return name.find_first_of("/\\:*?\"<>|") == std::string_view::npos;
 }
-
 } // namespace
 
 ShowLibrary::ShowLibrary(std::string rootDir) : root_(std::move(rootDir)) {}
@@ -91,11 +89,6 @@ Result<void> ShowLibrary::Refresh() {
     return Scan();
 }
 
-// The PAL pass. No lock is held and no member is touched: the results go into
-// `out` and Scan() publishes them. This is the difference that matters — the
-// pass is one directory walk, one stat and one file read PER SHOW, and it used
-// to run with mutex_ held, so every reader (and the interface thread that asked
-// for the list) waited out the whole corpus.
 Result<void> ShowLibrary::ScanUnlocked(Scanned& out) const {
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     if (!fs.Exists(root_)) {
@@ -186,11 +179,6 @@ std::vector<ShowEntry> ShowLibrary::Search(std::string_view text) const {
         out = entries_;
         return out;
     }
-    // Show names + categories are the vocabulary: "victory_lifestream.show"
-    // carries "victory", "lifestream". Typos correct ("victoy" -> "victory")
-    // before matching — the shared rules of every other search surface. A raw
-    // word stays primary: an incomplete word ("vic") already substring-matches
-    // everything its completion would, so completions never NARROW results.
     std::vector<std::string> vocabulary;
     vocabulary.reserve(entries_.size() * 2);
     for (const auto& e : entries_) {
@@ -260,9 +248,6 @@ Result<void> ShowLibrary::RemoveCategory(std::string_view name) {
     auto contents = fs.Enumerate(dir);
     if (!contents.ok()) return contents.error();
 
-    // Removing a category should not require deleting its shows. Move them to
-    // the library root (Unlabeled), choosing unique names if needed, then remove
-    // the now-empty folder. Roll back earlier moves if any later move fails.
     std::vector<std::pair<std::string, std::string>> moved;
     for (const std::string& source : contents.value()) {
         if (fs.IsDirectory(source) || !IsShowFile(source)) {
@@ -446,5 +431,4 @@ Result<std::string> ShowLibrary::NewShowPath(std::string_view category, std::str
         candidate = fs.Join(dir, std::format("{} ({}).vgr", base, n));
     return candidate;
 }
-
 } // namespace bps::presentation

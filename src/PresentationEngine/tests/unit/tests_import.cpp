@@ -1,6 +1,3 @@
-// Unit tests: importing (FreeShow's formats, in the engine): the format list, the plain-text converter every lyric format rides on,
-// CSV, FreeShow's own show files, the song providers' bridge, Bibles, and turning an imported show into a presentation.
-//   ./bps_unit_tests import
 #include "TestHarness.hpp"
 
 #include <filesystem>
@@ -14,7 +11,6 @@
 namespace im = bps::import;
 
 namespace {
-
 im::ImportFile File(std::string name, std::string ext, std::string content) {
     im::ImportFile f;
     f.name = std::move(name); f.extension = std::move(ext); f.content = std::move(content);
@@ -28,11 +24,6 @@ std::vector<std::string> Groups(const im::ImportedShow& s) {
 }
 
 // ---- a ProPresenter 7/8 .pro document, written field by field --------------
-// ProPresenter 7 replaced the XML of Pro6 with protocol buffers, and a library
-// folder is full of them; the fixture is built here so the reader is exercised
-// on the same wire shape the real files carry (a slide's text is the RTF of a
-// graphics text element, and the slide's NOTES are RTF too but must not be
-// imported as lyrics).
 std::string PbVarint(uint64_t value) {
     std::string out;
     do {
@@ -64,9 +55,6 @@ std::string PbCue(std::string_view id, std::string_view rtf, std::string_view no
     return PbBytes(13, cue);   // Presentation.cues
 }
 
-// rv.data.URL of an image the machine that made the deck had: the absolute Mac
-// path it was saved from, the platform tag, and the path relative to the
-// presentation's own root (which is the one that can still resolve here).
 std::string PbMediaUrl(std::string_view relative) {
     const std::string local = PbBytes(1, PbInt(1, 10)) + PbBytes(2, relative);   // ROOT_SHOW
     return PbBytes(1, std::string("file:///Users/old/ProPresenter/") + std::string(relative)) +
@@ -76,7 +64,6 @@ std::string PbGroup(std::string_view name, std::string_view cueId) {
     const std::string group = PbBytes(1, PbUuid("group")) + PbBytes(2, name);
     return PbBytes(12, PbBytes(1, group) + PbBytes(2, PbUuid(cueId)));
 }
-
 } // namespace
 
 void TestImportFormats() {
@@ -264,10 +251,6 @@ void TestImportFiles() {
     CHECK(sqlite.ok() && sqlite.value().shows.empty() && sqlite.value().warnings.size() == 1);
 
     // ---- FreeShow PROJECT: a zip of show files (built with the engine's own
-    // ZipWriter — the same reader the import path uses must read what the
-    // app's packaging produces), and the JSON-array shape (an array of
-    // [id, show]). Every show inside imports in order; a broken member is
-    // its own warning.
     {
         const std::string showA =
             R"({"name":"Project Song A","slides":{"a":{"group":"verse","items":[{"lines":[{"text":[{"value":"Alpha"}]}]}]}}})";
@@ -376,9 +359,6 @@ void TestImportFiles() {
             fs::remove_all(root);
             fs::create_directories(root / "Media" / "Assets");
             std::ofstream(root / "Media" / "Assets" / "logo.png", std::ios::binary) << "pixels";
-            // A media library stores a file under its id PREFIXED to the display
-            // name, while the document names only the display name — the shape a
-            // lower third's own artwork arrives in.
             std::ofstream(root / "Media" / "Assets" / "1559c5d1-d259-408e-84a2-e3256b9686f5Sermon background.jpg",
                           std::ios::binary)
                 << "pixels";
@@ -396,9 +376,6 @@ void TestImportFiles() {
             CHECK(withArt.ok() && withArt.value().shows.size() == 1);
             if (withArt.ok() && !withArt.value().shows.empty()) {
                 const std::vector<std::string>& refs = withArt.value().shows[0].mediaRefs;
-                // The pictures that are really there are carried — by relative
-                // path and by display NAME (the id-prefixed file) — and the one
-                // that is not there is dropped.
                 CHECK(refs.size() == 2);
                 bool relative = false, named = false;
                 for (const std::string& ref : refs) {

@@ -1,13 +1,5 @@
 #pragma once
 
-// RecordingEngine (docs/specs/28): the Phase 16 facade. Recording is a
-// first-class output consumer of the Phase 15 production graph — any valid
-// signal (source, bus, virtual source, scene, output) can be recorded with its
-// own profile, tap point, format and lifecycle. Owns profiles, the recording
-// queue, segmentation, markers, metadata, crash recovery (journal), replay
-// buffers, capture devices, encoder selection and disk-aware storage. It never
-// renders or plays content — it consumes the graph.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -24,7 +16,6 @@
 #include <vector>
 
 namespace bps::recording {
-
 class RecordingEngine final : public IService {
 public:
     static RecordingEngine& Instance();
@@ -57,10 +48,6 @@ public:
     Result<EncoderKind> SelectEncoder(const RecordingProfile& profile) const;
     Result<void> SetPreferredEncoder(std::string_view profileId, EncoderKind kind);
 
-    // --- Plugin registries (docs/specs/28 §Format Abstraction, §Recording Plugins) ---
-    // Containers, codecs and capture devices are registered by plugins — the
-    // engine core never hard-codes formats. Software fallbacks are
-    // pre-registered at Initialize.
     Result<void> RegisterContainer(std::string_view name, ContainerFactory factory);
     Result<void> RegisterVideoEncoder(EncoderKind kind, VideoEncoderFactory factory);
     Result<void> RegisterAudioEncoder(std::string_view codec, AudioEncoderFactory factory);
@@ -121,16 +108,10 @@ public:
 
     // --- Health (docs/specs/28 §Health) ---
     Result<EncoderHealth> GetRecordingHealth(std::string_view recordingId) const;
-    // Highest reported encoder load across the sessions that still occupy an
-    // encoder (Preparing/Recording/Paused/Finalizing/Recovering); 0 when none.
-    // The one number the Telemetry module's encoding meter needs.
     int MaxActiveEncoderLoad() const;
     Result<void> UpdateEncoderLoad(std::string_view recordingId, int loadPct);
     Result<void> UpdateDroppedFrames(std::string_view recordingId, size_t count);
 
-    // --- Time pump ---
-    // Advances the recording clock; drives segments, schedules and the disk
-    // monitor. Called by the CLI demo and tests; the scheduler may drive it.
     Result<void> Tick(int64_t advanceMs);
     int64_t ClockMs() const { return clockMs_.load(); }
 
@@ -218,5 +199,4 @@ private:
     std::atomic<uint64_t> errorCount_{0};
     mutable std::recursive_mutex mutex_;
 };
-
 } // namespace bps::recording

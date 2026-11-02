@@ -2,25 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// The effects rack + "selected effect" editor (the reference Add Source
-// dialog's 7-slot rack: Gain / Equalizer / Compressor / Reverb / Limiter /
-// Noise Gate / Delay, each toggle-on/off, with a parameter slider for the
-// selected effect below). Shared by the Add Source and Edit Audio Input
-// dialogs so the rack can't drift between them.
-//
-// Pure presentation over a plain QVariantList (the shape
-// AudioInputListModel's EffectsRole and defaultEffectsTemplate() emit):
-// { key, label, enabled, value, minValue, maxValue, suffix }. Controlled
-// component — state is owned by the caller; the panel only reports:
-//   effectSelected(key)               — chip body clicked (opens its editor;
-//                                       clicking the open chip closes it)
-//   effectToggled(key)                — dot clicked (flips on/off)
-//   effectValueMoved(key, value)      — editor slider moved
-// Two controls, two jobs: the BODY selects (the reference's own caption is
-// "pick any effect in the grid to edit its parameters" — selection must be
-// reachable on the whole card, not a 10px dot), and the DOT toggles (and
-// also selects, since flipping an effect on is usually the moment you want
-// to edit it).
 Column {
     id: root
 
@@ -89,15 +70,6 @@ Column {
                     }
                 }
 
-                // Body click = SELECT (or deselect if already open — the
-                // editor needs a way to close). The dot's own MouseArea is
-                // a child of this one, so pressing the dot never reaches
-                // the body: toggling never selects by accident. Emits are
-                // immediate — this component never mutates `effects` (it's
-                // a controlled component), and consumers defer their model
-                // writes (see AudioVideoScreen.qml), so the click dispatch
-                // always completes before a Repeater reset could destroy
-                // this chip mid-event.
                 MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
@@ -125,16 +97,6 @@ Column {
                         anchors.fill: parent
                         anchors.margins: -8
                         cursorShape: Qt.PointingHandCursor
-                        // Emit immediately — deferring this lambda was the
-                        // bug: the consumer's model write rebuilds the rack
-                        // (this Repeater), destroying the chip whose scope
-                        // the lambda closes over, so `root` was already dead
-                        // when callLater ran → ReferenceError → the toggle
-                        // AND the select silently never happened. The safe
-                        // shape is emit-now / mutate-later: the panel emits
-                        // synchronously (it mutates nothing), and the
-                        // consumer defers the model write past this event
-                        // dispatch (see AudioVideoScreen.qml's handlers).
                         onClicked: {
                             root.effectToggled(chip.modelData.key)
                             root.effectSelected(chip.modelData.key)

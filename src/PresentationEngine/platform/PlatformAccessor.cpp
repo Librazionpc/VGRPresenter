@@ -5,18 +5,12 @@
 #include <stdexcept>
 
 namespace bps::platform {
-
 namespace {
 std::shared_ptr<IPlatform>& PlatformSlot() {
     static std::shared_ptr<IPlatform> slot;
     return slot;
 }
 
-// Guards every access to the slot. Lifetime contract: Install() is called once
-// by the Kernel at boot, before any worker threads exist; afterwards the slot
-// is effectively read-only (Get/Shared/Installed). Replacing the backend while
-// systems hold Get() references is only safe if no references are live — callers
-// that must outlive a swap should hold the Shared() pointer instead.
 std::mutex& SlotMutex() {
     static std::mutex m;
     return m;
@@ -48,5 +42,4 @@ bool PlatformAccessor::Installed() {
     std::lock_guard<std::mutex> lock(SlotMutex());
     return PlatformSlot() != nullptr;
 }
-
 } // namespace bps::platform

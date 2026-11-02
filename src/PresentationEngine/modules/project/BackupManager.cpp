@@ -14,7 +14,6 @@
 #include <format>
 
 namespace bps::project {
-
 namespace {
 int64_t MsNow() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -74,9 +73,6 @@ Result<std::string> BackupManager::Backup(std::string_view projectId, std::strin
         auto& fs = platform::PlatformAccessor::Get().Filesystem();
         (void)fs.CreateDirectories(rec.destination);
         std::string path = rec.destination + "/" + rec.id + ".bak.json";
-        // ATOMIC: a backup a user cannot restore is worse than no backup at all,
-        // and this file is written at the moment the machine is already under
-        // load (autosave, full project).
         if (auto r = fs.WriteAtomic(path, doc.value().ToString()); !r.ok()) return r.error();
         rec.destination = path;
     } else {
@@ -203,5 +199,4 @@ size_t BackupManager::Count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return backups_.size();
 }
-
 } // namespace bps::project

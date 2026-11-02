@@ -1,23 +1,9 @@
 import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
-// Imported AFTER QtQuick so `Shortcut {}` below means the app's action-named
-// binding (a drop-in for QtQuick's): every sequence this screen uses lives in
-// qml/settings/Hotkeys.qml, not in this file.
 import "../../shortcuts"
 import "../../components"
 
-// The Edit screen: the slide canvas editor shown when the "Edit" tab is
-// active. Faithfully matches VGRPresenter_Main_Screen_Edit.qml (the
-// Figma-to-Qt ground truth), with the shared header chrome swapped for the
-// AppMenuBar/ViewTabs/HeaderStatus components already used by the Show
-// screen, and the repeated slide-list / output-monitor rows built from data
-// (same content, less duplication) instead of copy-pasted blocks.
-//
-// The screen chrome reads Theme tokens, so a Light choice recolours it with
-// the rest of the app. The canvas ITSELF is content (its stage ground, the
-// per-kind previews' own fallback fills and the camera/clock artwork) and
-// keeps literal values.
 Rectangle {
     id: root
 
@@ -29,31 +15,17 @@ Rectangle {
     readonly property real slidePanelWidth: Math.min(280, Math.max(160, width * 0.195))
     readonly property real inspectorPanelWidth: Math.min(400, Math.max(240, width * 0.278))
     readonly property real centerRegionWidth: Math.max(0, width - slidePanelWidth - inspectorPanelWidth)
-    // The stage's own fit rule, asked through the ONE grid definition
-    // (qml/settings/StageGrid.qml) so this canvas and every other picture of a
-    // stage (a library card, a thumbnail) can never scale one differently.
     readonly property real canvasFitScale: Math.max(0.3, Math.min(1,
         StageGrid.fitScale(centerRegionWidth - 20, height - 160)))
 
-    // Mock CRUD backend (qml/models/SlideListModel.cpp) — stands in for the
-    // real show/slide data source. Seeded with the same ground-truth
-    // content the static array used to hold, but "Add slide" and selecting
-    // a row now mutate real model state instead of pointing at fixed data.
     SlideListModel {
         id: slideModel
     }
 
-    // Per-slide canvas state (items + background), keyed by the model's
-    // stable slide id — switching slides swaps the canvas, duplicating a
-    // slide clones its canvas, deleting one drops its archive.
     SlideCanvasStore {
         id: slideStore
     }
 
-    // The seam to the ENGINE, which owns the show (slides, items, duplicate/delete,
-    // ids, the .vgr file). Slide and item actions below ask it first; the list and
-    // canvas are its projection plus the live gesture state it is synced from. See
-    // ShowSession.qml.
     ShowSession {
         id: showSession
         slideModel: slideModel
@@ -63,9 +35,6 @@ Rectangle {
     readonly property var session: showSession
 
     // ---- Designs: the same screen edits an overlay or a template from a library ----
-    // While a design is open (ShowSession.openDesign) the canvas, undo, inspector and text panel edit IT and every engine
-    // call goes to the library instead of the show. Nothing else changes: the Items and Text tabs already edit everything a
-    // design has, and the toolbar's back chevron is Done.
     readonly property bool designMode: showSession.designMode
     // Opens design `id` of `kind` ("overlay" | "template"); false if it does not exist.
     function openDesign(kind, id) { return showSession.openDesign(kind, id) }
@@ -79,22 +48,9 @@ Rectangle {
         function onCommitted() { showSession.scheduleFlush() }
     }
 
-    // Switching slides swaps the canvas: the store re-archives the outgoing
-    // slide's working set and installs the incoming one. addSlide()
-    // auto-selects, so a fresh slide lands here with an empty canvas too.
     Connections {
         target: slideModel
         function onActiveSlideChanged() {
-            // The undo stack's snapshots are of the ACTIVE slide's canvas only
-            // (no slide id), so replaying one after the slide changed would
-            // paint the old slide's items over the new one. Drop the history
-            // (and any open gesture/typing bracket) whenever the active slide
-            // changes — that also covers "New show", which clears the deck and
-            // adds a fresh slide. Session flags reset with it: the delegates
-            // die with the swap, and a destroyed TextEdit never reports
-            // editingChanged, which would leave them stale.
-            // The outgoing slide's on-screen state goes to the engine first (a no-op
-            // when it has not changed, and skipped while the UI is being rebuilt).
             showSession.flushSlide(slideStore.activeSlideId)
             canvasHistory.clear()
             root.textUndoKey = ""
@@ -103,20 +59,8 @@ Rectangle {
         }
     }
 
-    // True when a slide is active — the roster starts EMPTY (no hardcoded
-    // slides), so this is false on a fresh launch until "Add slide" is used.
-    // Drives the empty state: canvas and right panel grey out (nothing to
-    // edit), while the slide list stays fully live (adding a slide is the
-    // way out).
     readonly property bool hasActiveSlide: slideModel.activeSlideId > 0
 
-    // "New show": reset the deck to a fresh single slide. One call drops
-    // every canvas archive first, then every slide — order matters, since
-    // a removed ACTIVE slide fires onActiveSlideChanged and would load a
-    // stale archive for the next auto-selected slide if its canvas still
-    // existed. The final addSlide() gives the user the empty slide New
-    // Show means (matching the roster's empty-at-launch posture: never a
-    // hardcoded slide, never a bare roster).
     function newShow() {
         // The engine starts the new document; the UI resets to its single empty slide
         // (asking first if the current show has unsaved changes).
@@ -131,21 +75,7 @@ Rectangle {
     // caller that must wait for the file (the "save changes?" dialog) passes it.
     function saveShow(then) { showSession.saveShow(then) }
     function saveShowAs(then) { showSession.saveShowAs(then) }
-    // UI self-test helper (Main.qml scenario): resolve a named item into
-    // WINDOW coordinates by recursively walking this screen's item tree.
-    // C++ findChild can't reach some QML-created items (Repeater delegates
-    // exist — the row dump proves it — but are invisible to QObject-name
-    // search), so the QML side does the walking. Invisible branches are
-    // skipped so a closed menu/modal resolves to null, not a stale point.
 
-    // TEMP DIAGNOSTIC — reproduce "type text, exit, re-enter and type more,
-    // undo WHILE still in that second edit session" exactly. Flip to true
-    // ONLY when debugging an undo regression: it seeds a slide + text item
-    // on every launch (so the app never starts in the empty, greyed-out
-    // "no active slide" state while it's on) and drives the scripted
-    // type/undo sequence, logging [DIAG] lines to stderr. Default off —
-    // the app must start empty, which is what the regression it found (the
-    // mid-edit junk-command push) is now verified fixed.
     property bool diagUndoHarness: false
     Component.onCompleted: {
         if (!root.diagUndoHarness)
@@ -158,10 +88,6 @@ Rectangle {
             t.triggered.connect(fn)
         }
         afterMs(200, function () {
-            // Fresh reference — addCanvasItem's own deferred "after" commit
-            // (Qt.callLater) already fired by now and destroyed+recreated
-            // every item as a side effect (restoreItems' redundant re-
-            // apply), so the ORIGINAL `item` capture is stale/destroyed.
             const item = slideStore.current.items[0]
             console.log("[DIAG] fresh item key=", item.key)
             // Session 1: type "AAA", then commit (leave edit mode).
@@ -181,22 +107,10 @@ Rectangle {
                 console.log("[DIAG] after undo WHILE mid-session-2: text=", slideStore.current.items[0].text,
                              "canUndo=", canvasHistory.canUndo, "canRedo=", canvasHistory.canRedo,
                              "anyTextEditing=", root.anyTextEditing)
-                // One tick later: the old endTextEdit->commit chain (fired
-                // by the undo's apply() recreating the delegate) used to
-                // push a JUNK command here ("do: restore post-undo state",
-                // undo: re-apply "AAA"), clearing canRedo with it — so the
-                // NEXT Ctrl+Z resurrected the text that was just undone
-                // ("undo undoes the undo"). With abandonPending in place
-                // canRedo must STILL be true.
                 afterMs(50, function () {
                     console.log("[DIAG] commit-tick: text=", slideStore.current.items[0].text,
                                  "canUndo=", canvasHistory.canUndo, "canRedo=", canvasHistory.canRedo,
                                  "(canRedo MUST still be true — no junk step)")
-                    // Drains the last real command (session 1's edit, then
-                    // the add itself — whose "before" is an EMPTY canvas, so
-                    // items[0] legitimately no longer exists afterwards).
-                    // The old junk command would instead have re-applied
-                    // "AAA" here and left an extra entry on the stack.
                     root.undo()
                     const drained = slideStore.current.items.length === 0
                     console.log("[DIAG] second undo: items empty=", drained,
@@ -210,24 +124,9 @@ Rectangle {
         })
     }
 
-    // Output roster comes from the OutputListModel singleton (qml/models/OutputListModel.cpp)
-    // — the SAME model Settings · Outputs (OutputsScreen.qml) edits, so adding
-    // or renaming an output there shows up here too instead of two arrays
-    // drifting apart.
-
-    // Right-click context menu for slide rows (Edit / Duplicate / Delete) —
-    // see slideContextMenu near the end of this file. Tracks which row it
-    // was opened for, since only one shared DropdownPanel instance exists.
     property int contextMenuSlideIndex: -1
 
-    // Right panel's ITEMS/TEXT/SLIDE tab indicator — see that Row in the
-    // right panel below. Purely a visual toggle for now: the ground truth
-    // export never captured what TEXT/SLIDE should actually show, so the
-    // panel content underneath doesn't vary by tab yet.
     property string rightPanelTab: "items"
-    // The central workspace can show the visual slide canvas or FreeShow-style
-    // whole-show text editing. The text form keeps textbox markers so copied
-    // FreeShow text can be pasted back into the same positioned items.
     property string editWorkspaceMode: "slide"
     property string textEditBuffer: ""
     property string textEditStatus: ""
@@ -237,14 +136,7 @@ Rectangle {
     property bool textEditSwitchAfterApply: false
     property int textEditApplyToken: 0
     property string textEditSubmittedBuffer: ""
-    // True once the operator has LEFT the item facets on purpose, by clicking ITEMS or
-    // SLIDE. From then on a new selection does not move the panel to TEXT or MEDIA on
-    // its own — not even after the selection is cleared and made again. It stays that way
-    // until they click TEXT or MEDIA themselves (see onPrimarySelectedItemChanged).
     property bool rightTabPinned: false
-    // Leaving the TEXT tab closes its font dropdowns — an open menu
-    // belonging to a tab you've left is exactly the "not tied to its
-    // parent" class of bug.
     onRightPanelTabChanged: { textFontMenu.visible = false; textFontFamilyMenu.visible = false; textAutoSizeMenu.visible = false; textCaseMenu.visible = false; borderStyleMenu.visible = false }
 
     function textEditGroupLabel(fields) {
@@ -346,9 +238,6 @@ Rectangle {
             })
             if (current !== null) chunks.push(current.join("\n"))
         } else if (numberedItemSections) {
-            // FreeShow clipboard text has no slide markers. In this format a
-            // repeated [#1]/[#2] pair is one slide section; split at each new
-            // [#1] and associate the sections with slides in order.
             let current = []
             let sawItemMarker = false
             const finishSection = () => {
@@ -487,25 +376,9 @@ Rectangle {
         return token
     }
 
-    // Background-color picker (see bgColorModal near the end of this file)
-    // and the current selection it applies to the "Background" row's swatch.
-    // bgModalTarget says which row opened it ("background", "itemBackground"
-    // or "border" — see SizeStyleCard's Border row), so one shared picker
-    // instance can serve both instead of duplicating it.
     property bool bgModalOpen: false
     property string bgModalTarget: "background"
-    // WHICH ITEMS THE PICKER WAS OPENED FOR, captured at OPEN time. The apply
-    // used to read `selectedCanvasObjects` when Save was pressed, so anything
-    // that emptied the selection while the dialog was up (Escape in the modal's
-    // own hotkey scope, a selection change racing the open) turned Apply into a
-    // silent no-op: the colour never reached the shape, and its swatch stayed
-    // put — the reported "opacity does nothing, no matter how I drag it". The
-    // targets are a fact about the DIALOG, so they are latched with its target
-    // kind and used by the apply.
     property var bgModalTargetKeys: []
-    // One entry point for every "Change" chip that opens the shared picker, so
-    // the target kind and its items can never be latched separately (or one of
-    // them forgotten, which is how the item case went dead).
     function openBackgroundPicker(target) {
         root.bgModalTarget = target
         root.bgModalTargetKeys = root.selectedCanvasObjects.slice()
@@ -526,15 +399,6 @@ Rectangle {
     }
 
     // ---- ONE WAY TO COLOUR AN ITEM ----------------------------------------
-    // The TEXT item's colour has always been applied by building a NEW value and
-    // reassigning the whole property (`item.meta = Object.assign({}, item.meta,
-    // { color })`), and it works. Item fills and borders instead mutated a nested
-    // CanvasItemStyle in place, and that write never reached the shape on the
-    // canvas. So every item kind now uses the text item's shape: a fresh style
-    // object, reassigned, so the item's `style` property itself changes and every
-    // consumer (the delegate's fill, the panel's swatch, the thumbnails) is told
-    // to re-read it instead of relying on a notification from inside the style.
-    // `target` is "itemBackground" or "border", as the picker names them.
     function applyItemColor(item, target, hex) {
         if (!item || !item.style)
             return false
@@ -562,50 +426,16 @@ Rectangle {
     // dies with the item it belongs to.
     Component { id: canvasItemStylePrototype; CanvasItemStyle {} }
 
-    // Which canvas object(s) are currently selected — drives which ones show
-    // the border+handle "selected" chrome (see DraggableCanvasText). Empty
-    // means nothing selected (clicking empty canvas clears it, and a slide
-    // starts with none). A plain or Ctrl+click replaces the selection with
-    // just that one; Shift+click toggles it in/out of a multi-selection.
     property var selectedCanvasObjects: []
 
     // Canvas items live in slideStore (per-slide, archived on slide switch)
     // — no screen-level array anymore.
 
-    // Canvas zoom — a plain visual scale (see mCanvas's transformOrigin/
-    // scale below), clamped to a modest range since the canvas's own
-    // clip:true still clips to its unscaled bounds (zooming in crops the
-    // outer edges rather than revealing more canvas via panning — panning
-    // is future work, not built here).
     property real canvasZoom: 1
 
     // ---- Keyboard shortcuts --------------------------------------------
-    // The chords are NOT here any more: every Shortcut below names an ACTION
-    // (undo / redo / copy / …) and the sequence lives in the app's one map —
-    // qml/settings/Hotkeys.qml — beside the window's own menu accelerators, so
-    // a future rebind screen has one list to edit instead of one per screen.
-    // Delete/Backspace/Escape/arrow-nudge stay on mCanvas's own
-    // Keys.onPressed (below) rather than moving here — those are near-
-    // universal editing conventions, not the app-specific actions this was
-    // asked for (undo/redo/copy/paste/add-content).
 
     // ---- Undo/redo -------------------------------------------------------
-    // A reusable UndoHistory (see UndoHistory.qml) — now itself backed by
-    // the real engine's UndoRedoManager rather than a local stack, so this
-    // screen just teaches it how to capture/apply the whole per-slide
-    // canvas state ({ items, background }); the ordering/depth-cap
-    // bookkeeping lives in bps::project::UndoRedoManager. Each surface that
-    // wants undo instantiates its own UndoHistory (see its header comment
-    // for the full contract — push(label)/push(label,false)+commit()/
-    // push()).
-    //
-    // One entry per whole gesture, never per intermediate value: drags
-    // collapse via dragSnapshotTaken (below), a typing session via
-    // beginTextEdit (below), slider gestures via SizeStyleCard/
-    // TextItemPanel's undoHook (wired straight to canvasHistory.push below
-    // — its own no-arg settle-debounce handles those). Slide-level
-    // operations (add/remove/duplicate slide) are NOT yet covered — see
-    // KNOWN_ISSUES.md if that scope grows later.
     UndoHistory {
         id: canvasHistory
         capture: function () {
@@ -615,75 +445,16 @@ Rectangle {
         apply: function (snap) {
             slideStore.restoreItems(snap.items)
             slideStore.current.background = snap.background
-            // A snapshot taken before the filter set existed (or before a filter
-            // was dialled) has no filters key; the identity set is what such a
-            // slide actually had.
             slideStore.current.filters = snap.filters !== undefined ? snap.filters
                                                                    : slideStore.identityFilters()
         }
-        // Restored items are fresh objects; keys survive restore, object
-        // references don't — the selection is transient state referencing
-        // exactly those, so it resets after every undo/redo.
         afterRestore: function () { root.selectedCanvasObjects = [] }
     }
 
-    // undoHook target for SizeStyleCard.qml/TextItemPanel.qml — a plain
-    // reference to canvasHistory.push, called with no arguments, which is
-    // exactly UndoHistory's own settle-debounced mode (right for a
-    // component that only fires "drag started" with no matching "drag
-    // finished" signal back to this screen).
     function pushUndoSnapshot() {
         canvasHistory.push()
     }
 
-    // Undo/redo also pull keyboard focus back to the canvas: a chord
-    // pressed right after clicking a panel control otherwise fires while
-    // the panel's TextInput still owns focus, which native-edit behavior
-    // would route into that field instead of the canvas history.
-    //
-    // One exception: when the slide LIST owns the keyboard, the focus stays
-    // there (see the guard at the end of each function). Undo is reachable
-    // from that focus too (an undo pressed right after switching slides is
-    // the common case), and yanking the keyboard to the canvas would make
-    // the list's own Ctrl+D / Del stop working the moment an undo ran.
-    //
-    // Safe to fire mid-text-edit too (the Shortcuts below explicitly stay
-    // enabled while root.anyTextEditing): the typing session's own push is
-    // COMMITTED first, so the step Ctrl+Z lands on is the edit in progress —
-    // the whole reason those keys stay enabled while typing. It used to be
-    // ABANDONED instead (UndoHistory.undo's abandonPending), which dropped
-    // the pre-typing snapshot and made Ctrl+Z skip back over the edit to some
-    // older command: the text stayed exactly as typed and only the edit mode
-    // closed, which reads as "Ctrl+Z just escapes the item".
-    //
-    // Also resets the session bookkeeping explicitly: the apply() destroys and
-    // recreates the delegates, and a TextEdit destroyed mid-edit never emits
-    // onEditingChanged — so textUndoKey/anyTextEditing would stay stale
-    // (anyTextEditing stuck true; worse, a beginTextEdit on the SAME restored
-    // key early-returns and its typing would never be undoable). The snapshot
-    // was already committed above, so the dying delegate's endTextEdit ->
-    // commit finds nothing pending and cannot push junk on top of the undo.
-    // Shared by undo()/redo(): if the item being typed into was STILL in edit
-    // mode when the key fired, it should still BE in edit mode after — not
-    // escape to the canvas (user call: "it should still remain in the mode
-    // it was when [you] did ctrl+z... if it was in edit mode it should
-    // remain there"). `apply()` destroys and recreates every delegate (see
-    // the undo()/redo() header comment), so the OLD TextEdit is already gone
-    // by the time this runs; it reopens editing on the FRESH delegate for
-    // the same key instead, same as a double-click would, once the Repeater
-    // has rebuilt (Qt.callLater — the delegates do not exist yet in this
-    // same tick). Silently does nothing if that item no longer exists after
-    // the jump (deleted earlier in the history, say).
-    //
-    // ALSO re-selects it: canvasHistory's afterRestore unconditionally clears
-    // root.selectedCanvasObjects on every undo/redo (the restored items are
-    // fresh objects — see its own comment), which otherwise left the item
-    // editing but visibly deselected (no outline/handles) — a real but
-    // separate bug from the one this function was written to fix (user
-    // report: "it remains in edit mode but it still deselects the item").
-    // Set synchronously, not inside the callLater below: selection doesn't
-    // depend on the delegates existing yet, and the outline should reappear
-    // in the SAME frame the canvas redraws, not one tick later.
     function reopenEditAfterHistoryJump(wasEditing, editingKey) {
         if (!wasEditing || editingKey === "")
             return
@@ -697,11 +468,6 @@ Rectangle {
         })
     }
     function undo() {
-        // commitNow(), not commit(): commit() defers the push to the next tick,
-        // which would let the undo below pop the step BEFORE this one. The
-        // undoRedoRequested path is deferred with Qt.callLater already (see
-        // the delegate), so nothing here runs inside a dying TextEdit's key
-        // dispatch.
         canvasHistory.commitNow()
         const wasEditing = root.anyTextEditing
         const editingKey = wasEditing && root.selectedCanvasObjects.length === 1 ? root.selectedCanvasObjects[0] : ""
@@ -714,10 +480,6 @@ Rectangle {
             mCanvas.forceActiveFocus()
     }
     function redo() {
-        // Same commit-first rule as undo() (the typed step must not be lost),
-        // and a fresh step rightly clears the redo branch — so a redo pressed
-        // from inside an open edit has nothing left to redo, exactly as a
-        // redo after any other new edit behaves.
         canvasHistory.commitNow()
         const wasEditing = root.anyTextEditing
         const editingKey = wasEditing && root.selectedCanvasObjects.length === 1 ? root.selectedCanvasObjects[0] : ""
@@ -730,33 +492,12 @@ Rectangle {
             mCanvas.forceActiveFocus()
     }
 
-    // Set on the first applyCanvasMove/applyCanvasResize call of a drag
-    // gesture, cleared in endCanvasDrag() — collapses a whole drag into one
-    // undo step instead of one per mouse-move event.
     property bool dragSnapshotTaken: false
 
-    // True while the open slide's filter set is anything but its identity.
-    // The canvas's filter layer reads it (see slideFilterHost in the canvas
-    // children below): an unfiltered slide never pays for a ShaderEffect or an
-    // extra framebuffer, exactly as the engine's ApplyFilters returns before
-    // touching a pixel for the same slide on air.
     readonly property bool canvasFiltersActive:
         !slideStore.filtersAreIdentity(slideStore.current.filters)
 
-    // Brackets one typing session (double-click edit → commit) as a single
-    // undo step. Text edits previously weren't undoable at all: every other
-    // edit path pushes BEFORE mutating, but keystrokes arrive after the
-    // first change has already happened — so the push fires on the first
-    // edited() keystroke of a session, and only once per session (the key
-    // resets on commit/Escape via endTextEdit). Waiting one keystroke means
-    // the pushed snapshot still holds the pre-typing text, because the
-    // model write happens right after the push in the same handler.
     property string textUndoKey: ""
-    // True the instant ANY item's edit mode actually starts (set by the
-    // Repeater delegate's onEditingChanged below) — unlike textUndoKey,
-    // which stays "" until the session's first keystroke. Undo/redo need
-    // THIS one: pressing Ctrl+Z right after double-clicking into edit mode,
-    // before typing anything, has to work too.
     property bool anyTextEditing: false
     function beginTextEdit(key) {
         if (root.textUndoKey === key)
@@ -769,10 +510,6 @@ Rectangle {
         canvasHistory.commit()
     }
 
-    // Flip one boolean style flag (bold / underline) on the selected TEXT item.
-    // One undo step per press — the discrete-edit shape TextItemPanel's own
-    // setMetaDiscrete uses for the same toggles, and a fresh `meta` assignment
-    // because a real QtObject property only notifies on reassignment.
     function toggleTextStyle(key) {
         const item = root.primarySelectedItem
         if (!item || item.kind !== "text")
@@ -815,18 +552,10 @@ Rectangle {
             newKeys.push(item.key)
         })
         root.selectedCanvasObjects = newKeys
-        // UI-originated notification — the STANDARD way: through EventBus's
-        // notify() (stamps level/title/message/origin=ui and namespaces the
-        // topic under ui.*), so NotificationCenter toasts it and any other
-        // subscriber sees it exactly like engine traffic. Screens never call
-        // NotificationCenter directly and never hand-roll payload maps.
         EventBus.notify(qsTr("%1 item(s) pasted").arg(newKeys.length),
                         "success", "Edit", "ui.edit.itemsPasted")
     }
 
-    // Duplicate is its own function, not the shortcut's body: the canvas menu
-    // (Duplicate row) and Ctrl+D must be one action, or the two drift apart the
-    // first time either changes.
     function duplicateSelectedCanvasObjects() {
         const src = root.canvasObjectByKey(root.selectedCanvasObjects[0])
         if (src)
@@ -841,10 +570,6 @@ Rectangle {
     }
 
     // ---- Stacking, from the canvas menu's Rearrange submenu -----------------
-    // The item array IS the paint order (the canvas Repeater draws in model
-    // order, and the engine receives a slide's blocks in it), so "move to
-    // front" is "put this entry last" — one rewrite, one undo step, one flush.
-    // `where`: "front" | "forward" | "backward" | "back".
     function restackCanvasItem(key, where) {
         const items = slideStore.current.items
         let from = -1
@@ -873,14 +598,6 @@ Rectangle {
     }
 
     // ---- Per-item triggers and timers (the menu's Item actions submenu) -----
-    // Stored on the item's own meta so they travel with the item into the show
-    // file exactly as its text, geometry and style do:
-    //   clickReveal                               bool
-    //   actions: { displayDuration, showTimer, hideTimer }   seconds, 0 = off
-    // The live presentation pass does not read them yet (slide-level timers
-    // do — see PresentationRuntime's auto-advance); they are recorded here so
-    // the values an operator sets are real, saved data rather than a menu that
-    // forgets them.
     function setItemAction(key, field, value) {
         const item = root.canvasObjectByKey(key)
         if (!item)
@@ -909,13 +626,6 @@ Rectangle {
     }
 
     // ---- The canvas right-click menu -------------------------------------
-    // FreeShow's edit-canvas context menu, narrowed to the rows this app has
-    // (its contextMenus.ts "edit_box" list): Item actions, Rearrange,
-    // Duplicate, Delete, Paste, Select all. SlideContextMenu.qml draws it — the
-    // same panel shape, section colours and submenu mechanics FreeShow uses.
-    // `canvasMenuKey` is the item the menu was opened ON: a right-click selects
-    // whatever it landed on first, so the menu's rows always act on what the
-    // operator is pointing at rather than on a stale selection.
     property string canvasMenuKey: ""
 
     function canvasMenuModel() {
@@ -1024,11 +734,6 @@ Rectangle {
             slideModel.selectSlide(index)
             break
         case "group": {
-            // The slide's own "group" (Settings · Appearance & Actions'
-            // registry — verse, chorus...): a plain string, same field
-            // ShowCenter.qml's groupColor() already reads to colour the
-            // grid. The picker lists the registry's own names (so the colour
-            // actually matches one of them) plus "None" to clear it.
             if (eid !== "") {
                 groupPickerMenu.slideId = eid
                 groupPickerMenu.openAt(slideContextMenu.panelRect, 0, 0, root)
@@ -1059,17 +764,6 @@ Rectangle {
         return root.selectedCanvasObjects.indexOf(key) >= 0
     }
     // ---- CLICKING THROUGH A STACK OF ITEMS --------------------------------
-    // A click lands on the TOPMOST item whose box covers the point, and every
-    // kind's box is a rectangle — so a shape that sits BEHIND a text item (a
-    // band under a caption, the commonest design there is) could not be picked
-    // at all: the click took the text item, and the colour picked next went to
-    // the text item as well (reported: "you pick text item instead of the
-    // shape"). Clicking the same point again now steps DOWN to the next item
-    // under the pointer, and comes to rest on the bottom one.
-    //
-    // A RAPID second click is refused: that is the text item's EDIT gesture,
-    // and stealing it for whatever lies behind the text would make
-    // double-click-to-edit depend on the design underneath.
     property string canvasCycleKey: ""
     property point canvasCycleAt: Qt.point(-1, -1)
     property real canvasCycleAtMs: 0
@@ -1092,9 +786,6 @@ Rectangle {
     }
 
     function handleCanvasSelect(key, modifiers, at) {
-        // `at` (canvas coordinates) comes from every tap handler that has one;
-        // it is what makes the click-through below possible. A caller with no
-        // point (the app selecting what it just added) selects as before.
         if (at !== undefined && (modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) === 0) {
             const now = Date.now()
             const samePoint = Math.abs(at.x - root.canvasCycleAt.x) <= root.canvasCycleSlop
@@ -1105,9 +796,6 @@ Rectangle {
                 const from = stack.indexOf(root.canvasCycleKey)
                 if (from >= 0) {
                     root.canvasCycleAtMs = now
-                    // The bottom item is the end of the stack: further clicks
-                    // keep it rather than wrapping to the top, so the gesture
-                    // has a stable resting place.
                     if (from + 1 < stack.length) {
                         const next = stack[from + 1]
                         root.canvasCycleKey = next
@@ -1134,16 +822,9 @@ Rectangle {
             // Plain click and Ctrl+click both just select this one object.
             root.selectedCanvasObjects = [key]
         }
-        // So arrow-key nudge / Delete (see mCanvas's Keys.onPressed below)
-        // work immediately after a select click, without the user having
-        // to click empty canvas first to move focus off whatever was
-        // mid-edit.
         mCanvas.forceActiveFocus()
     }
 
-    // Every item's x/y/width/height *are* the data a Repeater delegate binds
-    // to, so writes through this function (from applyCanvasMove/
-    // applyCanvasResize below) propagate visually automatically.
     function canvasObjectByKey(key) {
         const items = slideStore.current.items
         for (let i = 0; i < items.length; ++i) {
@@ -1153,10 +834,6 @@ Rectangle {
         return null
     }
 
-    // Drives the top-of-panel "Background" row further down: it edits
-    // whichever item is primary-selected instead of the slide's own
-    // background when something is selected, rather than Size & Style
-    // duplicating the same swatch+chip control a second time.
     readonly property CanvasItemStyle primarySelectedItemStyle: root.selectedCanvasObjects.length > 0
         ? (root.canvasObjectByKey(root.selectedCanvasObjects[0])?.style ?? null)
         : null
@@ -1167,32 +844,15 @@ Rectangle {
         ? root.canvasObjectByKey(root.selectedCanvasObjects[0])
         : null
 
-    // The MEDIA tab edits a picture / video / audio item, so it has something to
-    // say only while one of those is the primary selection — the same rule the
-    // TEXT tab applies to text items.
-    // A WINDOW (a bus item) IS ONE OF THESE, by request: it is a picture in a
-    // box, so it reuses MEDIA rather than getting a tab of its own. The file row
-    // becomes the bus it names (with Change opening the bus picker — see
-    // MediaItemPanel's isWindow), and Fit / Blend / Flip / Cropping / Filters
-    // are the same values the canvas and the engine already apply to the window.
     readonly property bool primaryIsMedia: root.primarySelectedItem !== null
         && ["image", "video", "audio", "bus"].includes(root.primarySelectedItem.kind)
     readonly property var primaryMediaItem: root.primaryIsMedia ? root.primarySelectedItem : null
 
-    // The TEXT tab edits a text item, so — like MEDIA — it is only OFFERED
-    // while one is selected. With nothing selected the strip is just ITEMS and
-    // SLIDE (the two that always have something to show: the item sections and
-    // the slide itself), and selecting a text or media item adds its facet to
-    // the strip. One rule for both tabs and for the panel bodies that read it.
     readonly property bool primaryIsText: root.primarySelectedItem !== null
         && root.primarySelectedItem.kind === "text"
     readonly property bool textTabAvailable: root.primaryIsText
     readonly property bool mediaTabAvailable: root.primaryMediaItem !== null
 
-
-    // The font dropdowns (textFontMenu, textFontFamilyMenu, textAutoSizeMenu) are opened FOR this item, so they must not
-    // outlive it: deleting the item, clicking empty canvas or switching slides all drop this to null, and the menus close
-    // with it instead of floating over the panel with nothing left to apply to.
     onPrimarySelectedItemChanged: {
         if (!root.primarySelectedItem) {
             textFontMenu.visible = false
@@ -1201,21 +861,6 @@ Rectangle {
             textCaseMenu.visible = false
             borderStyleMenu.visible = false
         }
-        // The selected item decides which facet the panel OPENS on: TEXT for a
-        // text item, MEDIA for a picture / video / audio one AND for a window
-        // (a bus item reuses MEDIA), ITEMS when the selection is gone. Any other
-        // kind (shape, clock, timer, add-on blocks) owns no tab of its own, so
-        // the panel stays where the operator put it — unless it was on TEXT or
-        // MEDIA, which that selection has just taken off the strip; leaving it
-        // there would show a hidden tab's body, i.e. an empty panel.
-        // Truthiness, not `=== null`: canvasObjectByKey can hand back
-        // undefined for a key whose item has gone, and that is "nothing to
-        // show" just as much as an empty selection.
-        // A tab the operator chose ON PURPOSE is not overridden: once they have left the
-        // facets for ITEMS or SLIDE the panel stays there, through any later selection and
-        // through a cleared one, until they click TEXT or MEDIA themselves. The panel only
-        // falls back to ITEMS when its body would be empty (TEXT with no text item, MEDIA
-        // with no media item). Never pinned, the next selection opens on its own facet.
         if (!root.primarySelectedItem) {
             if (root.rightPanelTab === "text" || root.rightPanelTab === "media" || !root.rightTabPinned)
                 root.rightPanelTab = "items"
@@ -1229,29 +874,12 @@ Rectangle {
         }
     }
 
-    // Background/Border only have a visible effect on a "text", "shape",
-    // "clock" or "timer" item — camera's live-preview Shape and the generic
-    // media/audio placeholder still fill their box edge-to-edge with their
-    // own opaque visual, completely covering whatever the style background/
-    // border would draw underneath, so those stay greyed out. clock/timer
-    // (like shape) draw their own background Rectangle straight from the
-    // item's style now (see clockContent/timerContent below), so these
-    // controls are genuinely live for them, not just for text/shape.
     readonly property bool primarySelectedSupportsFill: root.primarySelectedItemStyle === null
         || ["text", "shape", "clock", "timer", "vignette", "corners"].includes(root.primarySelectedItemStyle.kind)
 
     // ---- Alignment-guide snapping helpers ----
-    // Pure geometry math (modeled after FreeShow's src/frontend/components/
-    // system/textbox.ts snapBox/checkMatch), kept as plain functions here
-    // rather than a separate .js module: this file is their only consumer,
-    // and a standalone .js sits outside this project's qml/*.qml glob in
-    // CMakeLists.txt, so it silently isn't bundled unless the build is
-    // taught about a second file type for one file's sake — not worth it.
     readonly property int snapDistance: 8
 
-    // canvasWidth/Height plus every "other" object's {x,y,width,height}
-    // become candidate lines: canvas edges + center, and each other
-    // object's edges + center, on each axis.
     function snapCandidates(canvasWidth, canvasHeight, others) {
         const xs = [0, canvasWidth / 2, canvasWidth]
         const ys = [0, canvasHeight / 2, canvasHeight]
@@ -1275,10 +903,6 @@ Rectangle {
         return best
     }
 
-    // Snap a translate (move): checks the box's left/center/right against x
-    // candidates and top/center/bottom against y candidates, snapping
-    // whichever edge/center is closest (center checked first since it's
-    // usually the more meaningful alignment).
     function snapMove(x, y, width, height, canvasWidth, canvasHeight, others) {
         const cand = root.snapCandidates(canvasWidth, canvasHeight, others)
         const guides = []
@@ -1306,10 +930,6 @@ Rectangle {
         return { x: snappedX, y: snappedY, guides: guides }
     }
 
-    // Snap a resize: only the edge(s) actually being dragged (per the
-    // left/right/top/bottom flags) are candidates for snapping, and only
-    // that edge moves — the opposite edge stays anchored, same as the
-    // underlying resize math already does.
     function snapResize(x, y, width, height, canvasWidth, canvasHeight, others, activeLeft, activeRight, activeTop, activeBottom) {
         const cand = root.snapCandidates(canvasWidth, canvasHeight, others)
         const guides = []
@@ -1349,10 +969,6 @@ Rectangle {
         return { x: rx, y: ry, width: rw, height: rh, guides: guides }
     }
 
-    // Group-drag + snap state for a body-drag in progress (see
-    // applyCanvasMove, wired to every EditableCanvasLabel's moveRequested).
-    // Keyed so a second object's drag starting mid-gesture (shouldn't
-    // happen, but defensively) resets cleanly instead of mixing deltas.
     property var canvasMoveDrag: null
 
     function applyCanvasMove(key, dx, dy, snapDisabled) {
@@ -1407,9 +1023,6 @@ Rectangle {
             return
         }
 
-        // One snapshot per whole resize gesture, not per mouse-move event
-        // (applyCanvasResize fires continuously while dragging a handle) —
-        // see dragSnapshotTaken's header comment and endCanvasDrag below.
         if (!root.dragSnapshotTaken) {
             canvasHistory.push(qsTr("Resize"), false)
             root.dragSnapshotTaken = true
@@ -1446,9 +1059,6 @@ Rectangle {
         })
     }
 
-    // Delete actually removes an item from the canvas entirely — nothing is
-    // a permanent slot anymore. The single delete path (the Delete key, the
-    // panel's own button) funnels through here.
     function removeCanvasItems(keys) {
         canvasHistory.push(qsTr("Delete"))
         showSession.removeItems(keys)   // the engine deletes them first
@@ -1461,18 +1071,6 @@ Rectangle {
         root.selectedCanvasObjects = []
     }
 
-    // One step of the SLIDE tab's Arrange-items arrows (SlidePanel.qml): move an
-    // item one place through the slide's item array, which IS the paint order —
-    // the canvas Repeater draws its delegates in model order — and the order the
-    // engine receives that slide's blocks in (ShowSession's slidePatch reads
-    // SlideCanvasStore.blocksOf), so canvas, output and saved show move together.
-    // `direction` +1 = forward (towards the viewer), -1 = backward.
-    //
-    // The array is REASSIGNED, not mutated: the model is a plain var array, and
-    // only a fresh assignment re-evaluates the list bindings (the same reason
-    // addItem concatenates instead of pushing). The undo snapshot is taken
-    // before the rewrite, so one arrow is one undo step and undo restores the
-    // previous stacking order.
     function moveCanvasItem(key, direction) {
         const items = slideStore.current.items
         let from = -1
@@ -1491,16 +1089,6 @@ Rectangle {
     }
 
     // ---- The slide's filter set (SLIDE tab · Filters) ----------------------
-    // One row of SlidePanel's Filters card moved. `value` is already in the
-    // ENGINE's units (the row divided its percentage readout back out), so this
-    // goes straight into the slide's set and out through the normal flush —
-    // the engine applies it to the composed frame for this slide alone (see
-    // Effects.cpp's ApplyFilters), and the canvas previews the very same map
-    // through SlideFilterEffect, which is what makes the two pictures one.
-    //
-    // The undo step is NOT pushed here: SlidePanel brackets a whole slider drag
-    // with undoHook (its rows call it on dragStarted), the same contract
-    // SizeStyleCard and TextItemPanel use, so a drag is one undo entry.
     function setSlideFilter(key, value) {
         if (!root.hasActiveSlide)
             return
@@ -1508,9 +1096,6 @@ Rectangle {
         showSession.scheduleFlush()
     }
 
-    // The Filters card's Reset chip: every value back to identity, as one undo
-    // step (the snapshot is pushed BEFORE the write, so undo restores the
-    // filtered look).
     function resetSlideFilters() {
         canvasHistory.push(qsTr("Reset filters"))
         slideStore.current.filters = slideStore.identityFilters()
@@ -1518,27 +1103,10 @@ Rectangle {
         mCanvas.forceActiveFocus()
     }
 
-    // Entry point for the "+" Add Content menu below — creates a new item
-    // of the clicked kind, drops it onto the canvas with a small cascading
-    // offset per existing item (so repeated adds don't stack exactly on top
-    // of each other), and selects it.
-    // Creates a new item of the given kind ("+" Add Content menu) — or, when
-    // `copyFrom` is given (the context menu's Duplicate), clones an existing
-    // item's geometry/text/style and lands the copy one tile down-right.
-    // The item is created and owned by the slide store so it archives with
-    // its slide. Returns the new CanvasItem.
     function addCanvasItem(kind, copyFrom, insertAt) {
-        // Deferred: several callers (CameraSourceModal.onApplied etc.) set
-        // item.text/item.meta right after this returns, in the same tick —
-        // the deferred commit fires after those too, so the undo step
-        // captures the fully-configured item, not a half-built one.
         canvasHistory.push(copyFrom ? qsTr("Duplicate item") : qsTr("Add item"))
         const n = slideStore.current.items.length
         const isCamera = kind === "camera"
-        // The ENGINE creates the item (or duplicates the source) and issues its id;
-        // the item — text, geometry, style, meta and all — comes back as a live
-        // CanvasItem already on the slide. showSession.addItem returns null if the
-        // engine refused (no show / no slide), and nothing is added then.
         showSession.ensureDocument()
         const item = showSession.addItem(
             kind,
@@ -1554,15 +1122,6 @@ Rectangle {
         return item
     }
 
-    // A plain "+Add Text" item (not a metadata-bound field — see
-    // addMetadataItem, which already sets a full style meta including this)
-    // starts with the show/template content default font, not whatever
-    // FontService.resolve("") falls back to for an empty meta — the HOST's
-    // own UI font, the exact same one Theme.fontFamily binds chrome to
-    // (user call: "make the app[']s shows or default template['s font] be
-    // Cambria, Segoe UI is for the app['s] UI"). Two call sites need this
-    // (the + menu's popover and the addText shortcut), so it is one
-    // function, not two copies of the same Object.assign.
     function addTextItem(insertAt) {
         const item = root.addCanvasItem("text", null, insertAt)
         if (item)
@@ -1585,11 +1144,6 @@ Rectangle {
         return item
     }
 
-    // A media FILE placed on the slide — what the Media chip's three kinds
-    // make once a file is picked (see the picker at the foot of this file).
-    // The item's KIND is the file's kind ("image" | "video" | "audio"), and
-    // the path lives in its meta `src`: that pair is all the engine needs to
-    // paint it, so a show saved today still opens if the picker changes.
     function addMediaItem(kind, file) {
         if (!file || !file.path)
             return null
@@ -1605,24 +1159,12 @@ Rectangle {
         return item
     }
 
-    // MEDIA tab's Change: while this names an item, the media picker REPLACES
-    // that item's file instead of adding a new item. "" is the ordinary
-    // adding mode (the "+" ring's Media chip), so one picker serves both and
-    // there is no second dialog to keep in step.
     property string mediaReplaceKey: ""
-    // The replace key belongs to ONE open of the picker. However the picker closes (a
-    // pick, Cancel, Esc, a click away), the key goes with it: a key left behind made
-    // the next pick from the "+" ring try to REPLACE an item instead of adding one,
-    // and fail with "That item is no longer on the slide".
     onMediaModalOpenChanged: {
         if (!root.mediaModalOpen)
             root.mediaReplaceKey = ""
     }
 
-    // Swaps the FILE of the media item already on the slide. Its box, position,
-    // style and z-order stay exactly where the user put them — the point of a
-    // Change is "that is the wrong picture", not "add another one". Undoable
-    // like every other edit.
     function replaceItemMedia(key, file) {
         if (!file || !file.path)
             return false
@@ -1639,12 +1181,6 @@ Rectangle {
     }
 
     // ---- MEDIA tab: writing a media item's own values -----------------------
-    // Everything that tab edits lands in the item's `meta.media` bag — the
-    // engine persists a block's meta JSON verbatim, while its ContentStyle has
-    // no room for flip/crop/filter values — except Fit, which stays
-    // CanvasItemStyle.mediaFit (the field the canvas and the ITEMS tab's
-    // Filters card already speak) and is MIRRORED into meta.media.fit so the
-    // engine can read it from the same block too.
     function setMediaMeta(patch) {
         const item = root.primaryMediaItem
         if (!item)
@@ -1653,9 +1189,6 @@ Rectangle {
         item.meta = Object.assign({}, item.meta ? item.meta : {}, { media: media })
     }
 
-    // One Fit choice, applied to EVERY selected media item (the ITEMS tab's
-    // Filters card can target several at once) — style for the canvas, meta for
-    // the engine, written together so the two can never disagree.
     function applyMediaFit(fit) {
         root.selectedCanvasObjects.forEach((key) => {
             const item = root.canvasObjectByKey(key)
@@ -1673,12 +1206,6 @@ Rectangle {
     }
 
     // ---- A WINDOW'S OWN BUS (a canvas item of kind "bus") -------------------
-    // A bus item on a design is a WINDOW: a rectangle showing ONE bus's live
-    // feed. Each window names its own bus, independently of every other window
-    // on the design — that is what lets one design show three cameras in three
-    // boxes, and it is what a template bus's windows are made of. The name lives
-    // in the item's meta (busId), which is the same channel SceneBuilder reads
-    // when it paints the plane, so the canvas and the output cannot disagree.
     readonly property bool primaryIsWindow: root.primarySelectedItem !== null
         && root.primarySelectedItem.kind === "bus"
     // The bus a window names (0 = none).
@@ -1705,11 +1232,6 @@ Rectangle {
         const bus = BusListModel.getBus(row)
         return bus.name !== undefined ? String(bus.name) : qsTr("No bus")
     }
-    // Re-point the window at the bus the picker returned. meta is the ENGINE's
-    // channel (SceneBuilder's bus plane reads meta busId), and the item's own
-    // caption follows the bus's CURRENT name — a canvas that labelled a window
-    // with a bus it no longer shows would be the same class of lie as a stale
-    // preview.
     function assignWindowBus(bus) {
         const item = root.primarySelectedItem
         if (!item || item.kind !== "bus" || !bus)
@@ -1757,9 +1279,6 @@ Rectangle {
         root.setMediaMeta({ filter: ({}) })
     }
 
-    // The MEDIA tab's ✕: the FILE comes off the item. Its box, position, style
-    // and z-order stay — this is "that is the wrong file", and the item itself
-    // is not what the user asked to remove.
     function clearItemFile() {
         const item = root.primaryMediaItem
         if (!item)
@@ -1772,9 +1291,6 @@ Rectangle {
         item.meta = meta
     }
 
-    // The MEDIA tab's Change button: the picker, locked to the selected item's
-    // own kind (a video cannot become an MP3 through this row) and in replace
-    // mode, so the pick lands on the item the operator is looking at.
     function pickReplacementMedia() {
         if (!root.primaryIsMedia)
             return
@@ -1783,20 +1299,12 @@ Rectangle {
         root.mediaModalOpen = true
     }
 
-    // The picture of a placed media file: the engine's own thumbnail cache (the
-    // one the Media library's tiles use), so the canvas and the library show ONE
-    // picture made the same way. Step -1 is the still — a picture's own image,
-    // and for a video the poster frame Media Foundation gives it.
     function mediaPictureUrl(path) {
         if (!path)
             return ""
         return "image://mediathumb/500/-1/" + encodeURIComponent(path)
     }
 
-    // Finds the live Repeater delegate for a given item key — items are
-    // dynamically created (no fixed/named id the way the old title/verse/
-    // ref/date objects had), so reaching one from outside the Repeater means
-    // searching its instantiated delegates by their modelData.key.
     function delegateForKey(key) {
         for (let i = 0; i < canvasItemsRepeater.count; ++i) {
             const d = canvasItemsRepeater.itemAt(i)
@@ -1808,10 +1316,6 @@ Rectangle {
 
     // Add-content chip + its popover menu (bottom of the canvas).
     property bool addMenuOpen: false
-    // The Media chip's own step: while true the ring shows a picture / video /
-    // audio choice instead of the usual kinds (see shownContentTypes). It is
-    // not a second menu — same ring, one step in — so nothing can be left
-    // floating over the canvas when the ring closes.
     property bool mediaMenuOpen: false
     // Which media kind the picker is asking for ("image" | "video" | "audio"),
     // and whether it is up. A picked file becomes an item of that kind.
@@ -1821,33 +1325,18 @@ Rectangle {
         if (!root.addMenuOpen)
             root.mediaMenuOpen = false
     }
-    // Opened instead of adding a camera/media/timer/clock/shape item
-    // immediately — see cameraSourceModal/mediaSourceModal/timerSourceModal/
-    // clockSourceModal/shapeSourceModal below and the matching branches in
-    // the chip row's onClicked above.
     property bool timerModalOpen: false
     property bool clockModalOpen: false
     property bool shapeModalOpen: false
-    // The Bus chip's picker — the roster is the engine's own buses
-    // (BusListModel), for the same reason the other pickers exist: an item
-    // that names a bus has to be given one before it can land.
     property bool busModalOpen: false
     // The WINDOW's own bus picker (see primaryIsWindow / assignWindowBus below):
     // editing which bus an EXISTING bus item shows, rather than making a new one.
     property bool windowBusModalOpen: false
-    // The Metadata palette (the + menu's Metadata chip). Its fields come from
-    // MetadataFields.qml — the one list of placeholders the engine's filler
-    // knows, so a template being built here can be given any of them. `group`
-    // picks which section is showing (the list is grouped: Scripture / The Table).
     property bool metadataPaletteOpen: false
     // The hovered field's own sentence (MetadataFields), shown at the foot of
     // the palette so the list explains itself.
     property string metadataHint: ""
 
-    // Adds a text item carrying ONE metadata placeholder — what clicking (or
-    // dropping) a field in the palette does. `at` places it under the pointer
-    // when the field was DRAGGED onto the canvas; without it the item lands
-    // where every other added item does.
     function addMetadataItem(token, at) {
         if (!token)
             return null
@@ -1856,28 +1345,7 @@ Rectangle {
         if (!item)
             return null
         item.text = token
-        // ONE SIZE for both halves below: the meta's `fontSize` and the box
-        // measured from it have to be the same number, or the fit solver starts
-        // out needing to squeeze what the box was sized for.
         const fontSize = 40
-        // BUILT LIKE A REGISTERED LAYOUT BLOCK, not like a bare text box.
-        // DesignCatalogs' Text() gives every shipped block two things this
-        // insert used to leave out:
-        //
-        //   * its BIND — the engine slot it feeds. The scene builder binds a
-        //     design/style template to a slide through that slot
-        //     (BindTemplateBlocks), so without it the engine held an unbound
-        //     placeholder block, could not resolve it, and the outputs drew an
-        //     EMPTY box while the panel showed the field. The registry names the
-        //     slot per field (MetadataFields' `bind`), so the insert asks it
-        //     rather than parsing the token. A field that is not a slot (the
-        //     number series, the code, the year…) stays unbound on purpose: its
-        //     value comes from the fill, which the engine cannot re-derive from
-        //     a slide on its own.
-        //   * the FULL STYLE META — the same key set Text() writes (color,
-        //     fontFamily, fontSize, bold, italic, align, autoSize, textCase,
-        //     verticalAlign); a new item arrives with an EMPTY meta, and every
-        //     surface then fell back to its own idea of the defaults.
         item.bind = String(field && field.bind ? field.bind : "")
         item.meta = Object.assign({}, item.meta, {
             color: "#ffffff",
@@ -1890,15 +1358,6 @@ Rectangle {
             textCase: "none",
             verticalAlign: "center"
         })
-        // AND SIZED TO ITS TOKEN. This canvas sizes the FONT to the box —
-        // EditableCanvasLabel's fit solver is explicit that "the BOX is always
-        // the master … the FONT adapts, never the other way around" — so a field
-        // dropped into the default 220x44 box arrived squeezed (a long token
-        // like {table_code_paragraphs} worst of all). Measure the box from the
-        // token with the same rough estimate the engine's own BoxFill/Capacity()
-        // uses (0.5 x fontSize per character, 1.4 x fontSize per line); with
-        // shrinkToFit pinned above, the text keeps to whatever box the operator
-        // then drags it to.
         const wantW = Math.round(String(token).length * fontSize * 0.5) + 24
         const wantH = Math.round(fontSize * 1.4)
         item.width = Math.min(wantW, Math.max(160, mCanvas.width - 80))
@@ -1914,51 +1373,21 @@ Rectangle {
         return item
     }
     readonly property var baseContentTypes: [
-        // `icon` is an IconGlyph name (qml/components/IconGlyph.qml — Lucide
-        // path data), not a Text glyph: the old "⏱"/"◷"/"◎" unicode
-        // strings had no glyph coverage in Inter and rendered as missing-
-        // glyph tofu boxes on Windows. Kind is the fallback for "text" —
-        // plain letters need no icon.
         { kind: "text",   icon: "text",   label: "Text" },
-        // The bus a slide carries. Camera / Media / Audio are gone from this
-        // ring by request — a service puts a BUS on screen, not a device
-        // (Settings · Audio & Video owns the buses and what is routed into
-        // them). The chip opens BusSourceModal below to PICK an existing bus
-        // (it never creates one); the engine receives a block of kind "bus"
-        // carrying that bus's stable id.
         { kind: "bus",    icon: "activity", label: "Bus" },
-        // A media FILE placed on the slide. Not one kind but three, and the
-        // chip opens them rather than adding anything (see mediaKinds below):
-        // a picture, a video and an audio file are one family to the operator
-        // and three different things to the engine, so the choice is made
-        // before the item lands. Each lands as an item of its own kind
-        // ("image" | "video" | "audio") carrying the file in its meta `src`.
         { kind: "media",  icon: "media",  label: "Media" },
         { kind: "shape",  icon: "shape",  label: "Shape" },        { kind: "timer",  icon: "timer",  label: "Timer" },
         { kind: "clock",  icon: "clock",  label: "Clock" },
-        // Not an item kind: this chip opens the METADATA palette (MetadataFields.qml)
-        // instead of adding an item, because a metadata field is a text item whose
-        // text is a placeholder — the operator picks the field, the item is made
-        // for them. See the chip handler below and addMetadataItem().
         { kind: "metadata", icon: "textLines", label: "Metadata" }
     ]
-    // The three things Media holds, in the order the submenu offers them — a
-    // picture first because that is what a service actually puts up, then the
-    // moving and sounding files.
     readonly property var mediaKinds: [
         { kind: "image", icon: "image",  label: "Picture" },
         { kind: "video", icon: "play",   label: "Video" },
         { kind: "audio", icon: "music",  label: "Audio" }
     ]
-    // What the ring shows right now: the usual roster, or — once Media is
-    // picked — its three kinds plus a way back. `mediaBack` is not an item
-    // kind; the chip handler below only walks the ring back.
     readonly property var shownContentTypes: root.mediaMenuOpen
         ? root.mediaKinds.concat([{ kind: "mediaBack", icon: "arrowLeft", label: "Back" }])
         : root.contentTypes
-    // What a placed ITEM of a given kind is called on the canvas and in the
-    // generic card (the Add ring's own labels are per-CHIP, and "media" is a
-    // chip that makes no item).
     readonly property var itemKindLook: ({
         image: { icon: "image", label: "Picture" },
         video: { icon: "play",  label: "Video" },
@@ -1999,16 +1428,6 @@ Rectangle {
         width: root.centerRegionWidth
         color: Theme.surface
 
-        // Both clusters below used to be positioned with hand-tuned x/y magic
-        // numbers (x: 50, x: 156, x: parent.width - 204 …) and four slightly
-        // different y guesses (10/12/14/17) for what was supposed to be the
-        // same vertical center — the "looks hardcoded, doesn't line up"
-        // report. Real anchors.verticalCenter + two Rows (left-anchored,
-        // right-anchored, consistent spacing) replace all of it: every child
-        // centers itself exactly, and the right cluster can never drift
-        // under/over "Fit" or the undo/redo/zoom group the way a fixed
-        // `parent.width - N` would the moment the save label's text changes
-        // length ("Not saved yet" vs "Autosaved ✓" are not the same width).
         Row {
             id: mHdrLeft
             anchors.left: parent.left
@@ -2080,11 +1499,6 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             spacing: 16
 
-            // KERNEL-DRIVEN, not baked text: reflects real project.saved events
-            // relayed from the engine (autosave flag included). Before the first
-            // save it says so honestly instead of claiming an autosave that never
-            // happened. Backfilled from the relay ring for events that fired
-            // before this screen existed.
             Text {
                 id: saveLabelText
                 anchors.verticalCenter: parent.verticalCenter
@@ -2394,13 +1808,6 @@ Rectangle {
         id: mCanvas
         visible: root.editWorkspaceMode === "slide"
 
-        // Dropping a metadata field makes its item where the pointer is — the + 
-        // palette's chips are DragSources, and this is the canvas half of that 
-        // gesture. Scoped to the CANVAS (inside mCanvas) rather than the whole 
-        // screen so a field can only be dropped onto a slide, and only this 
-        // payload is accepted: the library panes' drags carry engine item kinds, 
-        // which this screen has no drop for. drop.x/y arrive in mCanvas 
-        // coordinates — the same space canvas items are laid out in.
         DropArea {
             id: metadataDrop
             anchors.fill: parent
@@ -2415,46 +1822,17 @@ Rectangle {
                     root.addMetadataItem(p.items[0].ref, { x: drop.x, y: drop.y })
             }
         }
-        // Named so a scenario can ask where the edit canvas actually IS on
-        // screen (the resize dots have to stay inside it — see
-        // DraggableCanvasText's roomFor).
         objectName: "selfTestCanvas"
         x: root.slidePanelWidth + (root.centerRegionWidth - width * scale) / 2
         y: (root.height - height * scale) / 2 + 72
         height: StageGrid.h
         width: StageGrid.w
         clip: true
-        // Visual zoom (see root.canvasZoom's header comment) — scales from
-        // the top-left corner so the canvas stays pinned to its own x/y
-        // slot in the surrounding layout instead of drifting from the
-        // default center-origin scale.
         transformOrigin: Item.TopLeft
         scale: root.canvasZoom * root.canvasFitScale
-        // No active slide = nothing to edit: every child MouseArea (empty-
-        // canvas click, drag areas, resize handles) and the keyboard nudge
-        // go inert. The empty-state veil below lives OUTSIDE this item at
-        // root level precisely so its own "Add slide" chip stays clickable.
         enabled: root.hasActiveSlide
-        // Fill only — border is a separate top-layer Rectangle at the end
-        // of this file's children (see mCanvasBorder below), not a border
-        // set directly here: the checkerboard/background/content children
-        // fill edge-to-edge with anchors.fill:parent and draw on top of
-        // this Rectangle's own paint, which would hide a border set here
-        // completely (the exact bug camPanel's border had earlier).
         color: "#141519"
 
-        // Transparency checkerboard (FreeShow's Zoomed.svelte convention) —
-        // sits behind slideBgLayer so it reads through wherever the slide
-        // background is transparent or less than fully opaque, and gets
-        // fully covered once a solid, fully-opaque background is chosen.
-        // The shared Checkerboard component (also on design previews) — one
-        // definition for the whole app, FreeShow's own board: a single 15% tint,
-        // 13px cells, centred phase. This item sits inside the canvas's own
-        // zoom/fit transform, so it is TOLD that scale: the board counter-scales
-        // itself and rasterizes at 13px per real screen pixel, instead of
-        // painting in stage units for the transform to magnify (which smeared
-        // every cell edge into what read as a second, offset grid, and at 300%
-        // zoom cost tens of thousands of fills a repaint).
         Checkerboard {
             id: checkerGrid
             anchors.fill: parent
@@ -2463,12 +1841,6 @@ Rectangle {
             hostScale: root.canvasZoom * root.canvasFitScale
         }
 
-        // Decorative alignment-grid dots — declared here, before
-        // slideBgLayer, so a chosen background actually covers them like it
-        // covers the checkerboard above. They used to sit after slideBgLayer
-        // in the file and so always rendered on top of it regardless of
-        // background choice, showing as faint dot-rows near the top no
-        // matter what color was picked.
         Repeater {
             model: 13 * 8
             delegate: Rectangle {
@@ -2485,11 +1857,6 @@ Rectangle {
         // The slide background layer is declared INSIDE slideFilterHost below (with
         // every canvas item), because it is part of the slide the filter set paints.
 
-        // Arrow-key nudge / Delete / Escape for the selected canvas
-        // object(s) — guarded so it never fires while a label is actually
-        // being typed into (mCanvas only holds focus when nothing is
-        // mid-edit; see handleCanvasSelect and every forceActiveFocus call
-        // that steals focus back to mCanvas on selection/deselection).
         focus: true
         Keys.onPressed: (event) => {
             if (root.selectedCanvasObjects.length === 0)
@@ -2518,37 +1885,13 @@ Rectangle {
             event.accepted = true
         }
 
-        // Clicking empty canvas clears the whole selection. z: -1 keeps it
-        // behind every object's own MouseArea (so clicking an object still
-        // selects/drags it) regardless of declaration order — only clicks
-        // that land on truly empty canvas space reach this one. Each
-        // object's own ring is now enabled only while selected (see
-        // DraggableCanvasText), so there's genuinely empty space around an
-        // unselected object for this to catch.
         MouseArea {
             id: canvasBackgroundArea
             anchors.fill: parent
             z: -1
             hoverEnabled: true
-            // Cursor via the AppCursor override stack (see EditableCanvasLabel's
-            // dragArea for the full why — scale-transformed canvas kills plain
-            // cursorShape). Without this, truly empty canvas space never
-            // pushed anything: AppCursorCatcher's "no active override = leave
-            // the OS cursor alone" default then left whatever was last pushed
-            // (a resize handle's size cursor, a label's I-beam...) stuck
-            // showing over empty canvas indefinitely, since nothing here ever
-            // asserted Arrow to fall back to. z: -1 already keeps this behind
-            // every object's own MouseArea, so it only ever wins hover (and
-            // only ever pushes) over genuinely uncovered space.
             cursorShape: Qt.ArrowCursor
             function syncCursor() {
-                // Position truth only: containsMouse latches in this build
-                // (hover-exit never delivers — KNOWN_ISSUES.md); the pointer-
-                // position stream tracks both directions reliably.
-                // priorityFallback: the plain arrow over empty space is the floor
-                // of the pointer's claims — it must never outrank a real
-                // affordance (the old push order alone let it shadow a handle's
-                // size arrow whenever its Connections happened to run later).
                 if (visible && enabled && AppCursor.hovered(canvasBackgroundArea))
                     AppCursor.push(Qt.ArrowCursor, canvasBackgroundArea, AppCursor.priorityFallback)
                 else
@@ -2566,51 +1909,19 @@ Rectangle {
                 // A press on empty canvas is "done choosing" — the metadata palette
                 // closes with it, the same way the + menu does.
                 root.metadataPaletteOpen = false
-                // Steals focus from any object's TextInput mid-edit, so
-                // clicking empty canvas both exits edit mode and clears
-                // selection instead of leaving the old edit stuck open.
                 mCanvas.forceActiveFocus()
                 root.selectedCanvasObjects = []
             }
         }
 
-        // Alignment-guide lines shown while dragging/resizing a canvas
-        // object (see applyCanvasMove/applyCanvasResize) — z: 1000 (set
-        // inside SnapGuideLines.qml) keeps it above every object regardless
-        // of where it's declared.
         SnapGuideLines {
             id: canvasSnapGuides
         }
 
-        // Every item on the canvas, created via the "+" Add Content menu
-        // (see addCanvasItem) — "text" gets a real editable label, "camera"
-        // gets the full live-preview visual, everything else gets a
-        // bordered placeholder showing its own icon/label from
-        // root.contentTypes (not just its bare kind name) so each kind at
-        // least reads as visually distinct until real per-kind content
-        // (a real media player frame, audio waveform, etc.) gets built out.
         // ---- the slide itself, as ONE filtered picture ----------------------
-        // Everything that IS the slide lives under this host and nothing else does:
-        // the background layer and every placed item. A slide filter set is a
-        // property of the SLIDE (SlidePanel's own Filters card, SlideFilterEffect.qml),
-        // so it may tint, soften or grey out the slide's own pixels - never the
-        // checkerboard it sits on, the alignment dots, the snap guides or a
-        // selection handle, which are the operator's instruments rather than the
-        // picture. The layer is enabled ONLY while a filter differs from its
-        // default, so an ordinary unfiltered canvas pays nothing for this.
         Item {
             id: slideFilterHost
             anchors.fill: parent
-            // NO GPU, STILL A CANVAS. A ShaderEffect needs a shader-capable scene
-            // graph; under Qt Quick's SOFTWARE backend neither the effect nor the
-            // layer around it can be drawn, so enabling it there turned a
-            // filtered slide into a blank canvas — the worst answer on a laptop
-            // without GPU drivers. The layer is therefore enabled only where an
-            // effect can actually run (api Unknown counts as "not decided yet",
-            // and is left alone). Where it cannot, the canvas draws the slide
-            // unfiltered and the Filters card says so; the OUTPUT stays filtered
-            // either way, because the engine's filter pass is plain CPU pixel
-            // work (rendering::ApplyFilters) and never needed a GPU at all.
             readonly property bool canShader: GraphicsInfo.api !== GraphicsInfo.Software
             layer.enabled: root.canvasFiltersActive && slideFilterHost.canShader
             layer.effect: SlideFilterEffect {
@@ -2618,11 +1929,6 @@ Rectangle {
                 stageWidth: StageGrid.w
                 stageHeight: StageGrid.h
             }
-            // The actual slide background — driven by slideStore.current.background (see
-            // the "Background" row's Change button in the right panel). A
-            // dedicated layer, not mCanvas's own color: the checkerboard shows
-            // through when the background is deliberately set to Transparent
-            // (a real swatch in the picker, not just an unset default).
             Rectangle {
                 id: slideBgLayer
                 anchors.fill: parent
@@ -2634,20 +1940,8 @@ Rectangle {
                 delegate: DraggableCanvasText {
                     id: canvasItemObject
                     required property var modelData
-                    // The delegate names itself after the engine's stable item key:
-                    // every handle and dot hangs its own objectName off this (see
-                    // DraggableCanvasText.handleSuffix), so a scenario reaches THIS
-                    // item's adjustment points — not another item's.
                     objectName: "canvasItem_" + modelData.key
-                    // Named so the canvas can reach whichever delegate matches a
-                    // selected item and enter edit mode on it directly, without a
-                    // fixed/named id the way the old title/verse/ref/date objects had.
                     property alias textLabel: itemTextLabel
-                    // The bus this item carries — resolved from the STABLE id in its
-                    // meta (ids survive renames and row moves), then read exactly
-                    // as the picker and the Media › Inputs card read it, so the
-                    // picture and the light on the canvas are the same two answers
-                    // the operator chose from.
                     BusMonitor {
                         id: busMonitor
                         busRow: canvasItemObject.modelData.kind === "bus"
@@ -2663,15 +1957,9 @@ Rectangle {
                     // A circle / line / glyph shape, a vignette and screen corners draw their own body (see below); the box behind
                     // every other kind is the item's fill and border.
                     drawsOwnBody: modelData.kind === "vignette" || modelData.kind === "corners" || modelData.kind === "bus"
-                        // A placed picture (or a video's poster) IS the body: the
-                        // item's fill and border would only frame it with a box the
-                        // file itself should be showing.
                         || modelData.kind === "image" || modelData.kind === "video"
                         || (modelData.kind === "shape" && ["circle", "line", "triangle", "arrow", "star", "hexagon"].includes(modelData.meta.shapeType ?? "rectangle"))
                     selected: root.isCanvasObjectSelected(modelData.key)
-                    // Sourced from whichever content MouseArea is actually
-                    // present for this kind — not a second MouseArea of this
-                    // item's own (see DraggableCanvasText's contentHovered doc).
                     contentHovered: modelData.kind === "text" ? itemTextLabel.hovered
                         : modelData.kind === "camera" ? camDragArea.containsMouse
                         : modelData.kind === "clock" ? clockDragArea.containsMouse
@@ -2689,22 +1977,11 @@ Rectangle {
                         id: itemTextLabel
                         selected: canvasItemObject.selected
                         readonly property var tmeta: canvasItemObject.modelData.meta
-                        // THE LINES CARD'S TWO EXTRAS, drawn by the label's own
-                        // band layer: the per-LINE background colour ("" = none)
-                        // and the typed case that band must apply itself (see
-                        // EditableCanvasLabel's bandText).
                         bandColor: String(itemTextLabel.tmeta.lineBg ?? "")
                         bandCase: itemTextLabel.tmeta.textCase ?? "none"
                         // ...and the band's corner radius (the Lines card's "Line
                         // radius"): 0 keeps Qt's per-fragment rich-text bands.
                         bandRadius: MetadataFields.lineRadius(itemTextLabel.tmeta)
-                        // The font's own line box at the size being drawn — the
-                        // denominator that turns a px "Line spacing" gap into the
-                        // lineHeight MULTIPLIER QML's Text can express (see
-                        // MetadataFields.lineHeightWithGap). One glyph at line
-                        // height 1, measured by a Text (TextMetrics exposes no
-                        // ascent/descent); it reads the label's own font, so it
-                        // tracks weight/italic/size with it.
                         Text {
                             id: labelLineBox
                             visible: false
@@ -2713,14 +1990,6 @@ Rectangle {
                             lineHeight: 1
                             lineHeightMode: Text.ProportionalHeight
                         }
-                        // Auto-size mode, FreeShow's textFit semantics (see
-                        // InspirationOrResources/FreeShow-main/.../autosize.ts):
-                        // the BOX is always the master — the user sizes it
-                        // freely and the FONT adapts, never the other way
-                        // around. "shrinkToFit" renders at the set font size and
-                        // only shrinks on overflow; "growToFit" scales the text
-                        // to fill the box; "none" is fully fixed. Legacy values
-                        // from items saved before the rename map across.
                         readonly property string autoSizeMode: {
                             const v = itemTextLabel.tmeta.autoSize
                             return v === "shrink" ? "shrinkToFit"
@@ -2730,33 +1999,12 @@ Rectangle {
                         }
 
                         // ---- the font size actually rendered: an explicit solver ----
-                        // NOT Qt's Text.Fit: Fit converged differently on the canvas than
-                        // in the scaled-down DesignPreview subtree (lineHeight + wrap at
-                        // large sizes) and the canvas could still spill text below the box.
-                        // A bound placeholder is drawn at the item's OWN type size and
-                        // clipped to its box instead of being squeezed into it (see the
-                        // exception in recomputeFit), so a box too small for that size shows
-                        // the token running past its edge rather than shrinking the type
-                        // behind the operator's back — and it can never overlap a
-                        // neighbouring block either way.
                         clip: MetadataFields.isToken(itemTextLabel.shownText)
 
-                        // recomputeFit() bisects candidate sizes, re-measuring through the
-                        // twin at each step (each write re-lays the twin's text out,
-                        // wrapping included) and stores the largest size whose REAL laid-
-                        // out size fits the box — containment is guaranteed by the last
-                        // measurement, not by a formula's assumption. ~11 probes over
-                        // [3, 400] converge to sub-pixel. It is IMPERATIVE on purpose: a
-                        // binding doing this would write its own dependency (the twin's
-                        // pixelSize) mid-evaluation and QML would kill it as a loop.
                         readonly property real baseFontSize: itemTextLabel.tmeta.fontSize ?? 16
                         property real measureSize: baseFontSize     // the twin's current probe size
                         property real fittedSize: baseFontSize      // the solver's answer
                         property bool solving: false
-                        // Every input the solution depends on, in one binding: text, box
-                        // geometry, and every font knob (direct meta-field writes — the
-                        // sliders — mutate `tmeta` in place without replacing it, so the
-                        // per-field reads here are what make those live).
                         readonly property var fitInputs: [
                             itemTextLabel.shownText, itemTextLabel.width,
                             canvasItemObject.modelData.height, canvasItemObject.modelData.width,
@@ -2776,23 +2024,9 @@ Rectangle {
                             if (solving)
                                 return
                             solving = true
-                            // EVERY mode solves ("none" included): the box is the master and
-                            // the text must always sit inside it — a block renders at its set
-                            // size while that fits and SQUEEZES the moment it doesn't. Nothing
-                            // is ever cut or spilled on any surface.
-                            //
-                            // A bound placeholder is not the final content. Keep its declared
-                            // size for Shrink/None (the token can be much longer than its value),
-                            // but fit the visible token in Grow so the canvas shows that the
-                            // selected mode responds to this box. On air, the resolved value is
-                            // what gets fitted.
                             const pad = canvasItemObject.modelData.style ? (canvasItemObject.modelData.style.padding ?? 0) : 0
                             const bw = canvasItemObject.modelData.width - pad * 2
                             const bh = canvasItemObject.modelData.height - pad * 2
-                            // Keep bound placeholders at their declared size except in Grow:
-                            // the canvas has no resolved value to fit, so fitting the visible
-                            // token is the useful visual indication that this box grows. The
-                            // live output still fits the actual value when it is available.
                             if (bw <= 0 || bh <= 0) {
                                 fittedSize = baseFontSize
                             } else if (MetadataFields.isToken(itemTextLabel.shownText)
@@ -2816,22 +2050,12 @@ Rectangle {
                             solving = false
                         }
 
-                        // Fit solver measurement twin: an invisible Text rendering the same
-                        // content at the current PROBE size (`measureSize` above) so the solver
-                        // can measure whether that size really fits the box (wrapping included)
-                        // before committing it to the visible label. Measuring the visible label
-                        // itself would oscillate (its content size depends on its already-
-                        // applied size). Mirrors the display font's properties explicitly —
-                        // keep in sync with the displayText bindings below.
                         Text {
                             id: fitMeasure
                             visible: false
                             width: itemTextLabel.width
                             text: itemTextLabel.shownText          // what is on screen, list markers included
                             font: MetadataFields.textFont(itemTextLabel.tmeta, itemTextLabel.measureSize)
-                            // Same line STEP the label draws: natural × height plus
-                            // the px gap (see MetadataFields.lineHeightWithGap), so
-                            // the solver measures the spacing the canvas paints.
                             lineHeight: MetadataFields.lineHeightWithGap(itemTextLabel.tmeta, fitLineBox.contentHeight)
                             lineHeightMode: Text.ProportionalHeight
                             wrapMode: MetadataFields.oneLine(itemTextLabel.tmeta) ? Text.NoWrap : Text.WordWrap
@@ -2852,18 +2076,7 @@ Rectangle {
                         color: itemTextLabel.tmeta.color ?? "#f2f4fa"
                         font: MetadataFields.textFont(itemTextLabel.tmeta, fittedSize)
                         fontSizeMode: Text.FixedSize
-                        // Matches DesignPreview's (the thumbnails') own wrap rule:
-                        // the canvas and the preview must lay text out identically
-                        // or their auto-size results diverge. "Text on one line"
-                        // is the one thing that turns wrapping off on both.
                         wrapMode: MetadataFields.oneLine(itemTextLabel.tmeta) ? Text.NoWrap : Text.WordWrap
-                        // "bold" (the B toggle) is an emphasis override on top
-                        // of whatever base weight is picked in the font-family
-                        // row's dropdown — matching common rich-text-editor UX
-                        // where Bold stays a quick on/off regardless of the
-                        // family's own weight.
-                        // The panel's Height row reads the same function — 0/absent is
-                        // the font's own line height, never a hidden 1.2 (see MetadataFields).
                         lineHeight: MetadataFields.lineHeightWithGap(itemTextLabel.tmeta, labelLineBox.contentHeight)
                         horizontalAlignment: {
                             const a = itemTextLabel.tmeta.align ?? "center"
@@ -2881,18 +2094,6 @@ Rectangle {
                         text: canvasItemObject.modelData.text
                         // The list style (Text tab): every line a list item, marked by the ENGINE's formatting - display only.
                         listStyle: itemTextLabel.tmeta.list ?? ""
-                        // (The box is the master in every auto-size mode — see
-                        // autoSizeMode above — so nothing here resizes modelData
-                        // geometry from content size anymore; the box-resizing
-                        // "grow" that used to live here was FreeShow's inverse
-                        // and is gone.)
-                        // Live per-keystroke propagation into the item object
-                        // — the thumbnail binds to this same object, so rows
-                        // update as you type, not only on commit. beginTextEdit
-                        // pushes the undo snapshot on the session's first
-                        // keystroke (see its header comment for why it can't
-                        // push before the fact); endTextEdit closes the session
-                        // so the next edit session gets its own undo step.
                         onEdited: (value) => {
                             root.beginTextEdit(canvasItemObject.modelData.key)
                             canvasItemObject.modelData.text = value
@@ -2901,20 +2102,6 @@ Rectangle {
                             canvasItemObject.modelData.text = value
                             root.endTextEdit()
                         }
-                        // Closes the typing-undo session on every exit path —
-                        // commit (onCommitted above) but also Escape, which
-                        // exits edit mode without committing. Without this, a
-                        // second double-click-and-type into the same item would
-                        // silently merge into the first session's undo step.
-                        //
-                        // Also tracks root.anyTextEditing — separate from
-                        // textUndoKey, which only gets set on the session's
-                        // FIRST KEYSTROKE (see beginTextEdit's own comment) and
-                        // so stays empty the whole time if you enter edit mode
-                        // and press Ctrl+Z before typing anything. This flips
-                        // true the instant edit mode actually starts (the
-                        // double-click), which is what the undo/redo Shortcuts
-                        // below actually need to stay enabled through.
                         onEditingChanged: {
                             root.anyTextEditing = itemTextLabel.editing
                             if (!itemTextLabel.editing)
@@ -2928,28 +2115,10 @@ Rectangle {
                             root.applyCanvasMove(canvasItemObject.modelData.key, dx, dy, snapDisabled)
                         }
                         onDragEnded: root.endCanvasDrag()
-                        // Undo/redo chords pressed while this item's edit is
-                        // open (see EditableCanvasLabel.undoRedoRequested for
-                        // why they arrive here instead of via the Shortcuts
-                        // below: the focused TextEdit accepts their
-                        // ShortcutOverride, so the Shortcuts never activate).
-                        // Deferred with Qt.callLater for the same reason
-                        // UndoHistory.commit is deferred: undo() applies a
-                        // snapshot that DESTROYS AND RECREATES this very
-                        // delegate — running it synchronously here would mutate
-                        // the model mid-key-dispatch from inside the dying
-                        // TextEdit (the documented AudioEffectsPanel hazard).
-                        // By the callLater tick the event is done, undo() has
-                        // abandoned the open session's pending snapshot and
-                        // pulled focus back to mCanvas — a clean exit path.
                         onUndoRedoRequested: (undo) => Qt.callLater(undo ? root.undo
                                                                          : root.redo)
                     }
 
-                    // The full live-preview visual (lifted from the former fixed
-                    // camObject) — same Shape gradient, LIVE badge, cam icons,
-                    // CAM 1 label, timestamp — for every "camera" kind item, not
-                    // just a single hardcoded one.
                     Item {
                         id: camContent
                         visible: canvasItemObject.modelData.kind === "camera"
@@ -2987,10 +2156,6 @@ Rectangle {
                             font.family: Theme.fontFamily
                             font.pixelSize: 9
                             font.weight: Font.Medium
-                            // The source picked in cameraSourceModal (see
-                            // addCanvasItem's onApplied handler below), falling
-                            // back to a generic label for items created before
-                            // that field was set.
                             text: canvasItemObject.modelData.text.length > 0 ? canvasItemObject.modelData.text : qsTr("Camera")
                         }
                         Text {
@@ -3001,9 +2166,6 @@ Rectangle {
                             text: qsTr("10:24:07")
                         }
 
-                        // Click to select, drag the body to move — shared
-                        // press/threshold/delta body (see CanvasDragArea), the
-                        // same mechanics EditableCanvasLabel uses internally.
                         CanvasDragArea {
                             id: camDragArea
                             anchors.fill: parent
@@ -3018,10 +2180,6 @@ Rectangle {
                         }
                     }
 
-                    // Live-ticking visual for every "clock" kind item, driven by
-                    // the config picked in clockSourceModal (see its onApplied
-                    // handler below) and LiveClock.qml's shared ticking/
-                    // formatting logic — not a static placeholder.
                     Item {
                         id: clockContent
                         readonly property var cfg: canvasItemObject.modelData.meta
@@ -3041,10 +2199,6 @@ Rectangle {
                             running: clockContent.visible
                         }
 
-                        // Background/border/corner-radius come straight from
-                        // the item's own style now (see primarySelectedSupportsFill
-                        // above) — same neutral fallbacks the shape/camera
-                        // visuals use when no color's been picked yet.
                         Rectangle {
                             anchors.fill: parent
                             radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
@@ -3079,10 +2233,6 @@ Rectangle {
                             }
                         }
 
-                        // Simple analog face — a circle, three rotated hands, a
-                        // center pin. No real clock-face artwork; same
-                        // placeholder-visual status as the rest of this app's
-                        // per-kind content until that gets built out.
                         Item {
                             visible: clockContent.analog
                             anchors.centerIn: parent
@@ -3149,10 +2299,6 @@ Rectangle {
                         }
                     }
 
-                    // Live-ticking visual for every "timer" kind item, driven by
-                    // the config picked in timerSourceModal (see its onApplied
-                    // handler below) and LiveClock.qml's shared countdown/
-                    // count-up/time-of-day math — not a static placeholder.
                     Item {
                         id: timerContent
                         readonly property var cfg: canvasItemObject.modelData.meta
@@ -3167,10 +2313,6 @@ Rectangle {
                             running: timerContent.visible
                         }
 
-                        // Background/border/corner-radius come straight from
-                        // the item's own style now (see primarySelectedSupportsFill
-                        // above) — same neutral fallbacks the shape/camera
-                        // visuals use when no color's been picked yet.
                         Rectangle {
                             anchors.fill: parent
                             radius: canvasItemObject.style ? canvasItemObject.style.cornerRadius : 8
@@ -3206,15 +2348,6 @@ Rectangle {
                         }
                     }
 
-                    // Visual for every "shape" kind item, driven by the type
-                    // picked in shapeSourceModal (see its onApplied handler
-                    // below) plus the item's OWN CanvasItemStyle — unlike
-                    // camera/media/timer/clock, a shape's fill/border/corner-
-                    // radius genuinely ARE the item's whole visual, so this
-                    // reads style.backgroundColor/borderColor/borderWidth/
-                    // cornerRadius directly instead of using fixed colors (see
-                    // primarySelectedSupportsFill above, which keeps Background/
-                    // Border active for this kind specifically).
                     Item {
                         id: shapeContent
                         readonly property var cfg: canvasItemObject.modelData.meta
@@ -3228,16 +2361,10 @@ Rectangle {
                         readonly property bool isCircle: shapeContent.shapeType === "circle"
                         readonly property bool isLine: shapeContent.shapeType === "line"
                         readonly property bool isGlyph: ["triangle", "arrow", "star", "hexagon"].includes(shapeContent.shapeType)
-                        // The fallback for "rectangle"/"rounded" AND anything
-                        // unrecognized — always shows a filled box rather than
-                        // nothing if shapeType ever comes out unexpected.
                         readonly property bool isBox: !shapeContent.isCircle && !shapeContent.isLine && !shapeContent.isGlyph
                         visible: canvasItemObject.modelData.kind === "shape"
                         anchors.fill: parent
 
-                        // rectangle / rounded (and fallback) — a plain box;
-                        // corner radius is already its own independent style
-                        // control.
                         Rectangle {
                             visible: shapeContent.isBox
                             anchors.fill: parent
@@ -3247,9 +2374,6 @@ Rectangle {
                             border.width: shapeContent.strokeWidth
                         }
 
-                        // circle — square-fit ellipse (a true ellipse for
-                        // non-square boxes is future work, same simplification
-                        // status as the rest of this app's per-kind visuals).
                         Rectangle {
                             visible: shapeContent.isCircle
                             anchors.centerIn: parent
@@ -3270,10 +2394,6 @@ Rectangle {
                             color: shapeContent.fillColor
                         }
 
-                        // triangle/arrow/star/hexagon — a simplified glyph fill,
-                        // same language shapeSourceModal's own picker cells use
-                        // for these (plain Text icons, not custom path art);
-                        // real vector shapes are future work.
                         Text {
                             visible: shapeContent.isGlyph
                             anchors.centerIn: parent
@@ -3329,12 +2449,6 @@ Rectangle {
                     }
 
                     // ---- BUS: the same live tile the picker showed ------------
-                    // A bus item IS its feed: the window is the bus's picture while
-                    // its routed video source is delivering frames, "No signal"
-                    // when it is not, the three-state light in the corner and the
-                    // bus's name along the bottom. Same answers as the picker and
-                    // the Media › Inputs card (all three read BusMonitor), so the
-                    // tile you chose is the tile you get.
                     Rectangle {
                         id: busBody
                         visible: canvasItemObject.modelData.kind === "bus"
@@ -3343,14 +2457,6 @@ Rectangle {
                         color: "#000000"
                         clip: true
 
-                        // THE MEDIA TAB'S VALUES APPLY TO A WINDOW TOO — same
-                        // numbers, same order, same meaning as a placed picture
-                        // (see mediaPictureBody below): the bus item reuses MEDIA,
-                        // so Fit / Crops / Flips / Filters here must change the
-                        // window's picture, not just be stored on it. The engine
-                        // applies the same set to the bus plane's pixels
-                        // (SceneBuilder's RefreshBusPlanes), so the canvas and the
-                        // HDMI/NDI frame stay one picture.
                         readonly property var bmeta: canvasItemObject.modelData.meta
                         readonly property var bmedia: busBody.bmeta && busBody.bmeta.media
                                                      ? busBody.bmeta.media : ({})
@@ -3374,11 +2480,6 @@ Rectangle {
                             ? String(canvasItemObject.style.mediaFit) : "contain"
                         readonly property bool canShader: GraphicsInfo.api !== GraphicsInfo.Software
 
-                        // A LIVE PICTURE NEEDS A TAP, and BusMonitor never starts one itself.
-                        // While this window is on screen it asks for its feed's thumbnail tap
-                        // and lets it go when the window goes. A tap another card already holds
-                        // is left alone (card previews are one hold per source), and only a tap
-                        // THIS window started is released.
                         property string heldLabel: ""
                         readonly property string wantedLabel: busBody.visible ? busMonitor.videoLabel : ""
                         onWantedLabelChanged: busBody.syncPreview()
@@ -3426,9 +2527,6 @@ Rectangle {
                             }
                         }
 
-                        // The filter set (and the file-level Opacity row) wraps the
-                        // feed exactly as it wraps a picture: an identity set never
-                        // pays for a layer.
                         Item {
                             id: busFeedLayer
                             anchors.fill: parent
@@ -3542,19 +2640,6 @@ Rectangle {
                         }
                     }
 
-                    // A PLACED PICTURE — and a video's poster, which is the still
-                    // Media Foundation hands out for the same file. The FILE, not
-                    // a card: the canvas shows the pixels the outputs will show,
-                    // asked from the engine's own thumbnail cache (mediaPictureUrl)
-                    // so the two are one picture and not two decodes that can
-                    // disagree.
-                    //
-                    // The picture's own values (MediaItemPanel) are honoured HERE as
-                    // well as on the engine outputs: Fit (contain / cover / fill /
-                    // blur fill), the two flips, Cropping and the Filters set. Fit is
-                    // CanvasItemStyle.mediaFit; the rest ride meta.media, mirrored by
-                    // SceneBuilder's media branch so the canvas and the HDMI/NDI
-                    // frame cannot show two different pictures.
                     Rectangle {
                         id: mediaPictureBody
                         readonly property var mmeta: canvasItemObject.modelData.meta
@@ -3584,11 +2669,6 @@ Rectangle {
                         color: "transparent"
                         clip: true
 
-                        // BLUR FILL: the file fills the box softened, and the sharp copy
-                        // sits on top of it — FreeShow's fourth fit choice. A layer effect
-                        // needs a shader-capable scene graph; where there is none the
-                        // softened backdrop is simply skipped (the sharp picture still
-                        // draws, fitted the usual way).
                         Image {
                             anchors.fill: parent
                             visible: mediaPictureBody.fit === "blur" && mediaPicture.status === Image.Ready
@@ -3604,16 +2684,9 @@ Rectangle {
                             }
                         }
 
-                        // The picture's filter set wraps the picture (the same shader the
-                        // slide's own Filters card uses), so hue/invert/blur/gray/sepia/
-                        // brightness/contrast/saturate read identically in preview and on
-                        // air. An identity set never pays for a layer.
                         Item {
                             id: mediaPictureLayer
                             anchors.fill: parent
-                            // The filter list's own Opacity (the file's transparency).
-                            // It is an item opacity, so it needs no shader — it applies
-                            // even where the colour filters cannot run.
                             opacity: mediaPictureBody.mfilter.opacity ?? 1
                             layer.enabled: mediaPictureBody.filterActive && mediaPictureBody.canShader
                             layer.effect: SlideFilterEffect {
@@ -3627,16 +2700,9 @@ Rectangle {
                                 anchors.fill: parent
                                 asynchronous: true
                                 cache: false
-                                // FIT: three of the four map straight onto Qt's fit modes;
-                                // "blur" keeps the whole picture sharp over its softened
-                                // backdrop, so it fits like contain.
                                 fillMode: mediaPictureBody.fit === "cover" ? Image.PreserveAspectCrop
                                         : mediaPictureBody.fit === "fill" ? Image.Stretch
                                         : Image.PreserveAspectFit
-                                // CROP: Qt crops the SOURCE and then fits what is left into
-                                // the box — exactly FreeShow's order (crop the picture, then
-                                // fit the cropped picture), and the reason a cropped portrait
-                                // still keeps its aspect instead of being squashed.
                                 sourceClipRect: {
                                     if (!mediaPictureBody.cropActive || mediaPicture.sourceSize.width <= 1)
                                         return Qt.rect(0, 0, 0, 0)
@@ -3649,9 +2715,6 @@ Rectangle {
                                     const b = (c.bottom ?? 0) / 100
                                     return Qt.rect(w * l, h * t, w * (1 - l - r), h * (1 - t - b))
                                 }
-                                // FLIPS: mirror is Qt's own horizontal flip; the vertical one
-                                // is a scale about the picture's centre (a Scale at the origin
-                                // would swing it up out of its box).
                                 mirror: mediaPictureBody.flipH
                                 transform: Scale {
                                     origin.x: mediaPicture.width / 2
@@ -3659,18 +2722,11 @@ Rectangle {
                                     xScale: 1
                                     yScale: mediaPictureBody.flipV ? -1 : 1
                                 }
-                                // A file the engine could not decode answers with a
-                                // 1x1 blank (see MediaThumbnailProvider) — that is
-                                // "no picture", and the badge below still explains
-                                // what the item is.
                                 source: root.mediaPictureUrl(mediaPictureBody.src)
                                 visible: status === Image.Ready && sourceSize.width > 1
                             }
                         }
 
-                        // The file's name, quietly, so a poster is not mistaken
-                        // for the item's title. A video adds a play badge: it is
-                        // an item that PLAYS, and the poster alone cannot say so.
                         Rectangle {
                             anchors.left: parent.left
                             anchors.bottom: parent.bottom
@@ -3717,10 +2773,6 @@ Rectangle {
                         }
                     }
 
-                    // Generic placeholder for every other kind — its own
-                    // icon/label (root.kindInfo), not just the bare kind name, so
-                    // Audio and Shape at least read as visually distinct from each
-                    // other while real per-kind content is still future work.
                     Rectangle {
                         id: genericPlaceholder
                         readonly property var typeInfo: root.kindInfo(canvasItemObject.modelData.kind)
@@ -3736,9 +2788,6 @@ Rectangle {
                             anchors.centerIn: parent
                             spacing: 4
 
-                        // IconGlyph, not a unicode Text glyph — same missing-
-                        // glyph problem the Add Content chips had (see
-                        // contentTypes' comment).
                         Item {
                             anchors.horizontalCenter: parent.horizontalCenter
                             y: 16
@@ -3771,10 +2820,6 @@ Rectangle {
                                 font.weight: Font.Medium
                                 text: genericPlaceholder.typeInfo.label.toUpperCase()
                             }
-                            // The source picked in mediaSourceModal (see
-                            // addCanvasItem's onApplied handler below) — blank
-                            // for kinds without a picker yet (audio/shape/
-                            // timer/clock), so nothing extra shows for those.
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 visible: canvasItemObject.modelData.text.length > 0
@@ -3785,9 +2830,6 @@ Rectangle {
                             }
                         }
 
-                        // Click to select, drag the body to move — shared
-                        // press/threshold/delta body (see CanvasDragArea), the
-                        // same mechanics EditableCanvasLabel uses internally.
                         CanvasDragArea {
                             id: placeholderDragArea
                             anchors.fill: parent
@@ -3806,11 +2848,6 @@ Rectangle {
         }
 
         // ---- Right-click opens the canvas menu ----------------------------
-        // One catcher for the whole stage, and it accepts the RIGHT button
-        // only: every item's own MouseArea claims the left one, so a right
-        // press falls through to here no matter what was under it, while every
-        // drag, select and text gesture keeps behaving exactly as before.
-        // The press point also decides the target — see openCanvasMenu.
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.RightButton
@@ -3820,10 +2857,6 @@ Rectangle {
             }
         }
 
-        // The actual edit-area border — declared last so it draws on top of
-        // every other child (checkerboard, background, text objects, camera
-        // panel), instead of underneath them the way a border set on
-        // mCanvas's own Rectangle would (see the comment up top).
         Rectangle {
             anchors.fill: parent
             color: "transparent"
@@ -3832,11 +2865,6 @@ Rectangle {
         }
     }
 
-    // Empty-state veil over the canvas — shown only when no slide is active.
-    // A root-level sibling (not a child of mCanvas) deliberately: mCanvas is
-    // disabled in this state, and a disabled parent disables its children's
-    // input, so the "Add slide" chip here must not be inside it. Covers the
-    // canvas area only; the slide list and its Add slide button stay live.
     Rectangle {
         x: mCanvas.x
         y: mCanvas.y
@@ -3958,9 +2986,6 @@ Rectangle {
 
     Rectangle {
         id: addContentChip
-        // The + menu's own entry point, named for the metadata-palette scenario
-        // (tools/selftest/run_meta_palette_test.sh) — it drives the real path:
-        // + -> the Metadata chip -> the palette, never metadataPaletteOpen directly.
         objectName: "selfTestAddChip"
         x: root.slidePanelWidth + 6
         y: root.height - 62
@@ -4004,10 +3029,6 @@ Rectangle {
         radius: 14
         visible: root.addMenuOpen
 
-        // Centered, not hand-pinned x:10: 7 chips × 48 + 6 gaps × 4 = 360
-        // wide inside a 388-wide menu — a 10px left inset left 18px hanging
-        // on the right (the whole content block read shifted left). centerIn
-        // keeps the row optically centered whatever the roster does next.
         Row {
             id: contentTypeRow
             anchors.centerIn: parent
@@ -4022,9 +3043,6 @@ Rectangle {
                     required property var modelData
                     required property int index
                     readonly property bool active: chipHover.hoveredIndex === index
-                    // One name per KIND, not per index: a scenario asks for the
-                    // chip it means ("selfTestAddKindChip_metadata") and the name
-                    // survives the roster gaining kinds.
                     objectName: "selfTestAddKindChip_" + modelData.kind
 
                     height: 34
@@ -4033,22 +3051,7 @@ Rectangle {
                     border.width: typeChip.active ? 1 : 0
                     border.color: Qt.alpha(Theme.accent, 0.25)
                     color: typeChip.active ? Qt.alpha(Theme.accent, 0.13) : Theme.inset
-                    // NO Behavior animations here: at slow hand speed the
-                    // 100ms fades on adjacent chips fired for every boundary
-                    // crossing and read as shimmer/flicker ("slow down your
-                    // mouse" was the exact reproduction). Instant switching
-                    // makes the highlight a hard swap — nothing to see at
-                    // any speed.
 
-                    // Two fixed vertical bands inside the 34px pill — icon
-                    // band y 3..17 (14px), label band y 19..31 (12px) — 3px
-                    // off the top and bottom edges. The old offsets (icon
-                    // y:4, label y:22 with NO height) let the label's natural
-                    // ~11px line box run to the pill's bottom edge and the
-                    // whole block read 1px low/left-of-center. Explicit band
-                    // heights + verticalAlignment pin each glyph INSIDE its
-                    // band so neither the 12px "Aa" line box nor the 8px
-                    // label line box can drift with font metrics.
                     Text {
                         y: 3
                         height: 14
@@ -4070,22 +3073,9 @@ Rectangle {
                         name: typeChip.modelData.icon
                         color: typeChip.active ? Theme.accentLight : Theme.textSecondary
                         visible: typeChip.modelData.icon !== "text"
-                        // Explicit box + origin, not implicit: with only
-                        // implicitWidth/Height, the root-level scale below
-                        // has measured its center from a 0x0 box on some
-                        // builds — play/music (1.6×) then drew up-left of
-                        // the pill entirely (the "icons are out" report)
-                        // while the 1× icons hid the defect. Same lesson as
-                        // AppHeader.qml's gear: explicit width/height first,
-                        // THEN centerIn/scale compute from real geometry.
                         width: 14
                         height: 14
                         transformOrigin: Item.Center
-                        // No per-icon scale: all seven kinds now draw
-                        // from the same Lucide 24-grid family (play/music
-                        // re-authored natively — the old Figma-export
-                        // glyphs needed boosts that fattened their strokes
-                        // and made them read oversized).
                     }
                     Text {
                         y: 19
@@ -4102,42 +3092,18 @@ Rectangle {
             }
         }
 
-        // A sibling of the Row, not a child of it — Row (like Column/Grid)
-        // doesn't allow its own children to use anchors.fill/left/right/etc,
-        // since it positions them itself; anchors.fill: contentTypeRow from
-        // outside the Row works fine.
-        // Covers the WHOLE menu, not just the row: sized to the row exactly,
-        // the menu's 6px padding bands above/below are hover dead zones —
-        // pointer truth crossing the row's top/bottom edge read outside →
-        // hoveredIndex −1 → the highlight blinked OFF for the crossing — the
-        // "first hover flickers" report. zoneRow tells the area to map x
-        // into the row's frame, so any point over the menu is a live zone
-        // (columnar: one x → one chip) and the highlight only resets when
-        // the pointer truly leaves the menu. onClicked re-checks the press
-        // actually landed in the row's band, so padding clicks are no-ops
-        // rather than acting on whatever chip that column happens to hold.
         ZoneHoverArea {
             id: chipHover
             anchors.fill: parent
             container: contentTypeRow
             zoneRow: contentTypeRow
             cursorShape: Qt.PointingHandCursor
-            // Formal parameter, not injected `mouse` — parameter injection
-            // into signal handlers is deprecated and logs a warning toast
-            // on every open (surfaced by the self-test grab).
             onClicked: (mouse) => {
-                // The row band inside this menu: y 6..40 (menu 46 tall,
-                // row 34 tall, centered). Outside it the press is on
-                // padding — never act on it.
                 if (mouse.y < 6 || mouse.y > 40)
                     return
                 if (hoveredIndex < 0)
                     return
                 const kind = root.shownContentTypes[hoveredIndex].kind
-                // ONE STEP IN, not an item: the Media chip swaps the ring's
-                // roster for its three kinds, and Back swaps it again. Both
-                // LEAVE THE RING OPEN — a submenu that closed the thing it
-                // was extending would be a menu the pointer has to re-find.
                 if (kind === "media") {
                     root.mediaMenuOpen = true
                     return
@@ -4157,10 +3123,6 @@ Rectangle {
                     return
                 }
                 root.addMenuOpen = false
-                // Camera/Timer/Clock/Shape each need configuration
-                // picked first (see cameraSourceModal/timerSourceModal/
-                // clockSourceModal/shapeSourceModal below) rather than
-                // landing on the canvas immediately.
                 if (kind === "bus")
                     root.busModalOpen = true
                 else if (kind === "timer")
@@ -4172,9 +3134,6 @@ Rectangle {
                 else if (kind === "vignette" || kind === "corners")
                     root.addScreenTreatment(kind)
                 else if (kind === "metadata") {
-                    // Not an item: show the palette of every metadata field the
-                    // engine fills (MetadataFields.qml). Kept open after the + menu
-                    // closes — the palette IS the choice the chip was asking for.
                     root.metadataPaletteOpen = true
                     return
                 } else if (kind === "text")
@@ -4186,11 +3145,6 @@ Rectangle {
     }
 
     // ---- While the metadata palette is open, it OWNS the pointer ------------
-    // AppCursor.pushBlocker marks it as the panel the pointer is on: every hover
-    // area under it then reports not-hovered (PositionHoverArea's blocked()
-    // check) and every cursor claimed from underneath it is dropped
-    // (AppCursor.push) — which is what makes the panel read as lifted ABOVE the
-    // canvas instead of a sheet the canvas' own I-beam shines through.
     function syncMetadataBlocker() {
         if (root.metadataPaletteOpen)
             AppCursor.pushBlocker(metadataPalette)
@@ -4203,19 +3157,6 @@ Rectangle {
         Hotkeys.close(root.panelHotkeyScope)
     }
 
-    // The palette's DISMISS layer: a click anywhere outside the panel closes it.
-    //
-    // It used to close only on a click on the canvas BACKGROUND
-    // (canvasBackgroundArea's onClicked) — so a click on a panel, on the toolbar,
-    // on the slide list or on a canvas object left the panel standing (the
-    // report "when i click outside it box it doesnt deselect it still stays
-    // up"). One z under the panel: presses ON the panel belong to the panel,
-    // every other press inside this screen is "outside".
-    //
-    // CLICK-ONLY, deliberately NOT hoverEnabled — MenuCatcher's own rule (see its
-    // header): a hover-enabled catcher becomes a hover TARGET, the window-root
-    // AppCursorCatcher below it stops receiving pointer moves, and every
-    // position-truth hover in the screen freezes on a stale point.
     MouseArea {
         id: metadataCatcher
         objectName: "selfTestMetadataCatcher"
@@ -4235,19 +3176,9 @@ Rectangle {
     }
 
     // ---- The metadata palette (the + menu's Metadata chip) ----------------
-    // Every placeholder the engine's filler resolves (MetadataFields.qml), grouped
-    // and drawn from that one list: click a field to add a text item carrying it,
-    // or drag one onto the canvas to land it where the pointer is. Building a
-    // template used to mean knowing the spelling of {scripture_text} by heart —
-    // the fields existed only inside the shipped designs. Each chip shows its
-    // label over the literal token, because the token is what ends up in the text.
     Rectangle {
         id: metadataPalette
         objectName: "selfTestMetadataPalette"
-        // Anchored above the + menu (which sits at height - 63) and lifted ABOVE
-        // the canvas' own chrome: the canvas' snap guides draw at z 1000 while an
-        // object is being moved, and a panel the user opened must sit on top of
-        // what it covers.
         x: 344
         y: root.height - 63 - height - 8
         width: 560
@@ -4259,9 +3190,6 @@ Rectangle {
         border.width: 1
         visible: root.metadataPaletteOpen
 
-        // A soft accent halo just outside the edge — depth without pulling in a
-        // shadow effect, and it reads as a RAISED surface in both themes (the
-        // same corona the L/R pills and the monitor tiles wear).
         Rectangle {
             anchors.fill: parent
             anchors.margins: -3
@@ -4280,11 +3208,6 @@ Rectangle {
             color: Qt.alpha(Theme.accentLight, 0.35)
         }
 
-        // THE PANEL'S OWN BACKDROP. Hover-enabled so the pointer STOPS here —
-        // nothing painted under the panel claims hover (or a cursor) through it —
-        // and press-accepting so a click on the panel's padding is the panel's
-        // business: without it such a click fell through to the canvas and
-        // cleared the selection behind an open popup.
         MouseArea {
             id: paletteBackdrop
             anchors.fill: parent
@@ -4300,9 +3223,6 @@ Rectangle {
             width: metadataPalette.width - 28
             spacing: 10
 
-            // The panel's own header: WHAT this is, and the two gestures it takes.
-            // A grid of tokens does not explain itself, and "click to add · drag
-            // onto the canvas" is the whole interaction.
             Item {
                 width: paletteCol.width
                 height: 15
@@ -4348,16 +3268,10 @@ Rectangle {
                 delegate: Column {
                     id: metaGroup
                     required property var modelData
-                    // Named, not reached through the scope chain: the inner
-                    // Repeater below lists THIS group's fields, and a chip has to
-                    // know which group it came from to draw its header row.
                     readonly property var groupFields: modelData.fields
                     width: paletteCol.width
                     spacing: 6
 
-                    // The group's own header: a small accent tick plus the name in
-                    // tracked caps, so a section reads as a section instead of as
-                    // two more chips in the same grid.
                     Row {
                         spacing: 7
 
@@ -4389,16 +3303,8 @@ Rectangle {
                                 required property var modelData
                                 readonly property string label: String(modelData.label)
                                 readonly property string token: String(modelData.token)
-                                // Named after its TOKEN with the braces stripped
-                                // ("selfTestMetaChip_scripture_text"): the scenario
-                                // resolves the field it means out of
-                                // MetadataFields.all and clicks that chip by name.
                                 objectName: "selfTestMetaChip_" + metaChip.token.replace(/[{}]/g, "")
 
-                                // Both widths are STATIC (the label's and the token
-                                // pill's own text), and the hover only repaints —
-                                // the palette must never re-flow under the pointer
-                                // (see the hint slot's note below).
                                 width: Math.max(metaLabelText.implicitWidth, metaTokenPill.width) + 22
                                 height: 40
                                 radius: Theme.radiusMd
@@ -4410,9 +3316,6 @@ Rectangle {
                                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
-                                // A tick down the left edge while the pointer is on
-                                // the chip — the hover state, drawn without moving
-                                // anything (opacity only, never a size).
                                 Rectangle {
                                     visible: metaHover.hovered
                                     x: 0
@@ -4432,9 +3335,6 @@ Rectangle {
                                     font.family: Theme.fontFamily
                                     font.pixelSize: 12
                                 }
-                                // The literal, in a mono inset: the token is what
-                                // ends up in the text, so it reads as code rather
-                                // than as a second caption.
                                 Rectangle {
                                     id: metaTokenPill
                                     x: 11
@@ -4454,9 +3354,6 @@ Rectangle {
                                     }
                                 }
 
-                                // The drag carries the token itself, and the click
-                                // adds it — one control for both gestures, which is
-                                // what "easily add / drag all the metadata" asks for.
                                 DragSource {
                                     anchors.fill: parent
                                     label: metaChip.label
@@ -4466,20 +3363,9 @@ Rectangle {
                                     })
                                     onActivated: root.addMetadataItem(metaChip.token)
                                 }
-                                // Pointer-position hover for the highlight (containsMouse
-                                // latches in this build); the click sink is OFF so the
-                                // DragSource under it still takes presses.
                                 PositionHoverArea {
                                     id: metaHover
                                     anchors.fill: parent
-                                    // The hand is claimed through AppCursor, NOT left to
-                                    // the DragSource's own MouseArea.cursorShape: while
-                                    // any override is on the stack the catcher owns the
-                                    // OS cursor app-wide, so a plain cursorShape here
-                                    // showed as the default ARROW over every chip
-                                    // (measured: chipCursor=ARROW). The click sink
-                                    // stays OFF so the DragSource under it still takes
-                                    // presses (drag + click are that one control).
                                     showCursor: true
                                     cursorShape: Qt.PointingHandCursor
                                     clickEnabled: false
@@ -4492,20 +3378,6 @@ Rectangle {
                 }
             }
 
-            // What the field under the pointer renders — the registry's own
-            // sentence, so the palette explains itself without a doc.
-            //
-            // A FIXED-SIZE slot that is always laid out — never `visible: text
-            // !== ""`. This line is a child of the Column that sizes the
-            // palette, and the palette places ITSELF by that size (above the +
-            // menu: y = root.height - 63 - height - 8). Letting the line appear
-            // therefore grew the palette UPWARD the instant a hover filled it:
-            // every chip moved up under the pointer, the pointer landed on
-            // another chip (or off the palette), that hover left, the line
-            // emptied, the palette dropped back down and the hover returned —
-            // the report "when i hover this it starts flickering". A hover must
-            // never move the thing it is hovering: the slot is always here, so
-            // the palette's geometry cannot change with metadataHint.
             Rectangle {
                 width: paletteCol.width
                 height: 28          // two lines of 10px, reserved whether used or not
@@ -4549,19 +3421,6 @@ Rectangle {
         border.width: 1
         color: Theme.panelBg
 
-        // Plain background cursor reset — declared FIRST (so every real
-        // button below sits above it in z-order and still wins its own
-        // hover/cursor). This panel sits outside mCanvas's scale transform,
-        // so a direct cursorShape works here without going through
-        // AppCursor at all (that mechanism exists specifically to work
-        // around cursorShape not applying under a scale transform — see
-        // AppCursorCatcher.qml). Without this, moving the pointer here
-        // right after something elsewhere pushed a non-default OS cursor
-        // (a resize handle's size cursor, a text item's I-beam...) left it
-        // stuck: nothing in this panel's plain background space ever
-        // asserted a cursor of its own to replace it, same gap
-        // EditScreen's canvasBackgroundArea exists to close for the canvas
-        // side.
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
@@ -4588,10 +3447,6 @@ Rectangle {
             contentWidth: width
             contentHeight: slideListColumn.height
             boundsBehavior: Flickable.StopAtBounds
-            // The slide list takes the keyboard when a row is clicked (see the
-            // delegate's handlers) and is reachable with Tab. Its Ctrl+D / Del
-            // live in that focus (the Shortcuts at the end of this file), so
-            // "the focused slide row" is a real state and not just a hover.
             activeFocusOnTab: true
 
         Column {
@@ -4602,26 +3457,11 @@ Rectangle {
             Repeater {
                 id: slideListRepeater
                 model: slideModel
-                // No inline required-property declarations here —
-                // SlideListItem.qml declares them and the model injects them
-                // there. Duplicating them inline broke injection: the
-                // delegate failed to create ("Required property ... was not
-                // initialized"), which is exactly why thumbnails never
-                // appeared even though slides were created.
                 delegate: SlideListItem {
                     width: slideListFlick.width
-                    // Live thumbnail: the slide's items straight from the
-                    // per-slide store — the same objects the canvas edits,
-                    // so a row re-renders the moment its content does —
-                    // over the slide's own background.
                     previewItems: slideStore.items(slideId)
                     previewBackground: slideStore.backgroundOf(slideId)
                     onSelected: {
-                        // The list becomes the keyboard's owner while a row is
-                        // the thing you are working on — that is what lets
-                        // Ctrl+D / Del act on the slide (see the list's own
-                        // Shortcuts at the end of this file) instead of on a
-                        // canvas item. Clicking the canvas hands it back.
                         slideListFlick.forceActiveFocus()
                         slideModel.selectSlide(index)
                     }
@@ -4631,9 +3471,6 @@ Rectangle {
                         // The menu belongs to this row, so the row is what the
                         // keys act on: same focus hand-off as a left click.
                         slideListFlick.forceActiveFocus()
-                        // The shared menu panel maps the press into window space
-                        // and clamps itself, so it escapes slideListFlick's clip
-                        // without landing off-screen.
                         root.openSlideMenu(index, this, mx, my)
                     }
                 }
@@ -4690,11 +3527,6 @@ Rectangle {
         enabled: root.hasActiveSlide
         opacity: root.hasActiveSlide ? 1 : 0.35
 
-        // Plain background cursor reset — see leftPanel's own copy of this
-        // MouseArea for the full reasoning (this is the exact gap behind
-        // the "cursor stays as I-beam after leaving a text edit to pick a
-        // background/border color" report: this panel hosts that Change
-        // button, and had no cursor handling of its own at all).
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
@@ -4702,73 +3534,28 @@ Rectangle {
             cursorShape: Qt.ArrowCursor
         }
 
-        // Interactive now — the ground truth export (VGRPresenter_Main_
-        // Screen_Edit_Add_Camera.qml's r_tab*) has this same three-tab bar
-        // but as a single flat frame with ITEMS always active and no
-        // captured design for what TEXT/SLIDE should show, so this only
-        // switches the indicator for now; the content below doesn't vary
-        // by tab yet (see KNOWN_ISSUES.md if that scope grows later).
-        // An ITEM, not a Row, although the cells are exactly a Row's layout.
-        // A positioner writes its children's x on every polish, so the tabs
-        // could not animate into their new cells when one appears or vanishes
-        // (the docs are explicit that a positioner assumes nobody else moves
-        // its children). With explicit slots the strip tiles identically -
-        // `slot * cellWidth` and `cellWidth` add up to the full width - and
-        // the slide is a plain Behavior on x/width instead of a snap.
         Item {
             id: rightTabRow
-            // Each label owns one equal cell of the panel and sits centered in
-            // it (the classic tab-strip distribution). The cell divides by the
-            // count of SHOWING tabs, so the strip stays correct as TEXT/MEDIA
-            // come and go.
             x: 0
             width: parent.width
             // One label's metrics; all four share them (same font, same caps),
             // so the strip's height is the items label's.
             height: tabItemsLabel.implicitHeight
-            // The strip is ITEMS + SLIDE by default; TEXT and MEDIA join it
-            // only while their own kind of item is the primary selection (see
-            // textTabAvailable / mediaTabAvailable). Their labels stay
-            // declared and hide themselves, so the cells have to divide by the
-            // count that is actually SHOWING — dividing by children.length
-            // would keep four cells' worth of width with two of them empty,
-            // leaving the two visible labels crammed into the left half.
-            //
-            // The geometry is keyed on AVAILABILITY, not on `visible`: a tab
-            // fades out over ~160ms, and `visible` only turns off once its
-            // opacity reaches 0 (see each label). If the cells counted
-            // `visible`, the strip would sit rigid for the whole fade and then
-            // snap closed at the end — the pop this is here to remove.
             readonly property bool textShown: root.textTabAvailable
             readonly property bool mediaShown: root.mediaTabAvailable
             readonly property int visibleCount: 2 + (textShown ? 1 : 0) + (mediaShown ? 1 : 0)
             readonly property real cellWidth: width / visibleCount
-            // A label's slot among the SHOWING tabs, in strip order (ITEMS is
-            // always first, SLIDE always last). Each one counts only the
-            // available predecessors, which is what makes the cells close up
-            // as a tab leaves and open as one arrives.
             readonly property int textSlot: 1
             readonly property int mediaSlot: 1 + (textShown ? 1 : 0)
             readonly property int slideSlot: 1 + (textShown ? 1 : 0) + (mediaShown ? 1 : 0)
-            // Under the previews, not at a fixed 19: the strip's position is the
-            // wall's real bottom (see tabRowTop), which is what makes the same
-            // previews sit in the same place here as on the Show screen.
             y: rightPanel.tabRowTop
 
             Text {
                 id: tabItemsLabel
-                // One equal cell per VISIBLE tab (see visibleCount): a fifth
-                // tab, or a hidden one, needs no arithmetic here, the strip
-                // just re-divides.
                 horizontalAlignment: Text.AlignHCenter
                 color: root.rightPanelTab === "items" ? Theme.accent : Theme.textSecondary
                 font.family: Theme.fontFamily
                 font.pixelSize: 13
-                // Constant weight in every state — a weight that changes
-                // with the active tab changes the label's advance width,
-                // which re-flows this strip and shoves the neighbouring tabs
-                // sideways on every click. Color alone carries the active
-                // state; the underline indicator does the rest.
                 font.weight: Font.Medium
                 text: qsTr("ITEMS")
                 // ITEMS always leads the strip, so its slot is fixed.
@@ -4787,10 +3574,6 @@ Rectangle {
             }
             Text {
                 id: tabTextLabel
-                // Offered only for a selected text item (root.textTabAvailable).
-                // Fades with the slide instead of popping: `visible` is the
-                // tail of the fade (off only at opacity 0), so the label is
-                // still drawn while it dims and disappears at the end.
                 visible: opacity > 0
                 opacity: rightTabRow.textShown ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
@@ -4809,10 +3592,6 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     anchors.margins: -6
-                    // A label that is fading OUT is still drawn and still hit-
-                    // testable, but its tab has already left the strip: a
-                    // click there would select a tab whose body is hidden
-                    // (an empty panel) until the next selection change.
                     enabled: rightTabRow.textShown
                     cursorShape: Qt.PointingHandCursor
                     onClicked: { root.rightPanelTab = "text"; root.rightTabPinned = false }
@@ -4869,16 +3648,6 @@ Rectangle {
             }
         }
         // ---- THE PANEL'S ONE VERTICAL CHAIN ---------------------------------
-        // Previews first, then the tab strip, then the tab's own content — the
-        // order the Show screen reads in, and what the reference shows: the
-        // monitors ARE the frame of reference, so they sit above the strip that
-        // says which facet of the selection is being edited. Every step is
-        // derived from the one above it instead of a fixed number:
-        //     wall top → wall (its REAL height) → strip → hairline → content
-        // The wall is not tab content, so the strip does not jump when the tab
-        // changes, and the strip follows whatever height the wall currently
-        // reports — 212px for a lone preview, taller once the on-air toolbar
-        // and a second row of previews arrive (1, 2 or 4 outputs).
         readonly property real itemsWallTop: 12
         // Air between the previews and the strip: enough to read as two bands,
         // small enough that the previews still own the top of the panel.
@@ -4887,30 +3656,13 @@ Rectangle {
         readonly property real tabContentGap: 12
         readonly property real tabUnderlineY: rightTabRow.y + rightTabRow.height + 5
         readonly property real tabRuleY: tabUnderlineY + tabUnderline.height
-        // ITEMS/TEXT/MEDIA/SLIDE all read `tabContentTop`, so they cannot start
-        // at different heights, and a taller tab label, a larger UI scale or
-        // one more tab moves the content down with the strip instead of
-        // leaving behind a 56 that was right for exactly one strip.
         readonly property real tabContentTop: Math.round(tabRuleY + rightPanel.tabContentGap)
         // The strip's top, derived from the wall's SCALED height (see
         // itemsWallHeight for why scaling is not the same as height).
         readonly property real tabRowTop: rightPanel.itemsWallTop + rightPanel.itemsWallHeight + rightPanel.itemsWallGap
 
         // ---- WHAT IS LEFT FOR THE WALL AND THE CARDS -------------------------
-        // The wall's height is intrinsic: its tiles are 16:9 boxes derived
-        // from its 376px width, so it cannot simply be told to be shorter. On a
-        // short window that meant the wall ate the panel and the tab content
-        // collapsed to nothing (the clamp below then made it exactly 0 — a
-        // pinned preview over an unreachable editor). The floor is what the
-        // wall may not take: the strip and the cards keep this much, and
-        // whatever the wall is denied is paid by scaling it DOWN uniformly
-        // about its top centre, so every preview stays whole (no half-cut
-        // tile) and the toolbar shrinks with it. The Flickable's own clamp
-        // stays as the last resort for a panel shorter than that.
         readonly property real itemsSectionMinHeight: 150
-        // How far the wall may be shrunk before the cards give up space
-        // instead: under ~0.55 the transport icons stop being readable, which
-        // is worse than a section area that scrolls in less room.
         readonly property real itemsWallScaleFloor: 0.55
         readonly property real itemsWallScale: {
             const natural = itemsMonitorWall.height
@@ -4925,10 +3677,6 @@ Rectangle {
                 return 1
             return Math.max(rightPanel.itemsWallScaleFloor, budget / natural)
         }
-        // The wall's on-screen height, not its layout height: `scale` does not
-        // change the item's geometry, so everything below (the strip and the
-        // scroll area) has to be placed against the scaled height or a shrunk
-        // wall would leave a gap the size of the shrink behind it.
         readonly property real itemsWallHeight: itemsMonitorWall.height * rightPanel.itemsWallScale
 
         Rectangle {
@@ -4937,16 +3685,6 @@ Rectangle {
             height: 3
             radius: 1.50
             color: Theme.accent
-            // Centered under the active label. Each label owns one equal cell of
-            // the strip (divided by the row's own child count), so the underline
-            // is the label's text width placed at the cell's horizontal center —
-            // it glides between cell centers when the tab changes and tracks
-            // automatically if the panel is resized or a tab is added.
-            // Only an OFFERED tab can own the underline: a hidden label has no
-            // cell in the Row any more, so pointing at it would draw the
-            // indicator at its stale x. The availability guards make the
-            // fallback a one-frame safety net (the selection handler switches
-            // the tab away at the same time), never a visible state.
             readonly property var activeLabel: root.rightPanelTab === "text" && root.textTabAvailable ? tabTextLabel
                 : root.rightPanelTab === "media" && root.mediaTabAvailable ? tabMediaLabel
                 : root.rightPanelTab === "slide" ? tabSlideLabel : tabItemsLabel
@@ -4957,48 +3695,13 @@ Rectangle {
         }
         Rectangle { y: rightPanel.tabRuleY; height: 1; width: parent.width; color: Theme.border }
 
-        // ITEMS tab content — Outputs grid + the selected item's Background/
-        // Size & Style. Not literally "canvas items" despite the tab's
-        // name (see rightPanelTab's header comment — this predates the tab
-        // bar becoming interactive and hasn't been reorganized to match its
-        // label); TEXT below is the first tab with real, distinct content.
-        // Scrollable, and that is load-bearing rather than a nicety: the
-        // wall's on-air toolbar (transport, Clear all, the per-layer tiles)
-        // adds 112px to the wall the moment anything is on air, which used to
-        // shove the SLIDE label / Background row / Size & Style card (pinned
-        // at fixed y offsets that assumed a toolbar-less wall) down INTO the
-        // toolbar and past the panel's bottom edge — the per-layer tiles and
-        // the Background row drew on top of each other, and the Line/Dotted/
-        // Dashed selector ended flush against the window's bottom border. The
-        // sections now start below the tab strip (which starts below the wall,
-        // see tabRowTop) and that column scrolls when it doesn't fit — the same
-        // Flickable + AppScrollBar pattern the TEXT tab and leftPanel's slide
-        // list use.
-        // THE MONITOR WALL SITS AT THE TOP OF THE PANEL, ABOVE THE TAB STRIP.
-        // The same shared MonitorWall the Show screen's right column renders
-        // (hero page for a lone output, 2×2 paging, snap swipe, dots), with the
-        // same 12px gutter and the same 376-ish design width — same previews in
-        // the same place as the Show screen, and NOT tab content: the strip and
-        // the cards below it are what the tab switches, the monitors stay put.
-        // Scrolling never carries them off the top either (a half-scrolled wall
-        // is exactly what read as a cut-off preview).
         MonitorWall {
             id: itemsMonitorWall
             x: 12
             y: rightPanel.itemsWallTop
             width: rightPanel.width - 24
-            // Item.Top is (width/2, 0): the wall shrinks toward its own top
-            // centre, so it stays horizontally centred in the panel's gutter
-            // and its top edge never moves.
             transformOrigin: Item.Top
             scale: rightPanel.itemsWallScale
-            // The transport row only here (‹ ›, play, lock, transition).
-            // Clear all / Show all / Blackout and the per-layer clears are the
-            // Show screen's control surface; on this panel they sat between the
-            // previews and the tab strip, pushing the strip down for buttons
-            // that have nothing to do with editing the selected item. Dropping
-            // their height shrinks the wall, so the strip moves up by exactly
-            // that much.
             showClearControls: false
         }
 
@@ -5010,9 +3713,6 @@ Rectangle {
             // follow the previews instead of being pinned to a guess.
             y: rightPanel.tabContentTop
             width: parent.width
-            // Clamped: now that the pinned wall eats into the panel's height,
-            // a short window can leave less than 12px below it, and a negative
-            // Flickable height is an invalid geometry (not merely empty).
             height: Math.max(0, rightPanel.height - y - 12)
             visible: root.rightPanelTab === "items"
             clip: true
@@ -5024,26 +3724,12 @@ Rectangle {
                 id: itemsTabContent
                 width: itemsTabFlick.width
 
-                // ONE gutter for the whole tab: the section label, the
-                // Background row, the cards — and, above this scroll area,
-                // the pinned wall — all start at `inset` and stop `inset`
-                // short of the panel's right edge, so no pill or tile ever
-                // sits flush against the panel — and since the panel itself
-                // is flush against the window's right edge (rightPanel.x is
-                // root.width - 400), that one gutter is also what keeps the
-                // controls off the window border. 12 is the wall's own design
-                // gutter: it must keep its 376 design width (its tiles and
-                // toolbar are laid out for exactly that), so it is the floor
-                // here too.
                 readonly property int inset: 12
                 readonly property int rowWidth: width - inset * 2
 
         Text {
             id: slideSectionLabel
             x: itemsTabContent.inset + 4
-            // The wall is pinned ABOVE this scroll area now (see itemsMonitorWall),
-            // so the sections start at the content's own top spacing and no
-            // longer have to be anchored off the wall's changing height.
             y: 8
             color: Theme.textSecondary
             font.family: Theme.fontFamily
@@ -5059,12 +3745,6 @@ Rectangle {
             width: itemsTabContent.rowWidth
             color: Theme.card
             radius: 8
-            // Greyed out (not hidden — the row's meaning would otherwise
-            // silently flip back to "slide background" while something's
-            // still selected, which reads as more confusing than a dimmed,
-            // inert control) when the selected item's own visual (camera's
-            // live preview, the generic placeholder) fully covers whatever
-            // a background color would draw underneath it.
             enabled: root.primarySelectedSupportsFill
             opacity: root.primarySelectedSupportsFill ? 1 : 0.4
             Behavior on opacity { NumberAnimation { duration: 100 } }
@@ -5075,17 +3755,8 @@ Rectangle {
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily
                 font.pixelSize: 14
-                // Same row, two targets: the selected item's background when
-                // something's selected, the slide's own background
-                // otherwise — one control, not a duplicate built into
-                // Size & Style too (see that file's header comment).
                 text: root.primarySelectedItemStyle ? qsTr("Item Background") : qsTr("Background")
             }
-            // The swatch/Change/chevron cluster hangs off the row's RIGHT
-            // edge (same right margins as when this row was a fixed 384px:
-            // 104 / 26 / 8) instead of absolute x offsets — the row width now
-            // follows the tab's gutter, so absolute positions would push the
-            // cluster off the row's end.
             Rectangle {
                 anchors.right: parent.right
                 anchors.rightMargin: 104
@@ -5095,9 +3766,6 @@ Rectangle {
                 border.color: Theme.borderSubtle
                 border.width: 1
                 radius: 5
-                // A flat swatch — the slide background is a solid color now
-                // (gradients left with the opacity feature), so no swatch
-                // gradient plumbing.
                 color: root.primarySelectedItemStyle ? root.primarySelectedItemStyle.backgroundColor : slideStore.current.background
             }
             Rectangle {
@@ -5140,17 +3808,7 @@ Rectangle {
             }
         }
 
-        // Transform sits above Size & Style — FreeShow's own order, and the
-        // right one here too: how the item is PRESENTED (its opacity) is a
-        // different question from how its box is shaped, and Opacity used to
-        // live on the Filters card, which is about pixel effects.
         // ---- WINDOW BUS lives in the MEDIA tab -----------------------------
-        // A window REUSES MEDIA (see MediaItemPanel's isWindow): its Media row
-        // names the bus it shows and Change opens the bus picker, with Fit /
-        // Blend / Flip / Cropping / Filters below it — the same values a placed
-        // picture has, applied to the bus's feed. There is no separate bus card
-        // here: that row was the window's only control, and it now sits where the
-        // selection actually opens.
 
         TransformCard {
             id: transformCard
@@ -5159,12 +3817,6 @@ Rectangle {
             // is not part of this column any more — it is the MEDIA tab's).
             y: backgroundRow.y + backgroundRow.height + 10
             width: itemsTabContent.rowWidth
-            // Every selected object's style, in selection order — the card
-            // displays the first one and applies changes to all of them.
-            // canvasObjectByKey(k).style resolves correctly whether k is one
-            // of the fixed objects (registry-backed) or a "+"-added item
-            // (its own inline style) — one lookup path for both. The cards
-            // below share this one list rather than each re-deriving it.
             targets: root.selectedCanvasObjects.map((k) => root.canvasObjectByKey(k)?.style).filter((s) => s !== null && s !== undefined)
             undoHook: root.pushUndoSnapshot
             focusHook: function () { mCanvas.forceActiveFocus() }
@@ -5194,17 +3846,11 @@ Rectangle {
             targets: sizeStyleCard.targets
             mediaFitSupported: root.primarySelectedItem !== null
                 && (root.primarySelectedItem.kind === "image" || root.primarySelectedItem.kind === "video")
-            // The same Fit the MEDIA tab offers, through the same writer: style for
-            // the canvas AND the meta mirror the engine reads, so choosing Cover here
-            // cannot leave the output fitting it another way.
             fitHook: (fit) => root.applyMediaFit(fit)
             undoHook: root.pushUndoSnapshot
             focusHook: function () { mCanvas.forceActiveFocus() }
         }
 
-                // Bottom gutter: the card's last control keeps `inset` of
-                // breathing room below it instead of ending flush with the
-                // panel's bottom edge.
                 height: filtersCard.y + filtersCard.height + itemsTabContent.inset
             }
         }
@@ -5220,16 +3866,6 @@ Rectangle {
             visible: itemsTabFlick.visible && itemsTabFlick.contentHeight > itemsTabFlick.height
         }
 
-        // TEXT tab content — typography + geometry for the selected text
-        // item (see TextItemPanel.qml). No ground-truth capture of the
-        // ITEMS/SLIDE tabs' own designs exists either (see rightTabRow's
-        // header comment), so this is the first of the three actually
-        // built out, per the reference panel design supplied directly.
-        // Wrapped in a Flickable + AppScrollBar (the same pattern leftPanel's slideListFlick already uses) -
-        // the panel grew a real Align section and a headered List section on top of everything it already
-        // had (Style/Font/Case/Auto Size/sliders/Position & Size), tall enough on a normal window to run
-        // past rightPanel's bottom with no way to reach what's below - fixed-position, unscrollable content
-        // that just got cut off at the panel's edge.
         Flickable {
             id: textPanelFlick
             x: 8
@@ -5244,12 +3880,6 @@ Rectangle {
 
             TextItemPanel {
                 id: textItemPanel
-                // The scrollbar's 12px strip is ALWAYS reserved: sizing this
-                // panel from the bar's own visibility made showing the bar
-                // narrower content, which wrapped text taller, which raised
-                // textPanelFlick.contentHeight, which was the bar's own
-                // visible condition — a loop that never settled (a GUI-thread
-                // spin inside polish, AppHangB1).
                 width: textPanelFlick.width - 12
                 target: textPanelFlick.visible ? root.primarySelectedItem : null
                 undoHook: root.pushUndoSnapshot
@@ -5257,18 +3887,11 @@ Rectangle {
                 onChangeColorRequested: {
                     root.openBackgroundPicker("textColor")
                 }
-                // Anchored to the Weight FIELD itself, not the row/panel —
-                // same reasoning and matchAnchorWidth as the font-family menu
-                // below (it used to drop from x=0 of the whole row, landing
-                // under "Font family" instead of under "Weight").
                 onChangeFontRequested: {
                     const field = textItemPanel.weightFieldItem
                     textFontMenu.openAt(field, 0, field.height + 2, root)
                 }
                 onChangeFontFamilyRequested: {
-                    // Anchored to the Font family FIELD itself, not the whole
-                    // row/panel — matchAnchorWidth below then has the right
-                    // item to size itself against.
                     const field = textItemPanel.fontFamilyFieldItem
                     textFontFamilyMenu.openAt(field, 0, field.height + 2, root)
                 }
@@ -5309,12 +3932,6 @@ Rectangle {
             text: qsTr("Select a text item on the canvas to edit its formatting.")
         }
 
-        // MEDIA tab — the selected picture / video / audio item's own values
-        // (MediaItemPanel.qml): the file it points at (with Change) and how it
-        // fills its box. Nothing here edits the slide itself — that is the
-        // SLIDE tab — and nothing here is a second copy of ITEMS' cards: only
-        // values that belong to the media item on its own live here, the same
-        // split TEXT makes for a text item.
         Flickable {
             id: mediaItemFlick
             x: 8
@@ -5329,26 +3946,13 @@ Rectangle {
 
             MediaItemPanel {
                 id: mediaItemPanel
-                // The 12px scroll strip stays reserved whether the bar shows or
-                // not — the same reason the TEXT tab sizes its panel that way
-                // (a width that follows the bar's own visibility feeds back
-                // into the bar's condition).
                 width: mediaItemFlick.width - 12
                 item: mediaItemFlick.visible ? root.primaryMediaItem : null
-                // A WINDOW reuses this panel: its Media row names the bus this
-                // window shows (the item's meta busId, read through the roster)
-                // and its Change opens the BUS picker — see MediaItemPanel's
-                // isWindow. Fit / Blend / Flip / Cropping / Filters below are the
-                // same values, and they apply to the bus's feed on the canvas
-                // (busBody) and on the outputs (SceneBuilder's bus planes).
                 busName: root.primaryIsWindow ? root.windowBusName() : ""
                 undoHook: root.pushUndoSnapshot
                 focusHook: function () { mCanvas.forceActiveFocus() }
                 onChangeBusRequested: root.windowBusModalOpen = true
                 onChangeFileRequested: root.pickReplacementMedia()
-                // Opened against the WHOLE WINDOW (no bounds argument), not `root`: the menu
-                // is as wide as the field, and the field now runs the panel's full width, so
-                // clamping it inside `root` slid it left of its field and over the row below.
                 onFitFieldTapped: mediaFitMenu.openAt(mediaItemPanel.fitFieldItem, 0,
                                                       mediaItemPanel.fitFieldItem.height + 2)
                 onBlendFieldTapped: mediaBlendMenu.openAt(mediaItemPanel.blendFieldItem, 0,
@@ -5385,13 +3989,6 @@ Rectangle {
             text: qsTr("Select a picture, video, audio or bus window on the canvas to edit it.")
         }
 
-        // SLIDE tab — the slide's own settings (SlidePanel.qml): its background
-        // colour, then "Arrange items" — the live item stack, topmost first,
-        // with the reorder arrows FreeShow's Slide tab has. Scrollable with the
-        // same Flickable + AppScrollBar pattern the other two tabs use (a slide
-        // with a dozen items runs past the panel's bottom): the bar's 12px
-        // strip is always reserved, never derived from the bar's own visibility
-        // (see textPanelFlick's note on the polish-pass loop that caused).
         Flickable {
             id: slidePanelFlick
             x: 8
@@ -5432,13 +4029,6 @@ Rectangle {
         }
     }
 
-    // Swallows the next left-click anywhere to close whichever floating
-    // menu is open (slide row, canvas object, or the TEXT tab's font
-    // weights), without intercepting input when all are closed. Only claims
-    // the left button (MouseArea's default), so a right-click on a
-    // different row/object still passes through to reopen the menu there
-    // instead of being eaten here — same pattern as AppMenuBar.qml's own
-    // catcher.
     MouseArea {
         anchors.fill: parent
         enabled: slideContextMenu.visible || textFontMenu.visible || textFontFamilyMenu.visible || textAutoSizeMenu.visible || textCaseMenu.visible || borderStyleMenu.visible
@@ -5452,17 +4042,11 @@ Rectangle {
         }
     }
 
-    // The canvas's right-click menu (see canvasMenuModel/openCanvasMenu):
-    // FreeShow's own context-menu panel, so rows, icon colours, submenu
-    // mechanics and the shortcut hints all read the same as they do there.
     SlideContextMenu {
         id: canvasMenu
         onChosen: (id, arg) => root.canvasMenuPicked(id)
     }
 
-    // One of the item's three second-values (Item actions › Display duration /
-    // Time until show / Time until hide). 0 = off, which is what the store's
-    // defaults are too.
     NameDialog {
         id: itemTimerDialog
         property string itemKey: ""
@@ -5494,14 +4078,6 @@ Rectangle {
         }
     }
 
-    // The slide row's right-click menu — the SAME panel the canvas context menu
-    // uses (FreeShow's context menu), so a row here and a row there read alike:
-    // coloured per-action icons, a divider between the slide's own settings and
-    // the duplicate/delete pair, and the shortcut hint on the right. Its rows
-    // are FreeShow's own slide layout (contextMenuLayouts.slide): Edit, Change
-    // group, Next timer, then Duplicate and Delete below the divider. Actions
-    // are the ones this app has — the layout's slide-level extras (format,
-    // bind, transition) have no engine behind them here, so they are not drawn.
     SlideContextMenu {
         id: slideContextMenu
         model: [
@@ -5509,9 +4085,6 @@ Rectangle {
             { id: "group", label: qsTr("Change group…"), icon: "groups", color: "#ff97d9" },
             { id: "nextTimer", label: qsTr("Next timer…"), icon: "clock", color: "#fca4ff" },
             { divider: true },
-            // Both chords are bound while this list owns the keyboard (see the
-            // row's focus hand-off and the list's Shortcuts), which is the state
-            // a right-click on a row leaves it in — so the hints are true.
             { id: "duplicate", label: qsTr("Duplicate"), icon: "duplicate", color: "#97c7ff", shortcut: Hotkeys.sequence("duplicateSelected") },
             { id: "delete", label: qsTr("Delete"), icon: "delete", color: "#ff5454", shortcut: Hotkeys.sequence("deleteSelected") }
         ]
@@ -5539,12 +4112,6 @@ Rectangle {
         }
     }
 
-    // NO RIGHT-CLICK MENU ON THE CANVAS (user request: "the edit canvas should
-    // not have a right click feature that shows edit, delete..."). Right-clicking
-    // an item does nothing now; the panel's own controls are how an item is
-    // edited, duplicated or deleted, and the Delete key still removes the
-    // selection.
-
     // Font-weight picker for TextItemPanel's weight pill (see its changeFontRequested signal) - the short, fixed presets its
     // rendering already understands (see itemTextLabel's font.weight ternary above).
     DropdownPanel {
@@ -5568,10 +4135,6 @@ Rectangle {
         }
     }
 
-    // Auto-size picker for TextItemPanel's Font size/Auto size row
-    // (changeAutoSizeRequested) — moved out of the "Text" collapsible
-    // section into a compact chevron Field (see TextItemPanel.qml's own
-    // comment), same DropdownPanel shape as the weight menu above.
     DropdownPanel {
         id: textAutoSizeMenu
         visible: false
@@ -5590,13 +4153,6 @@ Rectangle {
         }
     }
 
-    // Border style picker for SizeStyleCard's Style field
-    // (changeBorderStyleRequested) — the Line/Dotted/Dashed choice, moved out
-    // of a row of three full-width buttons into a chevron Field beside Width
-    // (user call: "Border Lines beside the width then make dropdown[,] at
-    // all"), same DropdownPanel shape as the other item-panel pickers above.
-    // Applies straight to sizeStyleCard's own targets (CanvasItemStyle
-    // objects), the same list the card's own controls write to.
     DropdownPanel {
         id: borderStyleMenu
         visible: false
@@ -5613,10 +4169,6 @@ Rectangle {
         }
     }
 
-    // Fit picker for the MEDIA tab (MediaItemPanel's Fit field) — FreeShow's four
-    // choices for a placed file, the blur fill included: the canvas softens the
-    // file behind a sharp copy of itself, and the engine's media branch does the
-    // same on the pixels it sends to the outputs.
     DropdownPanel {
         id: mediaFitMenu
         visible: false
@@ -5634,10 +4186,6 @@ Rectangle {
         }
     }
 
-    // Blend-mode picker for the MEDIA tab (MediaItemPanel's Blend field):
-    // FreeShow's own sixteen modes, in its order. The list is taller than the
-    // inspector, so the panel caps it and scrolls (maxHeight) instead of running
-    // off the bottom of the window.
     DropdownPanel {
         id: mediaBlendMenu
         visible: false
@@ -5651,10 +4199,6 @@ Rectangle {
         }
     }
 
-    // Text-transform picker for the Text card's "Text transform" field
-    // (TextItemPanel's changeTextCaseRequested) — the four cases the engine's
-    // own textCase vocabulary understands, as one list instead of the four
-    // chips that used to sit under a "Case" caption.
     DropdownPanel {
         id: textCaseMenu
         visible: false
@@ -5674,36 +4218,17 @@ Rectangle {
         }
     }
 
-    // Font-FAMILY picker for TextItemPanel's font row (changeFontFamilyRequested) - every family Qt found installed on this
-    // machine (Qt.fontFamilies(), the same font-enumeration QML itself uses to resolve a font.family string), not a short fixed
-    // list; long, so it scrolls (maxHeight) rather than running off the screen. The current family gets a checkmark, same
-    // convention as every other "which one is picked" menu in this app.
     DropdownPanel {
         id: textFontFamilyMenu
         visible: false
         maxHeight: 320
         headerTitle: qsTr("Font family")
         headerSubtitle: root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? FontService.defaultContentFamily) : ""
-        // Tighter rows than this component's normal menu — a long,
-        // font-sample-heavy list reads better packed closer than the usual
-        // 16px/34px menu row (user call: "those unnecessary extra space in
-        // front... is not needed").
         rowInset: 8
         rowHeight: 30
-        // Matches the Font family FIELD's own width (a COMBOBOX menu, same as
-        // every matchAnchorWidth consumer) — hugging the widest ROW's content
-        // (fitContentWidth) made the panel wider than its own trigger field
-        // whenever a long font name like "Arial Rounded MT Bold" appeared
-        // (user call: "let the font [list] be [the] same width as it[s]
-        // drop[down trigger]"). anchorItem is the field itself (see
-        // onChangeFontFamilyRequested's openAt call), not the whole panel.
         matchAnchorWidth: true
         model: {
             const current = root.primarySelectedItem ? (root.primarySelectedItem.meta.fontFamily ?? FontService.defaultContentFamily) : ""
-            // Each row previews its own face (`fontFamily`) and the chosen one is
-            // drawn in the accent (`accent`) — FreeShow's font picker, which is
-            // what makes a long alphabetical list scannable: you pick by shape,
-            // not by reading names in the body font.
             return Qt.fontFamilies().slice().sort().map((f) => ({ label: f, trailing: f === current ? "✓" : "", fontFamily: f, accent: f === current }))
         }
         onItemActivated: (label) => {
@@ -5717,19 +4242,9 @@ Rectangle {
 
     BackgroundColorModal {
         id: bgColorModal
-        // Self-test hook (run_item_color_test.sh): the scenario has to reach the
-        // ONE shared picker to set an opacity and press Save the way the button
-        // does, instead of re-running the apply from outside.
         objectName: "selfTestBgPicker"
         open: root.bgModalOpen
-        // Seeded from the CURRENT value each time it opens — the palette
-        // highlights the color being edited instead of the component's
-        // hardcoded defaults (seedWith is pure; assigning `open` here would
-        // break the binding above).
         onOpenChanged: if (open) {
-            // Seeded from the LATCHED item, not the live selection: the two are
-            // the same object at open time, and only the latched one is still
-            // there when the dialog closes.
             const item = root.bgPickerPrimaryItem()
             const style = item ? item.style : null
             bgColorModal.seedWith(root.bgModalTarget === "itemBackground" || root.bgModalTarget === "border"
@@ -5746,9 +4261,6 @@ Rectangle {
             : qsTr("Background Color")
         onApplied: (selection) => {
             canvasHistory.push(qsTr("Change color"))
-            // Solid colors only for the item rows (gradients aren't a border /
-            // item-fill concept here); the picker is shared with the slide
-            // Background case, which does support gradients.
             const hex = selection.kind === "color" ? selection.color : selection.from
             if (root.bgModalTarget === "border" || root.bgModalTarget === "itemBackground") {
                 let touched = 0
@@ -5756,10 +4268,6 @@ Rectangle {
                     if (root.applyItemColor(root.canvasObjectByKey(k), root.bgModalTarget, hex))
                         ++touched
                 })
-                // AN APPLY THAT LANDED NOWHERE MUST SAY SO. Silently dropping it
-                // is what made the picker read as "opacity doesn't work": the
-                // slider and its Apply looked live, and the item never got the
-                // colour.
                 if (touched === 0)
                     EventBus.notify(qsTr("Colour not applied — the item it was opened for is no longer selected. Select it and try again."),
                                     "warning", qsTr("Edit"), "ui.edit.color.noTarget")
@@ -5769,11 +4277,6 @@ Rectangle {
                 if (item)
                     item.meta = Object.assign({}, item.meta, { color: hex })
             } else if (root.bgModalTarget === "lineBackground") {
-                // THE PER-LINE BAND (the Lines card). Each selected TEXT item
-                // gets its own fresh meta, the same reassign-the-whole-object
-                // shape as the text colour above, so every surface re-reads it.
-                // "transparent" lands here too and MEANS "no band" — the same
-                // spelling the picker and MetadataFields.lineBandText use.
                 let touched = 0
                 root.bgPickerKeys().forEach((k) => {
                     const item = root.canvasObjectByKey(k)
@@ -5797,22 +4300,12 @@ Rectangle {
         }
     }
 
-    // The Bus chip's picker PICKS an existing bus and never makes one. It is the same
-    // picker the window's re-point uses, in its bus mode: a bus is made in Audio &
-    // Video or on Media › Inputs, and the canvas only places a window onto it.
-    //
-    // What lands on the slide carries the bus's STABLE id in its meta (and its
-    // name as the item's text), so renaming or reordering the bus later leaves
-    // the item pointing at the same bus.
     BusSourceModal {
         id: busSourceModal
         objectName: "editBusPicker"
         mode: "bus"
         open: root.busModalOpen
         onApplied: (bus) => {
-            // The picker reports and leaves `open` alone — `open` is bound to
-            // busModalOpen here, so writing it from inside the modal would break
-            // that binding and the picker would never open again.
             root.busModalOpen = false
             const pickedRow = bus && bus.row !== undefined ? Number(bus.row)
                             : (bus ? root.windowBusRow(Number(bus.id)) : -1)
@@ -5840,9 +4333,6 @@ Rectangle {
         onCancelled: root.busModalOpen = false
     }
 
-    // The WINDOW's bus picker: re-points an EXISTING bus item at another bus
-    // (editBusPicker above places a NEW window on the bus the operator picks). The
-    // picker is told nothing about the item — its answer is applied by id here.
     BusSourceModal {
         id: windowBusPicker
         objectName: "editWindowBusPicker"
@@ -5860,9 +4350,6 @@ Rectangle {
         open: root.timerModalOpen
         onApplied: (config) => {
             const item = root.addCanvasItem("timer")
-            // startedAt is captured here (add-time), not inside the modal —
-            // it has to reflect when the item actually lands on the canvas,
-            // not when the picker happened to be configured.
             item.meta = Object.assign({}, config, { startedAt: Date.now() })
             root.timerModalOpen = false
         }
@@ -5896,10 +4383,6 @@ Rectangle {
     }
 
     // ---- The Media chip's picker -----------------------------------------
-    // The app's one media grid (the Media library's own items), locked to the
-    // kind the chip step asked for — a Picture chip cannot insert an MP3. The
-    // pick becomes an item (addMediaItem above); nothing is taken, so choosing
-    // a file while building never changes what is on air.
     MediaSourceModal {
         id: mediaSourceModal
         open: root.mediaModalOpen
@@ -5913,9 +4396,6 @@ Rectangle {
                                     "warning", qsTr("Media"), "edit.mediaReplace")
                 root.mediaReplaceKey = ""
             } else if (!root.addMediaItem(root.mediaPickKind, item)) {
-                // No active slide (or the engine refused): the ring had
-                // already closed, so say so rather than dropping the pick
-                // silently onto nothing.
                 EventBus.notify(qsTr("Add a slide first — an item needs a slide to sit on."),
                                 "warning", qsTr("Media"), "edit.mediaItem")
             }
@@ -5925,20 +4405,10 @@ Rectangle {
             root.mediaModalOpen = false
             root.mediaReplaceKey = ""
         }
-        // "Browse this PC...": the library only indexes folders it was given.
-        // Picking a folder adds it (and rescans), so the file appears in the
-        // grid that is still open in front of the operator.
         onBrowseRequested: MediaLibraryService.addFolder()
     }
 
     // ---- Esc closes the Edit screen's own transient panels -----------------
-    // The + ring and the metadata palette are not modals, but they do take
-    // over the screen (the palette even owns the pointer), so Esc has to be
-    // able to put them away — and the ring has to answer it ahead of the
-    // canvas' own Escape (which only clears the selection). No accept: neither
-    // panel has anything to confirm. A picker opened FROM the ring pushes its
-    // own scope on top, so that one answers first and closing it leaves the
-    // ring as it was.
     property int panelHotkeyScope: 0
     readonly property bool anyPanelOpen: root.addMenuOpen || root.metadataPaletteOpen
     onAnyPanelOpenChanged: {
@@ -5957,33 +4427,6 @@ Rectangle {
     }
 
     // ---- Keyboard shortcuts ---------------------------------------------
-    // Every sequence reads from root.shortcutBindings (see its header
-    // comment) rather than being written here — rebinding later means
-    // changing that one map, not these elements. Gated on mCanvas having
-    // focus, the same signal mCanvas's own Keys.onPressed (Delete/arrows/
-    // Escape) already relies on to know nothing is mid-edit — a focused
-    // TextInput (an item being typed into, a modal's search field, ...)
-    // steals focus away from mCanvas, so these can't fire mid-typing.
-    //
-    // Undo/redo are the exception to "canvas focus only": they are the open
-    // slide's HISTORY keys, and the slide list owns the keyboard as soon as a
-    // row is clicked — so gating them on mCanvas alone silently killed Ctrl+Z
-    // right after switching slides, which is exactly when a mistake gets
-    // noticed. They stay live while slideListFlick has focus and leave the
-    // focus there (see undo()/redo()), so the list's Ctrl+D / Del still work
-    // afterwards.
-    //
-    // Undo/redo specifically ALSO stay enabled while root.anyTextEditing is
-    // true — i.e. while a canvas text item is mid-edit specifically (not
-    // just any focused text field elsewhere, like a slide rename or a hex
-    // color input, which don't set this) — by explicit request: Ctrl+Z
-    // should jump straight out of an in-progress text edit and revert the
-    // whole step, not require clicking away first. canvasHistory.undo()/
-    // redo() below hand focus back to mCanvas either way. Deliberately NOT
-    // textUndoKey here — that only gets set on the edit session's first
-    // KEYSTROKE (see beginTextEdit's comment), so it stays "" if you enter
-    // edit mode and press Ctrl+Z before typing anything; anyTextEditing
-    // flips true the instant edit mode itself starts.
     Shortcut {
         action: "undo"
         enabled: mCanvas.activeFocus || root.anyTextEditing || slideListFlick.activeFocus
@@ -5994,9 +4437,6 @@ Rectangle {
         enabled: mCanvas.activeFocus || root.anyTextEditing || slideListFlick.activeFocus
         onActivated: root.redo()
     }
-    // Ctrl+Y — the second-standard redo chord, alongside Ctrl+Shift+Z above.
-    // Both map to the same redo; applications that ship only one of the two
-    // are why users report "redo is broken" on the other.
     Shortcut {
         action: "redoAlt"
         enabled: mCanvas.activeFocus || root.anyTextEditing || slideListFlick.activeFocus
@@ -6030,15 +4470,6 @@ Rectangle {
     }
 
     // ---- Text style from the keyboard (Ctrl+B / Ctrl+I / Ctrl+U) --------
-    // FreeShow's own chords for the Text tab's B/I/U style toggles (its
-    // edit/values/boxes.ts) — the panel rows stay the way they are, these are
-    // the same switches without leaving the canvas. Enabled wherever undo is
-    // (canvas focus, or a text item mid-edit), so the chord works while typing,
-    // exactly as an editor's bold does.
-    //
-    // Ctrl+I is Import everywhere else in the app. While this is true, Import's
-    // own binding is switched off (Main.qml) so the two are never ambiguous —
-    // "in the edit scenario, I can serve something else".
     readonly property bool textStyleKeysLive:
         (mCanvas.activeFocus || root.anyTextEditing) && root.primarySelectedItem !== null
     Shortcut {
@@ -6058,18 +4489,6 @@ Rectangle {
     }
 
     // ---- The slide LIST's own two keys --------------------------------
-    // Same chords as the canvas's, and gated by which surface owns the keyboard
-    // instead of being ambiguous: a row click hands focus to slideListFlick
-    // (see the delegate) and any canvas press hands it back to mCanvas, so
-    // exactly one of each pair is enabled at a time. Acting on the ACTIVE row
-    // is the model's `activeIndex()`, i.e. the slide the canvas is showing —
-    // never a hovered-but-unselected one.
-    //
-    // The gate is `hasActiveSlide`, not a read of activeIndex(): the index is a
-    // function call, so a binding on it would be computed once and go stale when
-    // the roster changes under it ("Add slide" would leave the key disabled
-    // until focus moved). hasActiveSlide is bound to the model's own change
-    // signal, so the enabled state follows the deck.
     Shortcut {
         action: "duplicateSelected"
         enabled: slideListFlick.activeFocus && root.hasActiveSlide

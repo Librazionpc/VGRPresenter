@@ -46,7 +46,6 @@ namespace sg = bps::song;
 namespace ts = bps::search::textmatch;
 
 namespace {
-
 using Scored = std::pair<int, QVariantMap>;   // lower score = better match
 
 QVariantMap makeResult(const QString &kind, const QString &title, const QString &subtitle,
@@ -87,9 +86,6 @@ bool containsAllExactWords(std::string_view text, const std::vector<std::string>
     });
 }
 
-// The first WHOLE-WORD occurrence of `needle` in `hay` (case-insensitive), or -1:
-// the characters on both sides of the match are not letters/digits, so "word"
-// does not match inside "words" or "password". The padlock's rule.
 int wholeWordAt(const QString &hay, const QString &needle)
 {
     int from = 0;
@@ -106,9 +102,6 @@ int wholeWordAt(const QString &hay, const QString &needle)
     }
 }
 
-// Rank a row's words by how they read together: the query phrase first, then
-// the same words in order with up to two fillers, then all words scattered.
-// This keeps every app-wide result type on the same proximity ladder as Table.
 int proximityScore(const QString &field, const QStringList &words)
 {
     if (words.size() < 2) return 0;
@@ -133,15 +126,6 @@ int proximityScore(const QString &field, const QStringList &words)
     return 30;                        // all words are present, but scattered/reversed
 }
 
-// Word-level matching for the Quick search's local surfaces (slides, settings,
-// show names) — the same semantics the engine gives songs/Bible/The Table:
-// EVERY query word must land in a field, words may sit anywhere in it, and a
-// MISSPELLED word is corrected against the field's own words (bounded edit
-// distance, first letter kept). "setings" finds "Settings", "outpt colr"
-// finds "Outputs". Exact whole-word matches rank by phrase proximity; fuzzy
-// corrections rank after exact words. -1 means no match.
-// `exactWords` (the padlock) drops the typo pass and demands whole words in the
-// exact one: every query word must occur whole in the same result field.
 int matchScoreList(const QString &needle, const QStringList &fields, bool exactWords)
 {
     const QStringList words = splitWords(needle);
@@ -203,9 +187,6 @@ void take(QVariantList &out, std::vector<Scored> &found, int limit)
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
-// Every searchable entry of the Settings popup: what it is called, the section it is
-// filed under, and the popup's navigation key for that section. The popup's own search
-// box and the app-wide search both read this one list (through SearchService).
 struct SettingEntry { const char *label; const char *section; const char *key; };
 constexpr SettingEntry kSettings[] = {
     { "General", "Settings", "general" },
@@ -262,9 +243,6 @@ QVariantList settingsMatches(const QString &text, int limit, bool exactWords)
 
 QString slideNumberLabel(int index) { return QStringLiteral("Slide %1").arg(index + 1); }
 
-// Verse text as the Bible files carry it has typesetting marks: the paragraph sign, the
-// red-letter quote marks, and [brackets] around the translators' added words. None of
-// that belongs in a search row or on a slide.
 QString cleanVerse(QString s)
 {
     s.remove(QChar(0x00B6)).remove(QChar(0x2039)).remove(QChar(0x203A)).remove(QLatin1Char('[')).remove(QLatin1Char(']'));
@@ -315,7 +293,6 @@ bool importOne(const QString &path, QString *why)
     }
     return true;
 }
-
 } // namespace
 
 SearchService::SearchService(QObject *parent)
@@ -339,9 +316,6 @@ SearchService *SearchService::create(QQmlEngine *engine, QJSEngine *jsEngine)
     return &instance();
 }
 
-// THE PUBLISHED BIBLE-ID LIST (see the header): read once on a worker and
-// published; the property binding reads this member, and every path that used to
-// `emit bibleChanged()` now asks for a fresh walk instead.
 QStringList SearchService::bibles() const
 {
     if (!biblesInFlight_ && biblesCache_.isEmpty())
@@ -380,13 +354,6 @@ void SearchService::refreshBiblesOffThread() const
     });
 }
 
-// The SYNC word resolution is PUBLISHED like the other reads (see the header):
-// it answers from the last worker read of that text, or no rows while the read it
-// queues is in flight — and wordsCached is what says the answer has landed. The
-// GUI-facing path is resolveWordsAsync, and a WORKER reads readResolveWords
-// directly: there is no signal to wait on down there, which is why readSearch
-// below no longer comes through here (a miss used to drop the typo correction a
-// locked search exists to apply).
 QVariantList SearchService::resolveWords(const QString &text) const
 {
     const QString typed = text.trimmed();
@@ -429,10 +396,6 @@ QVariantList SearchService::readResolveWords(const QString &text) const
     if (words.empty()) return out;
     auto resolved = bs::SearchEngine::Instance().ResolveTermsWithSplits(words);
     if (!resolved.ok()) return out;
-    // EVERY word comes back, spelled right or not (`changed` says which were
-    // fixed). Callers build the yellow highlight from ALL the resolved words —
-    // returning only the corrections dropped the words the user spelled
-    // correctly ("then frend" highlighted "friend" and lost "then").
     for (size_t i = 0; i < resolved.value().size() && i < words.size(); ++i) {
         const std::string &r = resolved.value()[i].term;
         const std::string &typed = words[i];
@@ -442,14 +405,6 @@ QVariantList SearchService::readResolveWords(const QString &text) const
         m.insert(QStringLiteral("resolved"), QString::fromStdString(r));
         m.insert(QStringLiteral("weight"), resolved.value()[i].weight);
         m.insert(QStringLiteral("changed"), r != typed);
-        // THE LAST WORD MAY STILL BE HALF TYPED (the caret is on it): hand the
-        // search boxes its CANDIDATE LADDER — every word the typed prefix can
-        // become, MOST CONFIDENT FIRST ("rec" -> receive, received, record, ...),
-        // so the hint can show what the smart money is on and then the rest, and
-        // the highlight can wrap the reading the search itself preferred (user
-        // call: "start from the ones it confident about then come as far as
-        // possible options exist"). Empty for every other word, and for a word
-        // that is already whole.
         if (i + 1 == words.size()) {
             std::vector<std::string> ladder =
                 bs::SearchEngine::Instance().PrefixCandidates(typed);
@@ -465,9 +420,6 @@ QVariantList SearchService::readResolveWords(const QString &text) const
     return out;
 }
 
-// ASYNC word resolution (see the header): each misspelled token scans the whole
-// vocabulary, so a garbled multi-token query runs OFF the GUI thread. Same
-// newest-token-wins contract as searchAsync.
 void SearchService::resolveWordsAsync(const QString &text, int token)
 {
     auto *runner = QThread::create([this, text, token] {
@@ -489,9 +441,6 @@ QVariantList SearchService::searchSettings(const QString &text, int limit) const
     const QString q = text.trimmed();        return q.isEmpty() ? QVariantList{} : settingsMatches(q, limit, false);
 }
 
-// One verse's full text — the Quick search hover preview (see the header).
-// PUBLISHED like the other reads: the hover asks once per row, and the answer
-// arrives on verseCached for the row that is still hovered (the dialog re-asks).
 QString SearchService::fullVerse(const QString &bibleId, const QString &bookId,
                                  int chapter, int verse) const
 {
@@ -548,10 +497,6 @@ QString SearchService::readFullVerse(const QString &bibleId, const QString &book
 // Search
 // ===========================================================================
 
-// The SYNC aggregate answers from a published result for the same query; a
-// query nobody has run yet is queued and reads as no rows. The Quick search
-// dialog prefers searchAsync (whose worker runs readSearch below), so this is
-// the contract for a caller that cannot wait.
 QVariantList SearchService::search(const QString &rawText, int perKind, bool exactWords) const
 {
     const QString typed = rawText.trimmed();
@@ -605,20 +550,7 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
     if (cancelled && cancelled())
         return out;
     const int limit = qMax(1, perKind);
-    // Exact mode still forgives a detected typo. Resolve only misspelled terms
-    // (weight < 1); completions remain locked to what the user typed. Applying
-    // the same correction to retrieval and the whole-word filter prevents the
-    // hint from saying "recieve -> receive" while the padlock searches for
-    // "recieve" and rejects every correctly spelled passage.
     if (exactWords) {
-        // THE WARM CACHE, THEN THE READ. This runs on a worker, and the published
-        // lookup is not an answer here: on a miss it queues its read and returns {}
-        // — a hook no worker has — so the FIRST locked search of a misspelled word
-        // silently lost the correction this whole block exists to apply while the
-        // second identical search found it (the worker's answer only fills the
-        // cache a beat later). Every word comes back when the read runs (see
-        // readResolveWords), so an empty list means "nothing read yet / nothing to
-        // resolve", which is exactly when reading is right.
         QVariantList resolved = resolveWords(text);
         if (resolved.isEmpty())
             resolved = readResolveWords(text);
@@ -838,9 +770,6 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
                 QVariantMap r = makeResult(QStringLiteral("bible"),
                                            QStringLiteral("%1 %2:%3").arg(name).arg(h.chapter).arg(h.verse),
                                            bibleLabel(h.bibleId), qstr(h.reference), QString(), body);
-                // (the verse text rides the `text` slot — an earlier version passed
-                // it as `path`, so the dialog showed no text and every fuzzy match
-                // looked wrong; the reference-resolution result below had it right)
                 r.insert(QStringLiteral("bibleId"), qstr(h.bibleId));
                 // Where the verse lives — the dialog's hover preview fetches the FULL
                 // text through fullVerse() with these (the snippet is only an excerpt).
@@ -856,25 +785,12 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
     if (cancelled && cancelled())
         return {};
 
-    // Results from the local libraries, settings and Bible are useful right
-    // away. Publish them before The Table starts its corpus-wide paragraph scan;
-    // the final result event will replace this interim list when that scan ends.
     if (progress && !(cancelled && cancelled()))
         progress(out);
     if (cancelled && cancelled())
         return {};
 
     // ---- Sermon paragraphs (The Table's library) -------------------------------------
-    // (2 chars on: the library's own Search() takes two-char words — "my" —
-    // and matches terms spread across up to two consecutive paragraphs.)
-    // A code-shaped query ("47-", "47-0412", "63-0628e") is naming a SERMON:
-    // the library now answers with sermon-level rows, and THE TABLE leads the
-    // list (user call: "when i type 47- the filter should have known to filter
-    // from the table" — Bible verses that merely contain 47 are noise here).
-    // STRICT code shape: every token digits-with-optional-letter-suffix
-    // ("47", "0412", "1100x") AND a dash or 3+ digits. A bare "47" stays a
-    // verse/year query, and a word beside a number ("genesis 47") is NOT a
-    // code — it must not steal the query from the Bible rows.
     bool codeShaped = false;
     {
         const QStringList tokens = text.split(QRegularExpression("[^A-Za-z0-9]+"), Qt::SkipEmptyParts);
@@ -890,20 +806,11 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
     }
     QVariantList tableRows;
     if (text.size() >= 2) {
-        // The Table gets a larger per-query share than other categories so the
-        // quick-search list can show more sermon matches while remaining capped.
-        // A code listing IS The Table's answer ("47-" = every 1947 sermon), so
-        // keep its wider listing cap as well.
         const int tableLimit = qMin(30, codeShaped ? qMax(limit * 4, 40) : qMax(limit * 3, 24));
         const QVariantList hits = TheTableService::instance().searchCancellable(
             text, tableLimit, exactWords, true, QString(), 0, cancelled);
         for (const QVariant &v : hits) {
             const QVariantMap h = v.toMap();
-            // Title = the sermon's citation line minus the paragraph — the same
-            // label the pane's own match rows show ("Faith Is The Substance"),
-            // with the code in the subtitle. The old scripture-shaped title
-            // ("1953 12 · ¶3") matched nothing when picked (the pane searches
-            // citation lines), so picking a sermon landed on an empty tab.
             const QString cite = h.value(QStringLiteral("citation")).toString();
             const QString title = cite.isEmpty()
                                       ? h.value(QStringLiteral("reference")).toString()
@@ -922,13 +829,7 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
             r.insert(QStringLiteral("chapter"), h.value(QStringLiteral("chapter")));
             r.insert(QStringLiteral("verse"), h.value(QStringLiteral("verse")));
             r.insert(QStringLiteral("spanned"), h.value(QStringLiteral("spanned")));
-            // The search hit carries its matched paragraph(s), avoiding a
-            // second chapter lookup for every row merely to support ranking,
-            // exact-word filtering, and the hover preview.
             r.insert(QStringLiteral("fullText"), h.value(QStringLiteral("fullText")));
-            // The library's ranking score rides along: the dialog's pick-float
-            // lets a previously-picked row keep its boost only over rows it
-            // actually outscores (a picked ¶ must not bury the verbatim match).
             if (h.contains(QStringLiteral("score")))
                 r.insert(QStringLiteral("score"), h.value(QStringLiteral("score")));
             out.append(r);
@@ -941,16 +842,9 @@ QVariantList SearchService::readSearch(const QString &rawText, int perKind, bool
     return out;
 }
 
-// The same aggregation off the GUI thread. The dialog passes a token (its
-// request counter): stale responses (an older keystroke finishing late) are
-// dropped here, so the UI only ever sees the LATEST query's rows.
 void SearchService::searchAsync(const QString &text, int perKind, int token, bool exactWords)
 {
     VGR_CALL_TRACE("SearchService.searchAsync");
-    // A word search scans the full sermon corpus. Serialize these scans and
-    // recheck the token after acquiring the gate: when typing outruns a scan,
-    // queued stale requests then exit without rescanning or holding the Table
-    // library's read lock while a result is being opened on the UI thread.
     static std::mutex asyncSearchMutex;
     auto *runner = QThread::create([this, text, perKind, token, exactWords] {
         if (token != latestToken_.load(std::memory_order_acquire))
@@ -1010,10 +904,6 @@ QStringList SearchService::candidateBibleFiles()
 
 void SearchService::refreshBibles()
 {
-    // The one thing an installer has to ask for (see the header): the walk publishes
-    // the new ids and bibleChanged lands with them. Without it the published list
-    // keeps the ids it had — the getter only re-walks an EMPTY list — so a Bible
-    // installed into a non-empty list never appeared in `bibles` at all.
     refreshBiblesOffThread();
 }
 
@@ -1050,9 +940,6 @@ bool SearchService::importBibleFile(const QString &path)
     if (!EngineBridge::instance().booted() || importing_)
         return false;
 
-    // Reading the file is cheap — done here; the parse + verse-level index is
-    // the slow part and runs on a worker thread (the same shape as The Table's
-    // folder import), so the UI stays live and its progress bar can move.
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         EventBus::instance().notify(QStringLiteral("cannot open %1").arg(path), QStringLiteral("error"),
@@ -1116,12 +1003,6 @@ bool SearchService::importBibleFile(const QString &path)
 
 void SearchService::shutdown()
 {
-    // BOUNDED: this runs on the GUI thread in aboutToQuit. A bible import is a
-    // one-shot worker that normally finishes long before this, but waiting the
-    // full 20s while it is still parsing 31k verses froze the app past
-    // Windows' ~5s hang threshold (AppHangB1 -> process killed), which is what
-    // "it crashes when I quit" looked like. The worker's result is delivered by
-    // a queued call that the exiting loop simply never runs.
     if (loader_)
         (void)loader_->wait(2000);
 }

@@ -3,7 +3,6 @@
 #include "interfaces/IService.hpp"
 
 namespace bps {
-
 // Feature-package manifest (00 §6 Versioning). Every module and plugin carries one.
 struct ModuleManifest {
     std::string id;                          // e.g. "presentation"
@@ -14,9 +13,6 @@ struct ModuleManifest {
     std::vector<std::string> capabilities;   // machine-readable tags
 };
 
-// Module interface (docs/specs/08). Modules are the feature packages of the
-// engine (Presentation, Bible, Media, Songs, Streaming, NDI, MIDI, AI, Cloud,
-// Remote). All lifecycle entry points are optional — default to Ok().
 class IModule : public IService {
 public:
     ~IModule() override = default;
@@ -33,5 +29,4 @@ public:
     virtual Result<void> OnResume() { return Ok(); }
     virtual Result<void> OnSuspend(){ return Ok(); }
 };
-
 } // namespace bps

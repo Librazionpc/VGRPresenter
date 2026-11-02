@@ -3,17 +3,37 @@
 #include "core/config/Json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <format>
 
 namespace bps {
-
 Logger& Logger::Instance() {
     static Logger instance;
     return instance;
+}
+
+std::optional<LogLevel> LogLevelFromName(std::string_view name) {
+    std::string lowered(name);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowered == "trace") return LogLevel::Trace;
+    if (lowered == "debug") return LogLevel::Debug;
+    if (lowered == "info") return LogLevel::Info;
+    if (lowered == "warning" || lowered == "warn") return LogLevel::Warning;
+    if (lowered == "error") return LogLevel::Error;
+    if (lowered == "fatal") return LogLevel::Fatal;
+    return std::nullopt;
+}
+
+std::optional<LogLevel> LogLevelEnvOverride() {
+    const char* raw = std::getenv("VGR_LOG_LEVEL");
+    if (!raw || !*raw) return std::nullopt;
+    return LogLevelFromName(raw);
 }
 
 // ---------------------------------------------------------------------------
@@ -25,6 +45,12 @@ FileSink::FileSink(std::string path, size_t maxBytes, size_t keepBackups)
     std::filesystem::path p(path_);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
     file_.open(path_, std::ios::app);
+    // The file outlives the process (the app appends across runs), so what decides rotation
+    // is the size ON DISK, not what this run has written — otherwise every run inherits a
+    // file already past the cap and adds to it forever.
+    std::error_code sizeEc;
+    const auto existing = std::filesystem::file_size(p, sizeEc);
+    if (!sizeEc) written_ = static_cast<size_t>(existing);
 }
 
 FileSink::~FileSink() {
@@ -33,9 +59,6 @@ FileSink::~FileSink() {
 
 void FileSink::Write(std::string_view formatted, const LogRecord&) {
     if (!file_.is_open()) return;
-    // Emit the whole line (including its newline) in a single write call so that
-    // concurrent writers (parallel test processes, remote apps) appending to the
-    // same file never interleave mid-line (02 §Atomicity).
     std::string line(formatted);
     line.push_back('\n');
     file_.write(line.data(), static_cast<std::streamsize>(line.size()));
@@ -198,9 +221,17 @@ void Logger::Log(LogLevel level, std::string_view module, std::string_view categ
     if (!PassesFilter(level, category)) return;
 
     if (!running_.load()) {
-        // Boot-safe fallback path: direct to stderr (Kernel has no logger yet).
-        fprintf(stderr, "[%s][%.*s] %.*s\n", ToString(level), static_cast<int>(module.size()),
-                module.data(), static_cast<int>(message.size()), message.data());
+        // Boot-safe fallback: no pump yet, so write the record straight to stderr —
+        // through the SAME formatter, so a line logged before the logger starts is
+        // indistinguishable from one logged after it.
+        LogRecord rec;
+        rec.level = level;
+        rec.timestamp = std::chrono::system_clock::now();
+        rec.threadId = std::this_thread::get_id();
+        rec.module = std::string(module);
+        rec.category = std::string(category);
+        rec.message = std::string(message);
+        std::fprintf(stderr, "%s\n", Format(rec).c_str());
         return;
     }
 
@@ -277,6 +308,24 @@ Result<void> Logger::RemoveSink(std::string_view name) {
         }
     }
     return Error::Make(Err::NotFound, "Logger", "sink not found: " + std::string(name));
+}
+
+bool Logger::SetSinkLevel(std::string_view name, LogLevel level) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& sink : sinks_) {
+        if (std::string_view(sink->Name()) == name) {
+            sink->SetMinLevel(level);
+            return true;
+        }
+    }
+    return false;
+}
+
+LogLevel Logger::SinkLevel(std::string_view name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& sink : sinks_)
+        if (std::string_view(sink->Name()) == name) return sink->MinLevel();
+    return LogLevel::Trace;
 }
 
 Result<void> Logger::Flush() {
@@ -415,5 +464,4 @@ Metrics Logger::MetricsSnapshot() const {
     m.health = GetHealth().state;
     return m;
 }
-
 } // namespace bps

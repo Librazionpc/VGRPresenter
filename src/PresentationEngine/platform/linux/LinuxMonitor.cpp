@@ -10,9 +10,7 @@
 #include <regex>
 
 namespace bps::platform {
-
 namespace {
-
 std::string ReadFile(std::string_view path) {
     std::ifstream in{std::string(path)};
     if (!in) return {};
@@ -34,10 +32,6 @@ bool ParseMode(const std::string& mode, int& w, int& h, int& refresh) {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime-loaded libdrm — fills the orientation/HDR best-effort gaps that
-// sysfs alone cannot see (panel orientation + HDR_OUTPUT_METADATA blob are DRM
-// connector properties). Mirrors the LinuxAudio libasound loader: resolved
-// through the PAL ILibrary seam; cleanly degrades when libdrm is absent.
 // ---------------------------------------------------------------------------
 
 // Minimal ABI-compatible views of the xf86drmMode structs (field order/layout
@@ -288,5 +282,4 @@ std::string LinuxMonitor::DefaultMonitorId() const {
         if (m.primary) return m.id;
     return monitors.empty() ? "" : monitors.front().id;
 }
-
 } // namespace bps::platform

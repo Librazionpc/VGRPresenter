@@ -1,6 +1,3 @@
-// Unit tests: Native .vgr format (docs/specs/22).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests vgr
 #include "TestHarness.hpp"
 
 void TestVgrFormat() {

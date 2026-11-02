@@ -7,18 +7,13 @@
 #include <algorithm>
 
 namespace bps::platform {
-
 namespace {
-
 InputDeviceKind KindOf(const std::string& name, const RID_DEVICE_INFO& info) {
     std::string lower = name;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(::tolower(c)); });
     if (info.dwType == RIM_TYPEKEYBOARD) return InputDeviceKind::Keyboard;
     if (info.dwType == RIM_TYPEMOUSE) return InputDeviceKind::Mouse;
-    // HID devices: classify by name keywords; digitizer usage page is
-    // available via GetRawInputDeviceInfoW(RIDI_PREPARSEDDATA) but names are
-    // sufficient for discovery.
     if (lower.find("touch") != std::string::npos) return InputDeviceKind::Touch;
     if (lower.find("pen") != std::string::npos || lower.find("tablet") != std::string::npos)
         return InputDeviceKind::Pen;
@@ -28,7 +23,6 @@ InputDeviceKind KindOf(const std::string& name, const RID_DEVICE_INFO& info) {
     if (lower.find("mouse") != std::string::npos) return InputDeviceKind::Mouse;
     return InputDeviceKind::Other;
 }
-
 } // namespace
 
 std::vector<InputDeviceInfo> WindowsInput::Enumerate() const {
@@ -84,5 +78,4 @@ bool WindowsInput::HasPointer() const {
             d.kind == InputDeviceKind::Pen) return true;
     return false;
 }
-
 } // namespace bps::platform

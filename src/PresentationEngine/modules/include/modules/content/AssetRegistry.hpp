@@ -1,9 +1,5 @@
 #pragma once
 
-// AssetRegistry (docs/specs/13 §Asset Registry): maps UUID → loaded runtime
-// asset, tracks reference counts and pins, provides alias lookup and
-// duplicate detection (by content hash).
-
 #include "modules/content/RuntimeAsset.hpp"
 #include "core/common/Common.hpp"
 
@@ -15,7 +11,6 @@
 #include <vector>
 
 namespace bps::content {
-
 class AssetRegistry {
 public:
     AssetRegistry() = default;
@@ -47,5 +42,4 @@ private:
     std::unordered_map<std::string, Uuid> aliases_;     // alias -> uuid
     std::unordered_map<std::string, Uuid> byHash_;      // hash -> uuid (first)
 };
-
 } // namespace bps::content

@@ -3,20 +3,9 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import VGRPresenterUI
 
-// One node on the Settings · Routing canvas — a bus, a screen, a style or an
-// output (sink). Pure presentation: the card carries no ports and no wire
-// state. The canvas owns both, so a wire's endpoint and the dot it leaves from
-// are computed from ONE set of formulas and can never disagree (the reason the
-// Audio & Video board draws its connector endpoints the same way).
-//
-// The card only reports hover, and only so the canvas can lift the wires that
-// belong to it.
 Rectangle {
     id: root
 
-    // The canvas's key for this node ("bus:3", "screen:Congregation",
-    // "sink:ndi"), passed straight back with hoverChanged so the canvas never has
-    // to guess which delegate the pointer is over.
     property string nodeKey: ""
     property string title: ""
     // The second line: a bus's signal type, a screen's kind + resolution, a
@@ -33,34 +22,13 @@ Rectangle {
     // A short state on the subtitle line: "No signal", "2 screens", "silent".
     property string status: ""
     property color statusColor: Theme.textMuted
-    // Draw that state as a compact BADGE at the card's right end (FreeShow's own
-    // node cards) instead of as text sharing the subtitle's line: the subtitle then
-    // owns the whole line, so "Audio · system endpoint" is not cut down to "Audio ·
-    // system en…" just to leave room for four words of state.
     property bool statusBadge: false
     // A connect-drag is live and this card is / is not a legal target.
     property bool dropValid: false
     property bool dropInvalid: false
-    // A transport button on the card's right end: START/STOP a take on the node
-    // THIS card is wired to. An empty label = no button, so the bus, style, screen
-    // and speaker cards keep exactly the look they had. `actionActive` is the live
-    // state of the take this card owns (the canvas answers it from the engine's
-    // own session), which is what turns the pill red and the label into "Stop".
     property string actionLabel: ""
     property bool actionActive: false
 
-    // THE TWO GATES ON THE CARD ITSELF — an output's own Overlays / Media
-    // switches (OutputListModel::setShowOverlay / setShowMedia). Only output
-    // cards set gateChips; the bus, style and speaker cards keep the look they
-    // had.
-    //
-    // They are DRAWN as connector nodes — a dot, a short stub of line, then the
-    // label — because that is what everything else on this canvas is, and a gate
-    // is the one thing on a card that is an allow-list fact rather than a picture.
-    // They are deliberately NOT ports: nothing can be wired to them, the canvas's
-    // port hit-test never sees them (they are inside the card, not on its edge),
-    // and their own MouseArea claims the press so neither the card's double-click
-    // nor the canvas's drag starts from one. A press simply flips the gate.
     property bool gateChips: false
     property bool overlayOn: true
     property bool mediaOn: true
@@ -70,15 +38,7 @@ Rectangle {
     readonly property bool hovered: hover.hovered
 
     signal hoverChanged(string key, bool isHovered)
-    // A right-click on the card. The canvas opens its shared DropdownPanel at the
-    // click point, so a right-click here behaves like one on a roster row
-    // anywhere else in Settings; the card reports the point rather than hosting
-    // the menu, because the menu is the canvas's (it is what knows the layer).
     signal contextRequested(string key, var card, real localX, real localY)
-    // A DOUBLE-CLICK opens this node's editor. The canvas decides what "its
-    // editor" means per layer (a bus lives on Audio & Video, a style on Styles,
-    // an output in its own dialog), so the card only reports the gesture — the
-    // same split the right-click menu uses.
     signal activated(string key)
     // The transport pill was pressed. The canvas decides what it MEANS per layer
     // (a REC / STREAM card starts or stops a take on its own node).
@@ -102,11 +62,6 @@ Rectangle {
     Behavior on opacity { NumberAnimation { duration: 110 } }
     Behavior on border.color { ColorAnimation { duration: 110 } }
 
-    // The hover wash is the app's shared layer (HoverGlow), not a colour binding
-    // on this card's own `color`: one animated layer fades instead of two colours
-    // racing (see HoverGlow's header), so a card on this canvas lights up exactly
-    // like a row or a tile elsewhere. No edge here — the card already owns its
-    // accent border for drop validity.
     HoverGlow {
         anchors.fill: parent
         radius: parent.radius
@@ -114,26 +69,16 @@ Rectangle {
         edge: false
     }
 
-
     HoverHandler {
         id: hover
         onHoveredChanged: root.hoverChanged(root.nodeKey, hover.hovered)
     }
 
-    // DOUBLE-CLICK = EDIT. A TapHandler, not a MouseArea, on purpose: it claims
-    // the pointer only when it recognises the gesture, so a single press on the
-    // body still reaches the canvas exactly as before, and the port dots (their
-    // own items, drawn above the cards) keep their drags untouched. The card's
-    // right-click MouseArea stays as it is — one gesture per handler keeps the
-    // two from fighting over acceptedButtons.
     TapHandler {
         acceptedButtons: Qt.LeftButton
         onDoubleTapped: root.activated(root.nodeKey)
     }
 
-    // Right button only: the LEFT press belongs to the canvas, whose ports and
-    // drop targets are hit-tested by coordinate (see RoutingScreen::nodeAt), so
-    // a card-level handler must never swallow it.
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.RightButton
@@ -211,13 +156,6 @@ Rectangle {
                 spacing: 6
 
                 Text {
-                    // The status owns the right-hand end of the line, so the
-                    // subtitle gives up exactly its width: a long screen name
-                    // elides instead of pushing "No signal" out of the card.
-                    // The gate chips share this line too (see gateRow), so they are
-                    // subtracted the same way — on a card that carries both a
-                    // transport and a state pill the line is short, and this is what
-                    // keeps the chips from drawing over them.
                     width: Math.max(0, parent.width
                                     - (gateRow.visible ? gateRow.implicitWidth + 6 : 0)
                                     - (statusText.visible ? statusText.implicitWidth + 6 : 0))
@@ -228,9 +166,6 @@ Rectangle {
                     font.pixelSize: Theme.textSub
                 }
 
-                // THE TWO GATE NODES (see gateChips): a dot, a stub of line and the
-                // gate's initial — the connector vocabulary this canvas already
-                // speaks, at subtitle height so they cost the card no extra row.
                 Row {
                     id: gateRow
                     visible: root.gateChips
@@ -256,9 +191,6 @@ Rectangle {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 2
 
-                                // The port-style dot. Lit when the gate is open;
-                                // muted and hollow when it is closed, so the state
-                                // reads before the letter does.
                                 Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: 5
@@ -297,9 +229,6 @@ Rectangle {
                                 }
                             }
 
-                            // One press = one flip. Accepting the press keeps the
-                            // card's TapHandler from reading it as the first half of
-                            // a double-click edit.
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
@@ -322,9 +251,6 @@ Rectangle {
             }
         }
 
-        // The state badge. Its own ground so the state reads at a glance without
-        // spending the subtitle's line on it — the dot beside the label carries the
-        // colour (warning for a wired-but-dark feed, muted for nothing wired).
         Rectangle {
             id: statusPill
             visible: root.statusBadge && root.status.length > 0
@@ -358,11 +284,6 @@ Rectangle {
             }
         }
 
-        // The transport pill. A voice of its own: it is the only thing on this
-        // canvas that CHANGES STATE rather than describing one, so it is filled
-        // (the app's armedStopBg / armedLiveBg washes) instead of outlined like the
-        // type badge beside it. Its own MouseArea keeps the click off the card's
-        // double-click handler and off the canvas behind it.
         Rectangle {
             id: actionPill
             visible: root.actionLabel.length > 0
@@ -382,9 +303,6 @@ Rectangle {
                 anchors.centerIn: parent
                 spacing: 5
 
-                // The live dot, in the same red every other live pill in the app
-                // uses, so "this is recording" reads the same here as on the
-                // Recording screen.
                 Rectangle {
                     visible: root.actionActive
                     width: 6

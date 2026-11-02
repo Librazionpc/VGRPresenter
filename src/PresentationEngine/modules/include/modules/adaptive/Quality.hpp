@@ -1,9 +1,5 @@
 #pragma once
 
-// Quality profiles, user modes and configuration layers (docs/specs/16 §6, §19,
-// §20, §17). The runtime maps the active mode+layer+profile onto QualitySettings
-// that the optimizer uses. Custom = user overrides on top of a base profile.
-
 #include "core/common/Common.hpp"
 
 #include <map>
@@ -11,7 +7,6 @@
 #include <string>
 
 namespace bps::adaptive {
-
 // --- Quality levels (docs/specs/16 §6) -------------------------------------
 enum class QualityLevel : int {
     Minimal = 0, BatterySaver, Performance, Balanced, High, Ultra, Custom
@@ -143,5 +138,4 @@ private:
     ConfigLayer layer_ = ConfigLayer::Automatic;
     Preference preference_ = Preference::None;
 };
-
 } // namespace bps::adaptive

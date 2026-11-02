@@ -2,37 +2,8 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// The app's TITLE BAR + tab strip, in two rows. The window is
-// frameless, so the top row (32 px) is the title bar: the logo + File/Edit/View/Help
-// menu (AppMenuBar, drawn over its left side), the connection status and the window's
-// own minimize/maximize/close buttons. The second row, under the line, holds the
-// Search button (far left), the Show/Edit/Stage tabs (centre) and GO LIVE at the far right
-// (with Settings just inside it). Drag the empty strip to move the
-// window; double-click it to maximize/restore (both handled by the OS via
-// startSystemMove, so edge-snapping works).
-// Shared by every screen — instantiated once in Main.qml instead of once
-// per screen, so there's exactly one ViewTabs/HeaderStatus in the tree
-// rather than a separate copy behind each screen.
-//
-// The logo + File/Edit/View/Help menu (AppMenuBar) is deliberately NOT
-// drawn here: it needs to sit above every screen (for its dropdowns and
-// click-outside catcher to work regardless of which screen is showing), so
-// Main.qml instantiates it separately as the topmost layer.
-//
-// The right-hand cluster is anchored to the window's right edge (window buttons, then
-// status), so it stays put at any window width; the tabs stay centred.
-//
-// Colors read the Theme singleton (title-bar ground, borders, icon and text
-// tones), so the header recolours with the rest of the app when Light is
-// chosen. It carried literal hex here only while Theme was registered as an
-// ordinary type and `Theme.*` resolved to undefined — a registration bug now
-// fixed in CMakeLists.txt (QT_QML_SINGLETON_TYPE), not an AOT/nesting limit.
 Rectangle {
     id: root
-    // Named for the header/caption-clearance scenario (tools/selftest/
-    // run_header_clear_test.sh): the tiles it measures are anchored in this
-    // item's own design space, so the scenario maps them against the caption
-    // cluster here rather than re-deriving the arithmetic.
     objectName: "selfTestAppHeader"
 
     // Title row + tab row. Main.qml's headerHeight must match (it pushes
@@ -66,11 +37,6 @@ Rectangle {
         color: Theme.workspacePaneBg
     }
 
-    // Window drag / maximize by the strip itself. Declared FIRST — z-order is
-    // declaration order, so every control below (GO LIVE, tabs, Search,
-    // Settings, window buttons) stacks ABOVE this and takes its own clicks
-    // before this sees them. Declared after the GO LIVE button once, the
-    // full-header drag layer buried it and the button stopped responding.
     Item {
         anchors.fill: parent
 
@@ -88,16 +54,8 @@ Rectangle {
         }
     }
 
-    // GO LIVE holds the tab row's EXTREME right end, with Settings directly
-    // beside it on its left (user call — the two used to be the other way
-    // round). Reads the shared live service; no signal needed — it calls it
-    // directly.
     readonly property bool live: LiveOutputService.live
 
-    // THE ONE ON-AIR SWITCH: red pill, GO LIVE / STOP (the transport arrows and Clear stay on the
-    // monitor wall — this is the global switch). It owns the very end of the row, in the same
-    // right-hand column as the caption buttons above it.
-    // Same icon-pill-above/caption-below layout as Search and Settings.
     Item {
         id: goLiveButton
         objectName: "selfTestGoLive"
@@ -192,9 +150,6 @@ Rectangle {
         color: Theme.border
     }
 
-    // Search - the extreme LEFT of the tab row. Opens the search dialog. Like the tabs, the
-    // button is the icon: the pill around the magnifier is the click target and the label
-    // is a caption under it.
     Item {
         id: searchButton
         x: 12
@@ -280,10 +235,6 @@ Rectangle {
         anchors.top: parent.top
     }
 
-    // The caption cluster's own size, in DESIGN units — published so the window's
-    // resize grips (Main.qml, which are deliberately unscaled) can keep their
-    // strips off the buttons. Nothing inside the header needs it: it is the one
-    // rect the header cannot claim and the frame has to leave alone.
     readonly property real captionClusterWidth: windowButtons.width
     readonly property real captionClusterHeight: windowButtons.height
 
@@ -295,28 +246,13 @@ Rectangle {
         y: 9
     }
 
-    // FEED HEALTH — a second pill in the same row, immediately left of
-    // Connected and deliberately NOT part of it. Connected answers "is the
-    // engine there"; this answers "is the picture still reaching the outputs",
-    // which is the failure the frozen-frame look hides. It is driven entirely
-    // by LiveOutputService (see sampleFeedHealth): silent while frames flow,
-    // "M1, M2 · No live feed" while any output is stalled, "… · Feed restored"
-    // for a few seconds after. Empty text = the item is simply not there, so
-    // nothing shifts while the feed is healthy.
     FeedStallPill {
         id: feedPill
         anchors.right: status.left
         anchors.rightMargin: 16
-        // Lined up with the WORDS, not with the 32 px status item: HeaderStatus's
-        // own content (the dot and "Connected") is a 14 px band at its TOP, so
-        // centring on status.verticalCenter put this pill visibly lower than the
-        // label it sits beside. 7 = that band's own centre inside HeaderStatus.
         y: status.y + 7 - height / 2
     }
 
-    // Settings - second from the right now (GO LIVE took the end), still mirroring Search on
-    // the left: the gear in a pill is the click target, the label a caption under it. Opens the
-    // Settings dialog (Main.qml owns the dialog).
     Item {
         id: settingsButton
         objectName: "selfTestSettingsTile"
@@ -345,18 +281,12 @@ Rectangle {
                 glowColor: Theme.hoverBg
             }
 
-            // A 24 px box holding the gear. IconGlyph is a plain Item that needs an explicit
-            // size and is drawn at ~10 px, so it is enlarged with scale (its stroke is
-            // thinned to match).
             Item {
                 id: gearGlyph
                 anchors.centerIn: parent
                 width: 24
                 height: 24
 
-                // The glyph's box is exactly the gear's own size (9 x 9.98): the icon's path
-                // sits at the top-left of its box, so any larger box would shift it off-centre
-                // (and the enlargement would multiply that shift).
                 IconGlyph {
                     readonly property real enlarge: 1.7
                     anchors.centerIn: parent

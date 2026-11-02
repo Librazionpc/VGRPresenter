@@ -1,10 +1,5 @@
 #pragma once
 
-// AudioDsp — the sample-level processing blocks the playout mixer applies to a
-// source's processing chain: a parametric (peaking) EQ band and a Schroeder/Freeverb
-// style reverb. Pure arithmetic on sample buffers, no platform or graph dependency,
-// so the same code is what the mixer runs and what the unit tests check.
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -12,7 +7,6 @@
 #include <vector>
 
 namespace bps::production::dsp {
-
 // One peaking-EQ band (RBJ cookbook), direct form I, one instance per channel.
 class PeakingBand {
 public:
@@ -66,10 +60,6 @@ private:
     double x1_ = 0.0, x2_ = 0.0, y1_ = 0.0, y2_ = 0.0;
 };
 
-// Adaptive noise reducer for one stereo source. It learns the source's noise floor
-// (the quiet level it keeps returning to), and when the signal sits near that floor
-// it attenuates by up to `amount` (0..1 = full depth). Louder material passes
-// untouched. Stereo is linked, so the image does not shift between channels.
 class NoiseReducer {
 public:
     void Process(float &l, float &r, double amount, double sampleRateHz)
@@ -89,20 +79,6 @@ public:
         // linearly toward (1 - depth) at the floor itself.
         constexpr double kThresholdRatio = 3.0;   // about +9.5 dB over the floor
 
-        // Floor. It drops at once to any quieter level and rises SLOWLY, at most
-        // about 3x per second — the rate a room's quiet level drifts at.
-        //
-        // It used to rise toward whatever it heard on a fixed 1.5 s curve, so one
-        // second of a loud passage dragged the floor halfway up behind it, the
-        // threshold (3x the floor) crossed the material, and the reducer ducked the
-        // very thing it exists to pass — heard as "the speech fades in and out while
-        // they are speaking". At 3x/s a second of loud material lifts the threshold
-        // to a ninth of itself at most, so loud stays untouched, while ordinary
-        // quiet still converges within a second or two.
-        //
-        // The FIRST 50 ms are averaged in instead of seeding the floor from one
-        // sample: a single unlucky sample initialised it a hundredfold too low, and
-        // the creep then had to spend seconds finding the real level.
         if (initSamples_ < static_cast<uint32_t>(0.05 * sampleRateHz)) {
             initSum_ += level;
             ++initSamples_;
@@ -134,9 +110,6 @@ private:
     double initSum_ = 0.0;
 };
 
-// Freeverb-style reverb: eight parallel damped feedback combs into four series
-// allpass filters, on a mono sum. Delay lengths are the Freeverb tunings scaled to
-// the sample rate.
 class Reverb {
 public:
     void Configure(double sampleRateHz)
@@ -205,5 +178,4 @@ private:
     Comb combs_[kCombs];
     Allpass allpasses_[kAllpasses];
 };
-
 } // namespace bps::production::dsp

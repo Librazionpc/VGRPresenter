@@ -1,6 +1,3 @@
-// Unit tests: Broadcast Engine (docs/specs/29).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests broadcast
 #include "TestHarness.hpp"
 #include "modules/broadcast/BroadcastEngine.hpp"
 
@@ -19,10 +16,6 @@ void TestBroadcastEngine() {
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
     eng.PreferProvider("software");   // deterministic loopback, whatever runtime is installed
-    // The "ndi" feature switch now defaults OFF (a fresh install needs a
-    // firewall grant first — see AdaptiveRuntime's own registration
-    // comment); this test exercises real sender/receiver creation, so it
-    // sets up its own precondition instead of relying on a default.
     eng.SetNdiEnabled(true);
 
     // The software loopback provider is always available.
@@ -179,10 +172,6 @@ void TestBroadcastNdiRuntime() {
     auto& eng = br::BroadcastEngine::Instance();
     CHECK(eng.Initialize().ok());
     CHECK(eng.Start().ok());
-    // This test's whole point is the REAL runtime's own status — "ndi"
-    // defaulting off would otherwise report Error/"switched off" here
-    // regardless of whether the SDK is actually installed, which is a
-    // different question than the one this test asks.
     eng.SetNdiEnabled(true);
 
     const auto st = eng.NdiStatus();
@@ -204,9 +193,6 @@ void TestBroadcastNdiRuntime() {
     std::fprintf(stderr, "[note] NDI runtime ready: %s\n", st.version.c_str());
     CHECK(!st.version.empty());
 
-    // Real sender -> real receiver through the vendor runtime on this machine.
-    // Exercises every ABI struct (send_create/send_video/recv_create/
-    // recv_capture/recv_free) — a wrong layout crashes or reads garbage here.
     eng.PreferProvider("ndi");
     constexpr uint32_t W = 320, H = 180;
     auto sender = eng.CreateNdiSender("bps-unit-test");
@@ -226,9 +212,6 @@ void TestBroadcastNdiRuntime() {
         CHECK(!eng.SendVideoFrame(sender.value(), oddFormat, frame.data(), frame.size()).ok());
         CHECK(eng.SendVideoFrame(sender.value(), vf, frame.data(), frame.size()).ok());
 
-        // Discover our own sender through the runtime (local sources are shown
-        // — but the provider hides ITS OWN senders, so look at the raw list via
-        // a second, independent receiver by full name instead).
         std::string fullName;
         for (int attempt = 0; attempt < 40 && fullName.empty(); ++attempt) {
             (void)eng.SendVideoFrame(sender.value(), vf, frame.data(), frame.size());

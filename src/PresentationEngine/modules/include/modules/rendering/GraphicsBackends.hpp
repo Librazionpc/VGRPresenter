@@ -1,10 +1,5 @@
 #pragma once
 
-// Backend implementations (docs/specs/17 §Backends):
-//  - NullGraphicsBackend: headless command accounting (CI, servers, tests).
-//  - SoftwareGraphicsBackend: complete CPU rasterizer producing RGBA frames.
-// DirectX12/Vulkan/Metal implement the same interface in future backends.
-
 #include "modules/rendering/IGraphicsBackend.hpp"
 
 #include <map>
@@ -12,7 +7,6 @@
 #include <unordered_map>
 
 namespace bps::rendering {
-
 // ---------------------------------------------------------------------------
 // NullGraphicsBackend — headless. Tracks counts + memory, produces a
 // black/transparent frame on Readback (useful for previews without pixels).
@@ -57,10 +51,6 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// SoftwareGraphicsBackend — CPU rasterizer.
-// Supports clear, fill rect, image blits, glyph blits, filled shapes, and
-// per-region pixel effects (brightness/contrast/saturation/opacity, box blur,
-// glow, shadow, crop, mask). Frames are captured via Readback().
 // ---------------------------------------------------------------------------
 class SoftwareGraphicsBackend final : public IGraphicsBackend {
 public:
@@ -120,5 +110,4 @@ private:
     };
     PendingEffect pending_;
 };
-
 } // namespace bps::rendering

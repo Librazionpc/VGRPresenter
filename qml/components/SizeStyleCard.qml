@@ -1,29 +1,5 @@
 import QtQuick
 
-// The Edit screen's item-style cards, in FreeShow's collapsing-card language
-// (see InspectorSection.qml — one shared card shape, ported from FreeShow's
-// edit tools). Two sections, because they answer two different questions:
-//
-//   Size & Style — the box itself: Padding and Corner Radius. Corner Radius is
-//                  deliberately NOT part of Border (it rounds the box's own
-//                  fill/outline/selection chrome, so it works with the border
-//                  off).
-//   Border       — the stroke: on/off, colour, Width, Line/Dotted/Dashed.
-//
-// Item background fill is still not a control here: the top-of-panel
-// "Background" row (EditScreen.qml) already picks a colour, and targets the
-// selected item when something is selected, so this card does not duplicate
-// that swatch+chip a second time.
-//
-// The card edits CanvasItemStyle value objects directly: point `targets` at the
-// style object(s) of the currently selected canvas item(s) and every control
-// binds to targets[0] and writes to all of them. No mirroring layer, no
-// per-field signals — the card is reusable anywhere CanvasItemStyle is. An
-// empty array disables the controls.
-//
-// There is no Opacity slider: item transparency lives on FiltersCard (it only
-// ever made sense for some kinds, and folding a kind-gated control into a card
-// everything uses unconditionally is what made the first removal necessary).
 Column {
     id: root
 
@@ -34,18 +10,11 @@ Column {
     readonly property CanvasItemStyle primary: targets.length > 0 ? targets[0] : null
     readonly property bool hasTargets: primary !== null
 
-    // False for a kind whose own content (camera's live preview, the generic
-    // media/audio/shape/timer/clock placeholder) fully covers its box with an
-    // opaque visual — a background fill or border stroke drawn underneath it
-    // would never be seen, so the Border section greys out.
     property bool fillSupported: true
 
     // Same reusable undo-notification pattern as TextItemPanel.qml's own
     // undoHook (see its header comment for the full reasoning).
     property var undoHook: null
-    // Called BEFORE undoHook — hands keyboard focus back to the canvas first
-    // (see EditScreen.qml's handleCanvasSelect and DraggableCanvasText's
-    // onPressed) so Ctrl+Z/Ctrl+Y are not gated off by an in-progress text edit.
     property var focusHook: null
     function notifyUndo() {
         if (root.focusHook)
@@ -57,13 +26,7 @@ Column {
     // Fired when the Border row's "Change" chip is clicked — this card owns no
     // colour-picker UI; the consumer reuses its BackgroundColorModal.
     signal changeBorderRequested()
-    // Fired when the Style field (Line/Dotted/Dashed) is tapped — this card
-    // owns no popup UI of its own (same reasoning as changeBorderRequested);
-    // the consumer opens a DropdownPanel anchored to borderStyleFieldItem.
     signal changeBorderStyleRequested()
-    // Exposed so the consumer's DropdownPanel can anchor to and width-match
-    // this exact field (see TextItemPanel.qml's fontFamilyFieldItem for the
-    // same pattern).
     readonly property alias borderStyleFieldItem: borderStyleField
 
     // Shorthands over the primary target so the bindings above stay short.
@@ -79,9 +42,6 @@ Column {
     readonly property real padding: primary ? primary.padding : 0
     readonly property real cornerRadius: primary ? primary.cornerRadius : 0
 
-    // FreeShow's sectionColors: box = #f079b4 (its "position" hue),
-    // border = #d8d8d8 (its own neutral). The same hues are used on the TEXT
-    // tab so a section keeps its colour across tabs.
     readonly property color boxHue: "#f079b4"
     readonly property color borderHue: "#d8d8d8"
 
@@ -102,9 +62,6 @@ Column {
             })
         }
 
-        // The SAME editable value fields the Text card uses (NumberField.qml):
-        // padding and radius are pixel values typed or nudged by one, and the
-        // card already reads as a column of bordered fields.
         Row {
             width: parent.width
             spacing: 12
@@ -161,9 +118,6 @@ Column {
             root.targets.forEach((t) => t.borderEnabled = false)
         }
 
-        // On/off row: the checkbox and its label on the left, the colour swatch
-        // and "Change" chip on the right — the same swatch/chip language as the
-        // panel's Background row.
         Item {
             width: parent.width
             height: 26
@@ -268,11 +222,6 @@ Column {
             }
         }
 
-        // Width beside Style now (user call: "Border Lines beside the width
-        // then make dropdown[,] at all" — the Line/Dotted/Dashed segmented
-        // buttons become a chevron dropdown field, sharing the row with
-        // Width the same way Padding/Corner Radius do above), instead of
-        // Width on its own row and three full-width buttons underneath.
         Row {
             width: parent.width
             spacing: 12

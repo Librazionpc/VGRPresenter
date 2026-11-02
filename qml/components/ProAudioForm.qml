@@ -2,54 +2,18 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// The pro-audio form block in the audio dialogs — a faithful rebuild of
-// the reference mock (VGRPresenter-style audio input editor):
-//
-//   Name    [ Input Name            ]
-//   Source  [ ~~~ Microphone (...) ▼]
-//   Delay                          [0ms ▲▼]
-//   Volume        ────────●──────── [0dB]
-//   Channels (speaker)        [Routing…]
-//   [✓] Channel 1  ▮▮▮▮▯▯  -36  (◯ 0)
-//   [✓] Channel 2  ▮▮▮▮▯▯  -36  (◯ 0)
-//   Select All / None
-//
-// Layout contract: EVERY row is the same two-column grid — a 76px label
-// column on the left, the control filling the rest — matching the
-// reference's aligned label rail. Controlled component: values are owned
-// by the caller; changes report through the *Edited signals only.
-//
-// Every colour here reads a Theme token. This file was the last surface still
-// carrying its own dark hex literals, which had two costs: with Light chosen
-// the dialog card went white while every strip inside it stayed dark, and each
-// state colour became a guess — the amber gain ring that "came out of nowhere"
-// was one of those guesses. The meter scale this form shares with LevelTrack
-// and OutputMonitorTile lives in Theme too (meterQuiet…meterClip), so the three
-// can no longer drift apart.
 Column {
     id: root
 
     // ---- Delay (latency compensation, ms) ----
     property int delayMs: 0
     // ---- Volume (0..100, a LINEAR gain fader ×0..×1) ----
-    // Scales the channel meters (post-fader display — see the meter rows)
-    // and reads as dB gain (20·log10). Stored on the model; the engine
-    // applies it as real DSP once gain lands there.
     property real volume: 0
     // ---- Muted (meters flatten; caller syncs with the signal pane) ----
     property bool muted: false
     // ---- Channels block ----
     property int channels: 2
-    // Live per-channel meter fill (0..1 each, index = channel row) — REAL
-    // telemetry from the engine's WASAPI capture tap (EngineBridge.inputLevels
-    // → the dialogs). An empty array, or a strip the tap no longer feeds,
-    // renders dark: the meters read "no signal", they never fake it.
     property var meterLevels: []
-    // The tap's live channel LAYOUT — "mono" | "stereo" | "multi" (engine
-    // truth from the capture format). While metering, this WINS over the
-    // stored `channels` count: the rows re-render to match what the device
-    // actually delivers (a mono mic shows one strip even if the roster said
-    // 2; a stereo line-in shows two). Empty string = not metering.
     property string meterLayout: ""
     // How many channel rows to render right now: the live tap's layout when
     // metering, the stored count otherwise.
@@ -64,42 +28,15 @@ Column {
     signal volumeEdited(real volume)
     signal channelsEdited(int channels)
     signal routingClicked()
-    // A channel switched on/off, carrying the trim the consumer must WRITE for
-    // it: 0 when it is switched off (that IS "off" — the model has no separate
-    // enabled bit, and gain 0 is exactly what the Media pane's L/R pill
-    // writes), and the row's remembered trim when it is switched back on. That
-    // is what makes "turn the left channel off" travel downstream — the board's
-    // bus mix, the Media pane's cards and pills, the monitor tile's meters and
-    // the engine's own graph trim all read that one value — instead of only
-    // greying this dialog's row out.
     signal channelToggled(int index, bool enabled, real gain)
     // The channel row's gain knob moved (0..1); index = channel row.
     // The dialogs write it through AudioInputListModel.setChannelGain.
     signal channelGainEdited(int index, real gain)
-    // Mute toggle request — the form has no mute control of its own (the
-    // signal pane that held it was removed), but consumers like the Bus
-    // dialog reuse the strip and wire their own mute through this.
     signal mutedToggled()
     // Seed a row's knob from the model (call via the gainKnobFor callback
     // below — a function keeps the binding lazy, no array copy per row).
     property var gainFor: function(index) { return 1.0 }
-    // The trim this channel should COME BACK AT when it is switched back on —
-    // asked of the model (X.channelTrim(row, i)), because that is where the trim
-    // now lives (models/ChannelTrim.h). It used to be a `channelTrim` array
-    // owned by this form, which meant the restore worked only for the life of
-    // one open dialog and only for a side closed from inside THIS dialog: a side
-    // closed from the Media pane's L/R pill came back at unity here, and a side
-    // closed here came back at unity there. The default (nothing remembered)
-    // falls back to the level the side already holds, else unity — the same
-    // chain the models apply, so an unwired host cannot reopen a side at 0.
     property var channelTrimFor: function(index) { return 0.0 }
-    // Seed a row's ON state from the model too. The checkbox is an exception
-    // array over a default-on base (channelOn), so a channel the user switched
-    // off ANYWHERE — the Media pane's L/R pill, a previous session, this dialog
-    // last time it was open — must read as off here: the callback is the
-    // model's own answer (gain 0 ≡ off, the convention the pills and every
-    // downstream meter already read), and the local array only overrides it
-    // while this dialog's own click is in flight.
     property var channelOnFor: function(index) { return true }
 
     spacing: 0
@@ -107,9 +44,6 @@ Column {
     // Channel enable-state — an exceptions array over a default-on base,
     // copy-on-written so re-assignment re-fires the row bindings.
     property var channelOn: []
-    // A shrinking channel count (a different device picked, or the live tap
-    // reporting a narrower layout than the roster) must not leave stale
-    // exceptions behind for channels that no longer exist.
     onChannelsChanged: root.trimChannelExceptions()
     onRenderedChannelsChanged: root.trimChannelExceptions()
     function trimChannelExceptions() {
@@ -120,13 +54,6 @@ Column {
         return root.channelOn[i] !== undefined ? root.channelOn[i] !== false
                                                : root.channelOnFor(i)
     }
-    // What a channel switched back ON comes back at. Switching one off writes
-    // gain 0 to the model, so the knob's own value is gone by the time someone
-    // switches it back on — this asks the model for the trim it remembers (see
-    // channelTrimFor above), and only falls back to the side's current level and
-    // then unity. Never the 0 that "off" is stored as. Exactly
-    // channeltrim::reopenGain (models/ChannelTrim.h) — one policy, two
-    // languages.
     function trimFor(i) {
         const remembered = Math.max(0, Math.min(1, root.channelTrimFor(i)))
         if (!Db.isChannelOff(remembered))
@@ -162,13 +89,6 @@ Column {
     }
 
     // ---- dB readouts (linear convention, matching the meter math) -------
-    // gainText: the fader's gain in dB — 100 → "0 dB" (unity), 50 → "−6 dB",
-    // 0 → "−∞". levelText: a measured 0..1 level in dBFS — what a channel's
-    // cell shows LIVE from the tap (a healthy song peaks around −6..−3).
-    // (The old readout mapped the fader's POSITION over −60..0 dB, which
-    // printed "0 dB" at max and a misleading −30 dB at mid — unrelated to
-    // what the meters actually showed. Both readouts now use the same
-    // 20·log10 math the post-fader display applies.)
     function gainText(v) {
         if (v <= 0) return "-\u221E dB"
         return Math.round(20 * Math.log10(v / 100)) + " dB"
@@ -187,56 +107,23 @@ Column {
     }
 
     // ================================================================
-    // NAME + SOURCE rows — the consumer drops its SettingsField and
-    // SelectField into the right column through the aliases, so both
-    // dialogs' fields sit on the same label rail without re-declaring
-    // them here.
     // ================================================================
     property string nameLabel: qsTr("Name")
     property string sourceLabel: qsTr("Source")
     property alias nameText: nameField.text
     signal nameEdited(string text)
-    // The Name box's hint text — a consumer whose Add dialog wants a
-    // friendlier example ("e.g. “Cam 3 · Aisle”") passes one; the edit
-    // dialogs keep the plain "Input Name".
     property string namePlaceholder: qsTr("Input Name")
     property string sourceValue: ""
     property var sourceOptions: []
     // Hint text for the Source box while nothing is picked.
     property string sourcePlaceholder
-    // SelectField's test hook (see its comment): setting this exposes the
-    // field's box as <name>_box and its popup as <name>_menu, so the modal-fit
-    // sweep can click the field and measure the menu that opened. Empty = no
-    // handle (the edit dialogs do not need one).
     property string sourceFieldObjectName: ""
     signal sourcePicked(string value)
 
-    // Reuse gates — a consumer that only wants the Channels section (the
-    // video dialogs' Media/NDI audio meter, which already has its own
-    // Name/Kind/Source fields elsewhere in that dialog and no latency
-    // stepper) hides the rows it doesn't need instead of duplicating the
-    // whole channel-row block a third time.
     property bool showNameSource: true
     property bool showDelay: true
-    // Volume and Channels are separable too, and that is what lets the VIDEO
-    // dialogs use this same form instead of their own field set: a camera or a
-    // screen has no audio to trim, so those dialogs hide those two sections
-    // (showNameSource stays on), while Media/NDI kinds show them. Every video
-    // field then sits on the SAME label rail, with the same rows, as the audio
-    // dialogs' — one design, not two (live report: "the app has two designs for
-    // the audio and video edit popup — make it only one").
     property bool showVolume: true
     property bool showChannels: true
-    // Are the channel rows something the consumer can WRITE? The audio input
-    // dialogs say yes (a click writes gain 0 = closed to the roster — the one
-    // "closed channel" convention this app has). A BUS cannot: the engine's
-    // VolumeControl carries gain/mute/solo/pan and no per-channel trims, so a
-    // bus's rows are a read-through of what feeds it (the Edit Bus dialog's
-    // channelOnFor/gainFor) and setting channelsEditable:false keeps them
-    // rendered EXACTLY like an input row's — same checkbox, same knob ring,
-    // same dimming — with the controls inert instead of silently writing
-    // nothing. Consistency of the rendering is the point; nothing pretends a
-    // value was stored.
     property bool channelsEditable: true
     // The per-channel check boxes and "Select All / None": hidden for a strip that only READS its
     // channels (the Edit Bus dialog) — switches that cannot be flipped are just noise there.
@@ -482,10 +369,6 @@ Column {
             }
         }
 
-        // Routing… — reports via routingClicked(); the dialogs commit the
-        // patch on Apply. (No channel-count stepper: the count defaults
-        // from the source — mono device / stereo media — and is not
-        // user-adjustable here per design review.)
         Rectangle {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
@@ -512,9 +395,6 @@ Column {
     }
 
     // ---- Channel rows -----------------------------------------------------
-    // The row count follows the LIVE tap layout while metering (see
-    // renderedChannels) — the user sees the device's real mono/stereo/N shape
-    // the moment the meter starts, not the roster's stored guess.
     Column {
         width: parent.width
         spacing: 5
@@ -527,10 +407,6 @@ Column {
                 id: chRow
                 required property int index
                 width: parent.width
-                // Taller than before (was 34): FreeShow's "detailed" AudioMeter
-                // (src/frontend/components/drawer/audio/AudioMeter.svelte, the
-                // exact one AudioChannelMixer.svelte gives each channel strip)
-                // carries a dB scale under the bar, not just the bar itself.
                 height: 52
                 radius: Theme.radiusSm
                 color: Theme.inset
@@ -539,25 +415,11 @@ Column {
 
                 readonly property bool chOn: root.channelEnabled(chRow.index)
                 Component.onCompleted: {
-                    // The knob reads the model's gain. Nothing to remember here
-                    // any more: the trim lives in the model, and setChannelGain
-                    // records every OPEN level it is given as that side's trim.
                     knob.gain = Math.max(0, Math.min(1, root.gainFor(chRow.index)))
                 }
-                // The knob shows what the model now holds: a channel switched
-                // off reads 0, one switched back on reads the trim it went off
-                // with — so the row's bar, dB cell, knob and the model agreement
-                // cannot drift apart across a toggle.
                 onChOnChanged: knob.gain = chRow.chOn
                     ? root.trimFor(chRow.index) : 0.0
 
-                // POST-FADER METER — the real WASAPI tap (channel i's own
-                // entry of meterLevels) through the full chain: master fader
-                // → this channel's gain knob, gated by the row's enable
-                // checkbox and the input's mute. The SIGNAL is engine truth;
-                // the gain math is display-side — the exact scaling the
-                // engine's DSP will apply once gain lands there.
-                // A cut/muted row reads "no signal" (nothing passes it).
                 readonly property bool passes: chRow.chOn && !root.muted
                 readonly property real rawLevel: {
                     const v = root.meterLevels.length > chRow.index
@@ -568,9 +430,6 @@ Column {
                     ? Math.min(1, chRow.rawLevel * (root.volume / 100) * knob.gain)
                     : 0
 
-                // Fast attack, slow release (FreeShow's AudioMeter.svelte's
-                // updateMeterChannel), and a peak-hold that sticks 2s before
-                // easing down — the same behaviour OutputMonitorTile's meter uses.
                 property real smoothed: 0
                 property real peakValue: 0
                 property real peakHeldAt: 0
@@ -579,9 +438,6 @@ Column {
                     running: chRow.visible
                     repeat: true
                     onTriggered: {
-                        // A channel that is switched off must go dark at once;
-                        // retaining its peak hold would make a muted side look
-                        // like it was still carrying signal.
                         if (!chRow.passes || Db.isChannelOff(knob.gain)) {
                             chRow.smoothed = 0
                             chRow.peakValue = 0
@@ -665,14 +521,6 @@ Column {
                     GradientStop { position: 1.0; color: Theme.meterClip }
                 }
 
-                // The dB scale the ticks/bars/needle all read from is the shared
-                // -60..0 dB mapping (Db.dbPct) — was a private copy here, in
-                // LevelTrack and OutputMonitorTile; three copies, three ways to
-                // drift.
-
-                // The bar itself — a CONTINUOUS gradient reveal (FreeShow's real design),
-                // not discrete LED dots. Stretches across the free width between the
-                // signal dot and the dB cell.
                 Item {
                     id: meterBar
                     anchors.left: signalDot.right
@@ -718,9 +566,6 @@ Column {
                     }
                 }
 
-                // dB scale — FreeShow's own ladder (-60..0, major ticks every 6dB), positioned
-                // linearly in dB (same -60..0 → 0..1 mapping the bar's fill above uses) so the
-                // ticks line up with what the bar actually shows, evenly spaced every 6dB.
                 Item {
                     id: dbScale
                     anchors.left: meterBar.left
@@ -745,9 +590,6 @@ Column {
                     }
                 }
 
-                // dB cell — the channel's LIVE post-fader level in dBFS
-                // (was: a static echo of the fader's gain, which printed
-                // "0 dB" no matter what the meter did).
                 Text {
                     id: dbCell
                     anchors.right: knob.left
@@ -759,12 +601,6 @@ Column {
                     font.pixelSize: Theme.textSm
                 }
 
-                // The reference's green gain knob — a mini ring with an
-                // The channel's own GAIN KNOB — the green ring, now REAL:
-                // it is this channel's fader (0..1, default unity), dragged
-                // vertically, double-clicked to reset. The meter shows the
-                // full post-fader chain: WASAPI level → master fader → this
-                // knob → the row's bar and dB cell.
                 Item {
                     id: knob
                     anchors.right: parent.right
@@ -772,47 +608,17 @@ Column {
                     anchors.verticalCenter: box.verticalCenter
                     width: 24; height: 24
 
-                    // This channel's gain (0..1): read from the model if the
-                    // caller wired channelGainEdited, else a local default
-                    // (the component stays usable without a backing model).
                     property real gain: 1.0
-                    // Drag math: full knob travel = ±135° over 0..1, ~0.4 dB
-                    // per pixel (270° over ~120px of travel) — slow enough
-                    // for fine trims, fast enough to sweep 0..1 quickly.
                     readonly property real angle: -135 + gain * 270
-                    // The ring (and the trim pill on it) reads the app's ONE
-                    // channel-state vocabulary — Db.channelState decides, Theme
-                    // .channelStateColor draws — the same decision the cards'
-                    // L/R pills and the monitor strips now read, so off and
-                    // trimmed mean one thing everywhere.
-                    //
-                    // It used to hardcode its own green/amber pair, which had
-                    // two consequences: the amber turned up in every dialog that
-                    // reuses this form (Edit Audio Input, Edit Bus, Edit Video
-                    // Source) as an unexplained orange ring — "that orange pill,
-                    // where is it coming from" — and the state it was trying to
-                    // announce was invisible on every other surface.
                     readonly property string stateName: Db.channelState(gain)
                     readonly property color stateColor: Theme.channelStateColor(stateName)
-                    // The needle's own sweep — LIVE level (same Db.dbPct/smoothed the bar
-                    // uses), not gain. A glowing ring alone still read as "not moving";
-                    // this is the actual speedometer-style needle motion that was missing.
                     readonly property real liveAngle: -135 + Db.dbPct(chRow.smoothed) * 270
 
                     function setGain(g) {
                         gain = Math.max(0, Math.min(1, g))
-                        // The consumer writes the model, which remembers this as
-                        // the side's trim (see setChannelGain) — so a knob moved
-                        // here is restorable from the Media pane's pill too.
                         root.channelGainEdited(chRow.index, gain)
                     }
 
-                    // Live glow ring — the knob itself is a manual gain trim (it only
-                    // moves when dragged), but sitting right beside the live dB
-                    // reading it reads as broken/frozen if nothing about it ever
-                    // responds to signal. This ring brightens with the SAME
-                    // smoothed/dbPct level driving the bar, so the knob visibly
-                    // pulses with live audio without disturbing the drag gesture.
                     Rectangle {
                         anchors.fill: parent
                         anchors.margins: -3
@@ -832,9 +638,6 @@ Column {
                         border.color: knob.stateColor
                         Behavior on border.color { ColorAnimation { duration: 100 } }
                     }
-                    // Gain-trim marker — a small fixed tick on the outer glow ring
-                    // showing where the manual trim sits (the needle below now sweeps
-                    // live level instead, so trim gets its own, separate indicator).
                     Item {
                         anchors.centerIn: parent
                         width: 2; height: 30
@@ -867,20 +670,10 @@ Column {
                         }
                     }
 
-                    // What the knob IS, in words: the ring's colour alone never
-                    // said "trimmed" anywhere, and the state the operator cannot
-                    // name is the state they cannot trust. Same vocabulary and
-                    // same dB as the L/R pills' tips (Db.channelStateText), which
-                    // is the point — one channel, one sentence, whichever control
-                    // you happen to be over.
                     readonly property string tipText:
                         qsTr("Channel %1 gain · %2").arg(chRow.index + 1)
                                                      .arg(Db.channelStateText(knob.gain))
 
-                    // Triggered by pointer position, not hover events (see
-                    // PositionHoverArea): the hover-exit this build never delivers
-                    // would leave the bubble up. Click sink off, so the knob's own
-                    // drag below is untouched.
                     PositionHoverArea {
                         id: knobTipArea
                         anchors.fill: parent

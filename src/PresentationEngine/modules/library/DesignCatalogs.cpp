@@ -3,9 +3,7 @@
 #include <format>
 
 namespace bps::library {
-
 namespace {
-
 namespace pres = presentation;
 
 // FreeShow lays its overlays out on a 1920 x 1080 screen; every number below is written the way FreeShow has it and
@@ -38,17 +36,6 @@ pres::ContentBlock Outline(pres::ContentBlock b, double width, std::string color
     return b;
 }
 
-// A text block. `fontFamily` stays in the signature for a design that genuinely
-// needs a face, but NO SHIPPED DESIGN PASSES ONE — the catalogs below all pass
-// nullptr, so a shipped template names no font at all.
-//
-// That is the font-agnostic rule, at the data level: "no fontFamily" is not a
-// missing value, it is the request for the HOST's own UI face
-// (FontManager::DefaultFamily) — the same face QML previews resolve through
-// FontService. A catalog that named "Segoe UI"/"Arial" made the shipped look a
-// property of the authoring machine: on a host without it the engine fell back
-// (correctly, but to a different face), and any compare of stored-vs-shipped
-// content differed per install.
 pres::ContentBlock Text(double x, double y, double w, double h, std::string text, double fontSize,
                         std::string background = "transparent", bool bold = false, const char* align = "left",
                         const char* fontFamily = nullptr, std::string bind = {}, std::string color = "#ffffff",
@@ -58,13 +45,6 @@ pres::ContentBlock Text(double x, double y, double w, double h, std::string text
     b.style.backgroundColor = std::move(background);
     b.style.padding = 4;
     b.bind = std::move(bind);
-    // autoSize "shrink": the set size is a CEILING, not a fixed value - DesignPreview/the canvas only shrinks
-    // the font (down to a 3px floor) when the box is too small for it, never growing past what's set here. Was
-    // hardcoded "none" (fixed size + elide), which silently truncated any bound text longer than the block was
-    // sized for - a sermon paragraph or a long verse would just cut off mid-sentence with "…" instead of fitting.
-    // The family key is written ONLY when one was named: an empty "fontFamily":""
-    // would read back as a family called "" (and be fingerprinted as a content
-    // difference), while the absent key is the honest "let the host decide".
     const std::string fontField = (fontFamily && *fontFamily)
         ? std::format(R"("fontFamily":"{}",)", fontFamily)
         : std::string();
@@ -175,11 +155,6 @@ std::vector<pres::ContentBlock> OverlayStarter() {
 }
 
 // -----------------------------------------------------------------------------
-// The shipped TEMPLATES - FreeShow's own starter set (createData.ts
-// getDefaultTemplates / getDefaultScriptureTemplates / createDoubleTemplate), copied over like the
-// overlays above so the app opens with a usable library instead of a mock one. FreeShow styles every
-// template item on a 1920 x 1080 screen; the At() helper scales those numbers onto the stage, so the
-// layout below keeps the original's proportions.
 // -----------------------------------------------------------------------------
 
 Design Template(std::string id, std::string name, std::string category, std::string color,
@@ -212,10 +187,6 @@ std::vector<Design> ShippedTemplates() {
     std::vector<Design> out;
 
     // ---- song ----
-    // Plain centered defaults (both axes) - left pickable, not baked in: the Edit screen's TextItemPanel now
-    // has a real vertical-align row (top/center/bottom) alongside the existing horizontal one, so whichever
-    // template this text box is reused for, someone can choose top/justify (or anything else) per item from
-    // the canvas instead of the engine forcing one choice on every user of this shape.
     out.push_back(Template("big", "Big", "song", kTextAccent,
         { Text(50, 88, 1820, 904, "Big", 120, "transparent", false, "center") }));
     out.push_back(Template("default", "Default", "song", kTextAccent, { Text(50, 88, 1820, 904, "Default", 100, "transparent", false, "center") }));
@@ -365,11 +336,6 @@ std::vector<Design> ShippedTemplates() {
                            { Text(50, 88, 1820, 904, "(Parentheses)", 60, "transparent", false, "center", nullptr, "", "#cccccc") }));
 
     // ---- table: the sermon layouts (The Table tab) — its own content type so
-    // each tab lists only its own layouts, and now its OWN placeholders too
-    // ({table_*}, see BookFill.hpp). The Table used to be written in the
-    // Bible's words here, which put an empty line at the foot of both shipped
-    // layouts: {scripture_name} is the Bible VERSION, and a sermon has none.
-    // The year takes that slot, and the body is paragraphs, not verses.
     {
         std::vector<pres::ContentBlock> s = { Box(30, 30, 1860, 865, "#66000000", 20),
                                               Text(55, 45, 1810, 835, "{table_number} {table_text}", 64, "transparent", false, "left", nullptr, "text"),
@@ -379,22 +345,6 @@ std::vector<Design> ShippedTemplates() {
         out.push_back(Template("table", "Table", "table", kTableAccent, std::move(s)));
     }
     {
-        // TABLE 3: a FULL three-part sermon layout — the title, the paragraphs and
-        // the citation — with every slab carrying its OWN slot of the table family,
-        // so all three fill. What it used to be is worth recording, because it is
-        // the shape of mistake this family exists to remove: three identical body
-        // boxes, two of them written in the BIBLE's parallel-Bible spelling
-        // ({scripture2_text} / {scripture3_text} — which only the scripture family
-        // resolves, and then only for a second Bible that this app does not have),
-        // so a shipped Table layout showed two slabs that could never hold
-        // anything while telling every reader the layout belonged to the Bible
-        // family.
-        //
-        // Only the middle slab is BOUND (bind "text"): the body is the slide's own
-        // content, while the title and the citation are slots the fill resolves
-        // from their tokens (an unbound block that names placeholders is resolved
-        // through the same vocabulary — see SceneBuilder::BindTemplateBlocks).
-        // Binding all three to "text" would paint the body into every slab.
         std::vector<pres::ContentBlock> s;
         const char* slots[3] = { "{table_title}", "{table_number} {table_text}", "{table_citation}" };
         for (int i = 0; i < 3; ++i) {
@@ -414,7 +364,6 @@ std::vector<pres::ContentBlock> TemplateStarter() {
     return { Text(100, 90, 1720, 170, "Title", 90, "transparent", true, "center", nullptr, "title"),
              Text(100, 300, 1720, 680, "Text", 70, "transparent", false, "center", nullptr, "text") };
 }
-
 } // namespace
 
 DesignLibraryConfig OverlayLibraryConfig() {
@@ -457,12 +406,8 @@ std::unique_ptr<DesignLibrary> MakeTemplateLibrary(std::string storageFile) {
 }
 
 std::string SeedStoreJson(const DesignLibraryConfig& config) {
-    // NO store path: Load() takes the same "nothing on disk" path a fresh install takes — it seeds
-    // exactly what ships — and its save is a no-op (DesignLibrary::CommitSave returns early for an
-    // empty path), so this only ever produces text.
     DesignLibrary library(std::string(), config);
     (void)library.Load();
     return library.StoreJson();
 }
-
 } // namespace bps::library

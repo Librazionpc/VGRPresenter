@@ -2,12 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "../shortcuts"
 
-// The centre page of the Show screen (FreeShow's Show.svelte): what the item you clicked - in the Projects panel or the Shows table -
-// looks like. A show is its slide grid (drawn by the same DesignPreview as everywhere else, read from the show's file WITHOUT opening
-// it for editing); media shows the picture or the file; audio, overlays, scripture and sections show what they are. "Edit" opens the show
-// on the Edit screen. Nothing clicked yet: the splash behind this stays.
-//
-// `item` is a project item ({ type, ref, name, layout, meta }) or a bare one ({ type: "show", ref: path, name }).
 Item {
     id: root
 
@@ -19,10 +13,6 @@ Item {
 
     readonly property string type: item ? (item.type ?? "") : ""
     property int reload: 0            // bumped when the show's file changed under us (the next timer), so it is read again
-    // The peeked show is a PUBLISHED read (see ShowService): peekShow asks for a
-    // file the centre page already knows and hands back what is known, so this
-    // binding carries `peekRevision` as its dependency — that is what re-evaluates
-    // it when a read lands, or when this app writes that show's file.
     readonly property var loaded: { root.reload; ShowService.peekRevision; return root.type === "show" ? ShowService.peekShow(item.ref) : null }
     readonly property string imageFit: {
         const fileFit = root.type === "image" && root.item
@@ -31,9 +21,6 @@ Item {
     }
     readonly property var show: loaded && loaded.ok ? loaded.show : null
     readonly property var slides: show ? show.slides : []
-    // A Shows category pick overrides the global Shows pick; when neither is
-    // set, use the active output style's Shows template (the same composition
-    // the output uses). This is the preview's effective layout template.
     property int styleRevision: 0
     property int templateCatalogRevision: 0
     Connections {
@@ -136,9 +123,6 @@ Item {
             return design && design.id ? design : null
         } catch (e) { return null }
     }
-    // Resolve the effective template (category override or Styles fallback)
-    // through one path so a template text slot can consume either slide-level
-    // text or a typed block item from imported shows.
     readonly property var renderShow: root.resolvedShow(root.categoryTemplateDesign)
     function blockKind(block) {
         return String(block?.kind ?? "text").toLowerCase()
@@ -159,17 +143,8 @@ Item {
         const hasTextItem = sources.some((block) => root.blockKind(block) === "text"
             && root.sourceHasContent(block))
         if (!hasTextItem) {
-            // Some imported shows keep their words in slide fields and let a
-            // bound template slot supply the text item. Use that resolved
-            // content when there is no authored text block to match.
             for (const slot of (templateDesign?.blocks ?? [])) {
                 const bind = String(slot.bind ?? "")
-                // A Shows template may bind its body through a field other
-                // than `text` (for example a reading's first line). The
-                // resolver has already filled that slot from the show, so
-                // carry its resolved text into the selected layout. `title`
-                // is intentionally excluded: it is the slide label, not the
-                // reading/song body.
                 if (root.blockKind(slot) !== "text" || bind === "" || bind === "title") continue
                 const bound = (resolved?.blocks ?? []).find((block) =>
                     String(block.key ?? block.id ?? "") === String(slot.key ?? slot.id ?? ""))
@@ -198,9 +173,6 @@ Item {
                     && root.sourceHasContent(candidate)
                     && root.blockKind(candidate) === kind)
             if (sourceIndex < 0) {
-                // Text labels and bindings are editor placeholders, not show
-                // content. A text slot without an authored item stays empty;
-                // template-owned visual blocks remain part of the design.
                 if (kind !== "text" && root.sourceHasContent(slot)) blocks.push(slot)
                 continue
             }
@@ -244,9 +216,6 @@ Item {
     function offerTemplateForMissingText() {
         if (!root.visible || root.type !== "show" || !root.show || !root.hasUnmatchedTemplateItems)
             return
-        // A selected template id can arrive before its library is ready. Wait
-        // for the service's changed signal instead of treating that as a
-        // genuinely missing category template.
         if (root.showTemplateId !== "" && TemplateLibraryService.totalCount === 0)
             return
         const path = String(root.item?.ref ?? "")
@@ -330,9 +299,6 @@ Item {
     function renderSlide(slide, forStage) {
         if (!slide || !root.show)
             return slide
-        // Stage the authored show items and its library category. Each output's
-        // own style then resolves its category override, so one output's layout
-        // is never baked into a slide shared by every output.
         if (forStage)
             return Object.assign({}, slide, { showCategory: String(root.item?.category ?? "") })
         const designId = root.showTemplateId
@@ -344,9 +310,6 @@ Item {
         if (!resolved || resolved.visible === false)
             return slide
         let blocks = resolved.blocks ?? slide.blocks ?? []
-        // Match by stable block id where possible, then by item type. Template
-        // geometry and typography stay authoritative even if the slide uses a
-        // different id for its content item.
         blocks = root.templateComposition(slide, resolved, design).blocks
         return Object.assign({}, slide, {
             blocks: blocks,
@@ -383,9 +346,6 @@ Item {
     readonly property int columns: Math.max(2, Math.min(10, Number(SettingsService.values["session.slideColumns"] ?? 4)))
     readonly property string viewMode: String(SettingsService.values["session.slideView"] ?? "grid")
     readonly property real cellWidth: Math.floor((width - 10) / columns)     // (FreeShow: the grid has 5px padding, a cell is 100 / columns %)
-    // Whole-show lyric rewriting is safe only while slides contain plain text.
-    // Rich FreeShow slides own their geometry and non-text blocks, so their
-    // quick-edit route keeps those items and edits text blocks individually.
     readonly property bool hasRichContent: root.slides.some((slide) => {
         const blocks = slide.blocks ?? []
         const background = String(slide.background ?? "").toLowerCase()
@@ -414,13 +374,6 @@ Item {
     property bool barOpen: false      // the floating bar's chevron: shows the zoom
     property bool zoomOpen: false     // the zoom's + / - popup
 
-    // ESCAPE, the ladder this component owns (Main's cancel binding calls it):
-    // while the “…” menu is up, put it away — a menu is a menu on every surface
-    // of this app; otherwise act as that menu's own Close row, which is how the
-    // page is dismissed from the keyboard. It fires the SAME signal the click
-    // sends, so the two can never disagree about what closing means. Returns
-    // false when there is nothing to close, so the caller can tell the key did
-    // no work here.
     function escapeBack() {
         if (root.headerMenuOpen) {
             root.headerMenuOpen = false
@@ -497,41 +450,11 @@ Item {
         return slide.text ? [{ blockId: "@slide_text", text: String(slide.text) }] : []
     }
 
-    // A double-click on a slide STAGES it into the Main Output tile — it
-    // used to go live immediately (goLiveWithSlides), which flipped the top
-    // GO LIVE/STOP button (and, with an Output bound to a real screen, put
-    // content there too) with no explicit go-live action from the user.
-    // stageSlides only updates the tile; the top GO LIVE button is what
-    // actually commits it. This pane stays a read-only PREVIEW of the
-    // show's file (peekShow), not the editor, either way — staging must not
-    // open the show for editing or touch the engine's shared "open
-    // document" (that would risk discarding whatever the Edit screen has
-    // unsaved).
     function takeSlideLive(index, slide, styledPreview) {
         root.selectedSlide = index
-        // MEASURED, for the same reason the reference tabs' pick is: the tile only
-        // updates when this function returns, so the elapsed time here IS the wait
-        // the operator sees. Printed only when it is slow enough to notice.
         const pickT0 = Date.now()
         const wordsPerScreen = Number(SettingsService.value("shows.wordsPerSlide"))
         LiveOutputService.readingWordBudget = wordsPerScreen > 0 ? wordsPerScreen : 40
-        // ONE SLIDE FIRST, THE WHOLE SHOW ONLY WHERE IT IS NEEDED.
-        //
-        // This used to hand stageSlideSet the WHOLE show with `index` saying which
-        // slide is being read — for the neighbour slide Alt+Down / the wall's ‹ ›
-        // step into. But the tile (and the air) only update when that call returns,
-        // and the call first measures the pick's whole READING RUN: every slide's
-        // words laid out as one passage at the active style. A show is far bigger
-        // than a Table section, so the same double-click sat visibly longer here
-        // ("the same for show, it takes a little too long to show on the monitor
-        // preview"). The picked slide goes out NOW; the set costs nothing on this
-        // click.
-        //
-        // What still wants the set is a SCROLL passage, which fills the screen from
-        // the slides AFTER the pick — so under Scroll the full set follows on a
-        // zero-delay timer, once the tile has been updated and painted. In Slide
-        // mode nothing needs it: the wall's ‹ › stages the neighbouring slide itself
-        // (see stepSlide), one slide at a time.
         const name = root.item ? root.item.name : ""
         const picked = slide ? root.renderSlide(slide, true)
                              : ((index >= 0 && index < root.slides.length) ? root.slides[index] : null)
@@ -543,9 +466,6 @@ Item {
             console.log("[PICKCOST] show slide " + index + " staged in " + pickMs + " ms"
                         + (LiveOutputService.scrollMode ? " (scroll)" : " (slide)"))
     }
-    // The show's own set, filled AFTER the click instead of inside it (see
-    // takeSlideLive). Read lazily on the timer, not captured: a second click
-    // restarts it with its own index, so only the newest pick is ever staged.
     function fillShowSet() {
         if (!root.item || !LiveOutputService.scrollMode)
             return
@@ -570,13 +490,6 @@ Item {
     }
 
     // ---- The wall's ‹ › while a SHOW slide is on the tile -------------------
-    // A staged show slide belongs to no reference tab, so the wall's arrows
-    // reached nobody: they were lit and dead ("no arrow on the wall is ever
-    // enabled while doing nothing"). A show IS steppable — its neighbouring
-    // slide, staged the same way a double-click stages this one — which is
-    // exactly the passage step a reference tab does for its own content. This
-    // pane therefore answers the wall's step request, and announces itself as
-    // the tile's stepper while its show is what the tile is showing.
     function stepSlide(direction) {
         const slides = root.slides
         if (!root.item || slides.length === 0)
@@ -590,9 +503,6 @@ Item {
         return true
     }
 
-    // Is THIS show's slide what the tile is showing? (staged, or on air — the
-    // same two-state ownership test the reference panes make against their own
-    // reference text.)
     function ownsWallTile() {
         if (!root.item)
             return false
@@ -600,9 +510,6 @@ Item {
             || (LiveOutputService.live && LiveOutputService.onAirTitle === root.item.name)
     }
 
-    // Announce (or withdraw) this pane as the tile's stepper. A ONE-slide show
-    // has nothing to step, so it withdraws too and the wall's arrows stay dim
-    // rather than lit-and-inert.
     function refreshWallStepper() {
         LiveOutputService.setWallStepper("show", root.ownsWallTile() && root.slides.length > 1)
     }
@@ -677,12 +584,6 @@ Item {
                     height: modelData === "-" ? 1 : 34
                     Rectangle { visible: menuEntry.modelData === "-"; width: parent.width; height: 1; color: root.cLighter }
                     Rectangle { visible: menuEntry.modelData !== "-"; anchors.fill: parent; color: menuEntryHover.hovered ? Theme.hoverBg : "transparent" }
-                    // WHITE, and MEDIUM: these two rows are ACTIONS (edit the
-                    // show / close it). Pure #ffffff at Font.Normal on the mono
-                    // face still read grey — a 15 px regular stroke never covers
-                    // its pixels completely (measured: 223,223,226 at its
-                    // brightest), so the weight, not the colour, is what makes a
-                    // label look white at this size.
                     Text { visible: menuEntry.modelData !== "-"; x: 12; anchors.verticalCenter: parent.verticalCenter; text: menuEntry.modelData; color: Theme.controlInk; font.family: root.mono; font.pixelSize: 15; font.weight: Font.Medium }
                     HoverHandler { id: menuEntryHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
@@ -709,10 +610,6 @@ Item {
         contentHeight: (root.viewMode === "grid" ? gridFlow.height : (root.viewMode === "list" ? listCol.height : lyricsCol.height)) + 76   // room for the bar
         boundsBehavior: Flickable.StopAtBounds
 
-        // A 100-slide show overflowed wheel-only — a real draggable bar.
-        // Same positioning convention ReferencePane's verse/paragraph list
-        // uses: clear the floating bar (below) instead of running the
-        // track straight through it.
         AppScrollBar {
             flickable: grid
             anchors.top: parent.top; anchors.bottom: parent.bottom
@@ -739,13 +636,6 @@ Item {
                     required property int index
                     readonly property bool selected: root.selectedSlide === index
                     readonly property color group: root.groupColor(modelData) !== "" ? root.groupColor(modelData) : root.cDarkest
-                    // The active output style's template (Settings > Styles'
-                    // "Template for Shows" pick), applied the SAME way
-                    // onAirSlide/stagedSlide already do — so the thumbnail
-                    // shows what the slide will actually look like on air,
-                    // not just its own raw blocks. Depend explicitly on both
-                    // the output-style and design-library revisions: template
-                    // canvas edits do not change the show's file/reload token.
                     readonly property var styled: {
                         void root.reload
                         void root.styleRevision
@@ -772,13 +662,6 @@ Item {
                                 showBindPlaceholders: false
                                 blocks: cell.styled.blocks ?? []
                                 background: cell.styled.background ?? "transparent"
-                                // THE COMPOSITION'S ANSWER, not a re-derived
-                                // "is this background clear": whether this frame
-                                // is transparent is composed once
-                                // (SlideComposition::frameTransparent) and read by
-                                // every surface that draws the convention — the
-                                // monitor wall, the output window and these
-                                // thumbnails alike.
                                 showCheckerboard: cell.styled.frameTransparent === true
                             }
                             Rectangle { anchors.fill: parent; color: Theme.hoverBg; visible: cellHover.hovered }      // the hover veil
@@ -809,9 +692,6 @@ Item {
                         Rectangle { anchors.fill: parent; color: "transparent"; border.width: cell.selected ? 2 : 0; border.color: root.cSecondary }
                     }
                     HoverHandler { id: cellHover; cursorShape: Qt.PointingHandCursor }
-                    // A slide already chosen in the preview goes live on one click; a slide
-                    // that is not chosen yet is only chosen, and its double-click takes it
-                    // live. Right-click opens Edit.
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
                         onTapped: {
@@ -951,23 +831,12 @@ Item {
             }
         }
 
-        // the words — EDITABLE (FreeShow's own Lyrics/Text-editor view,
-        // TextEditor.svelte): one continuous text block for the whole show,
-        // blank-line-separated the same way Quick Lyrics splits one — not a
-        // read-only per-slide list. Edits autosave (700ms settle, this
-        // app's usual debounce) via ShowService.rewriteShowFromText, which
-        // re-splits the text into slides and saves straight to the show's
-        // own file — isolated from the Edit screen's own editing session,
-        // so it can't collide with unsaved work open there.
         Column {
             id: lyricsCol
             visible: root.viewMode === "lyrics" && !root.hasRichContent
             x: Math.max(0, (parent.width - width) / 2)
             width: Math.min(parent.width, 760)
 
-            // Which show's text is currently loaded (captured at load time —
-            // root.item may already have moved on by the time a pending
-            // autosave needs to flush against the RIGHT file).
             property string editingPath: ""
             property bool loaded: false
 
@@ -1053,9 +922,6 @@ Item {
             id: barRow
             x: 1; y: 1; height: parent.height - 2
 
-            // Step the selected show slide onto the monitor tile without
-            // requiring another click in the slide grid. These controls use
-            // the same staging path as a slide double-click.
             Item {
                 objectName: "selfTestShowPreviousSlide"
                 visible: root.type === "show"
@@ -1135,11 +1001,6 @@ Item {
                     x: parent.width - width + 1; y: -height - 8
                     width: 252; height: timerPanel.height + 28
                     radius: 12; color: "#f018192a"; border.color: root.cLighter
-                    // Swallows any click that lands on the popover's own
-                    // padding/gaps (not one of its controls below) — those
-                    // had nothing to consume them, so the click fell through
-                    // to whatever slide sits underneath the popover's visual
-                    // position and selected it instead.
                     MouseArea { anchors.fill: parent; onClicked: (mouse) => { mouse.accepted = true } }
                     Column {
                         id: timerPanel
@@ -1288,10 +1149,6 @@ Item {
         }
     }
 
-    // Click-outside catcher for the timer/zoom popovers — below floatingBar's
-    // own z (5) so the popovers (its descendants) stay clickable, above
-    // everything else so a click anywhere else in the pane dismisses them
-    // (they used to only close on Escape or a successful "To all slides").
     MouseArea {
         anchors.fill: parent
         z: 4
@@ -1399,11 +1256,6 @@ Item {
     }
 
     // ---- a video: the live frame + the on-air transport -----------------
-    // Video files preview here (the frame follows playback — play it below
-    // and this moves), with the TAKE ON AIR control and, once on air, the
-    // full transport (play/pause, seek scrubber, position, mute, off-air).
-    // Reads LiveOutputService's media state inside bindings, so the bar
-    // follows the take no matter where it started (grid pill or here).
     Item {
         id: mediaView
         visible: root.type === "media" || root.type === "video"
@@ -1416,19 +1268,11 @@ Item {
             const e = filePath.substring(filePath.lastIndexOf(".") + 1).toLowerCase()
             return ["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv"].indexOf(e) >= 0
         }
-        // The preview follows the ON-AIR playback when this file IS on air
-        // (image://mediaplay, rev-paced); otherwise a still from the engine's
-        // thumbnail cache (the same middle frame the grid tile shows).
         readonly property url previewSource: onAir
             ? "image://mediaplay?v=" + LiveOutputService.mediaRev
             : "image://mediathumb/500/-1/" + encodeURIComponent(filePath)
         readonly property bool playing: LiveOutputService.mediaState === "playing"
 
-        // THIS FILE'S OWN FILL ("" = the output's default). A choice about the
-        // PICTURE, stored on the file by the library, so it is the same on every
-        // output and comes back with the next take — see
-        // LiveOutputService::setMediaFit. `fitPulse` re-reads it when a write
-        // lands (the service writes it off the interface thread).
         property int fitPulse: 0
         Connections {
             target: MediaLibraryService
@@ -1557,16 +1401,6 @@ Item {
                 }
             }
 
-            // Buttons: play/pause, mute. Taking media on/off air has its own
-            // explicit control (the big centre take-overlay above, and the
-            // off-air state's own play glyph there) — this row USED TO carry
-            // a second button that duplicated that exact takeMedia/clearMedia
-            // call behind a "play" icon, so clicking what looked like a
-            // transport play button silently took the media live instead of
-            // just starting playback (user report: "the play button... goes
-            // live and it's meant to pause and play"). Removed; the
-            // play/pause toggle below (mediaTogglePlay) is the only button
-            // here now, and it never touches on-air state.
             Row {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: 10

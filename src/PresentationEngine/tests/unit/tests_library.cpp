@@ -12,7 +12,6 @@
 #include "modules/presentation/TextFormat.hpp"
 
 namespace {
-
 namespace lib = bps::library;
 namespace pres = bps::presentation;
 namespace j = bps::json;
@@ -43,7 +42,6 @@ pres::ContentBlock TextBlock(std::string text, double x = 10, double y = 20, std
     b.style.borderColor = "#ffffff";
     return b;
 }
-
 } // namespace
 
 // The overlay library: what ships, categories, filing, search, edits, persistence.
@@ -304,9 +302,6 @@ void TestOverlayLibrary() {
     (void)fs.RemoveAll(root);
 }
 
-// The template library: FreeShow's starter set ships in it (the song / presentation / scripture
-// categories and their templates), the user's own work lives beside it, and a template is a real
-// SlideTemplate.
 void TestTemplateLibrary() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
     const std::string root = "/tmp/bps_template_library";
@@ -540,19 +535,6 @@ void TestBlockValidator() {
     (void)fs.RemoveAll(root);
 }
 
-// FRESH SHIPPED DESIGNS NAME NO FONT, AND AN OLD STORE IS MIGRATED ONCE.
-//
-// The catalogs are font-free: DesignCatalogs' Text() writes no fontFamily, so the
-// renderer resolves every shipped block to the HOST's UI face
-// (FontManager::DefaultFamily) instead of a family the authoring machine had.
-//
-// Two things have to hold. What ships — overlays AND templates — must name no
-// family at all, and a store written by an older catalog, whose seeded designs
-// carried "Segoe UI"/"Arial" and the authoring install's own picks ("TT Nooks
-// Trial" here), must be REFRESHED on load rather than only on a clean install.
-// The migration drops the family from every SHIPPED design, so the user's own
-// designs (and a copy they made of a shipped one) keep the font they chose, and
-// it runs once (the new revision is recorded).
 void TestDesignCatalogRevision() {
     auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
     const std::string root = "/tmp/bps_catalog_revision";

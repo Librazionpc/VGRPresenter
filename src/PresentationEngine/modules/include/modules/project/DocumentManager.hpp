@@ -1,10 +1,5 @@
 #pragma once
 
-// DocumentManager (docs/specs/15 §Document Manager): everything editable is a
-// document. Hosts a registry of IDocumentHandler per document type and tracks
-// per-document state: open, dirty, locked, read-only. Open/Close follow the
-// standard workflow; document content work is delegated to handlers.
-
 #include "modules/project/IDocumentHandler.hpp"
 
 #include <map>
@@ -14,7 +9,6 @@
 #include <vector>
 
 namespace bps::project {
-
 class DocumentManager {
 public:
     static DocumentManager& Instance();
@@ -59,5 +53,4 @@ private:
     std::map<std::string, std::shared_ptr<Document>, std::less<>> documents_;         // id → doc
     uint64_t nextId_ = 1;
 };
-
 } // namespace bps::project

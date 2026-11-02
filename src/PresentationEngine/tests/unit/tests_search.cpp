@@ -1,6 +1,3 @@
-// Unit tests: Search & Indexing Engine (docs/specs/20).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests search
 #include "TestHarness.hpp"
 
 #include "modules/search/TextMatching.hpp"
@@ -94,10 +91,6 @@ void TestSearchRanking() {
     CHECK(eng.Shutdown().ok());
 }
 
-// The fuzzy layer every search surface shares (TextMatching.hpp + the engine's
-// vocabulary resolution): incomplete words complete, typos correct (dropped
-// letters beat substitutions), typed-together words split — and exact
-// spellings always outrank all of it.
 void TestSearchFuzzyResolution() {
     using bps::search::textmatch::ContainsWord;
     using bps::search::textmatch::ContainsPhrase;
@@ -127,9 +120,6 @@ void TestSearchFuzzyResolution() {
     CHECK(EditDistanceBounded("frind", "friend", 1) == 1);    // insert 'e': the dropped-letter shape
     CHECK(EditDistanceBounded("frind", "friend", 0) == 1);    // over budget
 
-    // Resolution: exact stays, incomplete completes, dropped-letter typo beats
-    // a same-distance substitution ("thn" -> "then", never "the"), unresolvable
-    // words return empty.
     const std::vector<std::string> vocab{"then", "friends", "friend", "the", "find", "ghost"};
     const auto asTyped = ResolveWordInList("friends", vocab);   // (braces protect the comma)
     CHECK((asTyped.weight == 1.0 && asTyped.word.empty()));
@@ -142,12 +132,6 @@ void TestSearchFuzzyResolution() {
     CHECK(ResolveWordInList("frind", vocab).word == "friend");
     CHECK(ResolveWordInList("zzz", vocab).word.empty());
 
-    // A SWAPPED PAIR is one slip, not two edits: on equal distance the transposed
-    // word beats a one-letter substitution, so "recieve" resolves to "receive"
-    // and never to "relieve" (which only differs by one letter, so plain
-    // Levenshtein preferred it — the user was offered "recieve -> relieve", the
-    // search then hunted "relieve", and the sermon that says "that you receive"
-    // never appeared).
     using bps::search::textmatch::IsAdjacentTransposition;
     CHECK(IsAdjacentTransposition("recieve", "receive"));
     CHECK(IsAdjacentTransposition("thier", "their"));
@@ -189,25 +173,7 @@ void TestSearchFuzzyResolution() {
 // ===========================================================================
 // THE TYPING TAIL — the rule every live search box shares
 // ===========================================================================
-// The user's report (with the sermon pane's screenshot): typing
-//   "compelling that you rec"
-// listed ONE sermon — one whose paragraph happened to carry whatever single word
-// the resolver guessed "rec" meant — while the sermon that says
-//   "... and compelling and compulsory, that you receive the Holy Ghost now ..."
-// was not there at all. "i dont need to type the whole thingy before it shows me
-// what matches ... it should be using my last input to judge my preceding inputs
-// also matter across all search".
-//
-// The LAST word — the one the caret is on — is therefore a PREFIX: it matches
-// every word starting with what was typed, the readings ordered MOST CONFIDENT
-// FIRST (how often the corpus uses them), and every word before it still has to
-// be there. These tests pin the rule where it lives (the shared resolution and
-// the candidate ladder), because every surface reaches it through those.
 namespace {
-
-// A tiny corpus whose word frequencies make "receive" the obvious reading of
-// "rec" while keeping two other readings alive (received, record) — so the
-// candidate ladder has something to order.
 void IndexTypingTailCorpus(s::SearchEngine& eng) {
     const std::pair<const char*, const char*> docs[] = {
         // THE answer: every typed word, and the likeliest reading of "rec".
@@ -234,7 +200,6 @@ void IndexTypingTailCorpus(s::SearchEngine& eng) {
 bool TailListHas(const std::vector<std::string>& list, const std::string& word) {
     return std::find(list.begin(), list.end(), word) != list.end();
 }
-
 } // namespace
 
 // The resolution keeps a half-typed word (and hands back its ladder); a word
@@ -245,9 +210,6 @@ void TestTypingTailResolution() {
     CHECK(eng.Start().ok());
     IndexTypingTailCorpus(eng);
 
-    // A half-typed tail is NOT rewritten into one guessed word: the search keeps
-    // matching the prefix. (The old behavior turned "rec" into ONE completion,
-    // which is how the sermon that says "receive" was lost.)
     auto tail = eng.ResolveTermsWithSplits({"compelling", "rec"}, /*typingTail=*/true);
     CHECK(tail.ok() && tail.value().size() == 2);
     CHECK(tail.value()[0].term == "compelling");
@@ -299,9 +261,6 @@ void TestTypingTailSearch() {
     CHECK(hits.ok() && !hits.value().empty());
     CHECK(hits.value().front().documentId == "tail-0");
 
-    // Preceding words still matter: nobody says "compelling" AND "ghost" together
-    // with a "rec" word except doc 0, and the docs that carry some of them are not
-    // answers on their own.
     auto none = eng.Search("compelling ghost rec");
     for (const auto& r : none.value())
         CHECK(r.documentId != "tail-1");   // "received", but no compelling/ghost

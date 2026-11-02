@@ -81,9 +81,6 @@ void TestShowSlideKeepsItsOwnDesign();
 // A "bus" block's live plane on the real output frame: the block's own rect,
 // a new frame through a cache hit, and a stopped feed going invisible.
 void TestBusWindowPlane();
-// A template bus's windows: a named window shows its own bus, the open ones take
-// the bus's routed sources in route order — on a design whose FIRST window is the
-// named one (the case an every-block index got wrong) — each at the block's rect.
 void TestTemplateBusWindows();
 void TestTransparentBackground();
 void TestFrameRule();
@@ -116,21 +113,12 @@ void TestRenderPipeline();
 void TestRenderGpu();
 void TestRenderOutputs();
 void TestVideoLayerFrameRefresh();
-// Two template bands authored flush on the stage must be flush on the frame:
-// no one-pixel seam of the live video between them (a shared fractional edge
-// rounded independently for each box used to open one).
 void TestShapeEdgeSeams();
 void TestRenderEngine();
 // The D3D11 GPU backend behind the same IGraphicsBackend seam: the CPU frame and
 // the GPU frame of one scene compared, plus the software fallback's contract.
 void TestD3D11Backend();
-// The same GPU path at the STAGE size every output renders (a styled 1920x1080
-// frame with a cover-fit backdrop and a large text run) — the app's own
-// "hardware acceleration makes the output black" case.
 void TestD3D11StageFrame();
-// Which renderer a run picks: the app's hardware-acceleration switch (software
-// by default) against an explicit `render.backend`, and the fallback on a
-// machine that has no usable GPU.
 void TestRenderBackendPreference();
 void TestRenderStress();
 void TestPngCodec();
@@ -243,10 +231,8 @@ void TestLineSpacingAndLineBands();
 // A reading window that moved under an already-built scene is re-attached to the
 // existing reading block (SceneBuilder::RefreshReadingFlow), not rebuilt.
 void TestReadingFlowWindowRefresh();
+void TestFlowScrollMath();
 // A page commit inside one passage is an OFFSET update on the pick already on
 // air (LiveOutputController::UpdateReadingSlide), not a content replacement.
 void TestReadingPageKeepsPick();
-// A reading block's frame costs its VIEWPORT, not its passage: the glyph pass is
-// culled to the visible lines (see DrawTextObject), so a scroll through a long
-// passage does not build-and-clip the whole thing at the frame rate.
 void TestReadingFlowDrawCost();

@@ -15,9 +15,7 @@
 #include <type_traits>
 
 namespace bps::library {
-
 namespace {
-
 constexpr const char* kModule = "DesignLibrary";
 
 // The one id every design's blocks live under when ShowEditor's block rules are applied to them.
@@ -158,18 +156,6 @@ bool FromJson(const J& o, Design& out) {
 }
 
 // ---- the catalog-revision migration (see kCatalogRevision) ------------------
-//
-// A shipped design names NO font. The catalogs write none, so the renderer
-// resolves every shipped block to the HOST's UI face; a store seeded by an older
-// catalog still holds the faces that machine happened to have ("Segoe UI",
-// "Arial", and the authoring install's own picks — "TT Nooks Trial", "Cambria
-// Math", "Inter", "Segoe UI Semibold"). Load() clears them once, when the stored
-// revision is behind — this is the function that does it.
-//
-// EVERY family goes, not a list of known ones: the rule is about the DESIGN being
-// shipped, not about which face it happened to name. Shipped designs only. Any
-// other design is the user's, and a font they chose there is theirs; refreshing
-// the app's own defaults must not reach into their work.
 bool StripShippedFontFamilies(Design& d) {
     bool changed = false;
     for (pres::ContentBlock& block : d.blocks) {
@@ -178,10 +164,6 @@ bool StripShippedFontFamilies(Design& d) {
         if (!parsed.ok()) continue;   // a malformed meta is not ours to rewrite
         const J& meta = parsed.value();
         if (meta.Find("fontFamily") == nullptr) continue;
-        // Rebuild the object without the key (Json::Value exposes only a const
-        // view of an object): everything else the block's meta says — color,
-        // size, alignment, autoSize — rides through untouched, and the absent
-        // key is exactly what the catalogs write.
         J::Object rewritten;
         if (const J::Object* object = meta.asObject())
             for (const auto& [key, value] : *object)
@@ -205,7 +187,6 @@ auto WithBlocks(Design& d, Op&& op) {
     d.blocks = std::move(scratch.slides.front().blocks);
     return result;
 }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -259,10 +240,6 @@ Result<void> DesignLibrary::Load() {
                     ? recovery::DocumentShapeProblem(parsed.value(), "designs", J::Type::Array)
                     : parsed.error().message;
                 if (!problem.empty()) {
-                    // SELF-HEALING: set the damaged library aside as evidence and
-                    // come up on the defaults, which is a usable state — the old
-                    // shape returned an error AND left the file to be
-                    // overwritten by the next save.
                     (void)recovery::SetAsideDamagedDocument(
                         storageFile_, kModule,
                         std::format("{} library: {}", config_.noun, problem));
@@ -274,9 +251,6 @@ Result<void> DesignLibrary::Load() {
         }
     }
 
-    // Which revision of the SHIPPED content this file was written under — a
-    // document without the field predates revisioning (revision 0), and a fresh
-    // library (no document at all) is current by definition.
     long long storedCatalogRevision = kCatalogRevision;
     if (haveDocument) {
         const J* revision = document.Find("catalogRevision");
@@ -315,10 +289,6 @@ Result<void> DesignLibrary::Load() {
             return Error::Make(Err::IoError, kModule,
                                std::format("cannot read the {} library: {}", config_.noun, readFailure));
 
-        // THE SHIPPED CATALOG MOVED SINCE THIS FILE WAS WRITTEN (kCatalogRevision):
-        // refresh the app's own designs in place, and write the new revision back.
-        // The document is built HERE (under the lock) and committed BELOW (after
-        // it is released) — a PAL write never runs under a module lock.
         if (storedCatalogRevision < kCatalogRevision) {
             for (Design& d : designs_)
                 if (d.isDefault && StripShippedFontFamilies(d)) migrationTouchedDesigns = true;
@@ -367,10 +337,6 @@ std::string DesignLibrary::BuildStoreJsonLocked() const {
 
 Result<void> DesignLibrary::CommitSave(const std::string& json) const {
     if (storageFile_.empty() || json.empty()) return Ok();
-    // ATOMIC: the design library is user-authored content; an interrupted save
-    // must leave the previous document intact rather than truncating it.
-    //
-    // PAL: callers call this AFTER releasing mutex_ — see the header.
     return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, json);
 }
 
@@ -422,9 +388,6 @@ Result<void> DesignLibrary::Edit(std::string_view id, Change&& change) {
         }
         json = BuildStoreJsonLocked();
     }
-    // The write happens with the lock RELEASED; a failure re-takes it and puts
-    // the design back as it was (found again by id, not by a pointer that could
-    // have gone stale while the lock was down).
     if (auto saved = CommitSave(json); !saved.ok()) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (Design* d = FindLocked(id)) *d = undo;
@@ -556,14 +519,6 @@ std::vector<Design> DesignLibrary::Designs(std::string_view filter, std::string_
             if (filter.empty() || (filter == kUnlabeled ? d.category.empty() : d.category == filter))
                 out.push_back(d);
     }
-    // GROUPED ORDER: category first (the sidebar's order — shipped families
-    // first, then the user's, in creation order), natural name order inside
-    // each group, unlabeled designs last. A flat name sort interleaved the
-    // families in the All view ("Small, Small Bold, Table, Text, Trendy
-    // Curved" from three different categories in a row) and read as a mess;
-    // grouped, every category's block stays together and each single-
-    // category view keeps its name order (same comparator outcome when all
-    // hits share one category — which is what the filtered tests assert).
     std::map<std::string, size_t> categoryRank;
     for (size_t i = 0; i < categories_.size(); ++i)
         categoryRank[categories_[i].id] = i;
@@ -615,10 +570,6 @@ DesignCounts DesignLibrary::Counts() const {
 }
 
 Result<Design> DesignLibrary::Create(std::string_view name, std::string_view categoryId) {
-    // The starter blocks are the app's own content: claiming their ids runs
-    // ShowEditor's block rules over a scratch presentation, which has nothing to
-    // do with this library's state — and it reaches the PAL, so it happens
-    // BEFORE the lock is taken (the lock-scope rule).
     std::vector<pres::ContentBlock> starter;
     if (config_.starterBlocks) {
         Design bare;
@@ -845,5 +796,4 @@ Result<pres::SlideTemplate> DesignLibrary::AsTemplate(std::string_view id) const
         if (d.id == id) return ToTemplate(d);
     return Missing();
 }
-
 } // namespace bps::library

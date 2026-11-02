@@ -12,11 +12,6 @@
 #include <vector>
 
 namespace bps {
-
-// Hardware driver registry (core/drivers/). The core owns the registry;
-// feature modules provide IDriver implementations (NDI, capture, MIDI, ...) and
-// resolve them here instead of constructing hardware directly. Drivers are
-// thin adapters: Probe / Enable / Disable only.
 class DriverManager final : public IService {
 public:
     static DriverManager& Instance();
@@ -46,5 +41,4 @@ private:
     std::map<std::string, bool> enabled_;             // guarded by mutex_
     std::atomic<bool> initialized_{false};
 };
-
 } // namespace bps

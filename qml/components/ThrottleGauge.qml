@@ -1,10 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// How hard the machine is being held back: 0 = free running, 100 = held right
-// down. A SpeedometerGauge with the throttle's own scale, colours and wording —
-// the 0-100 dial, green free / amber once anything is given up / red past half,
-// and the engine's own reason under the hub.
 SpeedometerGauge {
     id: root
 

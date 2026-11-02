@@ -1,13 +1,8 @@
 #pragma once
 
-// Linux PAL backend for native dialogs: bridges to zenity (falling back to
-// kdialog when zenity is absent). Requires a desktop session (DISPLAY or
-// WAYLAND_DISPLAY); returns Err::Unsupported on headless hosts.
-
 #include "../IDialogs.hpp"
 
 namespace bps::platform {
-
 class LinuxDialogs final : public IDialogs {
 public:
     Result<std::optional<std::string>> OpenFileDialog(
@@ -23,5 +18,4 @@ public:
     Result<std::optional<std::string>> FontPicker(
         std::string_view title, std::string_view initialFont = "") override;
 };
-
 } // namespace bps::platform

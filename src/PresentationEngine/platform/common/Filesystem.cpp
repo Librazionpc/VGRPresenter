@@ -6,11 +6,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-// <windows.h> #defines CreateDirectory to CreateDirectoryA/W — silently
-// rewriting our own FilesystemImpl::CreateDirectory definition below into
-// "CreateDirectoryA", which then doesn't match its own declaration. Every
-// other method name in this file was checked against windows.h and doesn't
-// collide; this is the only one.
 #undef CreateDirectory
 #endif
 
@@ -32,24 +27,8 @@
 
 namespace fs = std::filesystem;
 namespace bps::platform {
-
 namespace {
-
 // ---------------------------------------------------------------------------
-// Path conversion: every path handed to this PAL is UTF-8 — and on Windows the
-// narrow route into the OS is LOSSY.
-//
-// fs::path(std::string), std::fstream(const char*) and CreateFileA all convert
-// through the CRT's locale, which on this toolchain maps one wide char per
-// BYTE. Importing a ProPresenter songbook therefore wrote
-// "WE’LL TALK IT OVER.vgr" as "WEâ€™LL TALK IT OVER.vgr.tmp" and then failed to
-// publish it — `rename failed … Input/output error` (ERROR_IO_DEVICE), 194
-// times in one sweep, for exactly the titles holding a curly quote and not one
-// ASCII title (engine.log, 2026-10-24). The names also never matched what the
-// library scan listed, so the shows simply were not there afterwards.
-//
-// Everything below goes Windows' own UTF-8 -> UTF-16 -> OS route instead;
-// POSIX paths are UTF-8 already and need no help.
 // ---------------------------------------------------------------------------
 #if defined(_WIN32)
 std::wstring ToWide(std::string_view utf8) {
@@ -122,9 +101,6 @@ Error IoError(std::string_view module, std::string_view message) {
 }
 
 // ---------------------------------------------------------------------------
-// Durability primitives behind WriteAtomic/CopyAtomic (see ReplaceAtomic for
-// the ordering argument). All three are OS-specific, so they live here with the
-// rest of the PAL's platform knowledge.
 // ---------------------------------------------------------------------------
 
 // Whether the volume could be asked to push bytes out of its cache.
@@ -142,12 +118,6 @@ bool FlushUnsupported(DWORD e) {
            e == ERROR_CALL_NOT_IMPLEMENTED;
 }
 
-// Open + FlushFileBuffers, the Windows way to say "this data is on the disk".
-// `directory` opens with FILE_FLAG_BACKUP_SEMANTICS, which is the only way the
-// OS lets a caller hold a directory handle at all. NOTE the access rights: a
-// FILE handle needs GENERIC_WRITE for FlushFileBuffers (opens for reading fail
-// with ERROR_ACCESS_DENIED, which read as a real I/O failure and failed every
-// save), while a DIRECTORY handle is opened for reading and flushed as-is.
 FlushOutcome FlushPathData(const std::string& path, bool directory) {
     HANDLE h = CreateFileW(ToWide(path).c_str(), directory ? GENERIC_READ : GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -189,9 +159,6 @@ FlushOutcome FlushPathData(const std::string& path, bool directory) {
     }
     int rc;
 #if defined(__APPLE__)
-    // macOS: fsync() only reaches the drive's own cache; F_FULLFSYNC is the one
-    // that asks for the platter. Falls back to fsync where a filesystem has no
-    // F_FULLFSYNC (it then answers ENOTSUP, which we read as Unsupported).
     rc = ::fcntl(fd, F_FULLFSYNC);
     if (rc != 0) {
         const int e = errno;
@@ -219,9 +186,6 @@ FlushOutcome FlushPathData(const std::string& path, bool directory) {
 
 #endif
 
-// The bytes we hold and the bytes the file now holds, compared in chunks (no
-// second copy of the whole document in memory). A short read, a longer file or
-// one differing byte is a mismatch.
 bool ContentMatches(const std::string& path, const void* bytes, size_t size) {
     FilePtr in(OpenFile(path, "rb"));
     if (!in) return false;
@@ -242,14 +206,6 @@ bool ContentMatches(const std::string& path, const void* bytes, size_t size) {
 // mtime tick used as a change fingerprint (ns resolution).
 std::string Fingerprint(std::string_view path) {
 #if defined(_WIN32)
-    // Verified by direct trace (2026-09-19): this MinGW-w64/libstdc++
-    // combination's std::filesystem::last_write_time() returns the exact
-    // same value before and after a real, confirmed-successful rewrite of
-    // the file's contents — not stale-but-eventually-consistent, genuinely
-    // frozen. A file-watch fingerprint built on it can never detect a
-    // change on Windows. GetFileAttributesExA's raw FILETIME (no
-    // std::filesystem clock-epoch conversion involved at all) doesn't go
-    // through whatever that library's bug is.
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(ToWide(path).c_str(), GetFileExInfoStandard, &data)) return {};
     uint64_t t = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
@@ -346,9 +302,6 @@ Result<void> FilesystemImpl::RenameRetry(std::string_view from, std::string_view
     for (int attempt = 0; attempt < kAttempts; ++attempt) {
         last = Move(from, to);
         if (last.ok()) return Ok();
-        // Only a transient holder (a sync filter, an indexer) is worth waiting
-        // out; a genuinely missing parent or a read-only volume just pays the
-        // delay and reports the same error it would have reported once.
         std::this_thread::sleep_for(kDelay);
     }
     return last;
@@ -363,17 +316,9 @@ Result<void> FilesystemImpl::WriteBinaryAtomic(std::string_view path,
     return ReplaceAtomic(path, data.data(), data.size());
 }
 
-// Write to a sibling temp, prove the bytes landed, then swap it in. The
-// invariant is the whole point: `path` holds a COMPLETE file at every instant,
-// including while a save is in flight or if the process dies mid-save. Nothing
-// between the truncate and the rename can be observed through `path`.
 Result<void> FilesystemImpl::ReplaceAtomic(std::string_view path, const void* bytes, size_t size) {
     if (!bytes && size > 0)
         return IoError("Filesystem", "no bytes to write for " + std::string(path));
-    // The temp must be a SIBLING (one volume, so the rename is a real rename),
-    // so the parent has to exist first — created here rather than pushed onto
-    // every caller, which is how half of them ended up writing into a missing
-    // directory and reporting it as a save failure.
     const std::string target(path);
     const size_t cut = target.find_last_of("/\\");
     if (cut != std::string::npos && cut > 0) {
@@ -404,15 +349,6 @@ Result<void> FilesystemImpl::ReplaceAtomic(std::string_view path, const void* by
                            " bytes to " + temp + "; " + target + " was left untouched");
     }
 
-    // ORDERING, before anything is published: the temp's bytes go to the medium
-    // FIRST, and only then does the rename put a name on them. Without this a
-    // power cut can persist the rename while the data is still in the driver's
-    // cache, which is how a document ends up NAMED and hollow. A volume that
-    // has no flush primitive (a network share, a filter driver answering
-    // ERROR_INVALID_FUNCTION) is not an error: there is simply nothing more to
-    // ask of it and no promise to make. A real I/O failure here IS fatal — the
-    // bytes are not durable, so the save is reported as failed and the target
-    // keeps the last good document.
     switch (FlushPathData(temp, /*directory=*/false)) {
     case FlushOutcome::Flushed:
     case FlushOutcome::Unsupported:
@@ -424,11 +360,6 @@ Result<void> FilesystemImpl::ReplaceAtomic(std::string_view path, const void* by
                            " was left untouched");
     }
 
-    // The byte count says the write was not SHORT; it does not say the bytes are
-    // the ones we sent. Read the temp back and compare it against the buffer —
-    // the read-back vgr::VgrFile::Write does for shows (which additionally
-    // parses), done here for EVERY document, so a torn or reordered write is
-    // caught before it can take the target's name.
     if (!ContentMatches(temp, bytes, size)) {
         (void)Remove(temp);
         return IoError("Filesystem",
@@ -441,12 +372,6 @@ Result<void> FilesystemImpl::ReplaceAtomic(std::string_view path, const void* by
         return swapped;
     }
 
-    // The rename ITSELF is a change to the parent directory, so flush the
-    // directory entry too or a power cut can undo a save that already reported
-    // success. Best-effort by nature, and deliberately non-fatal: what is at
-    // stake is only how RECENT the surviving document is — either the old file
-    // or the new one, both complete — which is the same recency every save
-    // without a journal gives away. Atomicity is never at risk here.
     if (cut != std::string::npos)
         (void)FlushPathData(target.substr(0, cut), /*directory=*/true);
     return Ok();
@@ -482,9 +407,6 @@ Result<void> FilesystemImpl::CopyAtomic(std::string_view from, std::string_view 
                        "copied " + std::to_string(wrote) + " of " + std::to_string(want) +
                            " bytes to " + temp + "; " + target + " was left untouched");
     }
-    // Same ordering rule as ReplaceAtomic, and for the same reason: a copy that
-    // backs up or restores user work must be on the medium before it takes the
-    // target's name. Unsupported (no flush primitive) is not a failure.
     if (FlushPathData(temp, /*directory=*/false) == FlushOutcome::Failed) {
         (void)Remove(temp);
         return IoError("Filesystem",
@@ -554,19 +476,6 @@ Result<uint64_t> FilesystemImpl::FileSize(std::string_view path) const {
 }
 
 Result<std::string> FilesystemImpl::Absolute(std::string_view path) const {
-    // An EMPTY path is not an error to report — it is the caller asking a
-    // question with no answer, and the honest reply is the empty string.
-    // std::filesystem::absolute() disagrees: on Windows it calls
-    // GetFullPathNameW, which fails with ERROR_INVALID_PARAMETER (22) for an
-    // empty string. The error_code overload below does NOT throw, so this
-    // function itself was never the problem — but it returned a Result the
-    // callers treat as fatal, and worse, callers that reached for the
-    // THROWING overload died here instead (see HardenAbsolute below).
-    //
-    // Measured on this toolchain (GCC 15.2 MinGW, -std=c++26):
-    //   fs::absolute(fs::path(""), ec) -> ec=22 'Invalid argument', result=''
-    //   fs::absolute(fs::path(""))     -> throws filesystem_error
-    //     "filesystem error: cannot make absolute path: Invalid argument []"
     if (path.empty()) return std::string();
 
     std::error_code ec;
@@ -596,9 +505,6 @@ std::string FilesystemImpl::Extension(std::string_view path) const {
 }
 
 Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path) const {
-    // Empty path: no file has no metadata. Reporting IoError here made an
-    // "is this thing a file?" probe on an empty string look like a disk
-    // failure in the log; the honest answer is "not a file, not a directory".
     if (path.empty()) {
         FileMetadata none;
         none.isDirectory = false;
@@ -619,9 +525,6 @@ Result<IFilesystem::FileMetadata> FilesystemImpl::Metadata(std::string_view path
         m.sizeBytes = static_cast<uint64_t>(size);
     }
 #if defined(_WIN32)
-    // std::filesystem on MinGW reports file times to the whole second (via stat), so two writes in the
-    // same second look identical - "is this newer than that" cannot be answered. Windows itself keeps
-    // 100 ns; ask for that.
     {
         WIN32_FILE_ATTRIBUTE_DATA data;
         const std::wstring native = ToWide(path);
@@ -679,15 +582,6 @@ Result<std::vector<std::string>> FilesystemImpl::FindFiles(std::string_view dir,
 
 Result<void> FilesystemImpl::CreateSymlink(std::string_view target, std::string_view linkPath) {
 #if defined(_WIN32)
-    // std::filesystem::create_symlink calls CreateSymbolicLinkW WITHOUT
-    // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (0x2, Windows 10 1703+)
-    // — without it, symlink creation needs full elevation even with
-    // Developer Mode on, which is why this failed outright on a normal
-    // (non-admin) process. The flag doesn't remove the requirement that
-    // SOME privilege be granted (elevation OR Developer Mode still has to
-    // be on), it just makes Developer Mode alone sufficient instead of
-    // requiring elevation on top of it — the standard, documented way an
-    // ordinary process creates symlinks on modern Windows.
     constexpr DWORD kUnprivileged = 0x2;   // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
     std::error_code ec;
     const bool targetIsDir = fs::is_directory(NativePath(target), ec);
@@ -749,9 +643,6 @@ void FilesystemImpl::PollLoop() {
         std::this_thread::sleep_for(interval);
         if (stop_.load()) break;
 
-        // Detect changes under the lock, then fire the callbacks OUTSIDE it so
-        // a callback may safely call Watch()/CancelWatch() without deadlocking
-        // (the callback is copied by value, so erasing its watch is fine).
         std::vector<std::pair<std::string, std::function<void(std::string_view)>>> changed;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -766,5 +657,4 @@ void FilesystemImpl::PollLoop() {
         for (auto& [path, cb] : changed) cb(path);
     }
 }
-
 } // namespace bps::platform

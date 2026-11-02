@@ -1,10 +1,5 @@
 #pragma once
 
-// UndoRedoManager (docs/specs/15 §Undo/Redo Manager): command-based undo/redo
-// with transaction grouping. Every editing operation is an ICommand; the
-// manager owns the two stacks and the history limit. Purely in-memory (the
-// HistoryManager persists checkpoints).
-
 #include "core/common/Common.hpp"
 
 #include <deque>
@@ -14,7 +9,6 @@
 #include <vector>
 
 namespace bps::project {
-
 // One reversible editing operation (docs/specs/15 §Command-based undo).
 class ICommand {
 public:
@@ -86,5 +80,4 @@ private:
     std::vector<Entry> pendingGroup_;
     bool grouping_ = false;
 };
-
 } // namespace bps::project

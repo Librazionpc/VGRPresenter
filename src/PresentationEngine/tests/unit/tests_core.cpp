@@ -1,6 +1,3 @@
-// Unit tests: Core Engine + PAL (Phases 1-8, docs/specs/01-15) and the whole-engine Kernel test.
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests core
 #include "TestHarness.hpp"
 
 #include <atomic>
@@ -139,11 +136,6 @@ void TestLogger() {
     CHECK(logger.GetHealth().IsHealthy() || logger.GetHealth().state == HealthState::Healthy);
 
     // ---- which Qt messages reach the user as a notice (core/logging/QtMessagePolicy.hpp) ----
-    // main.cpp's handler toasts what this says is user-facing and only logs the
-    // rest. The case that put the rule there: Qt's Windows clipboard retrying while
-    // another process holds the clipboard (normal on Windows) arrived as an amber
-    // "Application - Retrying to obtain clipboard." notice about nothing the user did.
-    // (A plain lambda: `Qt` is already the Qt namespace, so it cannot be aliased.)
     const auto userFacing = [](bool isQml, const char* category, std::string_view message) {
         return bps::logging::QtMessageIsUserFacing(isQml, category, message);
     };
@@ -334,9 +326,6 @@ void TestThreadPool() {
     auto h = pool.Submit([&]() { ran.store(true); }, slow);
     CHECK(h.ok());
     if (h.ok()) {
-        // Cancellation is safe and never crashes: the task either cancels, runs, or
-        // finishes. Cancel() fails only when the task already finished and was
-        // removed from the pool (NotFound) — both outcomes are valid.
         auto cr = pool.Cancel(h.value());
         if (cr.ok()) {
             auto st2 = pool.TaskStateOf(h.value());
@@ -576,11 +565,6 @@ void TestResource() {
 }
 
 namespace {
-
-// A PAL that forwards everything to the real backend but reports the machine's
-// RAM as fully used, so a ResourceManager sample crosses the memory-pressure
-// latch (High at 90% used) on demand instead of waiting for this machine to
-// actually come under pressure.
 struct FullyUsedRamPlatform final : bps::platform::IPlatform {
     FullyUsedRamPlatform() : real_(bps::platform::CreatePlatform()) {}
 
@@ -616,43 +600,16 @@ struct FullyUsedRamPlatform final : bps::platform::IPlatform {
 private:
     std::unique_ptr<bps::platform::IPlatform> real_;
 };
-
 } // namespace
 
-// The pressure notice a sample publishes must go out with the manager's lock
-// RELEASED. Its subscriber re-enters the manager (AdaptiveRuntime::OnPressure ->
-// ApplyOptimization -> MemoryPressure() -> Telemetry()), and mutex_ is not
-// recursive, so a dispatch under the lock deadlocks the sampling thread while it
-// owns AdaptiveRuntime's applyMutex_ — which a settings write on the GUI thread
-// (SettingsService -> ApplyToEngine -> SetPreference -> ApplyOptimization) then
-// waits on forever. That is a frozen UI from one toggle in the Reference pane,
-// not a slow sample.
 void TestResourceDispatchOutsideLock() {
     auto& res = ResourceManager::Instance();
     res.SetPlatform(std::make_shared<FullyUsedRamPlatform>());
-    // The latch state belongs to the PROCESS, not to this test. An earlier phase
-    // samples the real machine (the Kernel suite boots the heartbeat and the
-    // resource phase samples for real), so a sustained spike in that phase —
-    // this machine's CPU sits above 90% for whole stretches of a full suite run
-    // — leaves one of the latches active. An active latch answers Update() with
-    // None until it clears and its cooldown expires, so the transition this test
-    // WAITS for never arrives and the two CHECKs below fail for a reason that
-    // has nothing to do with the dispatch scope under test. Measured: this suite
-    // passes alone and failed in every full run here until the precondition was
-    // stated explicitly.
     res.ResetPressureAlerts();
-    // Deliberately no Initialize(): the pump below is what drives the latch, so
-    // the test does not depend on the sampling heartbeat's scheduler — an earlier
-    // phase (the Kernel suite) may already have torn it down.
 
     std::atomic<bool> inHandler{false};
     std::atomic<bool> otherThreadDone{false};
     std::atomic<bool> reachedWhileParked{false};
-    // The subscriber PARKS inside the dispatch, and the park is bounded on
-    // purpose: the flag it waits for is set by another thread (this dispatch is
-    // synchronous), so an unbounded spin could only be released from the thread
-    // that is parked here — the failure mode has to be a failed CHECK, never a
-    // wedged suite.
     Subscription sub = EventBus::Instance().Subscribe<events::ResourcePressureChanged>(
         [&](const events::ResourcePressureChanged&) {
             inHandler.store(true);
@@ -661,9 +618,6 @@ void TestResourceDispatchOutsideLock() {
             // Did the other thread get through the manager's own lock while this
             // dispatch was still in flight?
             reachedWhileParked.store(otherThreadDone.load());
-            // Re-enter only once it demonstrably could: with the lock held across
-            // the dispatch this call would deadlock the sampling thread (the
-            // suite's own thread) and take the whole run with it.
             if (otherThreadDone.load()) (void)res.Telemetry();
         },
         0);
@@ -678,10 +632,6 @@ void TestResourceDispatchOutsideLock() {
         otherThreadDone.store(true);
     });
 
-    // The latch needs a High memory reading to hold for 3 s (10 §7 Smart
-    // rules), so pump samples until the raise lands; the periodic sampler does
-    // the same from its own thread. The budget is bounded and the CHECKs below
-    // name a miss, so a scenario that never raised cannot read as a pass.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (!inHandler.load() && std::chrono::steady_clock::now() < deadline) {
         res.Sample();
@@ -729,12 +679,6 @@ void TestPal() {
     CHECK(info.totalRamBytes > 0);
     CHECK(!info.hostname.empty());
 
-    // --- Architecture coverage: canonical names + pointer width (DoD §24) ---
-    // Arch() must match the compile-time tag on every target (Windows
-    // x86/x64/ARM64, Linux x86_64/aarch64/armv7, macOS arm64/x86_64).
-    // Exception: Linux reports the *kernel* arch via uname, so a 32-bit build
-    // on a 64-bit kernel (the standard 32-bit CI setup) reports "x86_64"/"arm64"
-    // while kCompileArch is "x86"/"arm" — both are legitimate.
     auto archOk = [&](const std::string& a) {
         return a == p::kCompileArch ||
                (p::kCompileBits == 32 && (a == "x86_64" || a == "arm64"));
@@ -807,12 +751,6 @@ void TestPal() {
     auto tmp = fs.CreateTempFile("bps-");
     CHECK(tmp.ok() && fs.Exists(tmp.value()));
     if (tmp.ok()) CHECK(fs.Remove(tmp.value()).ok());
-    // Symlinks. On Windows this needs Developer Mode or elevation — a real
-    // OS permission gate, not something the calling process can grant
-    // itself, so ERROR_PRIVILEGE_NOT_HELD (1314) there is expected on a
-    // machine with neither, not a bug. Anything else (including any
-    // failure at all on non-Windows, where an ordinary user needs no
-    // special privilege for this) still hard-fails.
     auto symResult = fs.CreateSymlink(bfile2, dir + "/link");
 #if defined(_WIN32)
     constexpr int kErrorPrivilegeNotHeld = 1314;
@@ -834,13 +772,6 @@ void TestPal() {
     auto found = fs.FindFiles(dir, ".txt");
     CHECK(found.ok() && found.value().size() >= 1);
 
-    // A name outside ASCII must survive the WHOLE save path: write, read back,
-    // atomic swap, enumerating it back, rename. The Windows PAL used to hand
-    // these to the OS as narrow bytes, so the name was mangled one character
-    // per byte ("WE’LL …" was stored as "WEâ€™LL …") and the rename that
-    // publishes a save failed with ERROR_IO_DEVICE — every non-ASCII title of a
-    // 1144-show ProPresenter import stayed behind as a .vgr.tmp (engine.log,
-    // 2026-10-24).
     const std::string unicodeName = dir + "/WE\xE2\x80\x99LL TALK IT OVER.vgr";
     CHECK(fs.Write(unicodeName, "lyrics").ok());
     CHECK(fs.Exists(unicodeName));
@@ -877,10 +808,6 @@ void TestPal() {
     CHECK(wt.ok());
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     CHECK(fs.Write(wfile, "v2").ok());
-    // 900ms (1.8x the 500ms poll interval) was tight enough to miss under
-    // real scheduling jitter in a 3500+-check test process with several
-    // background threads already running — 1.5s guarantees a full poll
-    // cycle lands inside the window even under load, not just in isolation.
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     CHECK(watchHits.load() >= 1);
     CHECK(fs.CancelWatch(wt.value()).ok());
@@ -938,11 +865,6 @@ void TestPal() {
         CHECK(!proc.IsRunning(pid.value()).value());
     }
     CHECK(proc.CurrentProcessId() > 0);
-    // Restart: terminate the old child, spawn a fresh one. No bare `sleep`
-    // binary on Windows — `ping` against loopback is the standard
-    // stdin-free way to burn ~30s (each echo request takes ~1s; `timeout`
-    // needs a real console and errors out when stdin is redirected, which
-    // it is here).
 #if defined(_WIN32)
     const std::string sleepCmd = "ping.exe";
     const std::vector<std::string> sleepArgs = {"-n", "31", "127.0.0.1"};
@@ -1024,14 +946,6 @@ void TestPal() {
     CHECK(defIn.ok() || defIn.error().code == Err::NotFound);
     CHECK(!audio.Fingerprint().empty() || (!sawInput && !sawOutput));   // fingerprint or no devices
 
-    // --- Input metering (IAudio capture tap; see the metering section of
-    // IAudio.hpp) — contract holds on every backend: unknown ids fail with
-    // NotFound (Windows) or Unsupported (no tap), levels for untapped
-    // devices are the all-zero "no signal" snapshot, and start/stop cycle
-    // cleanly without leaking threads. On a machine WITH input devices this
-    // also runs the real WASAPI tap briefly and accepts silence (a muted or
-    // unplugged mic is still a working meter). The 'none' device id can't be
-    // expressed as wavein:<n>, so the Windows path rejects it with NotFound.
     {
         auto& a = audio;
         const auto none = a.InputLevels(12345);
@@ -1047,9 +961,6 @@ void TestPal() {
         CHECK(IL::LayoutFor(8) == CL::Multi);
         CHECK(std::string_view(IL::ToString(CL::Mono)) == "mono");
         CHECK(std::string_view(IL::ToString(CL::Stereo)) == "stereo");
-        // With no devices there is nothing more to exercise; with devices,
-        // the first input id must round-trip through start/stop (and may
-        // fail with Unsupported on backends without a tap).
         if (sawInput) {
             std::string firstIn;
             for (const auto& d : a.Enumerate())
@@ -1059,11 +970,6 @@ void TestPal() {
             CHECK(started.ok() || started.error().code == Err::Unsupported
                   || started.error().code == Err::NotFound);
             if (started.ok()) {
-                // The tap must resolve its endpoint + start the client before
-                // the first analysis window publishes; poll briefly instead of
-                // assuming a fixed delay. A machine with no ACTIVE capture
-                // endpoint (legacy-only WinMM rosters, disabled mic) never
-                // produces data — an honest "no signal", not a failure.
                 p::IAudio::InputMeterLevels lv;
                 for (int ms = 0; ms < 1000; ms += 25) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(25));
@@ -1090,16 +996,6 @@ void TestPal() {
         }
     }
 
-    // --- STREAM taps (audio that is not a capture device — see IAudio's
-    // "STREAM taps" section): the carrier a media file's or an NDI stream's own
-    // audio rides, and what the app's video cards and dialogs meter with. A
-    // synthesized WAV is decoded BY THE BACKEND (kind "media"), so the whole
-    // chain is exercised with a file this test creates itself: tap opens → real
-    // decoded samples arrive → the meter publishes non-zero peaks → the FIFO the
-    // mixer drains yields frames → stop releases the tap. A backend without
-    // stream taps answers Unsupported, which this section reports as "not
-    // supported here" (the same honesty rule the device taps follow) rather than
-    // failing a platform that legitimately has no such producer.
     {
         auto& a = audio;
         const uint32_t tapId = p::IAudio::kStreamTapBase + 3;   // inside the stream range
@@ -1124,9 +1020,6 @@ void TestPal() {
         }
         CHECK(wrote);
 
-        // An id OUTSIDE the stream range is refused by every backend: the two id
-        // spaces must never be confusable (one id goes to TapFormat /
-        // ReadTapAudio / InputLevels with no ambiguity).
         CHECK(!a.StartStreamTap(7, wav, "media").ok());
         // ...and so is a producer kind nobody implements.
         CHECK(!a.StartStreamTap(tapId, wav, "telepathy").ok());
@@ -1154,18 +1047,12 @@ void TestPal() {
                 CHECK(fmt.channels >= 1 && fmt.sampleRateHz > 0);
                 std::vector<float> fifo(4096, 0.f);
                 CHECK(a.ReadTapAudio(tapId, fifo.data(), 512) > 0);
-                // One greppable verdict line, the same shape the device taps'
-                // runs print (this is what makes "the media meter is dead"
-                // answerable from a log alone).
                 std::cout << "[stream-tap] decoded " << int(lv.channelCount)
                           << " ch @ " << int(lv.sampleRateHz) << " Hz peak="
                           << lv.peaks[0] << std::endl;
             } else {
                 std::cout << "[stream-tap] no decoded frames (media decode "
                              "unavailable on this host)" << std::endl;
-                // The decoder could not open the file on this host (no Media
-                // Foundation WAVE handler): the honest shape is "no signal", and
-                // the app shows exactly that rather than a fabricated level.
                 CHECK(a.InputLevels(tapId).channelCount == 0);
             }
             CHECK(a.StopStreamTap(tapId).ok());
@@ -1179,14 +1066,6 @@ void TestPal() {
         std::remove(wav.c_str());
     }
 
-    // --- Video preview tap (IAudio-style contract on IVideo): THE PER-
-    // DEVICE VERDICT RUN. Every enumerated camera gets its own tap, a poll
-    // window, and a one-line verdict. This is the ground truth the UI
-    // debates kept circling: per device, does the PAL deliver JPEG frames
-    // or not — independent of bridge, provider, and QML. Also the crash
-    // repro: the app died around the 6th camera switch; if the crash is in
-    // the tap lifecycle it happens HERE, under the test, with the
-    // symbolized crash log naming the faulting module.
     {
         auto& vid = plat.Video();
         const auto cams = vid.Enumerate();
@@ -1267,14 +1146,6 @@ void TestPal() {
                 CHECK(jpeg);
 
                 // ---- THE LIVE PIXEL PATH (IVideo::SetPreviewLive) ----------
-                // This is what a PROGRAM FEED reads — a live bus window, a taken
-                // input — and it is the path whose hand-off was rebuilt around a
-                // shared buffer (the pixels are taken under the tap's lock and
-                // copied OUTSIDE it, so a reader never makes the capture thread
-                // wait for an 8 MB memcpy). The three facts a puller depends on
-                // are pinned here: the sequence MOVES when frames arrive, the
-                // pixels are non-empty at the source's own size, and the byte
-                // count matches the geometry it reports.
                 vid.SetPreviewLive(mon.id, true);
                 const uint64_t seq0 = vid.PreviewFrameSeq(mon.id);
                 uint64_t seq1 = seq0;
@@ -1307,9 +1178,6 @@ void TestPal() {
             CHECK(vid.PreviewFrame(mon.id).empty());   // tap released
         }
 
-        // WINDOW capture verdict: enumerate the desktop's open windows and
-        // capture the first one (usually a file explorer or the terminal
-        // itself). Also proves a STALE id fails NotFound cleanly.
         const auto wins = vid.EnumerateWindows();
         std::printf("[screenpreview] %zu open window(s) enumerated\n", wins.size());
         CHECK(!wins.empty());   // a desktop with zero visible windows is absurd
@@ -1386,10 +1254,6 @@ void TestPal() {
         CHECK(!files.ok() || files.value().empty());
     }
 
-    // BITMAPS (the clipboard after a screenshot: Win+Shift+S posts a DIB and no
-    // text at all). WriteImage → ReadImage must round-trip the pixels; a
-    // platform with no image target must say Unsupported rather than fail
-    // silently or hand back garbage.
     bps::platform::ClipboardImage shot;
     shot.width = 2;
     shot.height = 2;
@@ -1465,9 +1329,6 @@ void TestPal() {
     // --- Notifications (DoD §17) — existence probe only (no desktop spam) ---
     (void)plat.Notifications().Supported();   // never crashes
 
-    // --- Color + font pickers (DoD §16 — implemented on Linux via zenity). ---
-    // Headless hosts get a clean Err::Unsupported; with a desktop session the
-    // dialog is spawned but the user is expected to cancel (nullopt).
     auto color = plat.Dialogs().ColorPicker("pick");
     CHECK(color.ok() || color.error().code == Err::Unsupported ||
           color.error().code == Err::IoError);
@@ -1669,12 +1530,6 @@ void TestDatabase() {
     CHECK(db.DocumentCount() == 2);
 
     // ---- a DAMAGED file must not take the engine's boot down --------------
-    // Seen in the wild: an interrupted flush left <dataDir>/kernel.json as pure
-    // NULs, Open() answered Config_ParseFailed, Kernel::Boot aborted the boot,
-    // and every QML write for the rest of the session answered "the engine is
-    // not running yet". Open() now sets the damaged file aside and starts a
-    // fresh database at the SAME path, so the session runs and persistence is
-    // intact immediately (no restart, no lost settings round-trip).
     {
         const fs::path damaged = fs::temp_directory_path() / "bps_db_corrupt_unit_test.json";
         const std::string damagedPath = damaged.string();
@@ -1944,14 +1799,6 @@ void TestKernel() {
     CHECK(kernel.State() == KernelState::Stopped);
 }
 // ---------------------------------------------------------------------------
-// Kernel::Boot degradation (01 §3).
-//
-// The failure this prevents: one subsystem that cannot initialize used to abort
-// the whole boot, so a single unreadable data file left a kernel that never
-// reached Running and a UI where every screen answered "the engine is not
-// running yet". Boot must now come up with a hole in it, name the hole in
-// Degraded()/EngineContext.degraded, publish it on the bus, and report Degraded
-// health — never go dark.
 // ---------------------------------------------------------------------------
 void TestKernelDegrade() {
     auto& kernel = Kernel::Instance();
@@ -2205,14 +2052,6 @@ void TestPressureLatch() {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic saves: the PAL's WriteAtomic / WriteBinaryAtomic / CopyAtomic.
-//
-// The failure these prevent is concrete: an in-place save interrupted by a crash
-// left <dataDir>/kernel.json as pure NULs, and the next boot failed on the file
-// it had just corrupted. The contract asserted here is the one every internal
-// document now relies on — the target holds a COMPLETE file at every instant, the
-// parent directory is created for the caller, and a failed save leaves the
-// previous file untouched with no .tmp debris beside it.
 // ---------------------------------------------------------------------------
 void TestAtomicWrite() {
     using namespace bps;
@@ -2298,19 +2137,6 @@ void TestAtomicWrite() {
     (void)fs.RemoveAll(root);
 }
 
-// The cancellation handle on a job handed to another thread (core/threading/
-// JobTicket.hpp). This is the shape that lets a job be taken back: the QML layer's
-// engine worker posts its work with one (EngineWorker::runOffThreadCancellable,
-// and ShowService's queued document jobs above it), because a single serialized
-// queue means a job nobody wants any more sits in front of the work the screen
-// that IS showing needs.
-//
-// Its TWO cancels mean different things, and that difference is what keeps
-// cancelling from losing data — so each one is pinned down here, not just the
-// happy path:
-//   * Abandon()         the work is pointless (a read): a queued job never runs.
-//   * WithdrawVerdict() the work is still wanted (a save the operator asked for)
-//                       and only the answer is: the write happens, nothing reports.
 void TestJobCancellation() {
     // Full life, nobody cancels: the work runs and its answer is used.
     {
@@ -2334,9 +2160,6 @@ void TestJobCancellation() {
         CHECK(!t->Abandon());    // a second cancel changes nothing, and says so
     }
 
-    // Abandoned while RUNNING: an engine call cannot be interrupted mid-lock, so
-    // the work finishes and Started() is what tells a caller to keep its
-    // consequences — while the answer is dropped.
     {
         JobTicketPtr t = std::make_shared<JobTicket>();
         CHECK(t->Begin());
@@ -2368,14 +2191,6 @@ void TestJobCancellation() {
         CHECK(!t->Deliver());
     }
 
-    // A cancel that arrives AFTER the verdict was delivered decides nothing
-    // retroactively: the worker already had its Delivered() answer, and no flag
-    // takes that back. What it does record is that nobody wants anything MORE from
-    // this job, so a later reader is never told the job is still wanted. (The two
-    // facts a caller acts on are answered to the two sides separately, and
-    // ShowService cannot reach a ticket whose verdict has landed — its entry is
-    // removed on the landing — so there is no shape in which this ordering can be
-    // read as "my cancel stopped a job that had already reported".)
     {
         JobTicketPtr t = std::make_shared<JobTicket>();
         CHECK(t->Begin());
@@ -2387,9 +2202,6 @@ void TestJobCancellation() {
         CHECK(!t->Begin());   // a second Begin() is not a re-run of this job
     }
 
-    // A copy shares the state: the poster keeps one handle and the worker captures
-    // another (EngineWorker's capture-by-value rule), so the sharing IS the
-    // mechanism rather than a detail of it.
     {
         JobTicketPtr poster = std::make_shared<JobTicket>();
         JobTicketPtr worker = poster;
@@ -2399,9 +2211,6 @@ void TestJobCancellation() {
         CHECK(worker->Started());
     }
 
-    // Exactly one canceller is told it was the one that abandoned the job, however
-    // many ask at once (the poster that wins is the one whose toast/log line is
-    // the truth about what happened).
     {
         JobTicketPtr t = std::make_shared<JobTicket>();
         std::atomic<int> winners{0};
@@ -2414,12 +2223,6 @@ void TestJobCancellation() {
         CHECK(!t->Begin());
     }
 
-    // The real contention: the poster cancels while the worker runs the job, 2000
-    // times. Either outcome is correct (the cancel landed before Begin() or after
-    // it), so the contract asserted here is the one a waiting caller depends on —
-    // a DROPPED answer always has a canceller behind it, so nobody stops waiting on
-    // a job that then reports success. The deterministic orders above are where the
-    // semantics themselves are pinned down; this loop is the thread-safety check.
     {
         int dropped = 0, delivered = 0;
         for (int i = 0; i < 2000; ++i) {

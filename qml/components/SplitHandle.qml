@@ -1,22 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// A draggable divider - the one splitter the app uses (the dock's top/bottom edge,
-// every library sidebar's right edge).
-//
-// It sits ON the divider: `value` is where the divider is, along the axis it moves
-// (an x for a vertical divider, a y for a horizontal one), in the PARENT's coordinates.
-// It straddles that line with an 8 px strip that spans the parent the other way,
-// shows a purple line and the resize cursor on hover, and reports drags rather than
-// moving anything itself - the owner applies `dragged` to whatever the divider
-// controls, so a binding on `value` follows.
-//
-//   SplitHandle { value: sidebar.width; minValue: 200; maxValue: 520
-//                 onDragged: (v) => sidebar.width = v
-//                 onResetRequested: sidebar.width = 320 }     // double-click
-//
-// The hover and cursor come from PositionHoverArea (pointer-position truth), like
-// every other cursor in the app - MouseArea.cursorShape sticks in this build.
 Item {
     id: root
 

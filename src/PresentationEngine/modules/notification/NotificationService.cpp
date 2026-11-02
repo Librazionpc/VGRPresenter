@@ -11,15 +11,12 @@
 #include <chrono>
 
 namespace bps::notification {
-
 namespace {
-
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
-
 } // namespace
 
 NotificationService& NotificationService::Instance() {
@@ -52,9 +49,6 @@ Result<void> NotificationService::Initialize() {
     if (auto r = manager_.RegisterProvider(center); !r.ok()) return r;
     if (auto r = manager_.RegisterProvider(status); !r.ok()) return r;
 
-    // Optional webhook provider: only registered when a destination is
-    // configured (notify.webhook.url), so default runs never see network
-    // errors from an unconfigured endpoint (docs/specs/14 §Providers).
     if (config.Has("notify.webhook.url")) {
         auto webhook = std::make_shared<WebhookNotificationProvider>();
         json::Value::Object wh;
@@ -195,9 +189,6 @@ void NotificationService::ApplyPolicy(Notification& n) const {
         if (policy->autoDismissMs > 0) n.autoDismissMs = policy->autoDismissMs;
         if (policy->persistent) n.persistent = true;
         if (policy->suppressInPresenting && presenting_.load()) {
-            // Never interrupt a live presentation: downgrade to log-only for
-            // the duration of the presentation (the user sees it in the
-            // notification center afterwards if it remains relevant).
             n.channels = {"console"};
         }
         return;
@@ -401,6 +392,4 @@ void NotificationService::WireEvents() {
             (void)Publish(factory_.BackupCompleted(e.destination));
         }));
 }
-
-
 } // namespace bps::notification

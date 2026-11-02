@@ -6,11 +6,7 @@
 #include <cmath>
 
 namespace bps::settings {
-
 namespace {
-// The live frame budget in ms (60Hz), the same budget RenderEngine counts
-// drops against — rendering utilization is "how much of that budget the
-// most recent frame used".
 constexpr double kBudgetMs = 1000.0 / Telemetry::kTargetFps;
 } // namespace
 
@@ -59,10 +55,6 @@ void Telemetry::OnLiveFrame(double ms, bool composed) {
         liveRepresented_.fetch_add(1);
     }
 
-    // The open second and the curve are ONE state, so they share one lock: the
-    // counts this iteration just added, the sample the previous second closes
-    // out, and the second that is now open. The lock covers a few increments —
-    // no PAL, no device, no other lock behind it.
     std::lock_guard<std::mutex> lock(liveMutex_);
     if (composed) ++secondComposed_;
     else          ++secondRepresented_;
@@ -70,9 +62,6 @@ void Telemetry::OnLiveFrame(double ms, bool composed) {
         secondStart_ = now;
         return;
     }
-    // The rates come from the loop's own counts over its own elapsed time, not
-    // from a wall clock: a loop that was held off for two seconds while the
-    // machine was busy must not read as a slow loop.
     const double elapsed = std::chrono::duration<double>(now - secondStart_).count();
     if (elapsed < 1.0)
         return;
@@ -82,10 +71,6 @@ void Telemetry::OnLiveFrame(double ms, bool composed) {
     sample.frameMs = lastComposedMs_.load();
     sample.representMs = lastRepresentMs_.load();
     sample.sharedCopies = secondShared_;
-    // Which element made THIS second's frames expensive. The hotspot is a
-    // property of the scene, not of the second, so it is carried rather than
-    // counted: a service that opens with a heavy slide reads that slide's name
-    // on every bar until the scene changes.
     sample.costElement = lastCost_.costElement;
     sample.costLayer = lastCost_.costLayer;
     sample.costObject = lastCost_.costObject;
@@ -159,9 +144,6 @@ LiveStats Telemetry::LiveSnapshot() const {
             s.composedFps = last.composedFps;
             s.presentFps = last.presentFps;
         } else if (secondStart_.time_since_epoch().count() != 0) {
-            // The first second is still open: report what it holds so far, so a
-            // snapshot taken during the FIRST second of a show is not a flat 0
-            // ("live and showing nothing" is a different report from "0 fps").
             const double elapsed = std::chrono::duration<double>(
                                        std::chrono::steady_clock::now() - secondStart_).count();
             if (elapsed > 0.0) {
@@ -180,9 +162,6 @@ std::vector<LiveSample> Telemetry::LiveHistory() const {
 
 void Telemetry::OnFrameRendered(double frameMs) {
     lastFrameMs_.store(frameMs);
-    // Render thread only: expire the slot leaving the 128-frame window, then
-    // open a fresh slot for the frame that just arrived. The ring is 2× the
-    // window, so the expired slot cannot be the one presents are landing in.
     std::lock_guard<std::mutex> lock(ringMutex_);
     ring_[framesSeen_ % kRing] = 0;
     ++framesSeen_;
@@ -214,9 +193,6 @@ Utilization Telemetry::Snapshot() const {
     u.encoding = std::clamp(
         recording::RecordingEngine::Instance().MaxActiveEncoderLoad(), 0, 100);
 
-    // Output: presents across the most recent window of frames vs the frames
-    // the window should have carried at the 60Hz target (one present per
-    // frame = 100%; several outputs on one frame saturate, not "over").
     uint64_t presents = 0;
     {
         std::lock_guard<std::mutex> lock(ringMutex_);
@@ -232,5 +208,4 @@ Utilization Telemetry::Snapshot() const {
     }
     return u;
 }
-
 } // namespace bps::settings

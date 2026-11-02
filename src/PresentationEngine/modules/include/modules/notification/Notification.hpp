@@ -1,9 +1,5 @@
 #pragma once
 
-// Notification object (docs/specs/14 §Notification Object). One model for every
-// user-visible notification. Contains NO UI information — providers decide how
-// to render it.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 
@@ -12,7 +8,6 @@
 #include <vector>
 
 namespace bps::notification {
-
 enum class Severity : int { Debug = 0, Information, Success, Warning, Error, Critical };
 
 inline const char* ToString(Severity s) {
@@ -119,5 +114,4 @@ struct NotificationSeed {
     std::vector<std::string> tags;
     int64_t autoDismissMs = 0;
 };
-
 } // namespace bps::notification

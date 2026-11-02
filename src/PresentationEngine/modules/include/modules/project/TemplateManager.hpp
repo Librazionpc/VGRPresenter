@@ -1,9 +1,5 @@
 #pragma once
 
-// TemplateManager (docs/specs/15 §Template Manager): reusable project
-// templates — creation from an existing project, versioning, default
-// template, and applying a template to seed a new project.
-
 #include "modules/project/Project.hpp"
 #include "interfaces/IService.hpp"
 
@@ -12,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct ProjectTemplate {
     std::string id;
     std::string name;
@@ -49,5 +44,4 @@ private:
     mutable std::mutex mutex_;
     std::vector<ProjectTemplate> templates_;
 };
-
 } // namespace bps::project

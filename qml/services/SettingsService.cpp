@@ -32,7 +32,6 @@
 namespace bs = bps::settings;
 
 namespace {
-
 // One place the app's version is written for the Settings screens (the nav rail and menus still carry their own copy).
 constexpr const char *kAppVersion = "0.1.2";
 
@@ -89,32 +88,6 @@ QVariantMap choiceMap(const bs::SettingChoice &c, bs::SettingKind kind)
 // ---------------------------------------------------------------------------
 // The renderer the user asked for (Settings · General's hardware switch)
 // ---------------------------------------------------------------------------
-//
-// The one place the app's `preferences.hardwareAcceleration` is turned into the
-// engine's own configuration, and the only place in the app that asks the render
-// engine to re-install a backend. Its callers are both off the interface thread
-// (see applyEngineSettingsAsync): the reload MAKES A DEVICE — the exact class of
-// call the interface-thread guard exists for.
-//
-// TWO KEYS, on purpose — RenderEngine::ResolveBackendName is the rule, this is
-// the writer that keeps it meaningful:
-//
-//   render.hardwareAcceleration   what THIS writes: the app's preference, used
-//                                 when nobody made an explicit choice.
-//   render.backend                NOT written here, ever. An explicit choice (a
-//                                 config file, an installed profile) OUTRANKS
-//                                 the app's switch, so the switch must not
-//                                 overwrite it — doing so would silently defeat
-//                                 an installed profile and make the switch look
-//                                 like the only truth about the renderer.
-//
-// Written to the Runtime scope: it is this run's answer, not something to persist
-// in the engine's own config file (the user's choice lives in settings.json,
-// which AppSettings owns).
-//
-// A write that changes nothing does NOTHING — no device, no reload — so the app
-// pushing the whole store (every settings write does, coalesced) can never re-make
-// a GPU device per tick.
 struct RenderBackendApply {
     bool changed = false;   // the preference really changed (only that is announced)
     bool wantGpu = false;   // what the engine was asked for
@@ -141,7 +114,6 @@ RenderBackendApply ApplyRenderBackendPreference(const bs::AppSettings &settings)
     out.active = qstr(render.ActiveBackendName());
     return out;
 }
-
 } // namespace
 
 SettingsService *SettingsService::s_instance = nullptr;
@@ -206,25 +178,11 @@ void SettingsService::load()
         return;
     auto &platform = bps::platform::PlatformAccessor::Get();
     dataDir_ = platform.Paths().UserDataDir();
-    // VGR_SANDBOX (QStandardPaths test mode, set in main.cpp) must cover the
-    // SETTINGS store as well as the engine data it already redirects. It did
-    // not: UserDataDir() is the PAL's own known-folder path ("%LOCALAPPDATA%")
-    // and knows nothing about Qt, so a sandboxed diagnostic run — every selftest
-    // script — read and WROTE the operator's real settings.json. A scenario that
-    // adds a test row to a roster therefore left that row on the real board
-    // (found exactly that way: a routing-diagnostic scenario's row survived in
-    // session.audioRoster), which is the one thing a "throwaway test area"
-    // promise must not allow. In test mode the store lives under Qt's own
-    // test tree instead.
     if (QStandardPaths::isTestModeEnabled()) {
         const QString sandbox = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
         if (!sandbox.isEmpty())
             dataDir_ = sandbox.toStdString();
     }
-    // The SHIPPED baseline beside the exe (assets/settings.shipped.json): the installer replaces it
-    // with the build's own configuration on every install, and the store adopts only what it has no
-    // value for — an update arrives configured without resetting anyone's choices. A dev build has no
-    // such file, so nothing changes there.
     const std::string baseline =
         platform.Filesystem().Join(platform.Paths().ExecutableDir(), "assets/settings.shipped.json");
     settings_ = std::make_shared<bs::AppSettings>(
@@ -234,11 +192,6 @@ void SettingsService::load()
 
     // Whatever the user chose last time takes effect now, and every later change does the same.
     (void)bs::ApplyToEngine(*settings_, bps::adaptive::AdaptiveRuntime::Instance());
-    // The renderer choice goes to a WORKER (see ApplyRenderBackendPreference: the
-    // reload makes a device), so the boot path only arms it here; it lands — and
-    // the General row starts reporting what is really drawing — a moment later.
-    // It is not announced: the user chose this in an earlier session, and a boot
-    // toast re-announcing a setting nobody just touched is noise.
     {
         auto settings = settings_;   // shared: the worker holds the store alive
         runOffThread([settings] {
@@ -248,24 +201,10 @@ void SettingsService::load()
     }
     settings_->Subscribe([this](const std::string &key) {
         refreshValues();
-        // The ENGINE apply is not interface-thread work (see
-        // applyEngineSettingsAsync): ApplyToEngine reaches AdaptiveRuntime,
-        // whose apply lock the resource sampler can hold for as long as a
-        // pressure decision takes — long enough that a settings WRITE was
-        // recorded parked in it on the interface thread, the window frozen
-        // behind the write (hang-3912 and its siblings). The write stays here;
-        // the push follows on a worker, coalesced so a slider drag is one
-        // apply, not one per tick.
         if (key == "startup.launchAtLogin")
             applyLaunchAtLogin();
         else if (key == "appearance.language")
             announceLanguage();   // applies the locale AND says what it did
-        // ...and the push the paragraph above describes, for EVERY write (this
-        // call was missing, so a live write only reached the engine through a
-        // restart or a settings restore: the resource profile, Lock In Mode, the
-        // Smart Config budgets, the log level AND General's hardware switch all
-        // read back as changed and did nothing). Coalesced, so a slider drag is
-        // still one apply, not one per tick.
         applyEngineSettingsAsync();
         emit valueChanged(qstr(key));
         emit changed();
@@ -277,9 +216,6 @@ void SettingsService::load()
     applyLanguage();
     emit changed();
 
-    // The store is open: run everything that deferred a pre-boot read to
-    // whenReady(). After changed(), so the bindings the callbacks are about to
-    // read have already been refreshed from the store.
     std::vector<std::function<void()>> pending = std::move(pendingReady_);
     pendingReady_.clear();
     for (const auto &callback : pending)
@@ -363,17 +299,10 @@ int SettingsService::resetAll()
         return 0;
     const int count = static_cast<int>(settings_->ResetAll());
     if (count > 0) {
-        // Bring what reads the store back in line with it — the same three the
-        // restore-a-backup path runs. WITHOUT this the screens keep drawing the
-        // values they had (ResetAll answers a count and tells no listener), so a
-        // reset left every row showing what it showed before the click.
         refreshValues();
         applyLaunchAtLogin();
         applyLanguage();
         emit changed();
-        // And the engine's runtime copy of the old values is now wrong too (a
-        // reset profile or a reset renderer choice would otherwise keep running
-        // until the next restart). Same off-thread apply every other write uses.
         applyEngineSettingsAsync();
     }
     return count;
@@ -422,11 +351,6 @@ void SettingsService::refreshHardware()
 {
     if (!EngineBridge::instance().booted())
         return;
-    // The audio counts come from the bridge's CACHED roster (kept current off
-    // the GUI thread), never from a fresh IAudio::Enumerate() here: that call
-    // queries device caps and WASAPI mix formats per endpoint on the calling
-    // thread, so building the report inline stalled the UI every time
-    // Settings · Smart Config opened (the AppHangB1 class).
     bs::AudioCounts audio;
     for (const QVariant &v : EngineBridge::instance().audioDevices()) {
         if (v.toMap().value(QStringLiteral("isInput")).toBool())
@@ -434,11 +358,6 @@ void SettingsService::refreshHardware()
         else
             ++audio.outputs;
     }
-    // The REPORT samples the machine (bs::CurrentHardwareReport reads CPU times
-    // and memory), and this runs every time Settings · Smart Config opens and on
-    // every Apply — so the sample and the QA pass behind it run on the worker,
-    // and the rows land here a moment later. Same rule as the audio roster below:
-    // nothing that measures the machine belongs on the thread that draws.
     runOffThread([this, audio] {
         const bs::HardwareReport report = bs::CurrentHardwareReport(audio);
         QVariantList rows;
@@ -469,10 +388,6 @@ void SettingsService::refreshHardware()
 
 void SettingsService::applyRecommendedProfile()
 {
-    // The report that names the profile is built on the worker (see
-    // refreshHardware), so this neither asks for it synchronously nor waits for
-    // it: when the report is already here, the profile goes straight in; when it
-    // is not, one worker sample names it and the apply follows it back.
     if (!recommendedProfile_.isEmpty()) {
         setValue(QStringLiteral("resources.profile"), recommendedProfile_);
         return;
@@ -527,17 +442,8 @@ bool SettingsService::applyLanguage()
     const QString tag = qstr(settings_->GetString("appearance.language"));
     const QLocale locale(tag.isEmpty() ? QStringLiteral("en-US") : tag);
 
-    // The DEFAULT locale is the half that takes effect with nothing installed:
-    // dates, times and numbers follow it at once (Qt carries its own CLDR data
-    // for every locale), so picking Deutsch renames the shows list's days and
-    // months immediately.
     QLocale::setDefault(locale);
 
-    // The string half: any translation installed for the choice is put in force.
-    // The app ships none yet (its strings are still English-only), so this
-    // normally finds nothing - dropping vgrpresenter_<locale>.qm (e.g.
-    // vgrpresenter_de_DE.qm) into the app's "translations" folder is what
-    // starts translating the UI's qsTr strings.
     if (translator_) {
         QCoreApplication::removeTranslator(translator_.get());
         translator_.reset();
@@ -565,17 +471,6 @@ bool SettingsService::applyLanguage()
     return translated;
 }
 
-// What a language change actually DID, said out loud.
-//
-// Every other Appearance choice is visible the moment it is made: picking a
-// theme or an accent recolours the interface in front of the user. The language
-// choice is the one that can look like nothing happened — and half of it
-// genuinely does nothing. The LOCALE half takes effect at once (dates, times,
-// numbers, via Qt's own CLDR data), while the STRING half needs a translation
-// the build does not ship yet, so the interface stays English whichever language
-// is picked. That is invisible from the Settings row, which is what the notice is
-// for: it says which of the two happened, so a user who picks Deutsch is not left
-// wondering whether the app ignored them.
 void SettingsService::announceLanguage()
 {
     const QString label = languageLabel();
@@ -608,12 +503,6 @@ void SettingsService::applyLaunchAtLogin()
 // Off the interface thread
 // ---------------------------------------------------------------------------
 
-// One place this service hands work to a worker. `fn` must capture what it
-// needs BY VALUE: nothing inside it may dereference a member of this service,
-// because the worker outlives the call that started it. Answers come back
-// through QMetaObject::invokeMethod(this, ..., Qt::QueuedConnection), which Qt
-// drops if the service is gone by then — the one guarantee that matters while
-// the app is shutting down with a copy still in flight.
 void SettingsService::runOffThread(std::function<void()> fn)
 {
     auto *runner = QThread::create(std::move(fn));
@@ -621,21 +510,6 @@ void SettingsService::runOffThread(std::function<void()> fn)
     runner->start();
 }
 
-// Pushes the store at the engine, off the interface thread.
-//
-// ApplyToEngine is a chain: it sets presentation styles and calls
-// AdaptiveRuntime::SetPreference -> ApplyOptimization, which takes the
-// adaptive runtime's apply lock. The resource SAMPLER takes that same lock
-// while it evaluates a pressure decision, so the interface thread's settings
-// write used to wait for a background thread's decision — the app's own hang
-// dumps caught exactly that (hang-3912: SettingsService::setValue ->
-// AppSettings::Set -> ApplyToEngine -> AdaptiveRuntime::SetPreference ->
-// lock, with the window frozen behind it).
-//
-// The write itself stays synchronous (the store is in memory and QML binds to
-// its values), the APPLY hops to a worker, and bursts coalesce: a write that
-// lands while an apply is running is picked up by a second pass, so the last
-// value wins rather than being dropped.
 void SettingsService::applyEngineSettingsAsync()
 {
     auto settings = settings_;   // shared: the worker holds the store alive
@@ -647,9 +521,6 @@ void SettingsService::applyEngineSettingsAsync()
     runOffThread([this, settings] {
         for (;;) {
             applyRequested_.store(false);
-            // The renderer first, and only when the user really changed it: this
-            // is the call that makes a GPU device, and the answer it brings back
-            // is what the General screen's row reports (see rendererInUse).
             const RenderBackendApply render = ApplyRenderBackendPreference(*settings);
             if (render.changed)
                 QMetaObject::invokeMethod(this, [this, render] {
@@ -877,11 +748,6 @@ void SettingsService::restoreCategoryBackup(const QString &backupPath)
     auto settings = settings_;   // shared: the worker holds the store alive
     runOffThread([this, source, target, name, settings] {
         auto &fs = bps::platform::PlatformAccessor::Get().Filesystem();
-        // Over the live file, ATOMICALLY (CopyAtomic): copy into a sibling temp
-        // and rename it on top. This used to delete the live file FIRST and then
-        // copy the backup in — so a failure between the two steps left the user
-        // with no settings file at all, and an interrupted copy left a truncated
-        // one, on the exact path a restore is meant to rescue.
         auto copied = fs.CopyAtomic(source, target);
         if (!copied.ok()) {
             const QString error = qstr(copied.error().message);
@@ -973,14 +839,6 @@ void SettingsService::requestPendingRecovery()
     });
 }
 
-// SYNCHRONOUS ON PURPOSE, and the only filesystem call in this file that still
-// runs on the interface thread (see the declaration's gui-ok note): it is the
-// CLEAN-EXIT path. A worker would be the wrong shape here — the app is about to
-// end, so a clear that has not finished leaves the recovery marker behind and
-// the next launch offers work the user already answered. The wait is two small
-// removals inside the store's own folder (the copy and its note — see
-// RecoveryStore::Clear), and by the time it runs there is no interface thread
-// left to protect.
 void SettingsService::clearRecovery()
 {
     if (dataDir_.empty())
@@ -1006,9 +864,6 @@ void SettingsService::restoreBackup(const QString &backupPath, const QString &ta
             }, Qt::QueuedConnection);
             return;
         }
-        // ATOMIC (CopyAtomic): the recovered show appears complete or not at all
-        // — a half-copied show file here would be presented to the user as their
-        // backup.
         auto copied = fs.CopyAtomic(source, dest);
         const QString error = copied.ok() ? QString() : qstr(copied.error().message);
         QMetaObject::invokeMethod(this, [this, error, label] {

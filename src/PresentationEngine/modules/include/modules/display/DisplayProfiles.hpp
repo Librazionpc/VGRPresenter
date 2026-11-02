@@ -1,11 +1,5 @@
 #pragma once
 
-// DisplayProfiles (docs/specs/18 §Display Profiles / Output Profiles). A
-// profile captures the full output configuration ("Church Main Hall": audience
-// on projector, stage on confidence monitor, preview on operator screen) and
-// can be applied in one click. Serialized as JSON (in-memory registry; callers
-// may persist the JSON string via the PAL filesystem).
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 #include "modules/display/DisplayTypes.hpp"
@@ -16,7 +10,6 @@
 #include <vector>
 
 namespace bps::display {
-
 class DisplayProfileStore {
 public:
     // --- Lifecycle ---------------------------------------------------------------
@@ -40,5 +33,4 @@ private:
     std::map<std::string, DisplayProfile, std::less<>> profiles_;
     bool initialized_ = false;
 };
-
 } // namespace bps::display

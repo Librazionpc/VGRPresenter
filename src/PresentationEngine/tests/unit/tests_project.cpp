@@ -1,6 +1,3 @@
-// Unit tests: Project & Data system (docs/specs/15).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests project
 #include "TestHarness.hpp"
 
 class TestDocumentHandler final : public project::IDocumentHandler {

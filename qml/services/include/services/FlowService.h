@@ -1,26 +1,5 @@
 #pragma once
 
-// The QML face of the engine's FlowEngine (Phase 14, docs/specs/26) — the
-// Functions tab's service-flow automation. The ENGINE runs entire services:
-// a Flow is an ordered list of executable nodes (actions, conditions, delays,
-// waits on engine events) that runs the countdown → welcome → worship →
-// sermon sequence with the operator always able to pause/skip/jump/stop.
-//
-// This service:
-//   • REGISTERS the app's domain actions into the engine's action registry
-//     ("go_live", "next_slide", "previous_slide", "clear_air", "start_rec",
-//     "stop_rec", "take_ndi_off") — real commands against LiveOutputService /
-//     RecordingService, so a flow's steps actually drive the service. The
-//     engine core stays decoupled (its own docs' plugin pattern).
-//   • LOADS built-in flow documents (.vgr JSON, the engine's native format)
-//     on boot: a starter Sunday-Service flow the user can run immediately.
-//   • RUNS/DRIVES executions: Start → an execution id; pause/resume/skip/stop
-//     + jumpTo are one call each. A 250 ms Poll pump advances delay nodes
-//     (the engine is externally-clocked, same contract RecordingService's
-//     pump honors) and refreshes the live state view.
-//   • PUBLISHES state: flows (id/name/node list) and the active execution's
-//     node timeline with per-node states — the Functions pane draws both.
-
 #include <QObject>
 #include <QStringList>
 #include <QVariantList>
@@ -64,17 +43,11 @@ public:
     QVariantMap execution() const { return execution_; }
     bool running() const { return running_; }
 
-    // Runs one of the four transport commands ("pause" | "resume" | "skip" |
-    // "stop") OFF the interface thread — the engine call happens on the worker,
-    // and the refreshed state comes back through refreshExecution.
     void runTransportOffThread(const QString &what);
 
     // Re-reads the engine's flow registry (also called after a Load). The read
     // runs on the engine worker; the list lands here and emits flowsChanged.
     Q_INVOKABLE void refreshFlows();
-    // Loads a .vgr/json flow document. True = ACCEPTED for loading: the load and
-    // its outcome (a toast, or the new flow on the list) arrive a moment later,
-    // since the engine call is off the interface thread.
     Q_INVOKABLE bool loadFlow(const QString &document);
     // Loads the built-in starter flow (idempotent — a re-load replaces it).
     Q_INVOKABLE void loadStarterFlow();

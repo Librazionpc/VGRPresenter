@@ -17,7 +17,6 @@
 #include <utility>
 
 namespace bps::live {
-
 namespace presentation = bps::presentation;
 namespace rendering = bps::rendering;
 
@@ -28,19 +27,8 @@ constexpr double kFrameSeconds = 1.0 / 60.0;
 // Slow re-sync with the open show's document (edits while live).
 constexpr double kSyncSeconds = 1.0;
 
-// The PAUSED rebind's engine work: unbind the stale runtime, then open,
-// compile and prepare the new presentation. Deliberately a free function with
-// no controller lock in scope — SyncWithDocument RELEASES control_ for it,
-// because closing/opening the runtime and compiling every scene is real work
-// that must not run under the controller lock (lock-scope guard,
-// tools/check_lock_scope.mjs).
 Result<void> RebindPausedRuntime(presentation::PresentationEngine& pres,
                                  const std::string& presentationId) {
-    // StopPlayback only transitions Live/Paused -> Stopped; the runtime stays
-    // BOUND to the (now stale) presentation, so a later Open fails AlreadyOpen.
-    // Close() is the real unbind: null-safe, idempotent, and it clears the
-    // stale compiled set — without it the next go-live dies at "already open"
-    // and the UI keeps rendering the previous content's last frame.
     (void)pres.Close();
     auto open = pres.Open(presentationId);
     if (!open.ok()) return open.error();
@@ -51,20 +39,6 @@ Result<void> RebindPausedRuntime(presentation::PresentationEngine& pres,
     return Ok();
 }
 
-// A content fingerprint for StartFromSlides' generated slide ids — see its
-// own comment: a POSITION-only id ("temp:<name>-<i+1>") collides whenever the
-// same presentation NAME is reused across different single-slide pushes,
-// which is exactly what a double-click on a verse row does (ShowCenter.qml's
-// stageSlides(root.item.name, [slide]) — the song's name, not the verse's own
-// identity, every time). SceneBuilder/RenderEngine cache scenes by this
-// fingerprinted id, so a collision serves the FIRST verse's cached scene
-// forever on every later verse of the SAME song — reported live as "the real
-// output window freezes on an older verse, only stop+go-live fixes it"
-// (stop tears the presentation down, so the next go-live's id happens to
-// miss the stale cache; nothing in between ever did). Folding the slide's
-// own content into the id keeps the "reuse the cache for a genuine re-pick
-// of the identical passage" intent the position-only scheme was going for,
-// while guaranteeing two DIFFERENT verses never share one.
 uint64_t HashSlideContent(const bps::presentation::Slide& s) {
     uint64_t h = 1469598103934665603ull;   // FNV offset basis
     const auto mix = [&h](uint64_t v) {
@@ -85,24 +59,10 @@ uint64_t HashSlideContent(const bps::presentation::Slide& s) {
         mixStr(b.text);
         mixStr(b.bind);
     }
-    // THE CLEAR FLAG IS PART OF THE CONTENT. A clear carrier and the blank
-    // GO-LIVE carrier are byte-identical otherwise (no title, no text, no
-    // blocks), so without this they hash to ONE slide id — and since
-    // SceneBuilder keys scenes by it, Clear all would serve the blank carrier's
-    // cached scene (the style painted, which is what the clear exists to take
-    // down) and a later GO LIVE would serve the CLEAR's empty one.
     mix(s.clearStage ? 1u : 0u);
     return h;
 }
 
-// IS THIS THE SAME PICK, APART FROM WHERE IT IS READING? — the reading stepper's
-// own question at a page commit (see UpdateReadingSlide).
-//
-// The id is excluded because the controller GENERATES it (StartFromSlides folds
-// the content hash in), so a caller can never match it; the flow fields are the
-// update itself. Everything else has to agree, because everything else is what
-// the scene's structure is built from: a different reference, title or set of
-// blocks is a different picture and must go through a real commit.
 bool SamePickApartFromReading(const bps::presentation::Slide& a,
                               const bps::presentation::Slide& b) {
     return a.title == b.title && a.text == b.text && a.notes == b.notes
@@ -114,10 +74,6 @@ bool SamePickApartFromReading(const bps::presentation::Slide& a,
         && a.categoryId == b.categoryId && a.clearStage == b.clearStage;
 }
 
-// THE TEMPORARY PRESENTATION a pick lives in — one slide set under one name,
-// every slide id folding in its own content (see HashSlideContent). Shared by
-// StartFromSlides and the reading commit's fallback so both name content the
-// same way; a second copy of this scheme is how two ids for one pick come about.
 bps::presentation::Presentation TempContent(const std::string& name,
                                             const std::vector<bps::presentation::Slide>& slides) {
     bps::presentation::Presentation content;
@@ -188,16 +144,8 @@ Metrics LiveOutputController::MetricsSnapshot() const {
 // Program start/stop
 // ---------------------------------------------------------------------------
 Result<void> LiveOutputController::StartFromOpenShow() {
-    // Resolved BEFORE the two gates below: RenderEngine::Instance() is a plain
-    // static getter, and a cross-engine call under a held lock is what the
-    // lock-scope guard forbids (tools/check_lock_scope.mjs).
     auto& render = rendering::RenderEngine::Instance();
 
-    // LIFECYCLE GATE (see the header): a stop landing inside this start used
-    // to join the worker mid-setup and then assign a new std::thread over a
-    // still-joinable handle — std::terminate (the fast GO LIVE -> STOP
-    // crash). Held for the WHOLE body; the loop's own syncs use control_ as
-    // before, so rendering is never blocked by this gate.
     std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
     std::lock_guard<std::mutex> lock(control_);
     if (running_.load()) return Ok();   // already live
@@ -222,14 +170,8 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     lastCompiledCount_ = 0;
     ownsOnAirContent_.store(false);   // a show's document is not ours to rewrite
 
-    // THE RUNTIME BINDS A COPY WE OWN: `snapshot` dies at scope end, and the
-    // registry mirror churns (every sync PutPresentation refreshes it) — so the
-    // runtime must point at the controller's own member, never at either.
     liveContent_ = snapshot;
 
-    // The preview feed: a FrameBufferOutput registered once with the render
-    // engine. Every distributed frame lands here (scaled to its target) and
-    // the frontend's image provider reads it back for the Show screen tile.
     if (!preview_) {
         auto existing = render.GetOutput(kPreviewName);
         if (existing.ok())
@@ -242,9 +184,6 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     }
     preview_->SetEnabled(true);
 
-    // Bind + run the real pipeline: our copy -> compile -> prepare -> live.
-    // (PutPresentation mirrors the content into the registry for diagnostics;
-    // PresentLive binds the RUNTIME to the controller's copy.)
     (void)pres.PutPresentation(liveContent_);
     auto live = pres.PresentLive(liveContent_);
     if (!live.ok())
@@ -282,27 +221,11 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     // Same lifecycle gate as StartFromOpenShow (the fast GO LIVE -> STOP
     // crash) — held for the whole body.
     std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
-    // THE CONTROLLER OWNS THE ON-AIR CONTENT: the runtime binds a raw pointer,
-    // so the copy must outlive the run. A stable member keyed by content name;
-    // each call REPLACES it (old slides die with the swap, and the runtime is
-    // rebound in the same critical section, so no window where the pointer
-    // dangles).
-    // Slide ids fold in the slide's OWN content (see HashSlideContent and
-    // TempContent): a genuine re-pick of the identical passage still lands on the
-    // same id (the scene cache stays warm, the original intent here), but two
-    // DIFFERENT verses of the SAME song — pushed one at a time under the SAME
-    // presentation name, exactly what a double-click on a verse row in
-    // ShowCenter.qml does — never collide onto one cached scene.
     presentation::Presentation content = TempContent(std::string(name), slides);
 
     presentation::PresentationEngine& pres = presentation::PresentationEngine::Instance();
 
     if (running_.load()) {
-        // Replacing a live pick recompiles scenes for every configured output.
-        // Queue it for the render worker instead of waiting on control_ here:
-        // with HDMI and NDI active, that wait can freeze the UI long enough
-        // for Windows to report AppHangB1. The newest pick supersedes any
-        // not-yet-applied pick, matching the latest-wins output pipeline.
         std::lock_guard<std::mutex> pendingLock(pendingContentMutex_);
         pendingLiveContent_ = std::move(content);
         liveContentReplacementPending_.store(true);
@@ -329,9 +252,6 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
         }
         preview_->SetEnabled(true);
 
-        // OWN THE CONTENT BEFORE BINDING: the runtime takes a raw pointer, so
-        // it must point at the member that outlives the run — never at this
-        // function's local (moving or returning would leave it dangling).
         liveContent_ = std::move(content);
         (void)pres.PutPresentation(liveContent_);
         auto live = pres.PresentLive(liveContent_);
@@ -343,9 +263,6 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
         boundPresentationId_.clear();   // not the document show; the sync stays out
         ownsOnAirContent_.store(true);  // ours to re-write (see UpdateReadingSlide)
         lastCompiledCount_ = liveContent_.slides.size();
-        // Fresh content: force the loop's next RenderOnce to actually rasterize
-        // (scene ids are reused across picks — temp:<name>-1 every time — so
-        // id equality alone can't tell new content from the old frame).
         lastRenderedScene_.clear();
         lastStyleRevision_ = 0;
         // THE FIRST PICTURE IS ON AIR (see OnAirSlidesSnapshot): the interface
@@ -361,10 +278,6 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
         return Ok();
     }
 
-    // LIVE REPLACE: swap the runtime's content in place (state stays Live) and
-    // rebuild scenes; the loop picks the new compiled set up the very next
-    // frame. Same ownership rule as the first start: the member is assigned
-    // BEFORE the runtime rebinds, so the raw pointer lands on stable storage.
     std::lock_guard<std::mutex> lock(control_);
     liveContent_ = std::move(content);
     auto swap = pres.SwapLiveContent(liveContent_);
@@ -374,9 +287,6 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     }
     ownsOnAirContent_.store(true);   // ours to re-write (see UpdateReadingSlide)
     lastCompiledCount_ = liveContent_.slides.size();
-    // LIVE REPLACE: the picked paragraph changed under the SAME scene id
-    // ("temp:<sermon>-1") — without this force the output would freeze on the
-    // previous verse's last frame.
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
     PublishOnAirSnapshot();   // the slides the interface thread may now read
@@ -391,9 +301,6 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
     return Ok();
 }
 
-// See the header: a page commit inside one passage is an OFFSET/WINDOW update,
-// not a new pick. The decision is the loop's (only it may read the on-air
-// content); this only queues it, so the interface thread never waits on control_.
 Result<void> LiveOutputController::UpdateReadingSlide(std::string_view name,
                                                      const presentation::Slide& slide) {
     if (!running_.load())
@@ -428,9 +335,6 @@ void LiveOutputController::ApplyPendingReadingSlide() {
             current && current->flowText != pending->slide.flowText;
         if (readingWindowChanged)
             readingFlowWindowMoved_ = true;
-        // THE PICK HAS TO BE OURS to rewrite in place: a show's document keeps
-        // ownership of its own slides (and a document pick has no passage of
-        // this stepper's in it anyway), so that case falls through to the commit.
         if (ownsOnAirContent_.load() && current && active && active == &liveContent_) {
             presentation::Slide* onAir = nullptr;
             for (size_t i = 0; i < liveContent_.slides.size(); ++i) {
@@ -442,18 +346,8 @@ void LiveOutputController::ApplyPendingReadingSlide() {
             if (onAir && SamePickApartFromReading(*onAir, pending->slide)) {
                 onAir->flowText = pending->slide.flowText;
                 onAir->flowChar = pending->slide.flowChar;
-                // THE NEXT FRAME IS A NEW PICTURE. A scene the loop has not
-                // rasterised yet takes its offset from the slide itself
-                // (RenderOptions::contentScrollFromScene), so this is what makes
-                // the landing frame the committed position rather than a frame of
-                // the previous window — and it is also what stops the dirty-frame
-                // skip from re-presenting the old picture (the flow is in no
-                // fingerprint, so nothing else would say it changed).
                 lastRenderedScene_.clear();
                 commitWhole = false;
-                // THE SLIDE ITSELF MOVED, so the interface thread's copy has to
-                // move with it (see OnAirSlidesSnapshot): a page commit is exactly
-                // the moment a surface re-reads what is on air.
                 PublishOnAirSnapshot();
                 Logger::Instance().Info(
                     std::format("reading page kept on air: window {} ({} char(s)), resting at "
@@ -466,10 +360,6 @@ void LiveOutputController::ApplyPendingReadingSlide() {
     }
     if (!commitWhole)
         return;
-    // A DIFFERENT PICTURE (the page's own words/reference changed, or the on-air
-    // content is not ours): commit the pick the way it has always been committed.
-    // QUEUED, never StartFromSlides called from here — that takes the lifecycle
-    // gate, and StopLive holds it while it joins THIS thread.
     {
         std::lock_guard<std::mutex> pendingLock(pendingContentMutex_);
         pendingLiveContent_ = TempContent(pending->name, {pending->slide});
@@ -493,34 +383,14 @@ Result<void> LiveOutputController::StopLive() {
     }
 
     // ---- THREAD LIFECYCLE MOP-UP (the stop-then-start crash's other half):
-    // the reaper below detaches itself, so the handle it was given may need
-    // releasing here if IT won the race to flip running_ but hadn't detached
-    // yet. If joinable, THIS (serialized) caller does the join — exactly one
-    // owner, no double-join, no thread-over-thread assignment.
     if (worker_.joinable())
         worker_.join();
-    // The tail runs with lifecycle_ HELD ON PURPOSE, and that is what makes it
-    // safe: it detaches the runtime under control_ and only then calls Close()
-    // (a provider call) — a start that slipped in while the gate was released
-    // would have the runtime it just bound torn down under it, which is the
-    // "press GO LIVE and immediately unpress" crash this gate was added for.
-    // The gate is the bound on the call; there is nowhere cheaper to put it.
     return StopLiveTail();   // lock-ok: the lifecycle gate is what orders it against a concurrent start (the crash it prevents)
 }
 
-// The GUI-thread-safe stop: returns immediately, the join happens on a
-// detached reaper. Used by LiveOutputService::stop() (the GO LIVE/STOP
-// button's path) — joining on the GUI thread froze the whole app whenever
-// the first heavy frame was mid-render (AppHangB1, "press go live and
-// immediately unpress"), because the worker can be inside its longest
-// single iteration (first RenderOnce: style load + scene build + full-
-// frame rasterize + distribute) when running_ flips.
 void LiveOutputController::StopLiveAsync() {
     std::lock_guard<std::mutex> lifecycleLock(lifecycle_);
     if (!running_.exchange(false)) {
-        // Nothing running: still run the tail once — a stop arriving while
-        // StartFrom* HELD the gate (queued behind it) must clean up whatever
-        // that start half-built. lifecycle_ is held, so this is serialized.
         (void)StopLiveTail();   // lock-ok: the lifecycle gate is what orders it against a concurrent start (see StopLive)
         return;
     }
@@ -549,11 +419,6 @@ Result<void> LiveOutputController::StopLiveTail() {
         pendingReadingSlide_.reset();
     }
     ownsOnAirContent_.store(false);   // nothing of ours is on air any more
-    // Take the runtime pointer and clear the session state under control_, then
-    // run the unbind with the lock RELEASED: Close() tears down the compiled
-    // set and stops playback, which is real work the lock-scope guard (rightly)
-    // refuses to see under a lock. While it runs the controller is already off
-    // air — pres_ is null, so the render loop's early-out applies.
     presentation::PresentationEngine* toClose = nullptr;
     {
         std::lock_guard<std::mutex> lock(control_);
@@ -576,9 +441,6 @@ Result<void> LiveOutputController::StopLiveTail() {
 // The loop
 // ---------------------------------------------------------------------------
 void LiveOutputController::Loop() {
-    // Hoisted: a plain singleton getter, fetched once per live session rather
-    // than per frame, and never called while control_ is held (see the publish
-    // site at the bottom of the loop).
     auto& telemetry = settings::Telemetry::Instance();
     auto last = std::chrono::steady_clock::now();
     double syncAccum = 0.0;
@@ -590,10 +452,6 @@ void LiveOutputController::Loop() {
 
         ApplyPendingLiveContent();   // a whole new pick always wins over a page commit
 
-        // Style changes land within one frame (FreeShow's reactive
-        // output.style): the UI pushes a spec, PresentationEngine bumps the
-        // runtime's revision, and the rebuild happens here on the loop
-        // thread — legal while LIVE (no state-machine bounce).
         if (pres_ && pres_->Runtime().StyleRevision() != styleRevision) {
             styleRevision = pres_->Runtime().StyleRevision();
             (void)pres_->Runtime().RebuildScenes(pres_->Builder(),
@@ -609,22 +467,12 @@ void LiveOutputController::Loop() {
 
         (void)RenderOnce();
 
-        // Report the iteration to Telemetry OUT HERE, not inside RenderOnce:
-        // RenderOnce holds control_ for its whole body, and calling across the
-        // engine under a module lock is the pattern the lock-scope guard exists
-        // to catch. What the iteration did is published as a phase + its cost.
         const int phase = lastPhase_.load();
         if (phase != static_cast<int>(Phase::Skipped)) {
             telemetry.OnLiveFrame(lastPhaseMs_.load(), phase == static_cast<int>(Phase::Composed));
             telemetry.OnLiveSharedCopies(sharedOutputCopies_.load());
         }
 
-        // WHICH ELEMENT MADE THAT FRAME EXPENSIVE. The renderer accounts for the
-        // pixel work of every element it drew for that scene, so the composed
-        // frame can name its own heaviest layer instead of leaving the operator
-        // with a curve that only has a shape. Published on COMPOSED iterations
-        // only: a re-present draws nothing, so it has no cost of its own and
-        // re-reporting the last raster's culprit would blame the copy.
         if (phase == static_cast<int>(Phase::Composed)) {
             std::string scene;
             {
@@ -634,13 +482,6 @@ void LiveOutputController::Loop() {
             if (!scene.empty()) {
                 const rendering::FrameCostProfile cost =
                     rendering::RenderEngine::Instance().CostProfileFor(scene);
-                // The heaviest element the SCENE drew — the clear is the engine's
-                // own per-frame baseline and would otherwise be named in every
-                // second of every service (it is a whole frame's pixels before
-                // any layer draws). Its share still travels with the report, so
-                // a content share is not read as the whole story; a frame with
-                // nothing on it but its background falls back to naming that,
-                // because there its clear IS the cost.
                 const rendering::ElementCost* heaviest = cost.HeaviestContent();
                 if (!heaviest)
                     heaviest = cost.Heaviest();
@@ -661,12 +502,6 @@ void LiveOutputController::Loop() {
                     std::chrono::duration<double>(sleep)));
     }
 
-    // The session's totals and its curve belong to the session: cleared here, by
-    // the thread that ran it, so the next go-live starts from zero instead of
-    // from the last service's numbers (and the Settings meters stop drawing a
-    // load that is no longer there). control_ guards the one non-atomic member
-    // (the kept composed frame) against a concurrent tear-down; the telemetry
-    // call stays OUTSIDE the lock (never call across the engine under one).
     {
         std::lock_guard<std::mutex> lock(control_);
         composedFrames_.store(0);
@@ -691,9 +526,6 @@ void LiveOutputController::Loop() {
     telemetry.OnLiveStopped();
 }
 
-// SEE OnAirSlidesSnapshot IN THE HEADER: the loop thread owns the on-air
-// presentation, so it is the only thread that may copy it. Called with control_
-// held, from one of the publish points below.
 void LiveOutputController::PublishOnAirSnapshot() {
     std::vector<presentation::Slide> slides;
     size_t index = 0;
@@ -762,13 +594,6 @@ void LiveOutputController::ApplyPendingLiveContent() {
     lastCompiledCount_ = liveContent_.slides.size();
     lastRenderedScene_.clear();
     lastStyleRevision_ = 0;
-    // THE NEW SLIDE'S PASSAGE IS NEWS TO EVERY CACHED SCENE. A reading commit that needs a whole
-    // pick sets readingFlowWindowMoved_ when it is queued, but frames keep rendering the OLD slide
-    // until this swap lands (measured: ~1.5 s), and the first of them consumes the flag against the
-    // old passage. The replacement slide has the same content-derived id, so its scenes are cache
-    // hits still holding the old (one-paragraph) passage — NDI sat on that paragraph's last line
-    // while the app scrolled the whole chapter. Set again HERE, once the new slide is the current
-    // one, so the next frame refreshes the program scene and every output's scene against it.
     readingFlowWindowMoved_ = true;
     // THE OLD SLIDES DIE WITH THIS SWAP. The interface thread reads them through
     // the snapshot, so it has to be refreshed here, before the lock is released.
@@ -789,11 +614,6 @@ Result<void> LiveOutputController::SyncWithDocument() {
     std::unique_lock<std::mutex> lock(control_);
     if (!pres_ || !running_.load()) return Ok();
 
-    // ON-AIR TEMP CONTENT (StartFromSlides): the runtime binds the controller's
-    // own copy, not the working show. Any document sync here would YANK the
-    // output back to the document — exactly what a scripture pick must not do
-    // one second after it goes on air. Temp content only rebuilds when the
-    // controller itself swaps it (SwapLiveContent).
     if (!boundPresentationId_.empty()) {
         auto doc = pres_->Document();
         if (!doc || !doc->HasDocument()) return Ok();   // show closed; keep last state
@@ -803,22 +623,12 @@ Result<void> LiveOutputController::SyncWithDocument() {
         bool rebuilt = snapshot.slides.size() != lastCompiledCount_;
 
         if (rebound) {
-            // A DIFFERENT show took the document while we were live: adopt it.
-            // Put first (the registry copy may predate this document), then the
-            // full rebind — Open is refused while live, so the swap path runs.
             auto put = pres_->PutPresentation(snapshot);
             if (!put.ok()) return put.error();
             if (smIsLive()) {
                 auto swap = pres_->SwapLiveContent(snapshot);
                 if (!swap.ok()) return swap.error();
             } else {
-                // Paused: the runtime is still bound to the STALE presentation
-                // (PresentationRuntime::Open refuses AlreadyOpen otherwise —
-                // see StopLiveTail's comment above for the same lesson). The
-                // unbind + open + compile + prepare run with control_ RELEASED:
-                // compiling every scene is the expensive half of a rebind, and
-                // holding the controller lock across it is what the lock-scope
-                // guard forbids. Controller state is re-validated on relock.
                 presentation::PresentationEngine* const target = pres_;
                 lock.unlock();
                 Result<void> rebind = RebindPausedRuntime(*target, snapshot.id);
@@ -860,10 +670,6 @@ std::string LiveOutputController::CurrentSceneId() const {
     if (!pres_) return {};
     const presentation::Slide* slide = pres_->CurrentSlide();
     if (!slide) return {};
-    // The COMPILED slide's sceneId — the one Prepare/RebuildScenes wrote
-    // (it carries the output-style fingerprint). Deriving the plain id here
-    // instead would ignore the style entirely (and, since styled scenes are
-    // fingerprinted, point at a scene that was never built).
     for (const auto& cs : pres_->Runtime().Compiled().slides)
         if (cs.slideId == slide->id)
             return cs.sceneId;
@@ -871,10 +677,6 @@ std::string LiveOutputController::CurrentSceneId() const {
 }
 
 void LiveOutputController::FlowCharPush(float chars) {
-    // Atomic stores only — see the header: the QML step's animator calls this on
-    // the GUI thread and it must not take a lock or touch a device there. The
-    // TIME is stored after the value so a frame that reads the pair can never see
-    // a new number with the old clock (which would end its settle window early).
     flowChar_.store(chars);
     flowCharAtMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -882,28 +684,15 @@ void LiveOutputController::FlowCharPush(float chars) {
 }
 
 bool LiveOutputController::FlowCharMoving(int64_t nowMs) {
-    // A SCROLL IN FLIGHT MUST NOT BE SKIPPED. The loop's whole economy is to
-    // compose only when something changed, and the offset is not part of the
-    // scene's fingerprint — so "is the number still moving?" is asked here, by
-    // the clock, and it keeps the compositor awake for as long as the step's
-    // animator is still pushing numbers.
     const int64_t at = flowCharAtMs_.load();
     if (at != 0 && nowMs - at < kFlowCharSettleMs)
         return true;
-    // ...and ONE extra frame after the last push, so the value the animator
-    // landed on is what stays on air (the frame that ends a move reads as
-    // "nothing changed" and would otherwise be skipped, leaving the previous
-    // sub-line offset up until something else moved).
     return flowCharSettle_.exchange(false);
 }
 
 Result<void> LiveOutputController::RenderOnce() {
     // Hoisted before control_ (plain singleton getter — lock-scope guard).
     auto& render = rendering::RenderEngine::Instance();
-    // A QUEUED READING PAGE COMMIT is applied at the top of the frame that
-    // follows it (see UpdateReadingSlide): after Loop's ApplyPendingLiveContent,
-    // so a pick queued later still wins — and inside the one function that is
-    // the loop body, so a test can drive a whole frame without the worker.
     ApplyPendingReadingSlide();
     std::lock_guard<std::mutex> lock(control_);
     if (!pres_ || !running_.load()) return Ok();
@@ -911,129 +700,48 @@ Result<void> LiveOutputController::RenderOnce() {
     // Advance playback (cues, auto-advance) by the real frame time.
     (void)pres_->Runtime().Tick(kFrameSeconds);
 
-    // Render the current slide's scene. The compiled set maps the current
-    // slide to its PREPARED scene id (style fingerprint included); a slide
-    // missing from the compiled set (hidden, or edited in mid-show before the
-    // next sync) simply renders nothing this frame — same as before.
     const presentation::Presentation* active = pres_->Runtime().ActivePresentation();
     if (!active) return Ok();
     const size_t idx = pres_->CurrentIndex();
     if (idx >= pres_->Runtime().Compiled().slides.size()) return Ok();
     const std::string sceneId = pres_->Runtime().Compiled().slides[idx].sceneId;
 
-    // Flow changes can arrive through either the in-place reading update or a
-    // full pick replacement. Refresh a cached program scene before rendering;
-    // an uncached scene will be built from the current slide below. The same
-    // flag remains set until RenderPerOutputPasses refreshes every output scene.
     const presentation::Slide* slide = pres_->CurrentSlide();
     if (readingFlowWindowMoved_ && slide && render.GetScene(sceneId).ok())
         (void)pres_->Builder().RefreshReadingFlow(render, sceneId, *slide);
 
-    // Refresh this scene's compositor layers (taken camera/screen, media on
-    // air, overlays) EVERY tick, same as RenderPerOutputPasses already does
-    // for the other outputs' styled scenes below — BuildSlideScene's cache
-    // hit re-runs AddCompositorLayers on an already-built sceneId instead of
-    // rebuilding the slide's text/shapes. Without this, this MAIN pass's
-    // compositor layers were only ever baked once (at Prepare/RebuildScenes
-    // time) and a taken camera or playing media froze on its first frame for
-    // the rest of the live session on the primary output.
     if (slide)
         (void)pres_->Builder().BuildSlideScene(*active, *slide, pres_->ActiveOutputStyle(),
                                                render);
 
-    // CHANGE-DRIVEN: skip the frame when nothing visibly moved (same scene
-    // and no style rebuild since the last raster). The frame in the preview
-    // buffer stays exactly as it was — re-drawing an unchanged verse at the
-    // frame cadence just starved the GUI thread (the app-wide lag report)
-    // for zero visual gain. Playback animations would tick via the style
-    // revision/clock below; cues that mutate the scene bump the revision.
-    // Live compositor content is the one exception: a taken camera/screen,
-    // media on air, or an active overlay changes every frame without ever
-    // touching sceneId/styleRev, so it must bypass the skip (and the
-    // heartbeat throttle below) the same way a style/content change does.
     const auto& compositor = presentation::CompositorState::Instance();
     const bool hasLiveCompositorContent = !compositor.GetTakenInput().deviceId.empty()
         || compositor.HasMediaFrame() || compositor.HasActiveOverlays()
-        // A bus window on the slide is live video too: skipping the frame while
-        // one is on air froze the feed at whatever it rasterised last, which is
-        // exactly the "bus shows on the canvas but the output is stuck" report.
         || compositor.HasBusFrames();
     const uint64_t styleRev = pres_->Runtime().StyleRevision();
-    // The slide's filters ride the FRAME, not the scene (see RenderOptions::filters),
-    // so a filter edit changes neither sceneId nor styleRev — without this a
-    // dialled-in blur would not reach the outputs until something else moved.
     const rendering::SlideFilterValues activeFilters =
         pres_->CurrentSlide() ? pres_->CurrentSlide()->filters : rendering::SlideFilterValues{};
     const bool filtersChanged = !(activeFilters == lastFilters_);
-    // THE READING POSITION (see SetFlowChar). While one is moving the frame is a
-    // MOVE even though the scene id never changes — the change-skip below must
-    // not eat it, so a scroll in flight forces a compose per tick. The offset
-    // itself is the animator's number, not this loop's: one value, pushed from
-    // the interface thread's animation, is what every output draws.
     const int64_t nowSteadyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now().time_since_epoch()).count();
     const float scrollChars = flowChar_.load();
     const bool scrollMoving = FlowCharMoving(nowSteadyMs);
-    // THE SCROLL'S OWN PACING — ONE FRAME PER kScrollComposeMs WHILE A MOVE IS IN
-    // FLIGHT, not one per tick.
-    //
-    // "A scroll in flight forces a compose per tick" is what the paragraph above
-    // used to say, and it is why a walk pinned the CPU: the animator pushes a new
-    // character every 16 ms, so the loop rasterised the full stage (and every
-    // per-output pass) as fast as it could resolve that motion — for a 60 Hz
-    // picture no output can actually carry (NDI is paced by the output's own
-    // configured rate, the HDMI window by the monitor, and a 190 ms glide at
     // 0.4 s a frame was never going to look like motion on either). The
-    // interface thread's QML preview still draws every 16 ms, so the operator
-    // still sees a smooth glide; the outputs now follow the SAME move at a rate
-    // they can hold. The final position is unaffected: the settle frame below
-    // composes once more when the move stops, so the frame that stays on air is
-    // always the landed one.
     if (scrollMoving && scrollComposedAt_.time_since_epoch().count() != 0) {
         const auto since = std::chrono::steady_clock::now() - scrollComposedAt_;
         if (since < std::chrono::milliseconds(kScrollComposeMs))
             return Ok();   // a frame of this move was already composed this budget
     }
-    // THE FIRST FRAME OF A NEW SCENE takes its offset from the scene itself (see
-    // RenderOptions::contentScrollFromScene): a step that lands on the next page
-    // commits a slide carrying its own resting offset, so the boundary is right
-    // even before the interface thread's animator has pushed a number for it.
     const bool freshScene = sceneId != lastRenderedScene_;
-    // THE SETTLE FRAME MUST COMPOSE, even though nothing about the SCENE moved.
-    // The compose budget above means the last frame of a move can be composed up
-    // to kScrollComposeMs before the position landed; without this test that last
-    // mid-glide frame would be the one the dirty-frame skip re-presented, and the
-    // outputs would sit on an intermediate position until something else changed
-    // (the "it stops a line short" shape, in the one place nothing else would
-    // ever fix it). A position that has not been composed yet IS a change.
     const bool scrollUncomposed = !hasComposedFlow_ || scrollChars != lastComposedFlowChars_;
     if (!scrollMoving && !scrollUncomposed && !hasLiveCompositorContent && !filtersChanged
         && !freshScene && styleRev == lastStyleRevision_) {
-        // ...but a LIGHT HEARTBEAT: a fully static scene would otherwise stop
-        // producing frames, so the render-path telemetry the Settings meters
-        // read never advances (they sit at their last value, or at 0 if the
-        // engine has not rasterized once since boot).
         if (std::chrono::steady_clock::now() - lastRaster_
             < std::chrono::milliseconds(kHeartbeatMs))
             return Ok();
         // ---- DIRTY-FRAME SKIP: RE-PRESENT, DO NOT RE-RASTERISE ---------------
-        // The heartbeat used to buy those frames with a full raster of every
-        // output, once a second, for a picture that had NOT CHANGED — pure waste
-        // that scaled with the output count. The composed frame is handed to the
-        // outputs again instead: a scale/copy per output, pixel-identical because
-        // nothing that went into it moved, and roughly an order of magnitude
-        // cheaper than the raster it replaces. That is why the heartbeat gate now
-        // feeds a copy rather than a re-draw.
         const auto presentStart = std::chrono::steady_clock::now();
         if (RepresentLastFrame(render)) {
-            // ...but the PER-OUTPUT passes still run. They are the only thing that
-            // CREATES a freshly configured output's buffer, and they serve an
-            // output whose own style/resolution is not the composed one — work the
-            // heartbeat used to get for free by falling through to a full raster.
-            // With the copy above already done, the shared outputs cost one
-            // Distribute each rather than a 1080p raster apiece, which is the whole
-            // point; this call is what keeps a newly enabled screen from never
-            // appearing at all while the on-air scene sits still.
             RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
             const double ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - presentStart).count();
@@ -1077,25 +785,8 @@ Result<void> LiveOutputController::RenderOnce() {
     // failing to rasterize is retried on the heartbeat, not every frame.
     lastRaster_ = std::chrono::steady_clock::now();
 
-    // TWO-PHASE PUBLISH. The live preview (and every output the main pass
-    // distributes to) is on the wire NOW — bump before the per-output passes
-    // so the operator sees a clicked paragraph immediately instead of waiting
-    // out the heavier per-output work below (reported live: "when I click a
-    // paragraph it delays before it updates on the monitor preview").
-    //
-    // Safe to publish early OR LATE, because the two write different buffers:
-    // a per-output-pass buffer turns AcceptsDistributedFrames() OFF, so the
-    // main pass never touches it (see OutputManager::Distribute) — nothing the
-    // per-output passes own can be fetched half-written here. Their own bump
-    // below is what tells the per-output tiles to refetch once their styled
-    // frame has landed (that race is why the late bump has to keep existing:
-    // a tile that fetched before its pass ran would otherwise sit on a 1x1
-    // placeholder until the NEXT content change).
     if (frame.ok()) {
         previewFrames_.fetch_add(1);
-        // KEEP THE COMPOSED FRAME: the dirty-frame path re-presents it, and a
-        // per-output buffer that has just been switched to the shared composed
-        // frame takes this copy immediately (see RenderPerOutputPasses).
         {
             auto composed = std::make_shared<rendering::Frame>();
             composed->sceneId = sceneId;
@@ -1107,10 +798,6 @@ Result<void> LiveOutputController::RenderOnce() {
                                         std::chrono::system_clock::now().time_since_epoch()).count();
             lastComposedFrame_ = std::move(composed);
         }
-        // ...and report the click-to-preview latency ONCE per replace. This is
-        // the number to read when the operator says the preview lags: it is
-        // measured from the UI-thread replace to the frame being on the wire,
-        // so it excludes the poll's own (bounded, 100 ms) tick.
         const int64_t stamp = replaceStampMs_.exchange(0);
         if (stamp > 0) {
             const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1121,35 +808,8 @@ Result<void> LiveOutputController::RenderOnce() {
                 "LiveOutputController");
         }
     }
-    // THE OTHER LIVE OUTPUTS: one gated pass per entry of the engine's
-    // live-output style set (best-effort — a failure in one pass never
-    // kills the main deck's frame). Runs under control_ on purpose: the pass
-    // reads the runtime's compiled set (pres_->Runtime().Compiled(), the
-    // builder, the active slide) while the GUI thread's replace path rewrites
-    // exactly those members, so releasing the lock here would let a content
-    // replace tear the set out from under a pass mid-frame.
-    // These passes follow the same 20 Hz scroll-compose cap as the main pass
-    // above. Skipping them until the move settles leaves separately styled
-    // outputs (including NDI's own template) on an old frame throughout the
-    // animation, even while the shared program preview is moving.
     RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
 
-    // frames_ is what LiveOutputService::pollTick() polls to decide whether
-    // to bump frameRev (the QML image providers' cache-buster) — and
-    // frameRev only bumps ONCE per change (change-driven, see above), so a
-    // bump the UI catches before a slower per-output pass above has actually
-    // Present()'d ITS buffer is a race the UI loses PERMANENTLY: nothing
-    // ever tells it to refetch that buffer again until the NEXT content
-    // change. A real OutputWindow's own per-output pass (heavier — Qt text
-    // layout/atlas rebuilds for a family template) can legitimately take
-    // longer than the main pass above it, so incrementing frames_ before
-    // RenderPerOutputPasses() ran let the poll's 100ms tick fetch a
-    // per-output buffer that wasn't written yet (a 1x1 placeholder, stuck
-    // forever) — reported live as "the real output window shows the idle
-    // background and never updates" for heavier (family-templated) content,
-    // while lighter content occasionally won the race and looked fine.
-    // Bumping it here, after every per-output buffer for this frame has
-    // ALSO landed, closes that window.
     if (frame.ok()) {
         frames_.fetch_add(1);
         composedFrames_.fetch_add(1);
@@ -1158,12 +818,6 @@ Result<void> LiveOutputController::RenderOnce() {
         lastPhaseMs_.store(ms);
         lastPhase_.store(static_cast<int>(Phase::Composed));
     }
-    // WHICH SLIDE THE OUTPUTS ARE ON, for the interface thread (see
-    // OnAirSlidesSnapshot). The loop advances slides itself (Runtime().Tick),
-    // and a Next/Jump from the interface thread lands here too — either way this
-    // is the one point that reads the index under control_, so it is where a
-    // change is published. A comparison and (on a change) one copy of the
-    // slides; nothing per frame.
     if (pres_) {
         bool stale = false;
         {
@@ -1187,12 +841,6 @@ bool LiveOutputController::RepresentLastFrame(rendering::RenderEngine& render) {
 
 void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
     if (!pres_) return;
-    // A READING WINDOW that moved while this output's scene was already built (see
-    // ApplyPendingReadingSlide): its cached reading object still draws the OLD
-    // passage, and its id cannot say so — the flow is in no fingerprint. Taken
-    // once for the whole pass, so every output here sees the same window; a pass
-    // that is skipped (a scroll in flight) leaves the flag set for the settle
-    // frame instead of leaving one output an older passage.
     const bool refreshReadingFlow = readingFlowWindowMoved_;
     readingFlowWindowMoved_ = false;
     std::vector<std::string> buffers;
@@ -1200,26 +848,11 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
     const std::vector<presentation::OutputStyleSpec> specs = pres_->LiveOutputStyles(&buffers, &sizes);
     const presentation::Presentation* active = pres_->Runtime().ActivePresentation();
     const presentation::Slide* slide = pres_->CurrentSlide();
-    // A WIRED BUS NEEDS NO SLIDE CONTENT: an output whose Routing wire names a
-    // bus shows that feed whatever the slide is (and whatever the style gates
-    // would have refused), so a missing slide is no longer a reason to skip the
-    // whole set. The check is per output now — the PROGRAM branch still needs a
-    // slide, the bus branch does not. (The loop still only runs while a
-    // presentation is Live: RenderOnce returns early without one.)
 
     rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
     for (size_t i = 0; i < specs.size() && i < buffers.size(); ++i) {
         auto out = engine.GetOutput(buffers[i]);
         if (!out.ok()) {
-            // Register on first use (named per-output frame buffer). Sized to
-            // THIS output's own configured resolution (Settings · Outputs'
-            // Resolution field) when it pushed one — an NDI sender, a real
-            // OutputWindow and a styled per-output pass all read this SAME
-            // buffer, so a 4K-configured NDI output now actually sends 4K
-            // instead of being silently downscaled to the fixed default; a
-            // missing/unparsed entry (size {0,0}, or no sizes pushed at all —
-            // every caller before this feature) falls back to it exactly as
-            // before.
             const bool hasSize = i < sizes.size() && sizes[i].first > 0 && sizes[i].second > 0;
             const rendering::Size bufSize = hasSize
                 ? rendering::Size(sizes[i].first, sizes[i].second)
@@ -1233,11 +866,6 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
         auto *fb = dynamic_cast<rendering::FrameBufferOutput *>(out.value().get());
         if (!fb || !fb->Enabled()) continue;
 
-        // Resolution changed (the user edited Settings · Outputs' Resolution
-        // field) while this output was already registered: re-target it NOW
-        // instead of only honoring the new size on a fresh GetOutput() miss —
-        // a mid-session resolution edit must actually resize the frame it
-        // pushes, not just the next time the buffer happens to be re-created.
         if (i < sizes.size() && sizes[i].first > 0 && sizes[i].second > 0) {
             const rendering::Size want(sizes[i].first, sizes[i].second);
             const rendering::Size have = fb->TargetSize();
@@ -1245,40 +873,13 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
                 fb->SetTargetSize(want);
         }
 
-        // THE SIZE THIS OUTPUT ACTUALLY PUSHES. The scene is built AT this
-        // size (not at the 1920x1080 default and then resampled): the render
-        // backend sizes itself to the SCENE (RenderEngine::Render's
-        // BeginFrame(w, h)), so this is what makes an NDI/HDMI output at its
-        // configured resolution a real, natively-laid-out frame — text is
-        // rasterized at the target resolution instead of being a nearest-
-        // neighbour blow-up of a 1080p layout (the "NDI is not following the
-        // Resolution" report: the frame WAS resized to the target, its layout
-        // was not). The styled scene id carries this size (see
-        // StyledSceneIdFor), so two outputs at different resolutions never
-        // share one cached scene.
         const rendering::Size bufSize = fb->TargetSize();
         const rendering::Size sceneSize =
             (bufSize.width > 0.0f && bufSize.height > 0.0f)
                 ? bufSize
                 : rendering::Size(kFrameBufferWidth, kFrameBufferHeight);
 
-        // Build (or reuse) THE SCENE THIS OUTPUT SHOWS.
-        //
-        // WIRED (Settings · Routing's video wire): the output shows ITS bus —
-        // the bus feed scene, one full-frame live layer of that bus's current
-        // picture. This is the composer half of a wire the canvas has been able
-        // to draw since the routing screen existed; until now the assignment was
-        // stored and then never read, so a camera wired into a screen did not
-        // change a single pixel of it.
-        //
-        // UNWIRED: the GATED slide scene, exactly as before — each output's own
-        // style rules decide content vs background-only, and style-fingerprinted
-        // ids keep that cache honest across edits and gate flips.
         const bool busWired = specs[i].videoBus > 0;
-        // A TEMPLATE BUS IS A DESIGN WITH WINDOWS, so it is composed (see
-        // SceneBuilder::BuildTemplateBusScene) rather than shown as one feed —
-        // and it needs no slide on air, which is why it is asked BEFORE the
-        // program-pass gate below.
         const bool templateBusWired =
             specs[i].templateBus > 0 && !specs[i].templateBusBlocks.empty();
         if (!busWired && !templateBusWired && (!active || !slide))
@@ -1292,28 +893,10 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
                 ? pres_->Builder().BuildBusFeedScene(specs[i].videoBus, engine, sceneSize)
                 : pres_->Builder().BuildGatedSlideScene(*active, *slide, specs[i], engine, sceneSize);
         if (!sceneId.ok()) {
-            // No scene of its own this frame (build refused/errored): let the
-            // main pass's program frame feed this buffer again, so the output
-            // shows the program feed instead of freezing on its last frame.
             fb->SetAcceptsDistributedFrames(true);
             continue;
         }
         // ---- SHARED COMPOSED FRAME: COPY, DO NOT RASTERIZE AGAIN -----------
-        // The scene id is the fingerprint of (slide, style, size — see
-        // StyledSceneIdFor), so when the gated build lands on the SAME id the
-        // main pass just composed, this output's picture is pixel-identical to
-        // the program frame and drawing it again is pure waste: one full 1080p
-        // pass per output per frame, which is why every extra enabled output
-        // used to take a bite out of the delivered frame rate (measured: two
-        // more outputs halved it). The output is switched to the program feed
-        // instead — Distribute copies the composed frame into it, scaled to its
-        // own target size by Present — and it takes THAT copy this frame rather
-        // than next, so the switch cannot show a stale picture for one beat.
-        //
-        // A different style, a different content gate or a different configured
-        // resolution means a different id, and such an output keeps its own
-        // natively-laid-out raster (the `@size:` in the id is exactly what keeps
-        // a 4K output from being silently served a resampled 1080p frame).
         if (refreshReadingFlow && !busWired && !templateBusWired && slide)
             (void)pres_->Builder().RefreshReadingFlow(engine, sceneId.value(), *slide);
         if (sceneId.value() == lastRenderedScene_) {
@@ -1324,30 +907,12 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
             sharedOutputCopies_.fetch_add(1);
             continue;
         }
-        // THIS PASS OWNS THIS BUFFER. The main pass distributes its scene to
-        // every enabled output; without this the buffer was written twice per
-        // frame (program scene first, then this one) and the NDI sender / real
-        // output window — both reading snapshots on their own cadence — caught
-        // whichever write landed last: the live report of an output "glitching
-        // between the two templates". One writer per frame now.
         fb->SetAcceptsDistributedFrames(false);
-        // Raster it (distribute off — this pass IS the distribution), then hand
-        // the pixels straight to this output's buffer. Rendered at the buffer's
-        // own size, so Present() takes its same-size path and resamples
-        // nothing.
         rendering::RenderOptions passOpts;
         passOpts.distribute = false;
         passOpts.capture = true;
-        // The same slide-wide filters the main pass applied — but ONLY for an
-        // output showing this slide. A bus feed is not this slide's picture: a
-        // slide filter (a blur, a grade) has no business tinting a camera that
-        // was wired straight to a screen, so a wired output renders unfiltered.
         if (!busWired && !templateBusWired && slide)
             passOpts.filters = slide->filters;
-        // ...and the current reading position. `freshScene` belongs to the
-        // program scene; it cannot tell whether this separately styled scene is
-        // fresh, so using it here could freeze this output at the slide's saved
-        // position instead of the animator's live position.
         passOpts.contentScrollChars = contentScrollChars;
         passOpts.contentScrollFromScene = false;
         if (auto img = engine.Render(sceneId.value(), passOpts); img.ok() && !img.value().empty()) {
@@ -1389,25 +954,9 @@ void LiveOutputController::StopIdlePreviewLocked() {
     if (previewWorker_.joinable()) previewWorker_.join();
 }
 
-// One frame a second of the open show's first slide, off the live path
-// entirely: nothing is distributed, nothing is read back, and nothing is put
-// on air. The point is the FRAME — RenderEngine publishes RenderFrameRendered
-// for every render, which is the feed the Settings meters read, so the engine
-// no longer reads as idle just because a show is not on air.
 void LiveOutputController::PreviewLoop() {
     int emptyTicks = 0;
-    // THE PREVIEW'S OWN SCENE — the ACTIVE STYLE plus the compositor's layers, which
-    // is exactly the picture GO LIVE sends (a blank carrier under whatever is taken:
-    // see LiveOutputService::goLiveBlank). This used to render only a slide of the
-    // OPEN SHOW, so with nothing open — or with a file on air that the operator was
-    // actually looking at — the monitor tile kept its last frame, or none: "it showed
-    // the label in the monitor preview but not the image". A take is preview content
-    // in its own right, so it must be able to hold the preview up on its own.
     presentation::Slide carrier;
-    // The preview showed a taken layer last tick — so the tick that finds it GONE
-    // still has to render (once), or the tile keeps the cleared picture on screen:
-    // that is the other half of "clear all doesn't clear the media" (the layer left
-    // the compositor and the last captured frame stayed).
     bool hadLayer = false;
     while (previewRunning_.load()) {
         bool rendered = false;
@@ -1431,12 +980,6 @@ void LiveOutputController::PreviewLoop() {
                 if (!haveSlide)
                     show.slides.push_back(carrier);
                 rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
-                // The builder caches by scene id, so this rebuilds only when the
-                // slide itself changed — the compositor layers ride the same scene.
-                // The ACTIVE OUTPUT's style, exactly as the live main pass
-                // builds it: the preview must be the picture GO LIVE would send,
-                // so the operator's decision is "does this go out?" and not "I
-                // hope it looks the same once it does".
                 auto sceneId = presPreview_->Builder().BuildSlideScene(
                     show, show.slides.front(), presPreview_->ActiveOutputStyle(), engine,
                     rendering::Size(kFrameBufferWidth, kFrameBufferHeight));
@@ -1447,19 +990,6 @@ void LiveOutputController::PreviewLoop() {
                     auto frame = engine.Render(sceneId.value(), opts);
                     rendered = frame.ok();
                     hadLayer = takenLayer;
-                    // NOT PUBLISHED FROM HERE. Writing the shared preview buffer
-                    // (and each styled output's own buffer) from this worker put
-                    // a second thread on buffers and scene graphs the live pass
-                    // and the output providers read, and the app died with
-                    // 0xc0000005 seconds after a take — twice. The monitor wall
-                    // does not need it: off air a taken file is drawn by the tile
-                    // from the SAME layer the centre Preview pane uses
-                    // (image://mediaplay — one decode, one provider, one picture;
-                    // see OutputMonitorTile's selfTestTileMediaFrame), and while
-                    // live the live loop publishes the buffers it always did.
-                    // What stays here is what this loop was always for: keep the
-                    // engine producing frames off air so the render-path
-                    // telemetry the Settings meters read does not sit at zero.
                 }
             }
         }
@@ -1469,13 +999,8 @@ void LiveOutputController::PreviewLoop() {
             previewRunning_.store(false);   // no open show: give the thread back
             break;
         }
-        // Sleep in short steps so a stop is felt promptly. One frame a second,
-        // as this loop has always run: it is a telemetry beat now (see the note
-        // above about what it deliberately no longer publishes), so a faster
-        // cadence would be rasterizing on a worker for nobody.
         for (int slept = 0; slept < kPreviewIntervalMs && previewRunning_.load(); slept += 50)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
-
 } // namespace bps::live

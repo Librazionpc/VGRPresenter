@@ -6,11 +6,7 @@
 #include "platform/PlatformAccessor.hpp"
 
 namespace bps::project {
-
 namespace {
-// Collection + key inside the kernel's DatabaseManager document store
-// (<dataDir>/kernel.json). Kept as free constants (not class members) so both
-// halves of StyleToJson/StyleFromJson round-tripping can't drift.
 constexpr const char* kCollection = "styles";
 constexpr const char* kKey = "roster";
 } // namespace
@@ -51,10 +47,6 @@ StyleStore& StyleStore::Instance() {
 }
 
 std::vector<StoredStyle> StyleStore::Get() const {
-    // First read of the roster: let this BUILD's configuration in, once per
-    // shipped fingerprint (see ShippedConfig.hpp). Without it an install that had
-    // already run kept its styles forever, because the installer only seeds files
-    // that do not exist yet.
     (void)ApplyShippedConfiguration();
 
     std::vector<StoredStyle> out;
@@ -72,11 +64,6 @@ std::vector<StoredStyle> StyleStore::Get() const {
             out.push_back(std::move(s.value()));
     }
 
-    // PORTABLE PATHS: re-attach background images saved on another machine to
-    // this machine's own copies (installer seed data) and persist the remap
-    // immediately, so every later reader — renderer, previews, the styles
-    // editor — sees a path that actually exists here. After the first heal
-    // the stored path exists locally and this whole pass is a no-op.
     bool remapped = false;
     for (StoredStyle& s : out) {
         const std::string fixed = ReattachBackgroundImage(s.backgroundImage);
@@ -102,9 +89,6 @@ Result<void> StyleStore::Save(const std::vector<StoredStyle>& styles) const {
     auto r = DatabaseManager::Instance().Put(kCollection, kKey, json::Value(std::move(arr)));
     if (!r.ok())
         return r;
-    // Put() only updates memory; Flush() writes the file. Saving without the
-    // flush would lose the roster to a crash — and a crash is exactly when
-    // the user notices styles "didn't save".
     return DatabaseManager::Instance().Flush();
 }
 
@@ -152,10 +136,6 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
     if (!o)
         return Error::Make(Err::InvalidArgument, "StyleStore", "style entry is not an object");
 
-    // GUARDED READS: Find() returns nullptr for a missing key — every read of
-    // a field an OLDER saved roster may not carry (backgroundImage,
-    // showTemplates, category) must go through str()/flag(), or hydrating a
-    // pre-existing roster null-derefs and takes the Styles screen down.
     const auto str = [&v](std::string_view key, std::string_view dflt = {}) {
         if (const json::Value* f = v.Find(key))
             return std::string(f->asString(dflt));
@@ -224,5 +204,4 @@ Result<StoredStyle> StyleStore::StyleFromJson(const json::Value& v) {
         return Error::Make(Err::InvalidArgument, "StyleStore", "style entry has no id");
     return s;
 }
-
 } // namespace bps::project

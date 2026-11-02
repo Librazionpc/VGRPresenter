@@ -13,9 +13,7 @@
 #include <thread>
 
 namespace bps::recording {
-
 namespace {
-
 using namespace mf;
 
 constexpr const char* kModule = "MediaFoundationEncode";
@@ -126,11 +124,6 @@ const std::vector<HardwareEntry>& HardwareEntries() {
             for (UINT32 i = 0; i < count; ++i) {
                 const EncoderKind kind = KindForVendor(ActivateString(acts[i], MFT_ENUM_HARDWARE_VENDOR_ID_Attribute));
                 if (kind == EncoderKind::Auto) continue;
-                // Listed from the enumeration alone. Actually starting each encoder here took
-                // 19-41 s in the app (waking the GPU's encoder), which held the capability list
-                // up long after launch; a kind that cannot start is refused, with the driver's
-                // reason, when a take opens its encoder (H264Encoder::Create). The app exports
-                // the discrete-GPU preference, which is what lets NVENC start on hybrid laptops.
                 const bool seen = std::any_of(entries.begin(), entries.end(),
                                               [kind](const HardwareEntry& e) { return e.kind == kind; });
                 if (!seen) entries.push_back({kind, ActivateString(acts[i], MFT_FRIENDLY_NAME_Attribute)});
@@ -168,7 +161,6 @@ const char* RegistryName(EncoderKind kind) {
         default: return "software";
     }
 }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -810,5 +802,4 @@ MediaFileInfo InspectMediaFile(const std::string& path) {
     }
     return info;
 }
-
 } // namespace bps::recording

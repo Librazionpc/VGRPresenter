@@ -1,28 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// THE striped list surface — one inset, hairlined panel whose rows alternate
-// between two faint tints. The action roster, the "choose action" catalog and
-// the custom-activation list all sit in one of these, so the three can never
-// drift apart again: the ground, the hairline, the inner padding, the row
-// height and BOTH row colours are decided here and nowhere else.
-//
-// Rows go straight in (they land in `column`, a Column that already has the
-// panel's inner width):
-//
-//     StripedListPanel {
-//         id: panel
-//         width: parent.width
-//         Repeater {
-//             model: ...
-//             delegate: Rectangle {
-//                 required property int index
-//                 width: parent.width
-//                 height: panel.rowHeight
-//                 color: panel.rowColor(index, hover.hovered)
-//             }
-//         }
-//     }
 Item {
     id: root
 
@@ -31,10 +9,6 @@ Item {
     property int padding: 5
     property int rowHeight: 38
     property int rowRadius: 6
-    // false = no bordered/inset box around the rows — they spread over
-    // whatever background the caller already sits on (the Settings nav
-    // rail: "don't contain it, let it spread and use the base as its bg").
-    // The striping/hover/padding stay identical either way.
     property bool showPanel: true
     // The second tint — the app's ONE striping rule (ListRows), so the
     // virtualized lists that stripe themselves match these panels exactly.

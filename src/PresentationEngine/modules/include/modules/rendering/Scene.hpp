@@ -1,10 +1,5 @@
 #pragma once
 
-// Scene system (docs/specs/17 §Scene Manager / Scene Graph). A presentation
-// *becomes* a scene: Scene → Layers → Objects → Components. Everything is a
-// node in a hierarchy; nodes carry transforms and components. The renderer
-// knows nothing about documents — only scenes.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 
@@ -15,7 +10,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 class Scene;
 
 // --- Layer kinds (independent render layers; any may be disabled) -----------
@@ -137,15 +131,6 @@ public:
     Size SceneSize() const { return size_; }
     void SetSize(Size s) { size_ = s; }
 
-    // TRANSPARENT BACKGROUND: this scene deliberately paints NO opaque fill, so
-    // the renderer must clear it to alpha 0 instead of the opaque default. A
-    // frame the style never fills — an explicitly "transparent" template, or one
-    // that names no colour at all — is a keyable overlay: the app's monitor tile
-    // shows it as transparent and the output window/NDI feed carry the alpha.
-    // Both cases stop painting, so this flag is the renderer's only signal that
-    // the frame has nothing of its own; which of the two it was is the
-    // COMPOSITION's business, not the scene's (see
-    // SlideComposition::explicitTransparent and SceneBuilder's background rule).
     bool TransparentBackground() const { return transparentBackground_; }
     void SetTransparentBackground(bool transparent) { transparentBackground_ = transparent; }
 
@@ -198,5 +183,4 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Scene>, std::less<>> scenes_;
 };
-
 } // namespace bps::rendering

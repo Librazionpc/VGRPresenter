@@ -1,11 +1,5 @@
 #pragma once
 
-// Platform Abstraction Layer (PAL) — the only place OS-specific code lives
-// (docs/architecture/SystemArchitecture.md §3.6 and docs/architecture/PAL.md).
-// The core consumes this facade; platform/linux, platform/windows,
-// platform/macos provide backends. No feature module may include OS headers or
-// call OS APIs directly — everything goes through one of the subsystems below.
-
 #include "core/common/Common.hpp"
 
 #include "IFilesystem.hpp"
@@ -32,7 +26,6 @@
 #include <vector>
 
 namespace bps::platform {
-
 // ---------------------------------------------------------------------------
 // Telemetry snapshot — absolute machine counters sampled by the backend.
 // Consumers (e.g. ResourceManager) compute deltas for rates (CPU %, bps).
@@ -49,18 +42,12 @@ struct Snapshot {
     uint64_t threadCount = 0;       // live threads in this process
     int batteryPercent = -1;        // -1 = no battery
     bool onBattery = false;
-    // Plugged in AND the pack is topping up (Windows BatteryFlag 8, Linux
-    // "Charging"). Distinct from onBattery=false, which also covers "plugged in
-    // and holding at 100%" — the battery dial says which of the two it is.
     bool batteryCharging = false;
     unsigned coreCount = 0;
     uint64_t gpuVramTotalBytes = 0; // best effort; 0 = no GPU backend reported
     uint64_t gpuVramUsedBytes = 0;
 
     // ---- Live health (best effort; -1 = this backend cannot measure it) ----
-    // The Settings resource-health surface reads these. A backend that has no
-    // way to measure one leaves it at -1 rather than reporting a plausible 0,
-    // so the UI can say "not measured" honestly.
     double gpuPct = -1.0;       // GPU engine utilization (percent, 0..100)
     double cpuPerfPct = -1.0;   // % Processor Performance: 100 = nominal clock;
                                 // below 100 means the CPU is being held under
@@ -149,9 +136,6 @@ public:
     virtual ILibrary& Library() = 0;
     virtual IMonitor& Monitor() = 0;
     virtual IAudio& Audio() = 0;
-    // Video-capture discovery (cameras/capture cards + their real mode
-    // lists). Same discovery-only scope as Audio(); streaming/capture I/O
-    // belongs to the future capture feature module.
     virtual IVideo& Video() = 0;
     virtual INetwork& Network() = 0;
     virtual IPower& Power() = 0;
@@ -163,9 +147,6 @@ public:
     // transports. Never null on a supported OS.
     virtual ISocketFactory& Sockets() = 0;
 
-    // Input device discovery, native dialogs, desktop notifications. Never
-    // null on a supported OS (methods may return Unsupported on headless
-    // hosts / when a provider tool is missing).
     virtual IInput& Input() = 0;
     virtual IDialogs& Dialogs() = 0;
     virtual INotifications& Notifications() = 0;
@@ -173,13 +154,9 @@ public:
     // Telemetry for the ResourceManager (never throws; fills what it can).
     virtual Snapshot Sample() = 0;
 
-    // OS events detected since the last poll. Called periodically by the
-    // Kernel's platform watcher; returns {} where change detection is
-    // unsupported.
     virtual std::vector<OsEvent> PollChanges() { return {}; }
 };
 
 // Platform factory — the only platform-specific symbol the core links.
 std::unique_ptr<IPlatform> CreatePlatform();
-
 } // namespace bps::platform

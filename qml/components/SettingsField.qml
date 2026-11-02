@@ -1,11 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One labeled settings text field — small caption above, inset rounded
-// box with a TextInput inside, optional right-aligned unit suffix (e.g.
-// "kbps") and optional placeholder. Shared by the settings screens'
-// value inputs (Recording's bitrates, server URL, stream key, and any
-// future section) so field styling can't drift between screens.
 Column {
     id: root
 
@@ -18,10 +13,6 @@ Column {
     property alias echoMode: input.echoMode
     property string suffix: ""
     property string placeholder: ""
-    // Why the value was refused ("" = nothing to say). Printed in red directly UNDER
-    // the box, whose border turns red with it — the one look for "this field is the
-    // problem" in every dialog (empty or taken name, a bad URL...). The owner sets it
-    // when a Save is refused and clears it when the operator edits.
     property string error: ""
 
     // User-driven edits only (not programmatic `text =` assignments) — the

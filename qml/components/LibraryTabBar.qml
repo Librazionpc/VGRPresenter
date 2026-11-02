@@ -1,9 +1,3 @@
-// The media-resource dock's tab bar — all nine library tabs share ONE
-// delegate (same icon box, label metrics, selected red underline + hover
-// tint: design consistency by construction, replacing the Figma export's
-// seven hand-pinned per-tab blocks that could never stay identical). The
-// eighth tab, THE TABLE, is the sermon app — it rides the same
-// Scripture-architecture browser through its JSON export file.
 import QtQuick
 import VGRPresenterUI
 
@@ -11,18 +5,8 @@ Rectangle {
     id: root
     objectName: "selfTestLibraryTabBar"
 
-    // Index into `tabs` of the selected tab; the host binds its pane
-    // switcher to this. Shows is the landing tab (the Figma export froze
-    // Scripture selected; the app opens on the shows library).
     property int currentTab: 0
     readonly property var tabs: [
-        // Shows / Media / Templates / Scripture / The Table / Calendar carry the
-        // app's own icon assets (IconGlyph "shows" / "media" / "overlay" /
-        // "template" / "bible" / "book" / "calendar", from qml/assets/shows
-        // icon.svg, media icon.svg, overlay.svg, template.svg, bible .svg,
-        // book.svg and calendar-event.svg) instead of the generic play / layout
-        // / open-book glyphs they used to borrow. Overlays was the last tab
-        // still wearing the shared hand-sized "layers" glyph.
         { label: "Shows",     icon: "shows",    pane: "shows" },
         { label: "Media",     icon: "media",    pane: "media" },
         { label: "Overlays",  icon: "overlay",  pane: "overlays" },
@@ -32,16 +16,9 @@ Rectangle {
         { label: "Calendar",  icon: "calendar", pane: "soon" },
         { label: "Functions", icon: "wrench",   pane: "functions" }
     ]
-    // Pane key of the current tab (\"shows\" | \"media\" | \"overlays\" |
-    // \"scripture\" | \"table\" | \"functions\" | \"soon\") — the host's
-    // switcher reads this.
     readonly property string currentPane: tabs[currentTab].pane
 
     // ---- Search, tied to the active tab ------------------------------------------------
-    // One query per tab (keyed by its pane), so a tab keeps its search while you look at another and
-    // each pane filters only its own content: Shows the shows, Media the media... A pane reads its own
-    // query as `searches.<pane>` ("" until something is typed). Tabs with nothing to search (the
-    // coming-soon ones) get no box.
     property var searches: ({})
     // The Functions pane drives flows (no search over them yet); the coming-
     // soon tabs have nothing at all to search.
@@ -58,17 +35,6 @@ Rectangle {
     }
 
     // ---- The typing beat, in ONE place ---------------------------------------
-    // Every pane reads its query as `searches.<pane>` and answers it with an
-    // ENGINE call: the shows tab searches the show library, media scans the
-    // media library, the design tabs scan theirs, scripture and The Table
-    // search the corpus. Pushing the query per keystroke therefore ran a whole
-    // library query on the INTERFACE THREAD for each character typed — the
-    // same freeze the searchAsync paths were built to avoid, in the boxes that
-    // route through a pane filter instead of a service. This is the one place
-    // all six share, so the beat lives here: 150 ms after the typing stops (the
-    // app's own typing interval — QuickSearchDialog debounces at 140 ms), while
-    // typing stays instant and the suggestion popup, which has its own
-    // provider, is untouched.
     property string pendingSearch: ""
     property string pendingPane: ""
     function delayedSearch(value) {
@@ -77,19 +43,9 @@ Rectangle {
         filterDebounce.restart()
     }
     function flushSearch() {
-        // THE PENDING QUERY IS THE STATE, not the timer's `running`: Qt clears a
-        // single-shot Timer's running flag BEFORE it emits triggered, so the old
-        // guard returned here on every debounced search and the typed query was
-        // never pushed to its pane — the reported "Shows search is not working"
-        // (the reference tabs hid it, because their filtering runs from the
-        // suggestion provider on each keystroke; the filter tabs — Shows, Media,
-        // Overlays, Templates — had no other path).
         if (!filterDebounce.running && root.pendingPane === "")
             return
         filterDebounce.stop()
-        // Landed on the tab it was TYPED on even if the user switched tabs
-        // inside the beat — each tab keeps its own query (that is what the
-        // per-pane map is for), so a switch must not lose or misplace it.
         const pane = root.pendingPane
         const text = root.pendingSearch
         root.pendingSearch = ""
@@ -103,10 +59,6 @@ Rectangle {
     }
 
     // ---- Live autocomplete (Scripture / The Table) -------------------------------------
-    // Panes with reference suggestions register a provider under their pane key
-    // (registerSuggester); `suggestions` wraps the ACTIVE tab's provider as one function
-    // (text) => rows — read fresh at every call, so each keystroke gets current rows. A
-    // picked row is routed to the pane that offered it via suggestionPicked(paneKey, ref).
     property var suggesters: ({})
     function registerSuggester(pane, item) {
         const next = Object.assign({}, root.suggesters)
@@ -126,16 +78,6 @@ Rectangle {
     signal suggestionHovered(string pane, int index, bool hovering)
 
     // ---- What the box STARTS with --------------------------------------------
-    // "Let the search bar by default hold 55-0117 - How The Angel …, so I can just
-    // enter the paragraph" (user call; the same for Scripture's book and chapter).
-    // The pane the operator is LOOKING AT knows which passage that is, so it answers
-    // (ReferencePane::paneSearchSeed) and the box shows that line — not its generic
-    // hint — until something is typed or a search is stored for the tab.
-    //
-    // Clicking the empty box COMMITS the seed as the query (one click, then the
-    // digits) — see TabSearchBox::seedOnClick. Nothing is pushed into the pane on
-    // its own: seeding the query would run a resolve on every tab switch, which is
-    // exactly the engine work the typing beat above exists to avoid.
     readonly property string searchSeed: {
         const s = root.suggesters[root.currentPane]
         if (!canSearch || !s || !s.paneSearchSeed)
@@ -145,42 +87,20 @@ Rectangle {
 
     color: "transparent"
 
-    // The far right of the bar, in the tabs' own row (the FreeShow sample:
-    // the tab pack hugs the left, Search sits at the bar's right edge with
-    // the same red underline).
     TabSearchBox {
         id: searchBox
         objectName: "selfTestSearchBox"
         visible: root.canSearch
         anchors.right: parent.right
         anchors.top: parent.top
-        // Fills the bar's full height rather than 31-in-39-centered: its icon/text are already
-        // centered internally, so this lands them exactly where the (also-centered) tab labels
-        // sit, and its own red underline - drawn at ITS bottom - lands right on the bar's border
-        // instead of floating short of it.
         height: parent.height
-        // The box's own width, measured from its hint (see TabSearchBox.implicitWidth) -
-        // clamped so it still can't run into the tabs, and a very narrow window still
-        // leaves it usable.
         width: Math.max(100, Math.min(searchBox.implicitWidth, root.width - tabsRow.childrenRect.width - 16))
-        // NAMES THE ACTIVE TAB — "Search Shows", "Search Media", "Search The
-        // Table", "Search Scripture", "Search Templates", "Search Overlays" —
-        // using the tab's own label, so the hint can never drift from the tab it
-        // describes. It is shown whether or not the box has focus (it used to
-        // switch on focus, which widened the box on click), and the box is sized
-        // to the hint, so there is no dead length past the last word. "Calendar"
-        // is the one coming-soon tab, and it has no box at all.
         placeholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label)
         // The passage the pane is on, ready to take a paragraph/verse number.
         seedText: root.searchSeed
         // It follows the pane (open another chapter, step a passage) until the
         // operator makes it their own query by typing in it.
         seedFollows: !root.searches[root.currentPane]
-        // Per-tab queries are pushed in imperatively (TabSearchBox.resetText) instead of
-        // bound — the autofill's programmatic writes would silently break a `text:` binding
-        // and tab switches would stop restoring that tab's query. Every keystroke also
-        // re-fires onSearchesChanged (setSearch rebuilds the map), so both handlers only
-        // push when the stored value DIFFERS from the box — the user's own typing is a no-op.
         function pushStored() {
             const want = root.searches[root.currentPane] !== undefined ? root.searches[root.currentPane] : ""
             if (searchBox.text !== want)
@@ -196,39 +116,14 @@ Rectangle {
         Connections {
             target: root
             function onCurrentPaneChanged() {
-                // A query typed a moment before the tab switch still belongs to
-                // the tab it was typed on, so it is pushed now rather than
-                // dropped with the timer.
                 root.flushSearch()
                 searchBox.pushStored()
-                // AN EMPTY BOX TAKES THE NEW TAB'S SEED HERE, not only from the seed's
-                // own change handler: the field is shared and keeps the keyboard across
-                // a tab switch, so moving The Table -> Scripture changes the line from a
-                // citation to "Genesis 1: " without any focus event — and a box left
-                // empty beside a pane naming a passage is exactly the "the verse digits
-                // replaced the seed" case. A tab with a stored query keeps it (pushStored
-                // just put it there, so the box is not empty).
-                // DEFERRED: the seed line and the stored-query reset both settle after
-                // this handler, so filling here can be undone by the push that follows.
                 Qt.callLater(function () {
                     if (searchBox.text === "")
                         searchBox.applySeed()
                 })
             }
         }
-        // Debounced: see delayedSearch above (a per-keystroke push here is a
-        // per-keystroke engine query in the active pane).
-        //
-        // THE REFERENCE TABS ALSO JUMP NOW, through the pane's own existing
-        // resolve+goTo (jumpToTyped — the same pair onFilterChanged runs). The box
-        // holds the passage ("…Commission " / "Genesis 1: "), so the digits typed
-        // after it are the paragraph/verse: "…Commission 56" moves to ¶56 and
-        // "Genesis 1: 16" to verse 16 as it is typed rather than after the reading
-        // beat. Only tabs whose pane offers jumpToTyped do this (The Table and
-        // Scripture); a filter tab keeps the debounced filter and nothing else.
-        // (Scripture's resolve answers from its published cache, so a keystroke the
-        // cache has not seen yet no-ops here and lands when the read does — see
-        // ReferencePane::corpusCacheLanded.)
         onEdited: (value) => {
             const s = root.suggesters[root.currentPane]
             // The place to come back to on Esc is taken BEFORE the typing jumps the
@@ -248,21 +143,9 @@ Rectangle {
             if (s && s.endSearch)
                 s.endSearch()
         }
-        // ENTER IN THE BOX TAKES THE PICK — the pane's own accept
-        // (ReferencePane::playPicked → goLiveRequested → LiveOutputService.stageSlides),
-        // so the paragraph the box just jumped to lands on the MONITOR PREVIEW. The
-        // pane's accept Shortcut can't do it while the field has focus (the pane stands
-        // its keys down while something is being typed into), which is why this relays
-        // it instead of relying on that shortcut.
         onAccepted: (value) => {
             root.flushSearch()
             const s = root.suggesters[root.currentPane]
-            // A RESULT THE ARROWS WALKED TO IS THE RETURN'S ANSWER: Enter opens that
-            // sermon and ENDS the search — the pane emits matchTaken (see the
-            // Connections below), which forgets this tab's query so the box clears
-            // back to the new sermon's own seed. (It used to leave the citation in the
-            // box, which read as still searching — user call: "when press enter or
-            // double click it should open it up and leave the search mode".)
             if (s && s.matchCursor >= 0 && s.takeMatch) {
                 const cite = String(s.takeMatch() || "")
                 if (cite !== "")
@@ -270,11 +153,6 @@ Rectangle {
             }
             if (s && s.playPicked) {
                 s.playPicked()
-                // ENTER ENDS THE SEARCH IN SCRIPTURE TOO (user call: share The Table's
-                // search controls with the Scripture tab): once the pane actually HOLDS a
-                // pick, the tab's query is spent — the box drops back to the new passage's
-                // own seed instead of standing there as a live query. A query that did not
-                // resolve leaves the box alone (nothing was taken).
                 const picked = s.selected !== undefined && s.selected !== null
                                && s.selected.length > 0
                 if (picked && s.searchReturn !== undefined && s.searchReturn !== null) {
@@ -283,13 +161,7 @@ Rectangle {
                 }
             }
         }
-        // A RESULT WAS OPENED FROM THE PANE (Enter there, or a double-click on a row):
-        // the search is over, so the tab's stored query goes too and the box returns to
-        // the seed of the sermon that was just opened (see ReferencePane's matchTaken).
         Connections {
-            // null (not undefined) until the active tab registers one: a Connections
-            // target is QObject* and refuses to take undefined (the reported
-            // "Unable to assign [undefined] to QObject*" at load).
             target: root.suggesters[root.currentPane] !== undefined ? root.suggesters[root.currentPane] : null
             ignoreUnknownSignals: true
             function onMatchTaken() {
@@ -300,9 +172,6 @@ Rectangle {
         // The search box's Up/Down over the in-pane result list (The Table).
         onStepMatch: (delta) => {
             const s = root.suggesters[root.currentPane]
-            // Through stepInColumn, not stepMatch: the key belongs to whichever column
-            // the selector is on (results while it is on the results, sermons while it
-            // is on the sermons) — see ReferencePane::stepInColumn.
             if (s && s.stepInColumn)
                 s.stepInColumn(delta)
             else if (s && s.stepMatch)
@@ -329,9 +198,6 @@ Rectangle {
             const s = root.suggesters[root.currentPane]
             if (s && payload && payload.ref) {
                 root.suggestionPicked(root.currentPane, payload.ref)
-                // A PICKED ROW ENDS THE SEARCH (the same rule as Enter): the book /
-                // chapter / sermon was taken, so the query is spent and the box returns
-                // to the seed of the passage it just opened.
                 if (s.searchReturn !== undefined && s.searchReturn !== null) {
                     root.setSearchFor(root.currentPane, "")
                     searchBox.resetText("")
@@ -345,9 +211,6 @@ Rectangle {
         }
     }
 
-    // Left-packed row — the tabs hug the LEFT edge of the bar (user call:
-    // the justified experiment spread them rightward and clipped Functions
-    // at the dock edge; "to the left" is the wanted arrangement).
     Flow {
         id: tabsRow
         anchors.left: parent.left
@@ -372,12 +235,6 @@ Rectangle {
                 width: tabLabel.implicitWidth + 47
                 topLeftRadius: 6
                 topRightRadius: 6
-                // Hover from pointer position (PositionHoverArea): a MouseArea's containsMouse never clears in this
-                // build, which left tabs you had merely passed over lit.
-                // Selected tabs wear the app's active-pill wash (Theme.activeBg
-                // — the user call: selection must read at a glance, same
-                // treatment as the sidebar's selected row); the underline +
-                // accent icon stay. Hover keeps a fainter lift.
                 color: selected ? Theme.activeBg : "transparent"
                 // Selection is state and still fades; hover is the app's shared
                 // glow layer, so a tab lights exactly like a card or a row.
@@ -394,13 +251,6 @@ Rectangle {
                     glowColor: Theme.hoverBg
                 }
 
-                // Every tab icon is the SAME 15px box and the same optical
-                // weight (user call: the row read as mixed sizes). Two things
-                // used to break that: `layers` and `calendar` are hand-sized
-                // glyphs (10 and 9x10 of natural ink) which `fit` cannot scale -
-                // it fits the Lucide 24 grid to the box, and those two are not
-                // drawn on that grid - so they stayed at their natural size
-                // while the rest grew; and they drew with the IconGlyph default
                 // 1.5px stroke, where a 24-grid glyph's 2 units come out as
                 // 2 * 15/24 = 1.25px at this box, so they read heavier as well.
                 // 1.25 here matches their weight, and 15 puts the row a step up.
@@ -428,12 +278,6 @@ Rectangle {
                     text: tabDelegate.modelData.label
                     textFormat: Text.PlainText
                 }
-                // The reference's selected-tab red underline. The delegate sits vertically
-                // centered in the 39px bar now (4px short of its bottom on each side), so the
-                // underline needs to reach 4px past its own parent's bottom to land on the bar's
-                // border line - a negative bottomMargin off its own parent, not an anchor to a
-                // distant ancestor (that flipped it to the TOP - anchoring to a non-parent/sibling
-                // item across several levels of nesting resolved the wrong way here).
                 Rectangle {
                     visible: tabDelegate.selected
                     anchors.left: parent.left
@@ -458,11 +302,6 @@ Rectangle {
         }
     }
 
-    // Ctrl+1 through the last tab (Hotkeys.libraryTabs — see its own
-    // comment), one Shortcut per tab in the row's own order. A Repeater
-    // over the same `tabs` model the row itself uses, so a tab added there
-    // picks up its chord automatically instead of needing a matching new
-    // Shortcut declared by hand.
     function tabShortcut(index) {
         const seqs = Hotkeys.sequences("libraryTabs")
         return index >= 0 && index < seqs.length ? seqs[index] : ""

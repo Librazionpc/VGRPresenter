@@ -1,25 +1,10 @@
 #pragma once
 
-// Plain lyrics to a show - FreeShow's text converter (converters/txt.ts), the one every text-ish song format and the
-// "paste from clipboard" import lean on:
-//
-//   [Verse 1] / "Verse 1:" / "Chorus x2"   group headers (brackets or a trailing colon, a repeat count x2..x9)
-//   blank line                              a new slide
-//   lines with chords over them             folded into [C]inline[G] chord markers, kept with the slide
-//   Title=... / Author=... / CCLI=... / notes=...   metadata lines (any key; unknown keys are kept as they are)
-//   "---" inside a slide                    what follows is that slide's notes
-//   a trailing "www.ccli.com" block         SongSelect's copyright footer, read as metadata
-//   sections with no header                 recognised by how alike they are: a section that repeats is a chorus / bridge,
-//                                           short or repetitive ones are tags, the rest are verses
-//
-// Only the ENGINE reads lyrics this way, so the Import dialog, the clipboard import and every format built on it agree.
-
 #include "modules/import/ImportTypes.hpp"
 
 #include <string>
 
 namespace bps::import {
-
 struct SongTextOptions {
     std::string name;             // the show's name; empty = from the Title metadata, else from the first lines
     std::string category = "song";
@@ -38,14 +23,5 @@ std::string GroupLabel(const std::string& group);
 // 0..1 how alike two strings are (FreeShow's edit-distance measure).
 double TextSimilarity(const std::string& a, const std::string& b);
 
-// The same content-based group guess ParseSongText makes for a header-less
-// stanza (repeated text -> chorus/bridge, a short or self-similar one ->
-// tag, an unrecognized-but-explicit label kept as itself, otherwise verse) —
-// exposed so an importer that already has each section's own text but no
-// USABLE group of its own (missing, or a meaningless placeholder like a bare
-// "1"/"2") can guess real ones instead of leaving them unlabeled or numbered.
-// One entry in, one standard group id out, same order; may rewrite a
-// section's text in place (a bracket/colon label line gets pulled off it).
 std::vector<std::string> AutoGroupSections(std::vector<std::string>& sections, bool autoGroups = true);
-
 } // namespace bps::import

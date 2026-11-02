@@ -1,13 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Functions tab — the service-flow automation surface (FreeShow's
-// Functions palette grown into the engine's Flow model). The pane lists
-// every flow the ENGINE has loaded ({ id, name, nodeCount } from
-// FlowService.flows), runs one with a real transport (Run / Pause / Skip /
-// Stop), and draws the active execution's node timeline live: each step
-// lights pending → running → completed (or failed), driven by the service's
-// 250 ms poll of the engine's executor.
 Item {
     id: root
 
@@ -21,10 +14,6 @@ Item {
     signal runActionRequested(string actionId)
 
     // ---- The action roster, with its CUSTOM ACTIVATIONS -------------------
-    // Settings · Appearance & Actions keeps the actions; this pane is where an
-    // operator stands while running the show, so it shows what will fire and
-    // when. A trigger two actions share is a genuine trap (both run on the
-    // same event), so those rows carry a warning badge naming the other one.
     readonly property var actionRows: {
         void ActionListModel.rosterChanged
         const out = []
@@ -468,9 +457,6 @@ Item {
             radius: Theme.radiusLg
             color: "#14151c"
             border.width: 1
-            // A running flow is a LIVE surface, so its card wears the live red the
-            // GO LIVE pill wears (Theme.liveBgOnAir) — this border used to be its own
-            // near-copy of that red, which is how the live red drifted into six values.
             border.color: root.running ? Theme.liveBgOnAir : Theme.border
 
             Column {

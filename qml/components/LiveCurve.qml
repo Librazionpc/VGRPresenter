@@ -2,26 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// The live loop's rate over the last minute, drawn as a graph — the engine's own
-// per-second curve (Telemetry's `liveHistory`, oldest first, at most 60 seconds).
-//
-// TWO LINES, ONE QUESTION: "is the show being fed, and is it getting slower?"
-//   the filled line     the rate the outputs were actually DELIVERED (presentFps)
-//   the inner line      how much of it was a real raster (composedFps) — the rest are
-//                       copies of the composed frame, which is why a still slide draws a
-//                       steady delivered line with the raster line resting near zero
-// A show that starts falling behind draws a falling slope and a spike shows as a
-// spike. The newest second is always at the right edge, so the same fall takes the
-// same shape whatever the poll cadence; a young show grows in from the right.
-//
-// The scale is a round number above the highest second in the window (15, 30, 60...
-// fps), labelled on the left with a faint grid, so a peak reads as a height rather
-// than as an unlabelled squiggle. The readout at the top right is the newest
-// second's delivered rate.
-//
-// Drawn with Shapes (one polyline per line, one filled polygon), not a Canvas paint
-// pass: a card that the operator may leave open all service must not spend work on
-// the thread that draws, and the points only rebuild when a new second arrives.
 Item {
     id: root
 

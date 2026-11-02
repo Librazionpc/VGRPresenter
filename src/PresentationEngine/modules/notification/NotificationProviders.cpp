@@ -7,7 +7,6 @@
 #include <format>
 
 namespace bps::notification {
-
 // ---------------------------------------------------------------------------
 // ConsoleNotificationProvider
 // ---------------------------------------------------------------------------
@@ -100,7 +99,6 @@ std::string StatusBarNotificationProvider::LatestText() const {
 // ---------------------------------------------------------------------------
 
 namespace {
-
 // Builds the JSON body for one notification (docs/specs/14 §Notification Object).
 json::Value NotificationToJson(const Notification& n) {
     json::Value::Object o;
@@ -130,7 +128,6 @@ json::Value NotificationToJson(const Notification& n) {
     }
     return json::Value(std::move(o));
 }
-
 } // namespace
 
 Result<void> WebhookNotificationProvider::Configure(const json::Value& cfg) {
@@ -178,11 +175,6 @@ void WebhookNotificationProvider::SetEndpoint(std::string host, uint16_t port,
 }
 
 Result<void> WebhookNotificationProvider::Show(const Notification& n) {
-    // Synchronous HTTP POST (opt-in via config only). Delivery is fire-and-forget
-    // from the pipeline's perspective — a slow/unreachable endpoint costs the
-    // caller a bounded connect + 5 s receive timeout at most, never blocks the
-    // notification queue, and is counted in `failed_` rather than retried here.
-    // A fully async dispatch can ride the TaskScheduler in a later iteration.
     std::string host, path;
     uint16_t port = 0;
     {
@@ -303,5 +295,4 @@ void RecordingNotificationProvider::Clear() {
     seen_.clear();
     dismissed_.clear();
 }
-
 } // namespace bps::notification

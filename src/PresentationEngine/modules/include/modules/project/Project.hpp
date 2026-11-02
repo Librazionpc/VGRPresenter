@@ -1,10 +1,5 @@
 #pragma once
 
-// Project model (docs/specs/15 §Project Manager). A project is the unit of
-// user work: it owns documents, references assets through CAMS, and carries
-// project settings + versioning. The model is pure data (no managers) so it
-// can be serialized independently.
-
 #include "core/common/Common.hpp"
 #include "core/config/Json.hpp"
 
@@ -12,7 +7,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct ProjectSettings {
     std::string theme;
     std::string defaultTemplateId;
@@ -42,5 +36,4 @@ struct Project {
 // --- Serialization (JSON documents persisted via the DatabaseManager) -------
 json::Value ProjectToJson(const Project& p);
 Result<Project> ProjectFromJson(const json::Value& v);
-
 } // namespace bps::project

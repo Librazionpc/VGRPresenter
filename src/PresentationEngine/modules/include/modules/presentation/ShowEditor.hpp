@@ -1,27 +1,5 @@
 #pragma once
 
-// ShowEditor (docs/architecture/PresentationEngine.md §Show structure): the engine
-// owns every create / update / delete on a show — categories, templates,
-// overlays and slides. A frontend asks for an operation; the engine validates it,
-// generates ids, applies the cascades, and refuses anything that would leave the
-// show inconsistent. Frontends never hand-edit these lists.
-//
-// Every operation works on a Presentation and is ATOMIC: it either applies fully
-// and returns Ok / the new id, or returns an error and leaves the presentation
-// exactly as it was. (PresentationDocument::Edit runs them on a copy and only
-// commits on success, so even a multi-step edit is all-or-nothing.)
-//
-// Referential rules (what "consistent" means):
-//   category.templateId  -> a template in the show, or "" (none)
-//   slide.categoryId     -> a category in the show, or "" (uncategorised)
-//   overlay.targetId     -> a category / slide in the show (for those scopes)
-// Deleting something that others point at follows an explicit rule, documented on
-// each Remove* — never a dangling id.
-//
-// Ids are stable and generated here ("category-3", "template-2", "overlay-1",
-// "slide-7"): unique within the show when created and never derived from list
-// position, so reordering or deleting never renames anything.
-
 #include "core/common/Common.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 
@@ -31,7 +9,6 @@
 #include <vector>
 
 namespace bps::presentation {
-
 // A partial update: only the fields that are set change.
 struct CategoryPatch {
     std::optional<std::string> name;
@@ -139,5 +116,4 @@ public:
     static Result<std::string> DuplicateBlock(Presentation& show, std::string_view slideId,
                                               std::string_view blockId, double dx = 20, double dy = 20);
 };
-
 } // namespace bps::presentation

@@ -9,6 +9,9 @@
 #include <QImage>
 #include <QPainter>
 #include <QString>
+#include <QTextLayout>
+#include <QTextOption>
+#include <QStringList>
 
 #include <algorithm>
 #include <cmath>
@@ -35,17 +38,14 @@ QString QtGlyphFor(uint8_t codepoint)
         return QString(QChar(0x2019));
     return QString(QChar(static_cast<ushort>(codepoint)));
 }
-
 } // namespace
 
 namespace bps::rendering {
-
 // ---------------------------------------------------------------------------
 // Built-in 5×7 bitmap font (ASCII 32..126). Each glyph is 5 bytes; each byte's
 // low 7 bits are the rows (bit 0 = bottom row). Pixel order: left = MSB.
 // ---------------------------------------------------------------------------
 namespace {
-
 const uint8_t kFont5x7[95][5] = {
     {0x00,0x00,0x00,0x00,0x00}, // space
     {0x00,0x00,0x5F,0x00,0x00}, // !
@@ -146,7 +146,6 @@ const uint8_t kFont5x7[95][5] = {
 
 constexpr int kGlyphWidth = 5;
 constexpr int kGlyphHeight = 7;
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -409,14 +408,7 @@ std::string FontManager::SubstituteFamily(std::string_view family) const {
     // stays outside the cache lock.
     std::string resolved = name;
     if (!HasSystemFont(name)) {
-        // THE HOST'S OWN UI FACE, not a literal. Nothing in this renderer needs to
-        // name a font: the machine already has one, and using it means a design
-        // authored on another PC draws in the same shape and spacing as the
-        // fallback every other design gets.
         resolved = SystemUiFamily();
-        // ONE line per requested family: this is the answer to "why does the
-        // output look wrong on that machine and not mine" — the design names a
-        // font that machine does not have.
         Logger::Instance().Warning(
             std::format("font family '{}' is not installed — drawing it with '{}' instead "
                         "(the builtin 5x7 bitmap it used to fall back to paints pixel blocks "
@@ -451,9 +443,6 @@ std::string FontManager::SystemUiFamily() const {
 }
 
 std::string FontManager::DefaultFamily() const {
-    // The host's own UI face — never a family name this app picked. "builtin"
-    // only when the platform cannot answer at all, which is the one case where
-    // the bitmap font is the honest answer.
     const std::string preferred = SystemUiFamily();
     return preferred.empty() ? "builtin" : preferred;
 }
@@ -469,12 +458,6 @@ std::string FoldToAtlasAscii(const std::string& text);
 } // namespace
 
 std::vector<std::string> TextLayout::SplitLines(const std::string& text, bool rtl) {
-    // Fold to atlas ASCII up front: the draw loop (RenderEngine::DrawTextObject)
-    // steps line text BYTE-wise against an ASCII-only atlas, and the RTL path
-    // below reverses these very bytes — raw UTF-8 would both miss the atlas
-    // (the "that     s" apostrophe gap) and reverse multibyte sequences into
-    // mojibake. Every consumer of LineLayout::text draws via that loop, so
-    // folding here covers all of them.
     const std::string folded = FoldToAtlasAscii(text);
     std::vector<std::string> lines;
     std::string cur;
@@ -492,25 +475,6 @@ std::vector<std::string> TextLayout::SplitLines(const std::string& text, bool rt
 }
 
 namespace {
-// Fold the Unicode punctuation the transcripts actually use (evidence: a
-// corpus-wide scan of src/downloads_vgr_txt — U+2019 715k hits, U+201C/D
-// 225k each, U+2026 127k, U+2014 94k, U+2018 8k, plus a long tail of
-// accented letters) down to the ASCII that BOTH glyph atlases contain
-// (BuildAtlas and BuildSystemAtlas rasterize codepoints 32..126 only).
-//
-// Without this, every U+2019 (') reached the layout/draw path as its 3-byte
-// UTF-8 encoding E2 80 99: none of those bytes are in the atlas, so
-// RenderEngine::DrawTextObject's per-byte glyph lookup missed three times
-// per apostrophe, each miss burning a style.size*0.6 blank advance — live
-// symptom: "that     s when" instead of "that's" on the engine-rendered
-// output (NDI), while the QML tiles (Qt's own text stack) rendered fine.
-//
-// Folding at LAYOUT ENTRY (not just at draw time) keeps every width
-// calculation — wrap points, line widths, centering — computed on exactly
-// the same characters the atlas draw loop will later step through, and
-// keeps layout cache keys (raw text) deduplicating lines that differ only
-// in punctuation flavor. Runs are scanned with a hand-rolled decoder
-// rather than std::codecvt (deprecated in C++17).
 std::string FoldToAtlasAscii(const std::string& text) {
     bool asciiOnly = true;
     for (unsigned char c : text)
@@ -586,30 +550,99 @@ std::string FoldToAtlasAscii(const std::string& text) {
     return out;
 }
 
-// Uniform per-character estimate — the builtin bitmap font's only option
-// (monospace by construction), and the fallback whenever style.fontId
-// names a real font the system can't actually resolve right now.
 float UniformAdvance(const TextStyle& style, const Font& f) {
     return f.cellWidth > 0 ? style.size * static_cast<float>(f.cellWidth + 1) /
                                  static_cast<float>(f.cellHeight)
                            : style.size;
 }
-// Real per-character advances for `text` when style.fontId names a font
-// the system can actually resolve; empty otherwise (caller falls back to
-// UniformAdvance) — the SAME "try the real font, degrade to builtin"
-// contract BuildSystemAtlas's own callers (SceneBuilder) already follow,
-// so wrapping decisions and what actually gets drawn always agree.
 std::vector<float> RealAdvances(const std::string& text, const TextStyle& style,
                                 const FontManager& fonts) {
     if (style.fontId.empty() || style.fontId == "builtin") return {};
-    // The SUBSTITUTED family, never the raw name: a design that names a font this
-    // machine lacks is measured with the face it will actually be painted with,
-    // so wrapping and the painted width agree (measuring with the builtin
-    // estimate while painting a real font is its own mis-wrap).
     const std::string family = fonts.SubstituteFamily(style.fontId);
     if (family.empty() || !fonts.HasSystemFont(family)) return {};
     return fonts.SystemCharAdvances(family, style.size, style.bold, style.italic, text,
                                     style.fontWeight);
+}
+
+bool MeasureWithQtLayout(const std::string& source, const TextStyle& style,
+                         const FontManager& fonts, TextLayoutResult& result) {
+    const std::string family = fonts.SubstituteFamily(style.fontId);
+    if (family.empty() || !fonts.HasSystemFont(family))
+        return false;
+
+    QFont font(QString::fromUtf8(family.data(), static_cast<qsizetype>(family.size())));
+    font.setPixelSize(FontManager::QtPixelSize(style.size));
+    font.setWeight(style.bold ? QFont::Bold : style.fontWeight);
+    font.setItalic(style.italic);
+    font.setUnderline(style.underline);
+    font.setStrikeOut(style.strikeout);
+    if (style.letterSpacing != 0.0f)
+        font.setLetterSpacing(QFont::AbsoluteSpacing, style.letterSpacing);
+    if (style.wordSpacing != 0.0f)
+        font.setWordSpacing(style.wordSpacing);
+
+    FontManager::LineMetrics metrics{};
+    if (!fonts.SystemLineMetrics(family, style.size, style.bold, style.italic, metrics,
+                                 style.fontWeight))
+        return false;
+
+    const float step = style.size + style.lineSpacing + style.lineGap;
+    const float lineHeight = step > 0.0f ? step : style.size;
+    result.lineStep = lineHeight;
+    result.lineBox = metrics.inkHeight;
+    QStringList paragraphs = QString::fromUtf8(source.data(),
+                                               static_cast<qsizetype>(source.size()))
+                                 .split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+    if (style.rtl)
+        std::reverse(paragraphs.begin(), paragraphs.end());
+
+    for (const QString& layoutText : paragraphs) {
+        const auto foldedLine = [](const QString& line) {
+            const std::string utf8 = line.toUtf8().toStdString();
+            return FoldToAtlasAscii(utf8);
+        };
+        if (layoutText.isEmpty()) {
+            result.lines.push_back({{}, 0.0f, true});
+            result.totalHeight += lineHeight;
+            continue;
+        }
+
+        if (!style.wrap || style.wrapWidth <= 0.0f) {
+            const float width =
+                static_cast<float>(QFontMetricsF(font).horizontalAdvance(layoutText));
+            result.lines.push_back({foldedLine(layoutText), width, true});
+            result.totalWidth = std::max(result.totalWidth, width);
+            result.totalHeight += lineHeight;
+            continue;
+        }
+
+        QTextLayout layout(layoutText, font);
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        option.setTextDirection(style.rtl ? Qt::RightToLeft : Qt::LeftToRight);
+        layout.setTextOption(option);
+        layout.beginLayout();
+        while (true) {
+            QTextLine line = layout.createLine();
+            if (!line.isValid())
+                break;
+            line.setLineWidth(style.wrapWidth);
+            const int start = line.textStart();
+            const int length = line.textLength();
+            const float width = static_cast<float>(line.naturalTextWidth());
+            result.lines.push_back({
+                foldedLine(layoutText.mid(start, length)),
+                width, start + length >= layoutText.size()
+            });
+            result.totalWidth = std::max(result.totalWidth, width);
+            result.totalHeight += lineHeight;
+        }
+        layout.endLayout();
+    }
+
+    if (!result.lines.empty())
+        result.totalHeight += result.lineBox - lineHeight;
+    return true;
 }
 } // namespace
 
@@ -619,9 +652,6 @@ float TextLayout::MeasureLine(const std::string& text, const TextStyle& style,
     // agree with the folded line text the atlas draw loop actually renders.
     const std::string& folded = FoldToAtlasAscii(text);
     if (folded.empty()) return 0.0f;
-    // Word spacing is PER SPACE GLYPH (the same additive convention
-    // letterSpacing uses per gap), and it is added here so a single-line
-    // measure and the drawn line agree.
     float wordExtra = 0.0f;
     for (char c : folded)
         if (c == ' ') wordExtra += style.wordSpacing;
@@ -639,44 +669,19 @@ float TextLayout::MeasureLine(const std::string& text, const TextStyle& style,
 TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& style,
                                      const FontManager& fonts) {
     TextLayoutResult result;
-    // SplitLines folds to atlas ASCII before splitting (see its comment): the
-    // RealAdvances/word-wrap/width math below indexes per-BYTE advances of the
-    // line text, and RenderEngine::DrawTextObject later walks the same line
-    // text byte-wise against an ASCII-only atlas — every stage needs exactly
-    // the folded string.
     auto raw = SplitLines(text, style.rtl);
+    if (MeasureWithQtLayout(text, style, fonts, result))
+        return result;
+
     Font f = fonts.Resolve(style.fontId);
-    // A NON-POSITIVE STEP IS NOT A LAYOUT: a style whose lineSpacing cancels its
-    // size (the shape a `lineHeight: 0` produced before SceneBuilder learned
-    // that 0 means "the font's own spacing") measured as zero-height lines and
-    // painted every line onto one baseline. One line's worth of space is the
-    // floor — natural spacing — so a degenerate style still renders a readable
-    // block instead of an overlap. Legitimately tight positive steps pass.
     const float step = style.size + style.lineSpacing + style.lineGap;
     const float lineHeight = step > 0.0f ? step : style.size;
     const float advance = UniformAdvance(style, f);
-    // REAL vertical ink extent when the style names a resolvable system
-    // font: ascent+descent, the visible height of ONE line of glyphs. The
-    // per-line STEP below stays size+lineSpacing (DrawTextObject advances
-    // lines by exactly that, and SceneBuilder now derives lineSpacing from
-    // the font's own natural line height — the font dependence lives there).
-    // Measuring the last line as a FULL step over-estimates by
-    // (step − ink): lineGap plus the space below the last baseline — a
-    // number that swings per font (negative for Segoe UI, ~15% of the em
-    // for many serifs) — which is why the fit solver accepted sizes that
-    // painted past the box only with certain fonts. Builtin font / non-
-    // Windows / unresolved family: ink == lineHeight and every total is
-    // byte-for-byte the legacy n·lineHeight.
     FontManager::LineMetrics fm{};
     const std::string family = fonts.SubstituteFamily(style.fontId);
     const bool haveReal = !family.empty() && fonts.HasSystemFont(family)
                           && fonts.SystemLineMetrics(family, style.size, style.bold,
                                                      style.italic, fm, style.fontWeight);
-    // BUILTIN FALLBACK: one line box, NOT lineHeight — lineHeight now includes
-    // lineGap, and a gap is air BETWEEN line boxes: letting the last line's ink
-    // carry it measured a taller block than the frames paint (and the fit solver
-    // then squeezed type smaller than needed on every gapped block). With no
-    // gap this is exactly the old value, so nothing else moves.
     const float ink = haveReal ? fm.inkHeight : (style.size + style.lineSpacing);
     result.totalHeight = 0.0f;
     result.lineStep = lineHeight;   // the step every line below advances by
@@ -685,10 +690,6 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     result.lineBox = ink;
 
     for (const auto& rawLine : raw) {
-        // Real per-character advances for THIS line (empty = no real font
-        // available; every width calc below falls back to the uniform
-        // estimate in that case, same as before this method knew about
-        // real fonts at all).
         const std::vector<float> real = RealAdvances(rawLine, style, fonts);
         const auto charAdvance = [&](size_t idx) {
             return (idx < real.size()) ? real[idx] : advance;
@@ -716,10 +717,6 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
             result.lines.push_back(std::move(ll));
             continue;
         }
-        // Word wrap: break BETWEEN words at spaces, never mid-word. The old
-        // loop wrapped per character, so a verse that didn't fit read as
-        // scrambled text ("com / e back", "mayb / e"). A single word wider
-        // than the wrap width is hard-broken per character as a last resort.
         std::string current;
         float currentWidth = 0.0f;
         auto flush = [&](const std::string& line, float width, bool paragraphEnd) {
@@ -767,13 +764,6 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
         if (!current.empty())
             flush(current, currentWidth, true);
     }
-    // Baseline-grid correction: every line pushed a full `lineHeight` step,
-    // but the LAST line contributes only its ink (ascent+descent for real
-    // fonts, the same as one step for the builtin cell font) — exactly the
-    // rectangle DrawTextObject paints: (n−1) baselines between lines plus
-    // one line of glyphs. SWAP the last line's step for its ink: add the
-    // ink, subtract the step it never spends (ink == lineHeight for the
-    // builtin font, so the legacy n·lineHeight total is preserved there).
     if (!result.lines.empty())
         result.totalHeight += ink - lineHeight;
     return result;
@@ -846,5 +836,4 @@ std::vector<int> TextLayout::FlowCharacterStarts(const std::string& text,
     }
     return starts;
 }
-
 } // namespace bps::rendering

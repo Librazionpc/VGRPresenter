@@ -1,13 +1,5 @@
 #pragma once
 
-// DataManager (docs/specs/15): the Phase 4 facade. Owns the Project & Data
-// System lifecycle and exposes the whole subsystem to the engine through one
-// IService: projects, workspace, documents, history, undo/redo, sessions,
-// snapshots, recovery, backups, packages, dependencies, references, recents,
-// favorites, templates and profiles. Integrates the Core (Logger, Config,
-// EventBus, TaskScheduler, DatabaseManager), CAMS (assets, packages, refs) and
-// the Notification Service (via project.* events).
-
 #include "modules/project/BackupManager.hpp"
 #include "modules/project/DependencyManager.hpp"
 #include "modules/project/DocumentManager.hpp"
@@ -32,7 +24,6 @@
 #include <vector>
 
 namespace bps::project {
-
 class DataManager final : public IService {
 public:
     static DataManager& Instance();
@@ -90,5 +81,4 @@ private:
     mutable std::mutex mutex_;
     std::string lastError_;
 };
-
 } // namespace bps::project

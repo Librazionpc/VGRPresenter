@@ -7,10 +7,6 @@ SlideListModel::SlideListModel(QObject *parent)
     : QAbstractListModel(parent)
     , m_nextId(0)
 {
-    // Starts empty: no seeded/hardcoded slides. The user builds the roster
-    // with "Add slide" (which auto-selects the new slide). This model owns
-    // roster metadata (num/id/tag/tagColor/active) only; slide content lives
-    // in EditScreen.qml's per-slide canvas archive.
 }
 
 int SlideListModel::rowCount(const QModelIndex &parent) const
@@ -105,9 +101,6 @@ void SlideListModel::removeSlide(int index)
 
     renumber(index);
 
-    // Keep exactly one slide active (if any remain) so the canvas always
-    // has something to show — pick the row that took the removed one's
-    // place, falling back to the new last row.
     if (removedWasActive && !m_slides.isEmpty()) {
         const int fallback = qMin(index, m_slides.size() - 1);
         selectSlide(fallback);
@@ -335,7 +328,6 @@ QVariantMap SlideListModel::syncFromEngine(const QVariantList &slides)
 
 int SlideListModel::slideIdAt(int index) const
 {
-
     if (index < 0 || index >= m_slides.size())
         return -1;
     return m_slides.at(index).id;

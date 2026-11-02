@@ -30,9 +30,6 @@ void CursorService::apply(int shape)
 {
     const QCursor cursor(static_cast<Qt::CursorShape>(shape));
     if (m_held) {
-        // Swap in place: setOverrideCursor() again would push a SECOND
-        // override that needs a matching restore, and the cursor would be left
-        // overridden by whichever shape got there first.
         QGuiApplication::changeOverrideCursor(cursor);
         return;
     }

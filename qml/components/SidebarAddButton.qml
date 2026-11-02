@@ -2,9 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// The "+ New ..." pill at the foot of a library sidebar (the reference's "+ New collection"
-// / "+ Add folder" box): a red plus and a label. Shared by the Media and the
-// Scripture / The Table sidebars.
 Rectangle {
     id: root
 

@@ -5,7 +5,6 @@
 #include <shlobj.h>
 
 namespace bps::platform {
-
 namespace {
 // Known folder -> wide path; empty on failure.
 std::wstring KnownFolder(REFKNOWNFOLDERID id) {
@@ -16,10 +15,6 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id) {
     return out;
 }
 
-// A DEV BUILD'S OWN PROFILE (VGR_PROFILE_DIR, set by the app's main before anything asks):
-// the project's dev-profile folder, kept apart from the installed app's %LOCALAPPDATA%\bps
-// and %APPDATA% so the two never read or rewrite one set of settings and templates.
-// Empty when unset — an installed app, and every non-app tool, are unchanged.
 std::string ProfileRoot() {
     wchar_t buf[MAX_PATH * 2] = {0};
     DWORD n = GetEnvironmentVariableW(L"VGR_PROFILE_DIR", buf, static_cast<DWORD>(sizeof(buf) / sizeof(buf[0])));
@@ -98,5 +93,4 @@ std::string WindowsPaths::AppDataDir() const {
     if (const std::string root = ProfileRoot(); !root.empty()) return root + "\\roaming";
     return Known(FOLDERID_RoamingAppData, "bps");
 }
-
 } // namespace bps::platform

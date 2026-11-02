@@ -1,16 +1,11 @@
 #pragma once
 
-// Built-in notification providers (docs/specs/14 §Notification Providers).
-// Each is an independent INotificationProvider; a UI frontend adds its own
-// Toast/Banner providers without touching the service.
-
 #include "modules/notification/INotificationProvider.hpp"
 
 #include <mutex>
 #include <string>
 
 namespace bps::notification {
-
 // Logs every notification through the engine Logger (category "Notify").
 // Channel: "console".
 class ConsoleNotificationProvider final : public INotificationProvider {
@@ -79,12 +74,6 @@ private:
     bool hasLatest_ = false;
 };
 
-// HTTP webhook provider (docs/specs/14 §Notification Providers): POSTs each
-// notification as a JSON payload to a configured endpoint using the PAL
-// ISocket transport (no curl dependency). Configure with a URL such as
-// "http://host:port/hooks/engine" (https/TLS is a documented future backend).
-// Without a configured URL every Show degrades to Err::Unsupported so the
-// service keeps running.
 class WebhookNotificationProvider final : public INotificationProvider {
 public:
     const char* Name() const noexcept override { return "Webhook"; }
@@ -145,5 +134,4 @@ private:
     std::vector<Notification> seen_;
     std::vector<uint64_t> dismissed_;
 };
-
 } // namespace bps::notification

@@ -1,63 +1,13 @@
 import QtQuick
 import VGRPresenterUI
 
-// The right panel's "TEXT" tab content — shown when a "text" kind canvas item
-// is selected (see EditScreen.qml's rightPanelTab). Edits the item's typography
-// (bold/italic/underline/strikethrough, alignment, size, line height, letter
-// spacing, auto-size mode) plus its raw geometry, straight off the item's own
-// `meta` bag (see CanvasItem.qml) and x/y/width/height — the same
-// live-object-binding convention SizeStyleCard.qml uses for style, so a change
-// here shows up on the canvas immediately, no mirroring layer.
-//
-// LAID OUT AS FREESHOW'S EDIT PANEL. The whole tab is the shared
-// InspectorSection card (see its header): one headerless block carrying the
-// controls an operator touches constantly (font family/weight/colour, the
-// B/I/U/S formatting row, Size), then collapsible sections — Align, Text,
-// Lines, List, Position & Size — each with the tab's one section hue, a chevron,
-// and a Reset chip that appears only when that section's values differ from
-// their defaults (and force-opens the section when they start to). That
-// replaced this panel's previous mixture of three hand-rolled collapsible
-// headers and four flat ALL-CAPS labels, which meant two different collapse
-// implementations and no way to reset one group.
-//
-// `meta` fields this owns: bold, italic, underline, strikethrough,
-// align ("left"|"center"|"right"|"justify"), verticalAlign ("top"|"center"|
-// "bottom"), fontFamily, fontWeight (display string only, no picker UI yet),
-// autoSize ("none"|"shrinkToFit"|"growToFit" — FreeShow's textFit vocabulary;
-// legacy "shrink"/"grow" values are mapped on the canvas side), fontSize,
-// lineHeight, lineSpacing (the px gap between line boxes), lineBg (the per-LINE
-// background band; "" = none), letterSpacing, wordSpacing, oneLine, textCase, list. All
-// optional — an item created
-// before this panel existed just reads as the same defaults
-// EditableCanvasLabel already rendered (16px, Medium weight, centered).
-//
-// Colors read Theme tokens, so a Light choice recolours this panel with the
-// rest of the app.
 Column {
     id: root
 
     // The CanvasItem being edited (must be kind "text"), or null.
     property var target: null
 
-    // A function the consumer points at its own undo/history snapshot
-    // function (e.g. EditScreen.qml's root.pushUndoSnapshot) — called once
-    // per discrete edit (a toggle click, finishing a geometry field, the
-    // start of a slider drag), never per intermediate value. Not wired
-    // directly to a specific undo system so this panel (and the same
-    // pattern on any other control) stays reusable outside EditScreen.qml
-    // too; null just means "no undo support here yet."
     property var undoHook: null
-    // Called BEFORE undoHook — hands keyboard focus back to the canvas
-    // first, same as clicking to select an item already does (see
-    // EditScreen.qml's handleCanvasSelect) and the same as a resize-handle
-    // press already does (DraggableCanvasText's onPressed). Without this, a
-    // slider drag that starts while THIS panel's own text item is still
-    // mid-edit leaves focus on its TextEdit — Ctrl+Z/Ctrl+Y are gated on
-    // mCanvas.activeFocus specifically (so they can't steal focus away from
-    // an in-progress typing session), and that gate would then stay closed
-    // for the rest of the session, not just this one drag. Same reusability
-    // reasoning as undoHook above: a consumer wires this to
-    // mCanvas.forceActiveFocus; null means nothing to hand off to.
     property var focusHook: null
     function notifyUndo() {
         if (root.focusHook)
@@ -73,11 +23,6 @@ Column {
     signal changeTextCaseRequested()    // opens the As-typed / UPPER / lower / Title list (Text section)
     signal changeLineBackgroundRequested()  // the Lines card's "Background color" row (per-LINE bands)
 
-    // The "Font family", "Weight" and "Auto size" fields themselves (not
-    // this whole panel) — so each field's own dropdown can be anchored to,
-    // and width-matched against, the actual trigger field instead of a
-    // hardcoded offset into the panel (user call: "let the font [list] be
-    // [the] same width as it[s] drop[down trigger]... fix the weight also").
     readonly property alias fontFamilyFieldItem: fontFamilyField
     readonly property alias weightFieldItem: weightField
     readonly property alias autoSizeFieldItem: autoSizeField
@@ -94,9 +39,6 @@ Column {
     // Mirrors `align` but for the vertical axis ("top" | "center" | "bottom") - DesignPreview.qml and
     // EditScreen.qml's canvas both already read this key; only this panel's picker was missing.
     readonly property string verticalAlign: root.meta.verticalAlign ?? "center"
-    // What the item ASKS FOR (shown in the picker, so the stored name is visible)
-    // and what every surface actually DRAWS with — the engine's resolution, so
-    // this panel's fit measurement matches the canvas and the frame.
     readonly property string fontFamily: root.meta.fontFamily ?? FontService.defaultContentFamily
     readonly property string drawFamily: FontService.resolve(root.meta.fontFamily)
     readonly property string fontWeight: root.meta.fontWeight ?? "SemiBold"
@@ -106,23 +48,10 @@ Column {
     // The list style (an ENGINE list style key, see TextFormatService.listStyles): every line of the text becomes a list item.
     readonly property string listStyle: root.meta.list ?? "none"
     readonly property real fontSize: root.meta.fontSize ?? 16
-    // WHAT THIS ROW SHOWS IS WHAT EVERY SURFACE DRAWS. These two read through
-    // MetadataFields — the one reading the Edit canvas, every DesignPreview
-    // tile and the engine's SceneBuilder also use — instead of
-    // this panel's own arbitrary `?? 0` / `?? 1.0`. That pair is what produced
-    // the report this replaces: the Height row read 0 for an item whose meta
-    // never named a line height, while the canvas, the previews and the outputs
-    // all drew 1.2x the font's natural spacing. 0 now means "the font's own
-    // line height" and is displayed as that (1.0), so the number in the panel is
-    // the number on screen.
     readonly property real lineHeight: MetadataFields.lineHeight(root.meta)
     // Blank air BETWEEN line boxes (the Lines card's second field) — additive px,
     // separate from the line height above, exactly FreeShow's split.
     readonly property real lineSpacing: MetadataFields.lineSpacing(root.meta)
-    // The per-LINE background colour ("/" or "transparent" = none). The Lines
-    // card's swatch row. One reading of "no band" for the row, its reset state
-    // and MetadataFields.lineBandText, so the picker's own transparent swatch
-    // turns the band OFF rather than storing a colour nothing draws.
     readonly property string lineBg: root.meta.lineBg ?? ""
     readonly property bool hasLineBg: root.lineBg !== "" && root.lineBg !== "transparent"
     // FreeShow's `lineRadius`: how round each line's band is (0 = square).
@@ -131,26 +60,7 @@ Column {
     readonly property real wordSpacing: MetadataFields.wordSpacing(root.meta)
     readonly property bool oneLine: MetadataFields.oneLine(root.meta)
 
-    // ONE hue for every section header in this tab, defined once.
-    //
-    // FreeShow gives each section its own colour (its edit/values/item.ts
-    // sectionColors: align #f079b2, text #e490c9, lines #ffb6e7, list #a16adb,
-    // position #f079b4). Carried over literally, that produced a row of
-    // near-pinks plus one purple, so the Align / List / Position & Size headers
-    // did not match the Text and Lines ones — the report this answers. The tab
-    // now uses the Text section's hue for all five: a single definition, so the
-    // header colours cannot drift section by section again.
     readonly property color sectionHue: "#e490c9"
-
-    // FreeShow's control shape for this panel (its edit/values/boxes.ts and the
-    // box markup in EditValues.svelte): every control is its own bordered FIELD
-    // — a small section-hue label on top, the value underneath, a chevron when
-    // it opens a list. A dense panel stays scannable because the box is the hit
-    // target and the label says what the value means, instead of one loose row
-    // of names and chips where only the operator's memory says which is which.
-    // The labeled chevron box (Font family / Weight / Auto size below) is
-    // now the shared FieldBox.qml component — see its own header for why it
-    // moved out of here.
 
     // One cell of the B/I/U/S group — FreeShow's four style toggles, which are a
     // single segmented control there rather than four separate buttons.
@@ -164,10 +74,6 @@ Column {
 
         height: 36
         radius: 9
-        // Premium shape: each toggle is its own rounded cell with a gap, and
-        // the ON state is a soft accent wash with the accent label — the thin
-        // underline bar this used to draw read as a text decoration inside a
-        // box, not as a switch that is on.
         color: toggle.active
                ? Qt.alpha(Theme.accent, toggleArea.hovered ? 0.22 : 0.16)
                : (toggleArea.hovered ? Theme.hoverBg : Theme.inset)
@@ -199,22 +105,6 @@ Column {
         }
     }
 
-    // The largest font size at which this item's text still fits its box's
-    // inner area (box minus padding). Measured from fitMeasure below: text
-    // metrics scale linearly with font size, so the fit size is the base
-    // render's size scaled by how much the text over/under-fills the box.
-    // Drives the Size slider's dynamic max — the slider ends exactly where
-    // the text would start leaving the bounding box, instead of letting the
-    // thumb travel dead space that changes nothing (or overflows the box).
-    //
-    // Only meaningful in shrinkToFit/growToFit, where "fits the box" is the
-    // actual goal — in "none" the user has fully manual control and this
-    // must stay a FIXED ceiling. It depends on fitMeasure's content size,
-    // which changes with every keystroke, so leaving it live in "none" mode
-    // made the slider's max (and so the thumb's position for an unchanged
-    // value) visibly drift while typing, with nothing having actually
-    // changed the font size — reads exactly like "the size crept up on its
-    // own".
     readonly property real fitMaxFontSize: {
         if (root.autoSize === "none")
             return 400
@@ -230,11 +120,6 @@ Column {
         return Math.max(8, Math.min(400, Math.floor(root.fontSize * Math.min(bw / cw, bh / ch))))
     }
 
-    // Reassigns the whole object — `meta` is a plain `var` property on a
-    // QtObject (CanvasItem), so mutating a field on the existing object in
-    // place wouldn't fire its change notification; only a fresh assignment
-    // does (same reasoning as CanvasItem.qml's own header comment about why
-    // it's a real QtObject in the first place).
     function setMeta(key, value) {
         if (!root.target)
             return
@@ -243,19 +128,11 @@ Column {
         root.target.meta = m
     }
 
-    // For discrete, single-shot edits (a toggle click, an alignment pick,
-    // an autoSize pick) — notifies undo once and applies, as one step.
-    // Slider-driven edits go through setMeta directly instead, since their
-    // undo notification brackets the whole drag via dragStarted (see the
-    // Size/Height/Spacing sliders below) rather than firing per value.
     function setMetaDiscrete(key, value) {
         root.notifyUndo()
         root.setMeta(key, value)
     }
 
-    // Several keys back to their defaults as ONE undo step — what a section's
-    // Reset chip does (FreeShow's resetSection, which sweeps every input in the
-    // group rather than one at a time).
     function resetMeta(values) {
         if (!root.target)
             return
@@ -268,12 +145,6 @@ Column {
 
     spacing: 8
 
-    // Invisible measurement twin for fitMaxFontSize above — renders the
-    // item's text with the exact styling the canvas will use (family,
-    // weight chain incl. the bold override, italic, spacing, line height)
-    // so the measured fit matches what the canvas shows. Invisible items
-    // are skipped by positioners, so this adds no visual gap in the Column.
-    // Mirrors EditScreen.qml's shrinkMeasure — keep the two in sync.
     Text {
         id: fitMeasure
         visible: false
@@ -287,24 +158,11 @@ Column {
     }
 
     // ---- The always-open block ------------------------------------------
-    // FreeShow's first section has no title bar: the controls an operator uses
-    // on every single text item stay one click away, and only the optional
-    // groups below fold away. Same card surface, so it still reads as part of
-    // the stack.
     InspectorSection {
         width: parent.width
         alwaysOpen: true
         title: qsTr("Text")
 
-        // Family, weight AND colour, all ONE row — FreeShow's own grid
-        // (InspirationOrResources/FreeShow-main: EditValues.svelte's
-        // "default" section + MaterialFontDropdown.svelte, whose font-family
-        // dropdown and a label-less "only arrow" style dropdown already sit
-        // in ONE InputRow, with a flex:1 colour swatch joining them — "do the
-        // same" per user call, "your design is wasting space"). The old
-        // layout gave Text colour its OWN full-width row below this one; a
-        // compact swatch here (hover for the hex, HoverDetail — the shared
-        // component, not a bespoke label) removes that whole wasted block.
         Row {
             id: fontFieldRow
             width: parent.width
@@ -312,10 +170,6 @@ Column {
 
             FieldBox {
                 id: fontFamilyField
-                // Widths are (row width - 2 gaps - the swatch's 50) split
-                // 2:1 — the old 0.5/0.3/0.2 shares plus the 16px of gaps came
-                // to more than 100%, which squeezed the Weight box down to a
-                // bare chevron with no label and no value.
                 width: (parent.width - 16 - 50) * 0.62
                 label: qsTr("Font family")
                 value: root.fontFamily
@@ -365,10 +219,6 @@ Column {
             }
         }
 
-        // B / I / U / S as ONE segmented group — FreeShow's shape for its style
-        // row (four touching cells inside a single bordered control) rather than
-        // four separate chips: they are one switch group, and each cell previews
-        // what it does (bold, italic, underlined, struck through).
         Item {
             id: styleGroup
             width: parent.width
@@ -402,26 +252,10 @@ Column {
             }
         }
 
-        // Font size AND Auto size, one row — same FreeShow grid as the
-        // family/weight/colour row above (boxes.ts' "default" section pairs
-        // font-size with textFit in exactly this shape). Auto size used to
-        // be three buttons inside the collapsible "Text" section below —
-        // moved here as a compact chevron-Field (its own dropdown, same
-        // shape as Font family/Weight) since it is a control every text item
-        // uses, not an occasional one, and burying it cost a whole extra row
-        // most operators never opened.
         Row {
             width: parent.width
             spacing: 8
 
-            // An EDITABLE VALUE, not a slider (user call: "remove the slider
-            // for font size, just editable values in text box"): a size is
-            // typed far more often than it is dragged, and a drag cannot hit
-            // "47" — the number field carries the same type-a-number value with
-            // the reference's up/down stepper beside it. The dynamic fit ceiling
-            // the slider used to impose is gone with it; the box is the master
-            // in every auto-size mode anyway (the solver squeezes on overflow),
-            // so nothing here can push text out of its box.
             NumberField {
                 id: fontSizeField
                 width: (parent.width - 8) * 0.58
@@ -431,9 +265,6 @@ Column {
                 decimals: 0
                 minValue: 1
                 maxValue: 400
-                // Inert in growToFit: there the BOX is the master and the
-                // rendered size follows the box regardless of this value, so
-                // the control dims instead of pretending.
                 enabled: root.autoSize !== "growToFit"
                 opacity: root.autoSize === "growToFit" ? 0.4 : 1
                 Behavior on opacity { NumberAnimation { duration: 100 } }
@@ -452,13 +283,6 @@ Column {
     }
 
     // ---- Align ----------------------------------------------------------
-    // Holding the horizontal row (left/center/right/justify) above the vertical
-    // one (top/center/bottom). Icons are FreeShow's own, not hand-drawn bars —
-    // see IconGlyph.qml. Vertical is where the text SITS in its box
-    // top-to-bottom rather than how each line is spread left-to-right; it was
-    // fixed at "center" with no way to change it (a hardcoded engine default was
-    // the only lever, and only per-template, not per-item) — a tall box holding
-    // variable-length bound text needs this pickable per item.
     InspectorSection {
         id: alignSection
         width: parent.width
@@ -472,9 +296,6 @@ Column {
             id: alignToggle
             property bool active: false
             property string icon: ""
-            // Set per-row (4 horizontal buttons vs 3 vertical ones share the
-            // row's width differently) - defaults to the 4-across math so a
-            // stray usage doesn't collapse to 0.
             property int siblingCount: 4
             signal picked()
 
@@ -521,18 +342,6 @@ Column {
     }
 
     // ---- Text: how the characters are presented, and how they fit --------
-    // FreeShow's own "Text" card (its edit/values/boxes.ts `default` group): a
-    // label-over-value FIELD per control instead of a label plus a row of
-    // chips — Letter spacing, Word spacing, Text transform, Text on one line.
-    // The chip rows this replaced (Case as four buttons) said the same thing in
-    // three times the height and offered no place for a numeric value at all.
-    //
-    // WORD SPACING IS HONOURED BY EVERY SURFACE, which is why it is here at all:
-    // QML's font value type carries it (font.wordSpacing), so the canvas label
-    // and the tile previews set it directly, and the engine carries the same
-    // number as TextStyle::wordSpacing — measured by TextLayout, drawn per
-    // space glyph by DrawTextObject, and part of the layout cache key so a
-    // measured layout can never be served to a style that spaces differently.
     InspectorSection {
         id: textSection
         width: parent.width
@@ -544,10 +353,6 @@ Column {
         hasChanges: root.textCase !== "none" || root.oneLine
                   || Math.abs(root.letterSpacing) > 0.001 || Math.abs(root.wordSpacing) > 0.001
         onResetRequested: root.resetMeta({ textCase: "none", oneLine: false, letterSpacing: 0, wordSpacing: 0 })
-
-        // The number fields here are the shared NumberField.qml (its header
-        // says why a value is typed or nudged rather than dragged, and why
-        // the stepper is a pair of pills rather than a divider).
 
         Row {
             width: parent.width
@@ -591,10 +396,6 @@ Column {
             onTapped: root.changeTextCaseRequested()
         }
 
-        // "Text on one line" — a real switch, not a chip: the canvas label
-        // stops wrapping, and the engine folds the content's newlines to
-        // spaces before laying the block out (see SceneBuilder), so a single
-        // line on the canvas is a single line on air.
         Item {
             id: oneLineRow
             width: parent.width
@@ -643,24 +444,11 @@ Column {
         title: qsTr("Lines")
         icon: "textLines"
         iconColor: root.sectionHue
-        // Letter spacing moved into the Text card (it is a text-presentation
-        // control, and FreeShow keeps it there next to the transform); this
-        // section is line height alone now.
         hasChanges: Math.abs(root.lineHeight - 1) > 0.001
                   || Math.abs(root.lineSpacing) > 0.001
                   || root.hasLineBg || root.lineRadius > 0
         onResetRequested: root.resetMeta({ lineHeight: 0, lineSpacing: 0, lineBg: "", lineRadius: 0 })
 
-        // The SAME editable value box the Text card's spacing rows use (user
-        // call: "the same for lines") — a line height is typed or nudged by a
-        // tenth, so a slider was the wrong control here too. The value is the
-        // multiplier QML's Text.lineHeight and the engine's lineHeight both
-        // mean (1.0 = the font's own spacing; the panel's neutral is 1).
-        // Two numbers, FreeShow's own split (its boxes.ts `lines` group): the
-        // HEIGHT sizes one line box (a multiplier of the font's own spacing),
-        // the SPACING opens blank air between one box and the next (additive
-        // px). One field could not say both, and a line height alone cannot
-        // make a dense verse breathe.
         Row {
             width: parent.width
             spacing: 12
@@ -689,12 +477,6 @@ Column {
             }
         }
 
-        // THE PER-LINE BACKGROUND (FreeShow's lineBg). NOT the item's background
-        // — that one fills the whole box and lives on the Background row above;
-        // this one draws a band behind each LINE of the text, following the
-        // wrapping, so a verse can be read a line at a time. Same field shape as
-        // the numbers beside it, with the swatch standing in for the value; an
-        // unset band shows the chequer and reads "None", not black.
         Rectangle {
             id: lineBgField
             width: parent.width
@@ -744,9 +526,6 @@ Column {
                 Checkerboard {
                     anchors.fill: parent
                     visible: !root.hasLineBg
-                    // The shared board (13px cells), not this swatch's own 7px:
-                    // a smaller cell on one surface made the same "no background"
-                    // read as a finer pattern than the canvas behind it.
                 }
             }
             PositionHoverArea {
@@ -757,9 +536,6 @@ Column {
             }
         }
 
-        // How round each line's band is (FreeShow's lineRadius). Half width, the
-        // same grid as the pair above, and dimmed while no band is set — a radius
-        // nothing draws would be a control that lies.
         NumberField {
             width: (parent.width - 12) / 2
             label: qsTr("Line radius")
@@ -774,9 +550,6 @@ Column {
     }
 
     // ---- List -----------------------------------------------------------
-    // Like FreeShow's list option: every line becomes an item, marked with a
-    // bullet, a dash, numbers, letters ... The typed text is never changed (the
-    // marker is added when it is shown), and the styles come from the engine.
     InspectorSection {
         id: listSection
         width: parent.width

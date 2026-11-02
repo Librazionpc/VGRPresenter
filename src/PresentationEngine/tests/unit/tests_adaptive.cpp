@@ -1,6 +1,3 @@
-// Unit tests: Adaptive Runtime (docs/specs/16).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests adaptive
 #include "TestHarness.hpp"
 
 void TestAdaptiveHardware() {

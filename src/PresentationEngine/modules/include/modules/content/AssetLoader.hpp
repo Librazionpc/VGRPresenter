@@ -1,9 +1,5 @@
 #pragma once
 
-// AssetLoader (docs/specs/13 §Asset Loader): responsible ONLY for turning
-// metadata into a RuntimeAsset. Sync + async (via Core ThreadPool), with
-// progress and cancellation. Text assets are decoded to a string form.
-
 #include "modules/content/RuntimeAsset.hpp"
 #include "core/common/Common.hpp"
 
@@ -12,7 +8,6 @@
 #include <memory>
 
 namespace bps::content {
-
 class IVfs;
 
 struct LoadProgress {
@@ -53,5 +48,4 @@ public:
 private:
     ReadFn read_;
 };
-
 } // namespace bps::content

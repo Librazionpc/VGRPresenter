@@ -6,30 +6,6 @@
 #include <QVariantMap>
 #include <qqml.h>
 
-// One recording / streaming PRESET (Settings · Recording). A preset is a named,
-// reusable configuration of ONE of two kinds:
-//
-//   "recording"  container (MKV/MP4), encoder, video + audio bitrate, frame rate,
-//                resolution, output folder — how a take is written to disk.
-//   "streaming"  platform, RTMP server URL + stream key, video + audio bitrate,
-//                frame rate, resolution, encoder — where and how a feed is pushed.
-//
-// Settings · Routing wires an output to a preset (OutputItem::presetId, by the
-// preset's STABLE id, exactly how an output wears a style), and that output then
-// records / streams with THAT preset's configuration instead of one global page of
-// settings. Several presets live side by side.
-//
-// `config` is a flat map of strings (the same shapes the old page persisted), the
-// field set of its kind — see defaultConfig(). The roster is persisted through the
-// kernel's PresetStore (DatabaseManager "presets"/"roster") after every mutation,
-// and re-read when the engine finishes booting (the kernel store only OPENS during
-// Boot, which is after this singleton exists — the same boot gap StyleListModel
-// documents).
-//
-// C++ readers (RoutingService, RecordingService) do NOT go through the singleton:
-// QML builds its own instance of these models, so a C++ read of instance() could
-// land on a different roster. They use the static lookup() below, which reads the
-// kernel store — the one place both sides agree on.
 struct PresetItem
 {
     QString id;

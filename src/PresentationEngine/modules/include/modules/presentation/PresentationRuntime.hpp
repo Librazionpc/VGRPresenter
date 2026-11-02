@@ -1,11 +1,5 @@
 #pragma once
 
-// PresentationRuntime (docs/specs/19 §Presentation Runtime + Controller). Runs a
-// live presentation: owns the state machine, navigator, timeline, compiled
-// form, playback clock and cue context. Receives controller commands
-// (Next/Previous/JumpTo/GoLive/Pause/Resume/Stop) and advances playback.
-// Orchestration only — no rendering, no display routing.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -32,9 +26,6 @@ class PresentationRuntime {
 public:
     PresentationRuntime();
 
-    // --- Binding --------------------------------------------------------------
-    // Binds a presentation (state -> Loaded). Validates/compiles/prepares via
-    // the explicit pipeline methods below.
     Result<void> Open(const Presentation& presentation);
     Result<void> Close();
     bool IsOpen() const { return pres_ != nullptr; }
@@ -45,34 +36,14 @@ public:
     Result<std::vector<ValidationIssue>> Validate(const PresentationValidator& validator);
     Result<void> Compile(const PresentationCompiler& compiler,
                          const std::map<std::string, std::string, std::less<>>* sceneIds = nullptr);
-    // Prepares scenes through the SceneBuilder for every compiled slide.
-    // `style` is the on-air output's OutputStyleSpec (empty = unstyled) —
-    // passed through to every scene build so a style change made while live
-    // is picked up on the next re-Prepare (styled scene ids fingerprint the
-    // spec, so no invalidation pass is needed).
     Result<void> Prepare(SceneBuilder& builder, rendering::RenderEngine& engine,
                          const OutputStyleSpec& style = OutputStyleSpec{});
 
-    // Rebuilds every compiled slide's scene under `style` WITHOUT touching the
-    // state machine — legal while LIVE (Prepare's Prepared/Ready transitions
-    // are not, and the live loop must never bounce through them). The live
-    // controller calls this when the on-air style changes (FreeShow's
-    // reactive output.style).
     Result<void> RebuildScenes(SceneBuilder& builder, rendering::RenderEngine& engine,
                                const OutputStyleSpec& style);
 
-    // LIVE REPLACE (FreeShow's setOutput("slide", { id: "temp", ... })): rebinds
-    // the runtime to new content WHILE LIVE — raw pointer + navigator + clock
-    // reset, recompile, all with the state machine staying in Live (Compile's
-    // own Compiled transition is illegal from Live). `content` must outlive the
-    // run (the runtime stores a raw pointer). Call RebuildScenes afterwards to
-    // build the new content's scenes.
     Result<void> SwapLive(const Presentation& content, const PresentationCompiler& compiler);
 
-    // Style-change epoch: PresentationEngine::SetActiveOutputStyle advances
-    // it; the live loop compares it per frame (one relaxed atomic read) and
-    // rebuilds scenes when it moves — a style pushed mid-show lands within
-    // one frame.
     void AdvanceStyleRevision() noexcept { styleRevision_.fetch_add(1, std::memory_order_relaxed); }
     uint64_t StyleRevision() const noexcept { return styleRevision_.load(std::memory_order_relaxed); }
     Result<void> GoLive();
@@ -88,17 +59,10 @@ public:
     Result<void> Last();
     Result<void> JumpTo(size_t index);
     Result<void> JumpById(std::string_view slideId);
-    // The live group-shortcut jump (Settings · Look & Feel's groups): the
-    // NEXT visible slide carrying this tag after the current one, wrapping —
-    // see PresentationNavigator::JumpByTag for why it cycles instead of
-    // always landing on the first match.
     Result<void> JumpByTag(std::string_view tag);
     Result<size_t> Search(std::string_view query) const;
     Result<void> Back();
 
-    // --- Playback clock ---------------------------------------------------------
-    // Advances the timeline + auto-advance by dt seconds. Only meaningful in
-    // Live/Paused states. Returns the number of cues fired.
     Result<size_t> Tick(double dt);
 
     // --- State ----------------------------------------------------------------
@@ -141,5 +105,4 @@ private:
     std::vector<Subscription> subscriptions_;
     bool eventsWired_ = false;
 };
-
 } // namespace bps::presentation

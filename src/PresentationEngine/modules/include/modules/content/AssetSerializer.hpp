@@ -7,7 +7,6 @@
 #include "core/config/Json.hpp"
 
 namespace bps::content {
-
 constexpr int kMetadataSchemaVersion = 1;
 
 class AssetSerializer {
@@ -22,10 +21,6 @@ public:
     static json::Value LibraryToJson(const std::vector<AssetMetadata>& library);
     static Result<std::vector<AssetMetadata>> LibraryFromJson(const json::Value& v);
 
-    // Migration hook: returns a copy of `doc` upgraded to targetVersion.
-    // Currently schema v1 only; future versions add migration steps here
-    // without changing callers.
     static Result<json::Value> Migrate(json::Value doc, int targetVersion);
 };
-
 } // namespace bps::content

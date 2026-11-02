@@ -17,24 +17,10 @@ namespace {
 // usually reads 0/0/0 (the engine's numbers themselves update per frame).
 constexpr int kPollMs = 500;
 
-// The service the QML engine made, if anything ever asked for one. Set by instance() (the
-// interface thread) and read by shutdownSampler() (the interface thread, at quit) — so
-// main.cpp's quit path can stop a sampler that is running without CREATING a service, its
-// thread and its first PAL sample in a session that never opened a settings screen.
 TelemetryService *g_live = nullptr;
 
-// The sampler thread's own id, hashed. Written once by that thread, read by the interface
-// thread for the ONE diagnostic below — the line that makes the split of work visible in a
-// log rather than only true in the code.
 std::atomic<size_t> g_samplerThread{0};
 
-// THE HEALTH MAP WITH NOTHING MEASURED — the shape `health` always has. sampleHealth()
-// fills this in, and the constructor publishes it before the first sample lands, so a dial
-// that binds health the moment its screen opens reads -1 ("not measured", the documented
-// value for a reading the platform has not given) instead of QML's undefined, which a
-// numeric property cannot even take. That last part is not theory: the meters on Settings ·
-// General's resource card are int-typed, and an empty map in the first moments produced
-// exactly that warning.
 QVariantMap unmeasuredHealth()
 {
     return {
@@ -80,16 +66,6 @@ TelemetryService *TelemetryService::create(QQmlEngine *engine, QJSEngine *jsEngi
 TelemetryService::TelemetryService(QObject *parent)
     : QObject(parent)
 {
-    // 2Hz, and the reading half of it runs OFF this thread (see the header): the PAL sample
-    // and the engine reads can each cost milliseconds on a machine that is working hard,
-    // and this object's thread is the one drawing the service. Starts unconditionally —
-    // every read is safe before boot too (they read zeros until the Kernel wires the module
-    // and frames flow).
-    //
-    // The SHAPES are published here, before the sampler's first pass: QML binds these maps
-    // the moment a screen opens, and "not measured yet" has to read as the documented -1
-    // rather than as a missing key. No signals — nothing has connected to this object while
-    // it is still being constructed.
     utilization_ = zeroUtilization();
     health_ = unmeasuredHealth();
     stop_.store(false, std::memory_order_relaxed);
@@ -115,9 +91,6 @@ void TelemetryService::stopSampler()
     stop_.store(true, std::memory_order_relaxed);
     wake_.notify_all();                  // do not wait out the sampling interval
     if (sampler_.joinable())
-        // Bounded in practice by the sample in flight: each read is one OS call or one
-        // engine snapshot, never a wait. Joining is what guarantees no read is still
-        // running when the engine begins tearing down.
         sampler_.join();
 }
 
@@ -130,10 +103,6 @@ void TelemetryService::samplerLoop()
         // the first moments must not leave a PAL sample running into the teardown.
         if (stop_.load(std::memory_order_relaxed))
             return;
-        // Read OUTSIDE any lock ("guard the publish, never the work"), then hand the maps
-        // to the interface thread QUEUED — the maps are what QML binds to, and publishing
-        // them is the interface thread's business. The same worker-to-GUI bookend the
-        // chapter and indexer workers use.
         Sample s = measure();
         s.pass = ++pass_;
         QMetaObject::invokeMethod(this, [this, s] { publish(s); }, Qt::QueuedConnection);
@@ -155,10 +124,6 @@ TelemetryService::Sample TelemetryService::measure()
         {QStringLiteral("output"), u.output},
     };
     s.health = sampleHealth();
-    // The live loop's own rate and frame cost, and the per-second curve behind
-    // them. Cheap (the module's counters and a small vector copy) and it is the
-    // one reading here that can go stale the moment a show starts, so it is read
-    // on EVERY pass.
     s.live = sampleLive();
     s.liveHistory = sampleLiveHistory();
     // What the engine is DOING with the machine. Slow-changing (and heavier to
@@ -175,10 +140,6 @@ TelemetryService::Sample TelemetryService::measure()
 void TelemetryService::publish(const Sample &s)
 {
     if (!threadingLogged_) {
-        // ONE line per session, and it is the whole claim in one place: the two ids must
-        // differ — the PAL sample is read on one thread and published on the thread that
-        // draws (see the header). It also dates the change for anyone reading a log from a
-        // machine where a settings screen felt slow to open.
         threadingLogged_ = true;
         EngineBridge::write(QStringLiteral("info"), QStringLiteral("Telemetry"),
                             QStringLiteral("samples are READ on thread 0x%1 and PUBLISHED on the interface "
@@ -187,10 +148,6 @@ void TelemetryService::publish(const Sample &s)
                                 .arg(std::hash<std::thread::id>{}(std::this_thread::get_id()), 0, 16));
     }
     if (!readingsLogged_ && s.pass >= 2) {
-        // The second pass is the first with something measured to show: CPU% is a DELTA
-        // between two PAL samples, so the first pass can only be the baseline (it reads -1)
-        // and logging it would look like a fault. This is the other half of the claim —
-        // real readings still reach the maps the interface binds.
         readingsLogged_ = true;
         EngineBridge::write(QStringLiteral("info"), QStringLiteral("Telemetry"),
                             QStringLiteral("first measured pass: cpu=%1% gpu=%2% mem=%3% temp=%4C "
@@ -215,9 +172,6 @@ void TelemetryService::publish(const Sample &s)
         engine_ = s.engine;
         emit engineChanged();
     }
-    // The live loop's numbers and its curve. Both change while a show runs and go
-    // quiet when it stops — the engine clears its own on stop, so the change is
-    // seen here too, which is what makes the session-end summary below fire.
     if (s.live != live_) {
         live_ = s.live;
         emit liveChanged();
@@ -226,21 +180,9 @@ void TelemetryService::publish(const Sample &s)
         liveHistory_ = s.liveHistory;
         emit liveHistoryChanged();
     }
-    // ONE LINE PER LIVE SESSION, written when it ends and carrying its shape. The
-    // curve exists so a slowdown is looked at rather than mined out of the log —
-    // but a session's slowest raster and its lowest composed rate are the two
-    // numbers the next report is actually made of, and they are only final once
-    // the loop has stopped (the engine clears the counters with the curve, which
-    // is exactly the edge this reads).
     if (!s.live.isEmpty()) {
         const double frameMs = s.live.value(QStringLiteral("frameMs")).toDouble();
         const double fps = s.live.value(QStringLiteral("composedFps")).toDouble();
-        // ONE line naming the show's hotspot, the first time there is one: the
-        // curve on the Settings card says WHICH second got slow, and this says
-        // WHAT made it slow — in the log, where a slowdown is read back after the
-        // service, and where the feature is verifiable without a screenshot
-        // (see LiveSample::costElement; the element comes from the renderer's own
-        // cost profile, so this is the engine's account of its own frame).
         if (!liveCostLogged_) {
             const QString element = s.live.value(QStringLiteral("costElement")).toString();
             if (!element.isEmpty()) {
@@ -258,9 +200,6 @@ void TelemetryService::publish(const Sample &s)
         }
         if (frameMs > liveWorstFrameMs_) {
             liveWorstFrameMs_ = frameMs;
-            // The element THAT frame's cost went into: the summary line below is
-            // the one place a slowdown is read back after the fact, so it has to
-            // end in a name rather than only in a number.
             liveWorstElement_ = s.live.value(QStringLiteral("costElement")).toString();
             liveWorstSharePct_ = s.live.value(QStringLiteral("costSharePct")).toDouble();
         }
@@ -278,9 +217,6 @@ void TelemetryService::publish(const Sample &s)
         liveMinComposedFps_ = 0.0;
         liveWorstElement_.clear();
         liveWorstSharePct_ = 0.0;
-        // ...and WHICH ELEMENT that worst frame's cost went into, when the
-        // renderer named one: the summary is only actionable if the heaviest
-        // raster also says what it was made of (see LiveSample::costElement).
         QString blame;
         if (!element.isEmpty())
             blame = QStringLiteral(" — worst element %1 (%2% of that frame)")
@@ -297,10 +233,6 @@ void TelemetryService::publish(const Sample &s)
     }
 }
 
-// The live loop's own counters (see LiveSample in the engine's Telemetry): the
-// current second's rates and costs plus the running totals, so QML can show a
-// number that moves WITH the show instead of a percentage of the 60Hz target
-// that a slow live loop cannot even fill.
 QVariantMap TelemetryService::sampleLive()
 {
     const bps::settings::LiveStats s = bps::settings::Telemetry::Instance().LiveSnapshot();
@@ -312,11 +244,6 @@ QVariantMap TelemetryService::sampleLive()
         { QStringLiteral("sharedCopies"), static_cast<qlonglong>(s.sharedCopies) },
         { QStringLiteral("composed"), static_cast<qlonglong>(s.composed) },
         { QStringLiteral("represented"), static_cast<qlonglong>(s.represented) },
-        // WHICH ELEMENT MADE THE FRAME EXPENSIVE (see LiveSample::costElement):
-        // the composed frame's own heaviest layer/element, so the curve's caption
-        // can name a cause instead of only showing a shape. costBackgroundPct is
-        // how much of the same frame the scene's own background clear took —
-        // context for the named share, not a second culprit.
         { QStringLiteral("costElement"), QString::fromStdString(s.costElement) },
         { QStringLiteral("costLayer"), QString::fromStdString(s.costLayer) },
         { QStringLiteral("costObject"), QString::fromStdString(s.costObject) },
@@ -326,9 +253,6 @@ QVariantMap TelemetryService::sampleLive()
     };
 }
 
-// The curve: one map per whole second of live loop, oldest first (the engine
-// keeps at most 60 s and drops the oldest). Same shape as `live`, so a card can
-// plot either without a second parse path.
 QVariantList TelemetryService::sampleLiveHistory()
 {
     QVariantList out;
@@ -353,10 +277,6 @@ QVariantList TelemetryService::sampleLiveHistory()
     return out;
 }
 
-// The adaptive runtime's own view: which mode/layer/quality it settled on, how
-// many workers it keeps, and the caps + memory budget it is enforcing. This is
-// the "good management" half — the health map says how the machine is, this
-// says what the engine chose to do about it.
 QVariantMap TelemetryService::sampleEngine()
 {
     const bps::adaptive::RuntimeSnapshot s = bps::adaptive::AdaptiveRuntime::Instance().Snapshot();
@@ -372,9 +292,6 @@ QVariantMap TelemetryService::sampleEngine()
     };
 }
 
-// The machine's own live health, from one PAL sample plus the adaptive
-// runtime's mode (a battery / on-air mode throttles background work even when
-// the part is not hot). CPU% is the jiffies delta since the last poll.
 QVariantMap TelemetryService::sampleHealth()
 {
     double cpuPct = -1.0;
@@ -386,10 +303,6 @@ QVariantMap TelemetryService::sampleHealth()
     // resource dials, which show charge as its own gauge.
     double batteryPct = -1.0;
     bool onBattery = false;
-    // Plugged in AND topping up (platform::Snapshot::batteryCharging). Smart
-    // Config's battery dial caption reads it: "Battery · charging" is a
-    // different state from plain "Battery" (on AC, holding), and the dial the
-    // user watches while the app runs on a laptop has to say which one it is.
     bool charging = false;
 
     if (bps::platform::PlatformAccessor::Installed()) {
@@ -418,9 +331,6 @@ QVariantMap TelemetryService::sampleHealth()
                                     0.0, 100.0);
     }
 
-    // How hard the machine is being held back. Two honest signals: the CPU
-    // running below its nominal clock (% Processor Performance < 100), and a
-    // package temperature at/over the thermal manager's 85C line.
     double throttlePct = 0.0;
     bool thermal = false;
     if (perfPct >= 0.0) {
@@ -446,11 +356,6 @@ QVariantMap TelemetryService::sampleHealth()
         throttling = true;
     }
 
-    // READ UNCONDITIONALLY, deliberately: this runs on the sampler thread, which touches the
-    // engine's own singletons and no QObject — so the `booted()` guard the interface thread
-    // used (an EngineBridge call, and a QObject) is gone. Before the runtime has probed the
-    // hardware the name is simply empty, which is what the surfaces that read it already
-    // treat as "no name to show" (ResourceHealthModal, Smart Config's GPU dial).
     const QString gpuName =
         QString::fromStdString(bps::adaptive::AdaptiveRuntime::Instance().Hardware().gpuName);
 

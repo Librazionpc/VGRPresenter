@@ -1,20 +1,5 @@
 #pragma once
 
-// The real encoders behind a recording profile's "encoder" choice, driven through Windows
-// Media Foundation — the same API the machine's GPU drivers expose their hardware H.264
-// encoders through:
-//
-//   NVENC      the NVIDIA H.264 encoder MFT      (vendor id 10DE)
-//   AMF        the AMD H.264 encoder MFT         (vendor id 1002)
-//   QuickSync  the Intel H.264 encoder MFT       (vendor id 8086)
-//   Software   Microsoft's H.264 encoder MFT
-//
-// A hardware kind exists only when the machine really HAS that encoder (it is found by
-// enumerating the hardware MFTs and reading each one's vendor id), so the list a preset
-// can pick from comes from the device, not from a fixed table. The containers
-// (MediaFoundationMp4 for the hardware path, MatroskaContainer) take their encoded
-// pictures from H264Encoder; AacEncoder produces the raw AAC the Matroska file carries.
-
 #include "core/common/Common.hpp"
 #include "modules/recording/RecordingTypes.hpp"
 
@@ -27,7 +12,6 @@
 #include <vector>
 
 namespace bps::recording {
-
 class RecordingEngine;
 
 // One encoded picture (Annex B byte stream: NAL units behind 00 00 00 01 start codes).
@@ -151,5 +135,4 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-
 } // namespace bps::recording

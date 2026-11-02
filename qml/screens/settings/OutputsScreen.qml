@@ -2,24 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Settings · Screens — the screens a show is sent to: the roster (Add / Edit /
-// Duplicate / Delete), each screen's live state and its on/off toggle. It reads
-// the same C++ singletons the Edit screen's monitor wall renders
-// (OutputListModel), so a rename, duplicate or delete here is reflected
-// everywhere at once.
-//
-// WHAT THIS PAGE NO LONGER OWNS. Two things moved to Settings · Routing, and
-// they are gone from here on purpose:
-//   • the KIND. A row on this page is a SCREEN — an HDMI display surface. The
-//     transports that are not screens (NDI, SDI, recording, streaming) are the
-//     Routing canvas's OUTPUTS, where you add one and wire its video and audio
-//     buses. Picking a kind belonged with the wiring, not with the screen it
-//     ended up on.
-//   • the STYLE. A look is a wire on that canvas (drag a screen onto a style) —
-//     the same style id the engine composes with, set where the routing is
-//     visible, instead of a pill on a roster row.
-// Both are still real OutputListModel state; this page just stopped being the
-// place that decides them, so there is one editor for each fact.
 Item {
     id: root
 
@@ -35,19 +17,12 @@ Item {
     // The canvas right-clicks a card; a screen's editor is THIS page's, so the
     // shell switches here with the row it wants open. -1 = nothing pending.
     property int editRequestRow: -1
-    // Told to the shell once the request has been acted on, so a LATER visit to
-    // this page does not pop the same editor again (the shell owns the value; a
-    // page that reset only its own copy would reopen the dialog next time).
     signal editRequestConsumed()
     function consumeEditRequest() {
         if (root.editRequestRow < 0)
             return
         const row = root.editRequestRow
         root.editRequestConsumed()
-        // The shell clears its own pending value, which drives this property back
-        // to -1 through its binding — and the binding must SURVIVE so the next
-        // request still arrives. Only a page nobody wired (no shell) resets it
-        // itself, once, here.
         if (root.editRequestRow === row)
             root.editRequestRow = -1
         if (row < OutputListModel.rowCount())
@@ -73,25 +48,7 @@ Item {
     }
 
     // ---- NDI firewall authorization (see EngineBridge::
-    // requestNdiFirewallAccess) ------------------------------------------
-    // Asked at most once per session, only while the firewall rule is
-    // actually missing: the RULE is the persisted permission, so once it is
-    // in place (or if the user refused the OS prompt, once they revisit)
-    // this re-fires exactly when it should and never otherwise. The
-    // elevated verdict is confirmed by a short retry timer.
-    //
-    // BOTH HALVES ARE ASYNC. Asking is a hidden `netsh` child process and so
-    // is every probe of the retry timer — work that must not ride inside a
-    // click — so the outcome arrives on ndiFirewallAccessResult and each
-    // tick's verdict on ndiFirewallRuleChecked. These two handlers are the
-    // whole of what used to be "read the return value".
     property bool firewallPending: false
-    // Probe cap: each tick runs a netsh child process — unbounded retries
-    // while a UAC dialog sits unanswered (or was denied) would spawn one
-    // every 2 s for as long as this screen stays open. 15 tries (~30 s)
-    // then give up with an honest notice; the manual re-run remains in
-    // this screen. Counted on the ASK side as well as against an answer, so
-    // a lagging verdict can never overshoot the cap.
     property int firewallProbes: 0
     function giveUpNdiFirewall() {
         if (!root.firewallPending)
@@ -142,10 +99,6 @@ Item {
         repeat: true
         running: root.firewallPending
         onTriggered: {
-            // The CAP is enforced on the asking side: a probe whose verdict is
-            // still in flight must not let the timer spawn another child
-            // process every 2 s (the answer side gives up as well, so the
-            // notice goes out whichever arrives first).
             if (root.firewallProbes >= 15) {
                 root.giveUpNdiFirewall()
                 return
@@ -167,9 +120,6 @@ Item {
     property string addType: "HDMI"
     property string addRes: "1920 × 1080"
     property string addRefresh: "60 Hz"
-    // Which existing screen the new one is placed against (-1 = none).
-    // Physical display the new screen is placed on (QScreen::name,
-    // "" = windowed), and whether its assignment starts locked.
     property string addScreenName: ""
     property bool addLocked: false
     // Whether this output's real destination window (OutputWindow.qml)
@@ -209,10 +159,6 @@ Item {
     // written on Save, matching the dialog's Cancel/Save contract.
     property string editName: ""
     property string editType: "HDMI"
-    // "1920 × 1080", matching the Add dialog's own default (addRes) and
-    // ScreenForm's own fallback — an empty default here left the box blank
-    // for an output whose resolution was never explicitly set (user report:
-    // "it[s] the default value not empty").
     property string editRes: "1920 × 1080"
     property string editRefresh: "60 Hz"
     property string editPattern: "smpte"
@@ -244,11 +190,6 @@ Item {
         root.editOriginalName = data.name
     }
 
-    // The Edit dialog saves the row it was OPENED for, by identity, not by the
-    // row index captured then: the roster is re-hydrated from the engine store
-    // on boot completion (and on any other reload), which renumbers rows, and a
-    // stale index then wrote the dialog's values onto a different output (or
-    // nothing at all) — the reported "Save does nothing, the dialog stays open".
     property string editOriginalName: ""
     function editRow() {
         if (root.editIndex >= 0) {
@@ -268,9 +209,6 @@ Item {
             return
         const row = root.editRow()
         if (row < 0) {
-            // The output this dialog was opened for is gone (deleted in another
-            // view): say so and close — an open dialog with a dead Save button
-            // is the bug being fixed here.
             EventBus.notify(qsTr("That output no longer exists, so nothing was saved."),
                             "error", qsTr("Output not saved"), "outputs.save.missing")
             root.editIndex = -1
@@ -278,13 +216,6 @@ Item {
         }
         root.editIndex = row
         OutputListModel.renameOutput(root.editIndex, root.editName)
-        // The KIND is deliberately not written any more (it is chosen and
-        // changed on Settings · Routing, beside the buses that feed it), so a
-        // save here can never quietly re-transport a row — the round-trip that
-        // used to resurrect the HDMI window on a row switched to NDI is gone
-        // with the picker. Empty editScreenName on a form that never touched
-        // the picker must also not CLEAR a valid binding, so it is normalized
-        // to the row's current one before writing.
         if (root.editScreenName === "")
             root.editScreenName = OutputListModel.getOutput(root.editIndex).screenName
         OutputListModel.setScreenName(root.editIndex, root.editScreenName)
@@ -293,20 +224,11 @@ Item {
         OutputListModel.setTestPattern(root.editIndex, root.editPattern)
         OutputListModel.setBoundsLocked(root.editIndex, root.editLocked)
         OutputListModel.setStayOnTop(root.editIndex, root.editStayOnTop)
-        // The endpoint this row's mix leaves on. Written last among the routing
-        // fields because setAudioDevice re-asks the routing pass, which reads the
-        // row as it now stands.
         OutputListModel.setAudioDevice(root.editIndex, root.editAudioDevice)
-        // The STYLE is not written here either: a screen's look is the style
-        // wire on Settings · Routing, and this dialog no longer carries a
-        // control that could silently restyle a screen on an unrelated save.
         root.chooseDefaultMediaFit(root.editDefaultMediaFit)
         root.editIndex = -1
     }
 
-    // Bumped on any change to the outputs model so derived values recompute.
-    // Plain Q_INVOKABLE reads in bindings aren't tracked, so the revision
-    // counter is the honest way.
     property int modelsRev: 0
     Connections {
         target: OutputListModel
@@ -316,11 +238,6 @@ Item {
     }
 
     // ---- What Settings · Routing has wired to the row being edited ----------
-    // The canvas is the ONE editor for a wire, so this page only REPORTS one:
-    // every label below is read from RoutingService's published snapshot (the
-    // canvas's own truth), never from a copy kept here. `revision` is that
-    // snapshot's version, so making or cutting a wire on the canvas re-derives
-    // these labels on the next binding pass.
     function busLabel(busRow) {
         if (busRow < 0)
             return qsTr("not wired")
@@ -347,10 +264,6 @@ Item {
                 continue
             return {
                 video: root.busLabel(Number(entry.videoBus)),
-                // A row that does not accept audio cannot be "unwired" for it —
-                // saying "not wired" on an HDMI screen would read as a fault
-                // the operator could fix by dragging, and there is nothing to
-                // drag onto it.
                 audio: entry.acceptsAudio ? root.busLabel(Number(entry.audioBus))
                                            : qsTr("not carried"),
                 style: root.styleLabel(String(entry.styleId || "")),
@@ -373,9 +286,6 @@ Item {
         Column {
             id: layout
             x: Theme.space6
-            // Below the fixed title/Add-Output header (pinned to root, same
-            // as addOutputBtn) so the tiles flow underneath it instead of
-            // scrolling the title away with them.
             y: Theme.space6 * 2 + addOutputBtn.height
             width: flick.width - Theme.space6
             spacing: Theme.space6
@@ -386,9 +296,6 @@ Item {
 
                 delegate: Rectangle {
                     id: card
-                    // Named so a self-test scenario can read a ROW the way it is
-                    // rendered (its style note included) instead of only through
-                    // the model — see the VGR_OUTS_TEST block in Main.qml.
                     objectName: "selfTestOutputRow_" + card.index
                     required property int index
                     required property string name
@@ -409,16 +316,6 @@ Item {
                         const state = LiveOutputService.ndiOutputStates[card.name]
                         return card.kind === "NDI" && !!state && state.warming === true
                     }
-                    // LIVE only while a GO LIVE session is actually running:
-                    // an NDI row whose frames verifiably flow right now, an
-                    // HDMI row that OutputWindowManager/OutputWindow actually
-                    // puts a window on (OutputWindow.qml's own `visible` is
-                    // the ground truth: enabled + bound to a screen + live —
-                    // ALL such rows go live simultaneously per
-                    // OutputWindowManager.qml's documented behavior, not just
-                    // the one selected in this screen), or — for kinds with
-                    // no screen window of their own (SDI) — the selected row
-                    // during a live session, same as before.
                     readonly property bool live: ndiFeedIsThisRow
                         || (card.kind === "HDMI" && card.isEnabled && !card.onAirOnly
                             && card.screenName !== "" && LiveOutputService.live)
@@ -426,19 +323,7 @@ Item {
                             && card.active && LiveOutputService.live)
 
                     // ---- THIS ROW'S OWN RUNTIME (every kind, not just NDI) --
-                    // The live line under a row used to exist only for the kinds
-                    // with a sender of their own (NDI, SDI), so an HDMI row said
-                    // nothing about itself while an NDI row reported frames —
-                    // read by the operator as "the notification only exists for
-                    // one output". Every output has a feed, and the engine
-                    // measures the same two facts for all of them
-                    // (RenderEngine::OutputFeedAges: frames delivered + how long
-                    // since the last present), which LiveOutputService publishes
-                    // as outputRuntime. So every row reports the same way.
                     readonly property var runtime: LiveOutputService.outputRuntime[card.name] || null
-                    // outputFeedStalled() is an invokable — an invokable alone is
-                    // opaque to QML's dependency tracking, so the revision is read
-                    // to make this binding re-run when the stall set changes.
                     readonly property bool stalledNow: {
                         void LiveOutputService.feedHealthRev
                         return LiveOutputService.live && card.isEnabled
@@ -446,18 +331,7 @@ Item {
                     }
                     readonly property bool delivering: !!card.runtime
                         && card.runtime.presented === true && !card.stalledNow
-                    // ONE line for every row, in the kind's own words. Deliberate
-                    // states first (switched off / off air), then the feed: no
-                    // feed beats a stale frame count, a frame count beats a guess.
-                    // The STAGE-WIDE facts are appended to every kind afterwards,
-                    // because a blackout is exactly as true of the HDMI screen
-                    // as of the NDI feed — that is the whole point of one line
-                    // per row instead of one line per kind.
                     readonly property string statusText: {
-                        // The KIND is not printed: a row here is a screen, and
-                        // what transports its picture is the Routing canvas's
-                        // business. What is left is the row's own feed — the
-                        // engine's own frame count and stall age.
                         let text = ""
                         if (!card.isEnabled)
                             text = qsTr("Switched off")
@@ -474,11 +348,6 @@ Item {
                             text += " · " + qsTr("no feed")
                         return text
                     }
-                    // Where this screen's picture comes from: the video bus
-                    // Settings · Routing has wired to this row (the canvas is
-                    // the one editor for that wire). `revision` is the routing
-                    // snapshot's version, so a wire made or cut there re-derives
-                    // this line.
                     readonly property int videoBusRow: {
                         void RoutingService.revision
                         const rows = RoutingService.rows
@@ -532,14 +401,8 @@ Item {
                                 font.pixelSize: Theme.textMd
                                 font.weight: Font.Medium
                             }
-
                         }
 
-                        // The screen's own facts: the display mode it renders
-                        // at, and what feeds it. The kind and the style are
-                        // wires on Settings · Routing, so the feed below is a
-                        // READ of that canvas (feedText), never a second copy
-                        // of it.
                         Row {
                             spacing: Theme.space2
 
@@ -565,29 +428,10 @@ Item {
                             }
                         }
 
-                        // EVERY OUTPUT'S OWN RUNTIME — real state, not a label
-                        // (see statusText above for the per-kind wording).
-                        // NDI: the live sender's frame counter while the active
-                        // output is sending (the counter only moves when frames
-                        // actually flow) with the SDK's connected-monitor count
-                        // deciding what "sending" means. SDI: the DeckLink
-                        // runtime/device truth from the engine. HDMI and every
-                        // other kind: this row's own buffer, counted by the
-                        // engine — frames delivered and whether they stopped.
                         Row {
                             spacing: Theme.space2
-                            // The once-per-session firewall ask rides the NDI
-                            // row's presence: an NDI output on the roster +
-                            // a usable runtime is exactly the moment it matters.
                             Component.onCompleted: if (card.kind === "NDI") root.maybeRequestNdiFirewall()
 
-                            // The same dot the monitor wall shows (components/
-                            // OutputRuntimeDot.qml): one component owns the state,
-                            // the colour and the hover detail (this row's own
-                            // numbers on hover), so the two surfaces cannot
-                            // describe one output differently. The row keeps its
-                            // text; the dot pulses here because a row is a status
-                            // surface rather than a picture.
                             OutputRuntimeDot {
                                 anchors.verticalCenter: parent.verticalCenter
                                 outputName: card.name
@@ -611,16 +455,6 @@ Item {
                         }
                     }
 
-                    // Status pill + on/off toggle, anchored top-right.
-                    // Live = the live red wash (Theme.liveBg, the GO LIVE
-                    // pill's own red — a live output is a state, not a fault)
-                    // + light-red text; Inactive = flat neutral chip. Pill's `tint` flag
-                    // picks which colors apply: tint=true uses
-                    // baseColor/lightColor (washed bg + colored text),
-                    // tint=false renders the flat neutral chip and IGNORES
-                    // baseColor — hence the flip between the two states.
-                    // Disabled screens are dimmed and can't go live (model
-                    // guards it; the click is inert here too).
                     Row {
                         anchors.right: parent.right
                         anchors.rightMargin: Theme.space5
@@ -676,14 +510,9 @@ Item {
                     }
                 }
             }
-
         }
     }
 
-    // The header needs its OWN ground, not just a higher paint order: without
-    // this, a scrolled-up card shows straight through the title/button (the
-    // text read as laid INSIDE the first row instead of pinned above it).
-    // Same surface the settings card itself sits on, so there's no seam.
     Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
@@ -692,10 +521,6 @@ Item {
         color: Theme.surface
     }
 
-    // "Screens" title — pinned alongside the Add-Screen button (sits above
-    // the Flickable in paint order, same as that button) so the header
-    // stays put while the roster scrolls underneath it, instead of
-    // scrolling away with the tiles it used to sit inside.
     Text {
         anchors.left: parent.left
         anchors.leftMargin: Theme.space6
@@ -707,11 +532,6 @@ Item {
         font.weight: Font.DemiBold
     }
 
-    // "+ Add Screen" pinned top-right — always visible no matter how far
-    // the roster scrolls (sits above the Flickable in paint order). The control
-    // itself is PrimaryAddButton, shared with the Routing canvas's column
-    // footers, so both surfaces create things with the same-looking button (see
-    // that file for why it is not plain AppButton).
     PrimaryAddButton {
         id: addOutputBtn
         objectName: "selfTestAddOutput"
@@ -793,10 +613,6 @@ Item {
         onCancelled: root.editIndex = -1
         onAccepted: root.saveEdit()
 
-        // Same form the Add dialog shows — one design, one implementation
-        // (ScreenForm), seeded with this screen's current values. Placement
-        // writes the real display assignment; setScreenName snaps res and
-        // refresh to the display's mode on save.
         ScreenForm {
             width: parent.width
             name: root.editName
@@ -816,9 +632,6 @@ Item {
             onRefreshPicked: (v) => root.editRefresh = v
             onPatternPicked: (k) => {
                 root.editPattern = k
-                // Saved with the row, but nothing downstream (SceneBuilder,
-                // the real OutputWindow) ever reads it to actually paint a
-                // pattern — picking one has no real effect yet.
                 EventBus.notify(qsTr("Test patterns aren't wired to the output yet — this pick is saved but has no visible effect."),
                                 "warning", qsTr("Not implemented"), "outputs.testPattern.notImplemented")
             }
@@ -832,11 +645,6 @@ Item {
             onLockToggled: (l) => root.editLocked = l
         }
 
-        // Whether this output's REAL destination window (OutputWindow.qml,
-        // the borderless window on the bound physical/HDMI screen — not
-        // this in-app settings UI) stays above other windows. Off by
-        // default: an always-on-top window with no dedicated second
-        // monitor buries the app itself.
         Item {
             width: parent.width
             height: 34
@@ -855,17 +663,8 @@ Item {
                 onToggled: root.editStayOnTop = !root.editStayOnTop
             }
         }
-        // (The style control lived here. A screen's look is now the style
-        // wire on Settings · Routing, beside the buses that feed it — one
-        // editor for each fact, and the one where the routing is visible.)
 
         // ---- What this screen is actually carrying (read-only) ------------
-        // Kind and style used to be editable here; both are WIRES now, and the
-        // canvas is where a wire is drawn. What is left for this dialog is the
-        // thing the operator opened it to check: what feeds this screen,
-        // whether it carries sound, and which look it wears — read from the
-        // canvas's own snapshot (root.editRouting), so this block can never
-        // disagree with the wiring on the Routing page.
         Rectangle {
             width: parent.width
             height: routingCol.height + Theme.space4 * 2
@@ -974,7 +773,6 @@ Item {
                 }
             }
         }
-
     }
 
     // ---- Add dialog (VGRPresenter · Settings · Screens · Add) ----
@@ -1039,7 +837,5 @@ Item {
                 onToggled: root.addStayOnTop = !root.addStayOnTop
             }
         }
-
     }
-
 }

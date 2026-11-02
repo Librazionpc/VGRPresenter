@@ -28,9 +28,7 @@
 #include <vector>
 
 namespace bps::recording {
-
 namespace {
-
 constexpr const char *kModule = "MediaFoundationMp4";
 // H.264 Main profile (eAVEncH264VProfile_Main) and the AAC bitrate the container asks
 // for: 192 kbit/s is 24000 bytes per second.
@@ -142,9 +140,6 @@ uint8_t Clamp8(int v)
     return static_cast<uint8_t>(std::clamp(v, 0, 255));
 }
 
-// Packed RGBA to NV12 (BT.601, limited range): a full-resolution Y plane, then one
-// interleaved UV plane at half resolution, each chroma sample averaged over its 2x2
-// block of target pixels.
 void PackedToNv12(const uint32_t *src, int srcW, int srcH, uint8_t *dst, int w, int h)
 {
     uint8_t *yPlane = dst;
@@ -224,9 +219,6 @@ Result<void> MakeAudioType(const GUID &subtype, uint32_t rateHz, uint32_t channe
     return Ok();
 }
 
-// Is there at least one Media Foundation encoder from `category` that turns the
-// `subtype` output into something? The software encoders are sync MFTs, so the
-// enumeration includes them; hardware ones are added where the machine has them.
 Result<void> ProbeMft(const GUID &category, const GUID &majorType, const GUID &outSubtype,
                       std::string_view label)
 {
@@ -254,7 +246,6 @@ Result<void> ProbeMft(const GUID &category, const GUID &majorType, const GUID &o
                            std::string(label) + " encoder is not available through Media Foundation");
     return Ok();
 }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -272,9 +263,6 @@ struct MediaFoundationMp4::Impl {
     std::vector<uint8_t> nv12;
     std::vector<int16_t> pcm;
 
-    // THE HARDWARE PATH. A picture is encoded by H264Encoder (NVENC, AMF or QuickSync) and
-    // the writer only stores the finished H.264 — so the writer's streams are added once the
-    // first keyframe is out and its parameter sets are known. Sound that arrives first waits.
     std::unique_ptr<H264Encoder> hw;
     bool wantAudio = false;
     bool started = false;
@@ -470,11 +458,6 @@ Result<std::string> MediaFoundationMp4::Open(const RecordingProfile &profile, st
 
     const uint32_t bitrate = static_cast<uint32_t>(std::max(1, profile.videoBitrateKbps)) * 1000u;
 
-    // HARDWARE ENCODER. A profile that names NVENC / AMF / QuickSync (or Auto on a
-    // machine that has one) is encoded by that hardware: H264Encoder makes the H.264 and
-    // the writer stores it as it is. The streams are added when the first keyframe is out
-    // (its parameter sets are part of the stream header), so nothing more is set up here.
-    // A named kind that cannot start is refused; Auto falls back to the software path.
     const EncoderKind kind = ResolveEncoderKind(profile.encoderPreference);
     if (kind != EncoderKind::Software) {
         auto made = H264Encoder::Create(kind, width, height, fpsNum, profile.videoBitrateKbps, impl_->hw);
@@ -675,5 +658,4 @@ Result<void> ProbeAacEncoder()
 {
     return ProbeMft(MFT_CATEGORY_AUDIO_ENCODER, MFMediaType_Audio, MFAudioFormat_AAC, "AAC");
 }
-
 } // namespace bps::recording

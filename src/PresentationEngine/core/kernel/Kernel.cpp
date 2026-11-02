@@ -53,9 +53,7 @@
 #include <thread>
 
 namespace bps {
-
 namespace {
-
 // Engine-wide defaults/schema seeded into the ConfigurationManager (03 §3).
 json::Value EngineDefaults() {
     json::Value::Object o;
@@ -91,7 +89,6 @@ std::string GenerateUuid() {
                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9],
                        b[10], b[11], b[12], b[13], b[14], b[15]);
 }
-
 } // namespace
 
 Kernel::Kernel() : uuid_(GenerateUuid()) {}
@@ -149,6 +146,14 @@ Result<void> Kernel::Boot(const BootOptions& options) {
         logger.Info("ConfigurationManager ready", "Kernel");
         AppendBootLog("ConfigurationManager");
     }
+
+    // ---- 2b. engine.log.level (03 §3) — the config-level verbosity, applied as soon as
+    // the store that holds it is open, so every boot line after this one obeys it. This
+    // key used to be seeded and then never read. Later a stored user preference wins
+    // (settings::ApplyToEngine, when the UI opens the settings store), and
+    // VGR_LOG_LEVEL wins over both.
+    if (auto fileLevel = LogLevelFromName(config.GetString("engine.log.level")))
+        (void)logger.SetSinkLevel("File", LogLevelEnvOverride().value_or(*fileLevel));
 
     // ---- 3. ServiceManager (04) — DI registration of the core systems ----
     auto& services = ServiceManager::Instance();
@@ -283,17 +288,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
         (void)services.Register<DriverManager>(&drivers);
 
     auto& db = DatabaseManager::Instance();
-    // Open() takes a FILE path; dataDir is a directory. Name the database
-    // inside it (an empty dataDir stays in-memory). Passing the bare dir
-    // used to collide with the UI's own "enginedata" directory of the same
-    // path, making every persist fail silently.
-    //
-    // THIS is the step whose failure started the whole story: an unreadable
-    // kernel.json answered Config_ParseFailed, Boot aborted, the UI never saw a
-    // Running kernel, and every write for the rest of the session answered "the
-    // engine is not running yet". Open() quarantines a damaged file now, and a
-    // failure here degrades a session that is missing its persistence — loudly,
-    // in the log and in EngineContext — instead of stopping the engine.
     const std::string dbFile =
         options.dataDir.empty() ? std::string{} : options.dataDir + "/kernel.json";
     if (BootStep("Database", [&] { return db.Open(dbFile); }))
@@ -333,11 +327,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     AppendBootLog("Renderer");
 
     // ---- 14. NotificationService (Phase 4, docs/specs/14) ----
-    // The ONLY system that decides if/when/where/how the user is informed.
-    // Subscribes to engine events (content, resource, platform, project) and
-    // routes through providers; never touches the UI. Boots after CAMS (it
-    // consumes content events) and before DataManager (whose project events it
-    // also consumes).
     {
         auto& notify = notification::NotificationService::Instance();
         if (auto r = notify.Initialize(); !r.ok()) {
@@ -366,9 +355,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 16. AdaptiveRuntime (Phase 5, docs/specs/16) ----
-    // The self-optimizing brain: hardware/capability detection, feature
-    // registry, quality modes, resource budgets, pressure reflexes, learning.
-    // Boots last (it watches everything above it) and shuts down first.
     {
         auto& runtime = adaptive::AdaptiveRuntime::Instance();
         if (auto r = runtime.Initialize(); !r.ok()) {
@@ -382,9 +368,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 16b. Telemetry (live utilization feed for the Settings meters) ----
-    // Subscribes to the render frame events; boots before the RenderEngine (17)
-    // so the very first frame is counted. Stops with the engine (it holds only
-    // event subscriptions — nothing to stop out of order).
     {
         auto& tel = settings::Telemetry::Instance();
         if (auto r = tel.Initialize(); !r.ok())
@@ -394,10 +377,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 17. RenderEngine (Phase 6, docs/specs/17) ----
-    // The generic rendering engine: scenes → layers → objects → pixels.
-    // Backend-independent (IGraphicsBackend) and frontend-agnostic; renders
-    // frames and distributes them to Render Outputs. Boots last — it asks the
-    // AdaptiveRuntime (16) for quality/budget guidance — and stops first.
     {
         auto& render = rendering::RenderEngine::Instance();
         if (auto r = render.Initialize(); !r.ok()) {
@@ -411,9 +390,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 18. DisplayEngine (Phase 7, docs/specs/18) ----
-    // Routes one rendered frame to any number of outputs through a provider
-    // architecture; hot-plug detection, profiles, recovery. Boots after the
-    // RenderEngine (17) whose frames it routes, and stops before it.
     {
         auto& disp = display::DisplayEngine::Instance();
         if (auto r = disp.Initialize(); !r.ok()) {
@@ -427,9 +403,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 19. PresentationEngine (Phase 8, docs/specs/19) ----
-    // The conductor: orchestrates shows, slides, timelines, cues, playback.
-    // Never renders pixels or routes outputs itself. Boots last (it consumes
-    // events from every system above) and stops first.
     {
         auto& pres = presentation::PresentationEngine::Instance();
         if (auto r = pres.Initialize(); !r.ok()) {
@@ -443,11 +416,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 19b. LiveOutputController (Phase 8 live loop) ----
-    // Drives the real pipeline continuously while a show is on air: renders
-    // the PresentationEngine's current slide through the RenderEngine (17) at
-    // the 60Hz target with distribution to every enabled output. Boots after
-    // the PresentationEngine (19) it drives; stops first (its worker must not
-    // outlive the engines it renders through).
     {
         auto& live = live::LiveOutputController::Instance();
         if (auto r = live.Initialize(); !r.ok()) {
@@ -459,9 +427,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 20. SearchEngine (Phase 9, docs/specs/20) ----
-    // The central knowledge layer: every module asks it "find me the
-    // information". Boots after CAMS (13) whose assets it auto-indexes, and
-    // before Media (21) which registers documents with it.
     {
         auto& search = search::SearchEngine::Instance();
         if (auto r = search.Initialize(); !r.ok()) {
@@ -475,9 +440,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 21. MediaEngine (Phase 10, docs/specs/21) ----
-    // The single system for managing every type of media. Depends on the
-    // Search Engine (20) for auto-indexing and the Adaptive Runtime (16) for
-    // budgets; boots after both.
     {
         auto& media = media::MediaEngine::Instance();
         if (auto r = media.Initialize(); !r.ok()) {
@@ -498,10 +460,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 23. SceneCompositionEngine (Phase 11, docs/specs/23) ----
-    // Everything is a Scene: templates, themes, layouts, widget rules. Consumes
-    // presentation events and produces composed scenes for the Render Engine.
-    // Boots last (it ties Content + Presentation + Rendering together) and
-    // stops first.
     {
         auto& sce = scene::SceneCompositionEngine::Instance();
         if (auto r = sce.Initialize(); !r.ok()) {
@@ -515,11 +473,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 24. BibleEngine (Phase 12, docs/specs/24) ----
-    // The first-class Scripture knowledge system: imports, validates, indexes,
-    // resolves references, queries, formats, and compares Bibles — completely
-    // independent of the UI. Boots after the Search Engine (20) which it uses
-    // for verse indexing. Imported bibles persist as a JSON store inside the
-    // data dir: SetStorePath BEFORE Initialize() so boot restores them.
     {
         auto& bible = bible::BibleEngine::Instance();
         if (!options.dataDir.empty())
@@ -535,9 +488,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 25. SongEngine (Phase 13, docs/specs/25) ----
-    // Structured musical content: imports, validates, transposes, arranges,
-    // detects duplicates, versions, and indexes songs. Never renders lyrics —
-    // the Scene Engine composes them. Boots after Search (20) and Media (21).
     {
         auto& songs = song::SongEngine::Instance();
         if (auto r = songs.Initialize(); !r.ok()) {
@@ -551,11 +501,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 26. FlowEngine (Phase 14, docs/specs/26) ----
-    // The orchestration layer: loads, validates, and executes Service Flows
-    // (playlists/automation) through registered actions, conditions, and
-    // triggers. It coordinates the other engines via actions only — it never
-    // renders or plays content itself. Boots after Scene (23), Bible (24), and
-    // Song (25) so its actions can target them.
     {
         auto& flow = automation::FlowEngine::Instance();
         if (auto r = flow.Initialize(); !r.ok()) {
@@ -569,10 +514,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 27. ProductionEngine (Phase 15, docs/specs/27) ----
-    // The production backbone: a universal signal graph (sources → processing
-    // → virtual sources → buses → outputs) for audio and video independently,
-    // with routing, mixing, planning, meters, clocks, and health. It routes
-    // and coordinates — rendering/media/display engines own pixels/audio/screens.
     {
         auto& prod = production::ProductionEngine::Instance();
         if (auto r = prod.Initialize(); !r.ok()) {
@@ -600,12 +541,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 28. RecordingEngine (Phase 16, docs/specs/28) ----
-    // Recording, replay & capture: recording is a first-class output consumer
-    // of the Phase 15 production graph. Any valid signal (source, bus, virtual
-    // source, scene, output) can be recorded with its own profile, tap point,
-    // format and lifecycle. Owns profiles, segmentation, markers, metadata,
-    // crash recovery (journal), replay buffers, capture devices, encoder
-    // selection and disk-aware storage. It never renders — it consumes the graph.
     {
         auto& rec = recording::RecordingEngine::Instance();
         if (auto r = rec.Initialize(); !r.ok()) {
@@ -619,10 +554,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
     }
 
     // ---- 29. BroadcastEngine (Phase 17, docs/specs/29) ----
-    // NDI + SDI via runtime-loaded SDKs (libndi / DeckLink). Providers degrade
-    // to Unsupported when the SDK or hardware is absent, so boot never fails
-    // on a machine without broadcast hardware. The software loopback provider
-    // is always available for rehearsal and CI.
     {
         auto& bc = broadcast::BroadcastEngine::Instance();
         if (auto r = bc.Initialize(); !r.ok()) {
@@ -656,12 +587,6 @@ Result<void> Kernel::Boot(const BootOptions& options) {
                     static_cast<double>(Kernel::Instance().Uptime().count()) / 1000.0);
                 return json::Value(std::move(o));
             });
-            // `engine.shutdown` must not run on the connection thread (Stop()
-            // joins connection threads) nor on a pool worker (Shutdown tears
-            // down the ThreadPool, and a worker joining itself terminates).
-            // Contract: Shutdown() only returns after full teardown (state
-            // flips to Stopped at the end), so a caller that waits for
-            // State() != Running is safe to exit afterwards.
             reg("engine.shutdown", [](const json::Value&) {
                 std::thread([]() { (void)Kernel::Instance().Shutdown(); }).detach();
                 json::Value::Object o;
@@ -732,9 +657,6 @@ void Kernel::Degrade(std::string_view system, const Error& cause) {
         degraded_.push_back(d);
         lastError_ = d.system + ": " + d.message;
     }
-    // Warning, not Fatal: the engine comes up without this system. The message
-    // names the hole so a log reader can tell a degraded boot from a clean one,
-    // and the operator's own data is what the UI should point at.
     Logger::Instance().Warning(
         std::format("{} unavailable this session: [{}] {} (engine continues)", d.system,
                     d.code, d.message),
@@ -773,26 +695,6 @@ Result<void> Kernel::ShutdownSystems() {
     for (const auto& info : plugins.Snapshot())
         if (info.state != 0) (void)plugins.Unload(info.id);
 
-    // Engine managers (boot steps 12-23, reverse order). The SceneComposition
-    // Engine (23) stops first, then Media (21) whose workers must not run, then
-    // Search (20) whose event subscriptions must be torn down, then the
-    // PresentationEngine (19) whose live tick must not run during teardown,
-    // then the DisplayEngine (18) whose output routing must stop, then the
-    // RenderEngine (17) whose render thread must not run during teardown, then
-    // the AdaptiveRuntime (16) whose heartbeat must not run during teardown.
-    // The Project & Data system and the Notification service shut down before
-    // CAMS (their events and metadata consumers must stop first); CAMS before
-    // the Database (persisted metadata must flush first).
-    // The PRODUCTION backbone (27) stops before everything it feeds, and
-    // critically before DatabaseManager::Shutdown() at the bottom of this
-    // method — ProductionEngine::Shutdown() takes the final graph save, which
-    // is only durable if the database flushes AFTER it. It never used to be
-    // called at all (its own comment claimed the kernel tears production down
-    // before the database, and this list simply did not include it), so the
-    // last edits of a session lived in the in-memory store and were written
-    // only because DatabaseManager::Shutdown happens to flush everything —
-    // with nothing guaranteeing production got its say first. See
-    // ProductionEngine::RequestPersist for the in-session counterpart.
     (void)audio::AudioEngine::Instance().Shutdown();
     (void)production::ProductionEngine::Instance().Shutdown();
     // Phase 14 (26) stops next: it was booted after the rest of the engines, so
@@ -943,14 +845,10 @@ HealthReport Kernel::GetHealth() const {
     HealthReport r;
     std::lock_guard<std::mutex> lock(mutex_);
     const bool running = state_.load() == KernelState::Running;
-    // A running kernel with a hole in it is Degraded, not Healthy: the state
-    // string used to be the only signal, and "Running" on a session that lost
-    // its database is exactly the kind of half-truth this reports against.
     r.state = (running && degraded_.empty()) ? HealthState::Healthy : HealthState::Degraded;
     r.detail = std::format("state={} uptime={}ms systems={} degraded={}", ToString(state_.load()),
                            Uptime().count() / 1000, bootLog_.size(), degraded_.size());
     r.lastError = lastError_;
     return r;
 }
-
 } // namespace bps

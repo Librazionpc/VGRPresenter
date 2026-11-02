@@ -11,9 +11,7 @@
 #include <string>
 
 namespace bps::audio {
-
 namespace {
-
 constexpr const char *kModule = "AudioEngine";
 // How often the control thread looks at the graph for source/device changes.
 constexpr auto kReconcileInterval = std::chrono::milliseconds(250);
@@ -34,9 +32,6 @@ std::string Normalize(std::string_view text)
     return out;
 }
 
-// The waveIn number of the capture endpoint whose roster name matches. Windows ids
-// are "wavein:<n>"; a name that matches nothing, or matches a non-input, resolves to
-// nothing rather than a guess.
 std::optional<uint32_t> ResolveWaveIn(const std::vector<platform::AudioDeviceInfo> &roster,
                                       std::string_view name)
 {
@@ -58,10 +53,6 @@ std::optional<uint32_t> ResolveWaveIn(const std::vector<platform::AudioDeviceInf
     return std::nullopt;
 }
 
-// True when an output that is playing on its OWN endpoint is wired to this bus.
-// With the program off the air those streams are the only path left that can be
-// heard — the speakers and the plays-locally copy are drawn by the program render
-// that is not running — so a bus counts only when one of them holds it.
 bool BusPlaysOnAnEndpoint(const production::GraphSnapshot &snap, const std::string &busId,
                           const std::set<std::string> &endpoints)
 {
@@ -75,7 +66,6 @@ bool BusPlaysOnAnEndpoint(const production::GraphSnapshot &snap, const std::stri
             return true;
     return false;
 }
-
 } // namespace
 
 AudioEngine &AudioEngine::Instance()
@@ -97,9 +87,6 @@ Result<void> AudioEngine::Start()
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
         if (!initialized_)
             return Error::Make(Err::InvalidState, kModule, "Initialize() first");
-        // PROGRAM, not running_: a Stop() that left an output playing on its own
-        // endpoint keeps running_ up, so asking that flag would report "already
-        // started" and never put the program back on the air.
         if (programPlaying_.load())
             return Ok();
         if (starting_ || stopping_)
@@ -129,9 +116,6 @@ Result<void> AudioEngine::Start()
     programPlaying_.store(true);
     if (!started.ok())
         softClock_ = std::thread([this] { SoftClockLoop(); });
-    // REUSED, never replaced: a stop that left an output playing on its own
-    // endpoint keeps this thread (and its capture) alive, and assigning over a
-    // joinable std::thread terminates the process.
     {
         const std::lock_guard<std::mutex> lock(lifecycleMutex_);
         if (!control_.joinable()) {
@@ -162,21 +146,11 @@ Result<void> AudioEngine::Stop()
     wake_.notify_all();
 
     // 1. THE PROGRAM COMES OFF THE AIR. Its render thread joins inside
-    //    StopRender; a program that never got a device is paced by the software
-    //    clock instead, which watches programPlaying_ (NOT running_ — that stays
-    //    up while an output is still playing, and a loop watching it would never
-    //    end here).
     if (softClock_.joinable())
         softClock_.join();
     (void)platform::PlatformAccessor::Get().Audio().StopRender();
 
     // 2. IS ANYTHING ELSE STILL PLAYING? An output with an endpoint of its own is
-    //    a stream the PAL keeps for the ROUTING, not for playout (see
-    //    WindowsAudio::renderStreams_), driven by that device's own thread and
-    //    mixing straight from the graph (AudioMixer::RenderOutput). Tearing it
-    //    down with the program is what used to silence an output's device the
-    //    moment playout stopped, so it keeps playing — and so do the capture
-    //    bindings the buses behind it need.
     bool outputsPlaying = false;
     {
         const std::lock_guard<std::mutex> lock(outputAudioMutex_);
@@ -257,9 +231,6 @@ void AudioEngine::SoftClockLoop()
     std::vector<float> chunk(static_cast<size_t>(kChunk) * kChannels);
     const auto origin = std::chrono::steady_clock::now();
     uint64_t rendered = 0;
-    // programPlaying_, not running_: the clock paces the PROGRAM, so it ends with
-    // it even while an output's own endpoint keeps running_ up (a loop watching
-    // running_ there would spin forever and Stop's join would hang).
     while (programPlaying_.load()) {
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - origin).count();
         const auto due = static_cast<uint64_t>(elapsed * kRate);
@@ -277,9 +248,6 @@ Result<void> AudioEngine::Shutdown()
 {
     auto stopped = Stop();
     if (!stopped.ok()) return stopped;
-    // Stop() leaves an output's own endpoint playing on purpose (its lifetime is
-    // the routing's, not playout's). Shutdown is the one place that takes them all
-    // down, so no device is left open behind an engine that is gone.
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
         if (starting_ || stopping_)
@@ -397,12 +365,6 @@ void AudioEngine::StopAllOutputAudio()
         (void)audio.StopRenderStream(id);
 }
 
-// THE OTHER END OF THE STOP IN Stop(). That function keeps an output's own
-// endpoint — and with it the control thread, the capture bindings and the graph —
-// alive while the program is off the air, because that stream can still be heard.
-// When the LAST of those streams closes there is nothing left that could hear a
-// source, so the capture devices are released and the control thread winds up: the
-// same tail Stop() runs when it finds no output playing.
 void AudioEngine::MaybeFinishStop()
 {
     {
@@ -462,13 +424,6 @@ void AudioEngine::Reconcile()
     if (!snap)
         return;
 
-    // WHICH BUSES ARE BEING PLAYED RIGHT NOW. On the air, every enabled audio bus
-    // is: the program sums the ones wired to the speakers and to a plays-locally
-    // display, and a mix tap (NDI, recording, a stream) reads any of them off that
-    // same render. With the program STOPPED none of that is true, and the only
-    // buses that can still be heard are the ones an output's own endpoint is
-    // playing (StartOutputAudio → AudioMixer::RenderOutput). Capturing for
-    // anything else would hold a device open for silence.
     const bool programOn = programPlaying_.load();
     std::set<std::string> endpoints;
     if (!programOn) {
@@ -594,5 +549,4 @@ void AudioEngine::ReleaseAll()
     tapUsers_.clear();
     boundDevice_.clear();
 }
-
 } // namespace bps::audio

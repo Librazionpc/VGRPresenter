@@ -1,15 +1,5 @@
 #pragma once
 
-// PAL socket subsystem (Phase 2): the only socket API the engine core touches.
-// core/ipc (IpcServer/IpcClient) and future transports (WebSocket, gRPC) build
-// on this interface; POSIX and Winsock implementations live under
-// platform/common (PosixSocket) and platform/windows (WindowsSocket).
-//
-// Threading model: sockets are NOT thread-safe — each ISocket / ISocketListener
-// is owned by a single thread (a connection thread on the server, the calling
-// thread on the client). Receive()/Accept() block with a caller-supplied
-// timeout so owning threads can poll and observe stop flags.
-
 #include "core/common/Common.hpp"
 
 #include <cstdint>
@@ -18,7 +8,6 @@
 #include <string_view>
 
 namespace bps::platform {
-
 // A connected TCP stream socket (AF_INET).
 class ISocket {
 public:
@@ -67,5 +56,4 @@ public:
                                                      uint16_t port) = 0;
     virtual Result<std::unique_ptr<ISocketListener>> Listen(uint16_t port) = 0;
 };
-
 } // namespace bps::platform

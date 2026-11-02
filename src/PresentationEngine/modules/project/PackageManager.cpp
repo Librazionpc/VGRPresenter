@@ -12,7 +12,6 @@
 #include <chrono>
 
 namespace bps::project {
-
 namespace {
 int64_t MsNow() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -152,9 +151,6 @@ Result<std::string> PackageManager::Import(std::string_view hostPkgPath,
     auto proj = ProjectFromJson(parsed.value());
     if (!proj.ok()) return proj.error();
 
-    // Import referenced assets through CAMS (CreateText + Save rehydrates the
-    // bytes through the VFS; no direct file access). Fresh uuids are assigned
-    // and the project document's references are updated to match.
     std::vector<std::string> newUuids;
     for (auto& [uuid, data] : assetEntries) {
         (void)uuid;
@@ -241,5 +237,4 @@ Result<PackageManifest> PackageManager::Inspect(std::string_view hostPkgPath) {
     }
     return Error::Make(Err::Project_PackageFailed, "Package", "manifest not found");
 }
-
 } // namespace bps::project

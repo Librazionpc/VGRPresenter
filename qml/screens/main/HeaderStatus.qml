@@ -2,22 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// The connection indicator + window controls (close/minimize/maximize) that
-// sit in the top-right of the app header. Extracted so EditScreen.qml can
-// reuse the exact same chrome as VGRPresenterMainScreen.qml without
-// duplicating the vector icon paths.
-//
-// "Connected" is KERNEL-DRIVEN, not baked text: EngineBridge's relay emits
-// engine.kernel.state_changed with structured to/from fields whenever the
-// kernel's state machine moves; the indicator reflects that live — dot color
-// and label both. Between events it simply holds the last state, exactly
-// like every real dashboard status light. (EngineBridge.boot() itself fires
-// the first state_changed on the engine's own bus, so this populates even
-// before the QML engine finishes loading.)
-//
-// Colors read the Theme singleton. The status hues are the theme's semantic
-// tokens (success / warning / danger) and the neutral label uses textSecondary,
-// so the light/dark choice recolours the label with the rest of the chrome.
 Item {
     id: root
 
@@ -38,9 +22,6 @@ Item {
         }
     }
 
-    // Re-sync from the relay's ring at construction — catches the state
-    // change(s) fired before this header existed (boot happens in main()
-    // before the QML engine loads).
     Component.onCompleted: {
         const recent = EngineBridge.recentEngineEvents(200)
         for (let i = recent.length - 1; i >= 0; --i) {
@@ -99,5 +80,4 @@ Item {
             textFormat: Text.PlainText
         }
     }
-
 }

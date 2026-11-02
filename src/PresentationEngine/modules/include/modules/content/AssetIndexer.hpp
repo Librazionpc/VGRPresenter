@@ -1,10 +1,5 @@
 #pragma once
 
-// AssetIndexer (docs/specs/13 §Asset Indexer): builds a search index over
-// names, tags, category, description, and file names. Supports exact, partial
-// (prefix + substring), and fuzzy (edit-distance) matching plus structured
-// filters (type, tag, category, extension, favorite, date, author).
-
 #include "modules/content/AssetMetadata.hpp"
 
 #include <map>
@@ -15,7 +10,6 @@
 #include <vector>
 
 namespace bps::content {
-
 struct SearchQuery {
     std::string text;             // free-text term (exact/partial/fuzzy)
     AssetType type = AssetType::Unknown;   // Unknown = any
@@ -56,5 +50,4 @@ private:
     std::unordered_map<Uuid, AssetMetadata> docs_;
     std::map<std::string, std::set<std::string>> inverted_;   // token -> uuid strings
 };
-
 } // namespace bps::content

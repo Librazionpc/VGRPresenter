@@ -1,11 +1,7 @@
 #pragma once
 
-// Render objects (docs/specs/17 §Renderable Objects). Every visible object
-// derives from RenderObject. Nothing is hardcoded for a "Song" or "Bible" —
-// these are generic: text, image, video, shape, background, gradient, overlay,
-// countdown, clock. Components (text style, image source, ...) attach data.
-
 #include "core/common/Common.hpp"
+#include "modules/rendering/FlowScrollMath.hpp"
 #include "modules/rendering/IGraphicsBackend.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 #include "modules/rendering/Scene.hpp"
@@ -17,7 +13,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 // Component carried by image/video objects: where the pixels come from.
 struct ImageSource {
     std::string assetId;      // CAMS uuid (for async load)
@@ -99,12 +94,6 @@ public:
     float RotationRad() const { return rotationRad_; }
     void SetRotationRad(float r) { rotationRad_ = r; }
 
-    // HOW THIS OBJECT COMPOSITES onto the pixels already in the frame — the
-    // Edit screen's MEDIA tab "Blend mode". The default is Alpha, so an object
-    // that never asked for a blend draws exactly as it always did; the
-    // rasterizer reads this out of the DrawCommand the object produces, which
-    // is why a media item's Screen/Multiply is a property of the OBJECT and not
-    // of one draw call.
     BlendMode Blend() const { return blend_; }
     void SetBlendMode(BlendMode b) { blend_ = b; }
 
@@ -163,34 +152,6 @@ public:
     // TextStyleComponent is set via AddComponent (defined in TextEngine.hpp).
 
     // ---- THE READING FLOW (see SceneBuilder::ApplyReadingFlow) -------------
-    //
-    // A block whose words were cut out of a LONGER passage: its box is a
-    // VIEWPORT onto one continuous layout of Text(), and `flowPageLines_` is
-    // how many visual lines one page of that passage takes (the size the fit
-    // solver was measured against). 0 = an ordinary text object: nothing clips,
-    // nothing scrolls, and its drawing is byte-for-byte what it always was.
-    //
-    // WHY IT LIVES ON THE OBJECT. The reading step (Alt+Down / Alt+Up) can only
-    // scroll if the lines arriving from below EXIST in the layout — a block that
-    // holds just the page has nothing to show under its last line, so every
-    // earlier attempt cut a fresh window of text per press. That re-ran the fit
-    // solver, so the type size and the wrapping changed while the words were
-    // supposed to travel (the reported "it scrolls then snaps" and "it messed
-    // with the template"): one layout, one size, one offset into it is the only
-    // shape that scrolls. The offset itself is per-frame (RenderOptions), not
-    // part of this object — a scene is built once and rasterised by every
-    // output's pass.
-    // `pageLines` is how many visual lines ONE page of the passage takes — the
-    // layout the fit solver sized the box against, which is what the block's own
-    // vertical alignment has to keep using (the box holds a page, not a book).
-    // `charAt` is WHERE IN THE PASSAGE the reader is: a character offset into the
-    // flow text, not a line. Lines are per-STYLE ("line 7" is a different word in
-    // a style that wraps differently), so a line number sent to two outputs of
-    // different types sizes put different sentences at the top of each box —
-    // measured on the operator's own two styles: a line or two apart, half the
-    // time, which is the "the left is still showing while the right has finished"
-    // report. A character offset means the same words everywhere; each style turns
-    // it into its own line with FlowLineForChar below.
     void SetReadingFlow(int pageLines, float charAt) {
         if (pageLines > 0 && flowPageLines_ == 0)
             pageText_ = text_;
@@ -206,38 +167,16 @@ public:
         flowCharStarts_.clear();
     }
     bool HasReadingFlow() const { return flowPageLines_ > 0; }
-    // SCROLL'S MAX-WORDS COLUMN: the passage fills the WHOLE text area from its top edge, with no
-    // vertical alignment — the same rule the QML surfaces apply when the reading column is solved
-    // from the max-words budget (DesignPreview's flowWindow). Without it the engine centred or
-    // bottomed a window one PAGE tall, so an output's words sat differently from the monitor's.
-    // Set by the scene builder (OutputStyleSpec::readingFontPx > 0); survives Set/ClearReadingFlow.
     void SetFlowFillsBox(bool on) { flowFillsBox_ = on; }
     bool FlowFillsBox() const { return flowFillsBox_; }
     int FlowPageLines() const { return flowPageLines_; }
     float FlowCharAt() const { return flowCharAt_; }
-    // THE PASSAGE'S LINES AS THIS OBJECT'S OWN STYLE WRAPS THEM, as character
-    // offsets (one entry per visual line). Built once from the layout the scene
-    // already measured (SceneBuilder::ApplyReadingFlow), because the mapping is
-    // needed on EVERY frame — a scroll in flight re-reads it sixty times a second —
-    // and re-laying out the passage per frame is exactly the cost this file's
-    // one-layout design exists to avoid. Empty = no mapping (an ordinary text
-    // object, or a slide that carries no passage).
     void SetFlowCharTable(std::vector<int> lineStarts) { flowCharStarts_ = std::move(lineStarts); }
     bool HasFlowCharTable() const { return !flowCharStarts_.empty(); }
-    // The position in the char offset, expressed in THIS style's line heights:
-    // the line that holds that character, plus the fraction of the move still in
-    // flight so a glide stays smooth on every surface. A char offset is a float
-    // whose integer part is a character and whose fraction is that progress.
     float FlowLineForChar(float charAt) const {
-        if (flowCharStarts_.empty())
-            return charAt;   // no table: the caller is already speaking lines
-        const float whole = std::floor(charAt);
-        const int target = static_cast<int>(whole);
-        const auto it = std::upper_bound(flowCharStarts_.begin(), flowCharStarts_.end(), target);
-        const int index = (it == flowCharStarts_.begin())
-                              ? 0
-                              : static_cast<int>(it - flowCharStarts_.begin()) - 1;
-        return static_cast<float>(index) + (charAt - whole);
+        // The same function the monitor tiles use (FlowScrollMath.hpp): the shared
+        // character position, turned into THIS output's own line.
+        return static_cast<float>(flowscroll::LineForChar(flowCharStarts_, charAt));
     }
 
 private:
@@ -279,28 +218,10 @@ public:
     // The engine treats video as a frame source: modules push decoded frames.
     void SetFrame(RgbaImage frame) {
         frame_ = std::move(frame);
-        // Bumped on EVERY push so a renderer can tell a stale upload from a
-        // current one. A live frame source (media on air, a camera tap) pushes
-        // a new frame every tick through this SAME object, and the GPU texture
-        // upload path is create-once/dedup-by-name — without a revision the
-        // first frame ever uploaded stayed on the output forever (see
-        // GPUResourceManager::UpdateTexture).
         ++frameRev_;
     }
     const RgbaImage& Frame() const { return frame_; }
     bool HasFrame() const { return !frame_.empty(); }
-    // THE SOURCE FRAME THESE PIXELS CAME FROM (0 = an uncounted source).
-    //
-    // A live layer (a taken camera/screen input, a bus window, media on air) is
-    // refreshed on every scene build — the pixel pass runs on cache hits too —
-    // and one tick builds a scene per output. Re-copying and re-uploading an
-    // 8 MB frame that has NOT changed is most of the per-frame cost of a live
-    // program feed, and it is pure waste whenever the source runs slower than
-    // the composition (which is exactly what a busy machine does to a capture
-    // device). The producer's own counter is what lets the refresh tell "the
-    // same picture" from "a new one" without comparing a single pixel; it is
-    // stored here, on the object, because the object IS the picture being
-    // asked about (see SceneBuilder::LayerFrameCurrent).
     uint64_t SourceSeq() const { return sourceSeq_; }
     void SetSourceSeq(uint64_t seq) { sourceSeq_ = seq; }
     // Monotonic version of the pixels currently in Frame() (0 = never pushed).
@@ -320,10 +241,6 @@ public:
     const char* TypeName() const noexcept override { return "Shape"; }
     ShapeComponent* Shape() { return FindComponent<ShapeComponent>(); }
     const ShapeComponent* Shape() const { return FindComponent<ShapeComponent>(); }
-    // `cornerRadius` is in the shape's OWN (destination) pixels and is clamped
-    // by the rasterizer to half the shorter side, exactly like Qt's Rectangle
-    // in DesignPreview/the Edit canvas. Defaulted so the square-corner callers
-    // (and the rendering phase's own tests) are untouched.
     void SetRectangle(Color fill, float cornerRadius = 0.0f) {
         auto c = std::make_shared<ShapeComponent>();
         c->kind = ShapeKind::Rectangle;
@@ -417,5 +334,4 @@ public:
     ClockComponent* Clock() { return FindComponent<ClockComponent>(); }
     const ClockComponent* Clock() const { return FindComponent<ClockComponent>(); }
 };
-
 } // namespace bps::rendering

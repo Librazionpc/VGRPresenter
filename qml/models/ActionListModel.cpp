@@ -256,12 +256,6 @@ void ActionListModel::setShortcut(int index, const QString &shortcut)
     if (index < 0 || index >= m_actions.size())
         return;
     const QString trimmed = shortcut.trimmed();
-    // One shortcut, one owner — refuse a chord another ACTION already has.
-    // Groups are checked separately (Main.qml's dispatch merges both maps
-    // and groups was there first; a genuine cross-registry collision is rare
-    // enough that surfacing it there, where the operator can see both lists
-    // open at once, is simpler than threading one registry's knowledge into
-    // the other's model).
     for (int i = 0; i < m_actions.size(); ++i) {
         if (i != index && !trimmed.isEmpty() && m_actions.at(i).shortcut == trimmed)
             return;
@@ -323,11 +317,6 @@ QVariantMap ActionListModel::shortcutMap() const
 }
 
 namespace {
-// THE CATALOG — one entry per real LiveOutputService capability this app
-// already has. The chooser includes the full reference catalog; entries not
-// supported here are disabled as Coming soon. Adding a new real
-// capability later is one line here, nothing else (ManageActionsModal reads
-// this list, it never hardcodes an effect).
 struct CatalogEntry {
     const char *id;
     const char *name;
@@ -355,12 +344,6 @@ constexpr CatalogEntry kCatalog[] = {
     { "media_toggle_muted",  "Mute",                 "volume2",      "MEDIA", false },
 };
 
-// Some reference-catalog ids (FreeShow's own naming) name the same capability
-// as one of this app's real effects above, under a different string — picking
-// "Clear slide" or "Mute" from the catalog must store the REAL effectId
-// (Main.qml's runEffect() switch only recognizes the kCatalog ids), or the
-// action would silently do nothing when its shortcut fires. One table, so a
-// reference id always resolves to its real counterpart, never a near-miss.
 struct CatalogAlias { const char *referenceId; const char *realId; };
 constexpr CatalogAlias kCatalogAliases[] = {
     { "clear_slide",          "clear_on_air_slide" },
@@ -374,11 +357,6 @@ constexpr CatalogAlias kCatalogAliases[] = {
 // Preserve the reference catalog's action ids and section order; actions
 // without a local dispatcher remain visible but unavailable until implemented.
 struct ReferenceCatalogEntry { const char *id; const char *section; bool common; };
-// Matches the real FreeShow Actions catalog one-for-one: same sections, same
-// entries, same order within a section. OBS Studio and Spotify are deliberate
-// external integrations this app doesn't have yet (see the click+keypress v1
-// scope decision) and were never part of FreeShow's own list — they don't
-// belong here as placeholders.
 constexpr ReferenceCatalogEntry kReferenceCatalog[] = {
     {"id_select_project","PROJECT",false},{"index_select_project","PROJECT",false},{"next_project_item","PROJECT",false},{"previous_project_item","PROJECT",false},{"index_select_project_item","PROJECT",false},{"name_start_project_item","PROJECT",false},{"mark_active_as_played","PROJECT",false},
     {"id_select_show","SHOW",false},{"name_select_show","SHOW",false},{"start_show","SHOW",true},{"set_template","SHOW",false},{"set_next_slide_timer","SHOW",false},{"change_slide_timeline_speed","SHOW",false},{"transpose_show_up","SHOW",false},{"transpose_show_down","SHOW",false},
@@ -402,9 +380,6 @@ QString catalogName(const QString &id)
     if (id == QLatin1String("transpose_show_down")) return QStringLiteral("Transpose down");
     if (id == QLatin1String("change_slide_timeline_speed")) return QStringLiteral("Change slide timeline speed");
     if (id == QLatin1String("toggle_icecast")) return QStringLiteral("Toggle Icecast");
-    // SLIDE-section ids that would otherwise fall into the generic "Open X"
-    // prefix rules below (meant for PROJECT/SHOW navigation) — FreeShow uses
-    // "Play" here instead, and these must be checked before those rules.
     if (id == QLatin1String("random_slide")) return QStringLiteral("Play random slide");
     if (id == QLatin1String("index_select_slide")) return QStringLiteral("Play slide at index");
     if (id == QLatin1String("name_select_slide")) return QStringLiteral("Play slide with name");
@@ -437,10 +412,6 @@ QString catalogName(const QString &id)
 
 QVariantMap catalogMap(const QString &id, const QString &section, bool common)
 {
-    // A reference id that names the same capability as a real kCatalog entry
-    // under FreeShow's own wording resolves to the REAL id first, so picking
-    // it from the catalog stores something Main.qml's runEffect() can
-    // actually dispatch (see kCatalogAliases' own comment).
     QString realId = id;
     for (const CatalogAlias &a : kCatalogAliases) {
         if (id == QLatin1String(a.referenceId)) {
@@ -461,17 +432,10 @@ QVariantMap catalogMap(const QString &id, const QString &section, bool common)
 } // namespace
 
 namespace {
-// THE TRIGGERS — the app events an action can be bound to ("custom
-// activation"). One table, read by the editor's picker AND by the Functions
-// pane's summary, so an id can never render as two different labels. Icons are
-// IconGlyph names.
 struct TriggerEntry {
     const char *id;
     const char *name;
     const char *icon;
-    // Shown while the picker's eye is CLOSED (the default): the handful of
-    // moments an operator actually wires up. The rest are the long tail the
-    // open eye reveals — same two-view idea as the action catalog's.
     bool common;
 };
 constexpr TriggerEntry kTriggers[] = {
@@ -520,10 +484,6 @@ QVariantList ActionListModel::catalogEntries() const
     for (const ReferenceCatalogEntry &e : kReferenceCatalog) {
         out.append(catalogMap(QString::fromUtf8(e.id), QString::fromUtf8(e.section), e.common));
     }
-    // Keep app-specific controls that have no catalog counterpart at all (the
-    // rest of this app's real effects now surface through their aliased spot
-    // in kReferenceCatalog above instead of a duplicate "VGRPRESENTER" row —
-    // see kCatalogAliases).
     out.append(catalogMap(QStringLiteral("go_live"), QStringLiteral("VGRPRESENTER"), true));
     out.append(catalogMap(QStringLiteral("stop"), QStringLiteral("VGRPRESENTER"), true));
     out.append(catalogMap(QStringLiteral("blackout"), QStringLiteral("VGRPRESENTER"), true));

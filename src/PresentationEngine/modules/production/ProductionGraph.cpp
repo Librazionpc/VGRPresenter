@@ -4,25 +4,11 @@
 #include <format>
 
 namespace bps::production {
-
 namespace {
-
 bool IsUniversalSink(NodeKind kind) {
     return kind == NodeKind::Data || kind == NodeKind::Control;
 }
 
-// An OUTPUT is a sink, not a pipe: it terminates the signals that reach it, and
-// what a row may CARRY is its OutputConfig caps — video only for a physical
-// screen window, both for NDI / SDI / recording / streaming — enforced where
-// buses are assigned (AssignOutputBuses). Its node `signalType` is therefore a
-// label, not an edge filter.
-//
-// Filtering on it was a real fault, not a nicety: a row's node is created as a
-// VIDEO node (that is its picture), so the audio edge into it was refused and
-// the audio half of an NDI/recording/stream wire existed only in the
-// OutputConfig. Nothing read it there — AudioMixer resolves an output's feed set
-// through the EDGE set, and a recording taps the mix of its own output node \u2014
-// so the wire drew on the canvas and the sink stayed silent.
 bool IsSignalAgnosticSink(const NodeInfo& node) {
     return node.kind == NodeKind::Output || IsUniversalSink(node.kind);
 }
@@ -132,7 +118,6 @@ ProcessingStage StageFromJson(const json::Value& v) {
 // The serialized doc also records the "next bus" counter the app model uses
 // for id generation, so ids stay stable across restarts.
 constexpr const char* kDocKey = "v1";
-
 } // namespace
 
 std::string ProductionGraph::NextId(
@@ -339,23 +324,6 @@ bool ProductionGraph::CanConnect(std::string_view from, std::string_view to,
                                  SignalType type) const {
     const auto fit = nodes_.find(std::string(from));
     const auto tit = nodes_.find(std::string(to));
-    // A MISSING node is NOT a refusal. The old rule here ("EnsureNode would
-    // create them; a TEST never does") sounded right but was backwards in
-    // practice: callers (BusListModel::toggleAudioRoute/toggleVideoRoute)
-    // lazily AddSource() the FROM node themselves, right before calling
-    // Connect(), whenever it's missing — a brand-new, never-before-routed
-    // source has no node yet, which is the COMMON case for a video source
-    // (nothing else ever creates its node proactively the way
-    // AudioInputListModel::pushEffectsOffThread does for audio on any
-    // level/mute change). Refusing here meant a video source's very FIRST
-    // connection attempt was refused unconditionally, forever — the node
-    // it was checking for only ever gets created BY a successful connect,
-    // which this pre-check never let happen. Treating a missing node as
-    // "will be created with exactly `type`" matches what Connect() actually
-    // does immediately afterward.
-    // ONE rule, asked of Accepts() so the optimistic gate and Connect() can
-    // never disagree — an output takes any signal it is caps-allowed to carry,
-    // a bus/source still takes only its own type.
     if (fit != nodes_.end() && !Accepts(type, fit->second))
         return false;
     if (tit != nodes_.end() && !Accepts(type, tit->second))
@@ -370,10 +338,6 @@ bool ProductionGraph::CanConnect(std::string_view from, std::string_view to,
     // cycle — only check when both sides are already real.
     if (fit != nodes_.end() && tit != nodes_.end() && WouldCreateCycle(from, to))
         return false;
-    // No capacity rule: a bus takes any number of sources and a source feeds
-    // any number of buses. A video bus used to hold exactly one provider, and
-    // that refusal was invisible on the board — the second video source's drag
-    // simply did not connect, with nothing saying why.
     return true;
 }
 
@@ -390,11 +354,6 @@ Result<void> ProductionGraph::Connect(std::string_view from, std::string_view to
         return Error::Make(Err::Production_SignalMismatch, "ProductionGraph",
                            "signal type mismatch on " + std::string(from) + " -> " +
                                std::string(to));
-    // The ONLY bus rule left: an audio-only bus has no video plane to feed.
-    // A bus otherwise takes as many sources as the user routes into it (see
-    // CanConnect) — the mixer sums their audio and the video side shows the
-    // first one routed, so a second video source is a usable route, not an
-    // error.
     const NodeInfo &destination = nodes_.at(std::string(to));
     if (type == SignalType::Video && destination.kind == NodeKind::Bus) {
         const auto busType = destination.meta.find("uiBusType");
@@ -625,16 +584,6 @@ Result<void> ProductionGraph::AssignOutputBuses(std::string_view outputId,
         nextVideoBus = std::string(videoBusId);
     }
     if (!audioBusId.empty()) {
-        // AN OUTPUT ALWAYS TAKES AUDIO. It is a transport, and every transport this
-        // app draws — an HDMI/projector display exactly like NDI, SDI, recording
-        // and streaming — carries sound beside the picture. This used to ask the
-        // node's caps, which a display row was created with as audio-false, so an
-        // audio wire onto HDMI was refused at assignment (the toast "output
-        // out:out-1 does not accept audio") even though Connect() already treats
-        // every output as a signal-agnostic sink. What a transport can DELIVER is a
-        // separate question, answered where the mix is played, not here: a display
-        // with no speakers still renders its mix, it just has no device to come out
-        // of. Video stays gated by caps (the speaker endpoint has no picture).
         auto it = nodes_.find(std::string(audioBusId));
         if (it == nodes_.end() || it->second.kind != NodeKind::Bus ||
             it->second.signalType != SignalType::Audio)
@@ -969,10 +918,6 @@ std::vector<ValidationIssue> ProductionGraph::ValidateGraph(
             else if (it->second.signalType != SignalType::Audio)
                 issues.push_back({ValidationIssue::Severity::Error, "output_bus_signal_mismatch",
                                   "output " + oid + " audio assignment is not an audio bus: " + cfg.audioBusId});
-            // No "does not accept audio" issue: an output is a transport and takes
-            // audio (see AssignOutputBuses). A document saved by an older build
-            // carries `supportsAudio: false` on its display rows, and judging it by
-            // that would keep refusing a wire the canvas now offers.
             (void)cfg.caps.supportsAudio;
         }
     }
@@ -1366,5 +1311,4 @@ void ProductionGraph::RollbackEdit() {
     baseSnapshots_.clear();
     PublishSnapshot();
 }
-
 } // namespace bps::production

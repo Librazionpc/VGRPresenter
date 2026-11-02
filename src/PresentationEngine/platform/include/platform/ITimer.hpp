@@ -1,16 +1,11 @@
 #pragma once
 
-// PAL timer subsystem (Phase 2): high-resolution time. Built on standard C++
-// (std::chrono) per the PAL design rule — the interface exists so the rest of
-// the engine never calls the OS clock directly.
-
 #include "core/common/Common.hpp"
 
 #include <chrono>
 #include <cstdint>
 
 namespace bps::platform {
-
 class ITimer {
 public:
     virtual ~ITimer() = default;
@@ -47,5 +42,4 @@ public:
     };
     Stopwatch StartStopwatch() const { return Stopwatch{}; }
 };
-
 } // namespace bps::platform

@@ -12,7 +12,6 @@
 #include <vector>
 
 namespace bps::modules {
-
 enum class MediaPlaybackState : int { Stopped = 0, Playing, Paused, Finished };
 enum class MediaType : int { Unknown = 0, Video, Audio, Image };
 
@@ -23,10 +22,6 @@ struct MediaItem {
     double durationSec = 0.0;
 };
 
-// Media feature module (docs/specs/08): playlist playback with a timed
-// position clock driven by the TaskScheduler's animation timer (07 §Animation).
-// Publishes `media.state_changed` on play/pause/resume/stop/finish; the core
-// has no knowledge of media formats.
 class MediaModule final : public IModule {
 public:
     static std::shared_ptr<MediaModule> Create();
@@ -71,5 +66,4 @@ private:
     TaskId playbackTask_ = 0;   // guarded by mutex_ (owned by TaskScheduler)
     std::atomic<bool> started_{false};
 };
-
 } // namespace bps::modules

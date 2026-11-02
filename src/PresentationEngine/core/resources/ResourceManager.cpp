@@ -9,7 +9,6 @@
 #include <format>
 
 namespace bps {
-
 ResourceManager& ResourceManager::Instance() {
     static ResourceManager instance;
     return instance;
@@ -109,16 +108,6 @@ void ResourceManager::SampleLocked() {
 }
 
 void ResourceManager::Sample() {
-    // What this sample has to PUBLISH is collected under the lock and put on the
-    // bus only after it is dropped. The bus dispatches SYNCHRONOUSLY, and the
-    // pressure subscribers re-enter this very manager (AdaptiveRuntime::OnPressure
-    // -> ApplyOptimization -> MemoryPressure() -> Telemetry() -> mutex_), so
-    // publishing under mutex_ deadlocks the sampling worker on a non-recursive
-    // lock WHILE it holds AdaptiveRuntime's applyMutex_ — and the GUI thread's
-    // next settings write (SettingsService -> ApplyToEngine -> SetPreference ->
-    // ApplyOptimization) waits on that applyMutex_ forever. One settings toggle
-    // then freezes the whole UI (killed by the hang watchdog: it reads as a
-    // crash).
     struct Pending {
         bool publishHigh = false;                  // ResourcePressureHigh for this sample
         bool sticky = false;                       // ...and remember it for late subscribers
@@ -197,10 +186,6 @@ void ResourceManager::Sample() {
         while (decisions_.size() > kMaxDecisions) decisions_.pop_front();
     }
 
-    // The lock is DROPPED before anything is dispatched: a subscriber of these
-    // events re-enters this manager (see the comment at the top), so the sample
-    // must not own mutex_ while the bus runs. Same rule as
-    // ProductionEngine/RecordingEngine's dispatch-scope tests.
     for (const Pending& p : pending) {
         if (p.sticky) {
             auto sticky = std::make_shared<events::ResourcePressureHigh>(p.high);
@@ -331,5 +316,4 @@ Metrics ResourceManager::MetricsSnapshot() const {
     m.health = GetHealth().state;
     return m;
 }
-
 } // namespace bps

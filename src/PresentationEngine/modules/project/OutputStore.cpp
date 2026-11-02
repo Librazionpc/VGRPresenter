@@ -5,11 +5,7 @@
 #include "modules/project/ShippedConfig.hpp"
 
 namespace bps::project {
-
 namespace {
-// Collection + key inside the kernel's DatabaseManager document store
-// (<dataDir>/kernel.json) — the same document the StyleStore writes its
-// roster into, one collection over.
 constexpr const char* kCollection = "outputs";
 constexpr const char* kKey = "roster";
 // The Edit dialog's item-kind keys, in StoredOutput::contentToggles order.
@@ -84,9 +80,6 @@ json::Value OutputStore::OutputToJson(const StoredOutput& o) {
         obj["presetId"] = json::Value::String(o.presetId);         // absent = no preset
     if (!o.videoMode.empty() && o.videoMode != "direct")
         obj["videoMode"] = json::Value::String(o.videoMode);       // absent = direct
-    // The row's own gates ARE its allow-list wires (see StoredOutput::showOverlay).
-    // Written when OPEN, so a roster with nothing wired stays byte-identical and an
-    // older build reading it falls back to its own "on" default.
     if (o.showOverlay)
         obj["showOverlay"] = json::Value::Bool(true);
     if (o.showMedia)
@@ -102,9 +95,6 @@ Result<StoredOutput> OutputStore::OutputFromJson(const json::Value& v) {
     if (!o)
         return Error::Make(Err::InvalidArgument, "OutputStore", "output entry is not an object");
 
-    // GUARDED READS: Find() returns nullptr for a missing key — every field
-    // an OLDER saved roster may not carry goes through a defaulted read, or
-    // hydrating a pre-existing kernel.json null-derefs.
     const auto str = [&v](std::string_view key, std::string_view dflt = {}) {
         if (const json::Value* f = v.Find(key))
             return std::string(f->asString(dflt));
@@ -161,5 +151,4 @@ Result<StoredOutput> OutputStore::OutputFromJson(const json::Value& v) {
         return Error::Make(Err::InvalidArgument, "OutputStore", "output entry has no id");
     return out;
 }
-
 } // namespace bps::project

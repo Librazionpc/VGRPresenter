@@ -11,7 +11,6 @@
 #include <format>
 
 namespace bps {
-
 ModuleManager& ModuleManager::Instance() {
     static ModuleManager instance;
     return instance;
@@ -144,9 +143,6 @@ Result<void> ModuleManager::UnregisterModule(std::string_view id) {
         states_.erase(std::string(id));
         factories_.erase(std::string(id));
     }
-    // Run OnUnload so the module releases subscriptions and cancels timers
-    // (08 §3) — otherwise e.g. an active autoplay sequence would keep calling
-    // into a destroyed module. A throwing module must not block unregistration.
     try {
         (void)module->OnUnload();
     } catch (...) {
@@ -174,9 +170,6 @@ Result<void> ModuleManager::DoTransition(std::string_view id, ModuleState target
     std::string entityId = "module:" + std::string(id);
     auto& lc = LifecycleManager::Instance();
 
-    // Restart path: a Stopped/Unloaded module re-enters through the reset edge
-    // Stopped -> Registered (12 §3), then walks forward to Running. Plain lifecycle
-    // Transition() rejects backward jumps, so the reset is explicit.
     if (target == ModuleState::Running &&
         (from == ModuleState::Stopped || from == ModuleState::Unloaded)) {
         auto reset = lc.Transition(entityId, LifecycleState::Registered);
@@ -315,5 +308,4 @@ HealthReport ModuleManager::GetHealth() const {
     r.lastError = lastError_;
     return r;
 }
-
 } // namespace bps

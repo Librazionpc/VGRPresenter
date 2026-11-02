@@ -1,9 +1,5 @@
 #pragma once
 
-// Phase 14 plugin surface (docs/specs/26 §Plugin Support). New action,
-// condition, and trigger types plug in through these registries without
-// modifying the engine — implement, register, done.
-
 #include "core/common/Common.hpp"
 #include "modules/automation/AutomationTypes.hpp"
 
@@ -12,7 +8,6 @@
 #include <string>
 
 namespace bps::automation {
-
 class FlowEngine;
 
 // Runtime context handed to actions/conditions/triggers. Deliberately small:
@@ -68,5 +63,4 @@ public:
 using ActionFactory = std::shared_ptr<IAction> (*)();
 using ConditionFactory = std::shared_ptr<ICondition> (*)();
 using TriggerFactory = std::shared_ptr<ITrigger> (*)();
-
 } // namespace bps::automation

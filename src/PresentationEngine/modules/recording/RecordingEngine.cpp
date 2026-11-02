@@ -52,14 +52,9 @@ struct RecordingEngine::Pump {
     }
 };
 
-
 namespace {
-
 constexpr const char* kModule = "RecordingEngine";
 
-// The Media Foundation encoders the MP4 container writes with. Initialize succeeds
-// only when Media Foundation has the encoder; the encoder selected is the one the
-// system provides (hardware where present, the Microsoft software encoder otherwise).
 class MediaFoundationVideoEncoder final : public IVideoEncoder {
 public:
     const char* Codec() const noexcept override { return "H.264"; }
@@ -92,7 +87,6 @@ public:
 private:
     bool initialized_ = false;
 };
-
 
 const char* EncoderKindName(EncoderKind k) {
     switch (k) {
@@ -141,7 +135,6 @@ int SeverityRank(StorageAction a) {
     }
     return 0;
 }
-
 } // namespace
 
 RecordingEngine& RecordingEngine::Instance() {
@@ -159,19 +152,11 @@ Result<void> RecordingEngine::Initialize() {
         if (defaultDir_.empty()) defaultDir_ = "recordings";
         dir = defaultDir_;
     }
-    // Ensure the recording directory exists (docs/specs/28 §18); failures are
-    // non-fatal — individual recordings report their own storage errors. This
-    // is a PAL call, so it runs with mutex_ released.
     { std::error_code ec; (void)std::filesystem::create_directories(dir, ec); }
 
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (initialized_.load()) return Ok();   // lost the race; other caller finished
 
-    // Default providers (docs/specs/28 §11-§13). MP4 (Media Foundation) and MKV (the
-    // Matroska writer) are the containers this build writes; any other format is not
-    // registered, so a profile that asks for one is refused rather than silently written
-    // as something else. The hardware encoders are registered by the host through
-    // RegisterHardwareEncoders — only the ones the machine really has.
     containers_.emplace(ContainerName(ContainerKind::MP4),
                         []() -> std::shared_ptr<IRecordingContainer> {
                             return std::make_shared<MediaFoundationMp4>();
@@ -863,9 +848,6 @@ std::vector<JournalEntry> RecordingEngine::Journal() const {
 }
 
 Result<size_t> RecordingEngine::Recover() {
-    // Any session still in an active state was interrupted (docs/specs/28 §21):
-    // finalize its open segment and mark recovered. Detach the containers under
-    // the lock, then close them (a provider call) with NO lock held.
     std::vector<std::shared_ptr<IRecordingContainer>> closing;
     std::vector<std::string> recoveredIds;
     {
@@ -1103,9 +1085,6 @@ Result<StorageInfo> RecordingEngine::GetStorageInfo(std::string_view path) const
     StorageInfo info;
 
     if (simulated >= 0) {
-        // Test hook: deterministic disk without touching the filesystem.
-        // freeBytes carries the real byte figure (for capacity estimates);
-        // freePercent is simulated directly (0-100).
         info.freeBytes = simulated;
         info.totalBytes = simulated * 2;
         info.freePercent = static_cast<int>(std::clamp<int64_t>(simulated, 0, 100));
@@ -1157,9 +1136,6 @@ Result<void> RecordingEngine::SetStoragePolicy(int freePercentBelow, StorageActi
 }
 
 int64_t RecordingEngine::FreePercent() const {
-    // Snapshot the inputs under the lock, then query the filesystem with NO
-    // lock held: std::filesystem::space is a PAL stat that can block (network
-    // or removable media) and must not stall every other engine operation.
     std::string dir;
     int64_t simulated = 0;
     {
@@ -1204,11 +1180,6 @@ std::string RecordingEngine::MakePath(const RecordingProfile& p, std::string_vie
 
 // --- Segments ---
 
-// Route a recording to its next segment: the current container is closed and
-// the next one opened with NO engine lock held (a real container's Close/Open
-// can block for a long time — docs/specs/28 §20). State changes stay under the
-// lock and re-validate the session afterwards, since it may have been stopped
-// while the provider was working.
 void RecordingEngine::RotateSegment(const std::string& recordingId) {
     std::shared_ptr<IRecordingContainer> closing;
     std::shared_ptr<Pump> pumpRef;
@@ -1379,16 +1350,10 @@ Result<void> RecordingEngine::UpdateDroppedFrames(std::string_view recordingId,
 }
 
 Result<void> RecordingEngine::Tick(int64_t advanceMs) {
-    // The scope below holds the lock for session/replay/schedule state only.
-    // Segment rotations and the disk monitor run AFTER it closes, because both
-    // reach provider/PAL calls that must not run under the engine lock.
     std::vector<std::string> rotate;
     // Replay buffers that just became ready, published AFTER the lock closes.
     struct ReadyPing { std::string rid, nodeId; int64_t capacityMs; };
     std::vector<ReadyPing> replayReady;
-    // Scheduled work that came due: taken out of the schedule under the lock and
-    // RUN after it closes — StartRecording/StopRecording open and close provider
-    // containers (docs/specs/28 §38).
     std::vector<std::pair<std::string, std::string>> dueStarts;
     std::vector<std::string> dueStops;
     {
@@ -1438,9 +1403,6 @@ Result<void> RecordingEngine::Tick(int64_t advanceMs) {
     }
     }   // release mutex_ — provider calls below must not run under it
 
-    // Scheduled work that came due: run here, with the lock released (both open
-    // or close a provider container — real work, and re-entrant into this
-    // engine, which is exactly what must not happen under mutex_).
     for (const auto& [pid, nid] : dueStarts) (void)StartRecording(pid, nid);
     for (const auto& id : dueStops) (void)StopRecording(id, "scheduled");
 
@@ -1503,12 +1465,8 @@ void RecordingEngine::UnwireEvents() {
 }
 
 // ---------------------------------------------------------------------------
-// The pump: one thread per recording. Frames come from the render buffer the
-// recording reads whenever it holds a new one; audio comes from a listener on the
-// program mix, queued until the pump writes it.
 
 namespace {
-
 // The buffer a recording reads when its production node names none: the on-air
 // feed (the same name LiveOutputController::kPreviewName carries).
 constexpr const char* kOnAirBuffer = "__live_preview__";
@@ -1521,7 +1479,6 @@ double ElapsedMs(std::chrono::steady_clock::time_point start)
 {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
-
 } // namespace
 
 void RecordingEngine::StartPump(const std::string& recordingId) {
@@ -1547,11 +1504,6 @@ void RecordingEngine::StartPump(const std::string& recordingId) {
         if (auto* fb = dynamic_cast<rendering::FrameBufferOutput*>(out.value().get()))
             pump->lastFrame = fb->FramesReceived();
 
-    // The audio listener copies each rendered chunk; the pump writes it later. Audio is
-    // stamped on the mix's sample clock, counted from the moment this recording began.
-    // The listener hears only the buses wired to this recording's output node. With no
-    // output node there is nothing to hear: no tap, rather than the speaker mix (an
-    // empty id means the speakers to the mixer).
     pump->audioOrigin = audio::AudioEngine::Instance().FramesRendered();
     pump->audioTap = nodeId.empty() ? uint64_t{0} : audio::AudioEngine::Instance().AddMixTap(
         nodeId,
@@ -1687,5 +1639,4 @@ void RecordingEngine::FailRecording(const std::string& recordingId, const std::s
     if (container) (void)container->Close(true);
     (void)EventBus::Instance().Publish(events::RecordingFailed{recordingId, message});
 }
-
 } // namespace bps::recording

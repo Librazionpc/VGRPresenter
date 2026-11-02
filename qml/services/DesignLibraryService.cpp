@@ -15,9 +15,7 @@
 namespace bl = bps::library;
 
 namespace {
-
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -36,11 +34,6 @@ void DesignLibraryService::open(bool forTemplates, QString noun, QString toastCh
     noun_ = std::move(noun);
     toastChannel_ = std::move(toastChannel);
 
-    // The library's file path needs the engine's platform layer. Boot may already have run
-    // (tests, reload) or may still be pending (the singletons are created when QML first
-    // touches them, which can be before boot) — either way the library is built the moment
-    // the platform layer exists. Without the retry a service created pre-boot stayed empty
-    // for the whole session, the same gap ShowService had.
     connect(&EngineBridge::instance(), &EngineBridge::bootedChanged, this,
             [this, forTemplates] {
         if (EngineBridge::instance().booted())

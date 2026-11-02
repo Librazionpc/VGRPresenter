@@ -1,13 +1,5 @@
 #pragma once
 
-// Chord System (docs/specs/25 §Chord System / §Transposition). Chords are
-// structured data — root, quality, extension, slash bass — never random text.
-// The parser recognizes G, Am, D/F#, Cmaj7, Em7, G/B, C#m7b5 and friends;
-// unrecognized notation is preserved as `custom` so nothing is ever lost.
-// Transposition maps every chord through a chromatic table, preserves
-// qualities/extensions/slash basses, and keeps the original spelling family
-// (sharps stay sharps, flats stay flats).
-
 #include "core/common/Common.hpp"
 #include "modules/songs/SongTypes.hpp"
 
@@ -16,7 +8,6 @@
 #include <vector>
 
 namespace bps::song {
-
 class ChordSystem {
 public:
     // Parses a single chord token ("G", "Am", "D/F#", "Cmaj7", "Em7", "G/B").
@@ -41,5 +32,4 @@ public:
     // detection): every whitespace-separated token parses as a chord.
     static bool IsChordToken(std::string_view token);
 };
-
 } // namespace bps::song

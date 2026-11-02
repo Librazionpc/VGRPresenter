@@ -2,17 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// "Add Clock" configurator — pops up when "Clock" is picked from the Edit
-// screen's "+" Add Content menu, matching
-// 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Add_Clock.qml's clock_modal_*/
-// clock_fmt_*/clock_style_*/clock_toggle*_*/clock_btn_* elements. Same
-// convention as CameraSourceModal.qml/MediaSourceModal.qml: scrim + centered
-// card, `open` to show/hide, `applied`/`cancelled` signals, no application
-// state of its own beyond the picker UI.
-//
-// The live preview (and the eventual canvas visual, see LiveClock.qml) both
-// run off the same shared ticking component instead of duplicating a
-// second-by-second Timer + formatting logic here.
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
@@ -71,13 +60,6 @@ Item {
         running: root.open
     }
 
-    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
-    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
-    // the whole app, not just that page's content column: parented in place its scrim
-    // covered one side of the settings card, so the dialog read as half-modal (user
-    // report: "the black box doesn't cover the whole settings modal, only one side").
-    // Reparented to the window overlay, this component has no scaled ancestor to
-    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
     parent: Overlay.overlay
 
     ModalScrim {
@@ -126,30 +108,9 @@ Item {
                         font.weight: Font.DemiBold
                     }
 
-                    Rectangle {
+                    ModalCloseButton {
                         id: closeBtn
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 28
-                        height: 28
-                        radius: 7
-                        color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                        Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✕"
-                            color: Theme.textSecondary
-                            font.pixelSize: 14
-                        }
-
-                        MouseArea {
-                            id: closeArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.cancelled()
-                        }
+                        onClicked: root.cancelled()
                     }
                 }
 

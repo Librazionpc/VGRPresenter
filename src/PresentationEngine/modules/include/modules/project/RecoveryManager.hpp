@@ -1,10 +1,5 @@
 #pragma once
 
-// RecoveryManager (docs/specs/15 §Recovery Manager): automatically restores
-// unsaved work, crashed sessions and incomplete imports. On engine start it
-// detects an unclean previous session, records unsaved document state, and
-// publishes project.recovery_available so the UI can offer recovery actions.
-
 #include "modules/project/SessionManager.hpp"
 #include "interfaces/IService.hpp"
 
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct RecoveryItem {
     std::string kind;        // "unsaved-work" | "crashed-session" | "incomplete-import"
     std::string projectId;
@@ -49,5 +43,4 @@ private:
     mutable std::mutex mutex_;
     std::vector<RecoveryItem> items_;
 };
-
 } // namespace bps::project

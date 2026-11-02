@@ -8,7 +8,6 @@
 #include <thread>
 
 namespace bps::platform {
-
 namespace {
 std::string RegistryString(HKEY root, const char* subKey, const char* value) {
     char buf[1024] = {0};
@@ -19,10 +18,6 @@ std::string RegistryString(HKEY root, const char* subKey, const char* value) {
     return buf;
 }
 
-// Reports the running process architecture (canonical name) — the most useful
-// answer on Windows, where a 32-bit build can run on 64-bit hardware (WOW64)
-// and an ARM64 build can run under x64 emulation. Compile-time: deterministic
-// and identical to BuildInfo (kCompileArch).
 std::string ArchString() { return CompileArch(); }
 
 struct RawOsVersion {
@@ -33,9 +28,6 @@ struct RawOsVersion {
 };
 
 RawOsVersion QueryOsVersion() {
-    // RtlGetVersion (Vista+) is not deprecated like GetVersionExA — it
-    // reports the true running OS regardless of the app's manifest, which
-    // GetVersionExA/VerifyVersionInfo silently lie about without one.
     using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
     static auto fn = win::ProcAddress<RtlGetVersionFn>(
         GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
@@ -56,13 +48,6 @@ std::string OsVersionString(const RawOsVersion& v) {
     return std::to_string(v.major) + "." + std::to_string(v.minor) + "." + std::to_string(v.build);
 }
 
-// Marketing name for EnvironmentInfo::osName (IEnvironment.hpp documents
-// "Windows 11" as the expected shape, matching Linux's "Ubuntu 24.04 LTS")
-// — kept separate from osVersion's raw kernel string. Windows 11 is still
-// internally NT 10.0 (Microsoft deliberately never bumped the major/minor —
-// countless apps hardcode a "10.0" check and would break otherwise), so the
-// build number is the ONLY signal that distinguishes 10 from 11; these are
-// Microsoft's own published boundaries, not a guess.
 std::string FriendlyOsName(const RawOsVersion& v) {
     if (!v.ok) return "Windows";
     if (v.major == 10 && v.minor == 0)
@@ -118,5 +103,4 @@ EnvironmentInfo WindowsEnvironment::Current() const {
     info.timezone = Timezone();
     return info;
 }
-
 } // namespace bps::platform

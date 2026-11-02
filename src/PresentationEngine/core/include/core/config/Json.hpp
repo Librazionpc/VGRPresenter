@@ -1,9 +1,5 @@
 #pragma once
 
-// Minimal, dependency-free JSON implementation used by the ConfigurationManager
-// (docs/specs/03). Supports the full JSON grammar for parsing and compact
-// serialization. Numbers are stored as double (config precision is sufficient).
-
 #include "core/common/Common.hpp"
 
 #include <cmath>
@@ -13,15 +9,11 @@
 #include <vector>
 
 namespace bps::json {
-
 class Value {
 public:
     using Array = std::vector<Value>;
     using Object = std::map<std::string, Value, std::less<>>;
     enum class Type : int { Null, Bool, Number, String, Array, Object };    Value() = default;
-    // Converting constructors: containers assign directly to Value. (The static
-    // factories for Array/Object are intentionally absent — a member type and a
-    // member function cannot share a name in the same class.)
     Value(Array arr) : t_(Type::Array), v_(std::move(arr)) {}
     Value(Object obj) : t_(Type::Object), v_(std::move(obj)) {}
 
@@ -100,7 +92,6 @@ private:
 // Serialization
 // ---------------------------------------------------------------------------
 namespace detail {
-
 inline void EscapeInto(std::string& out, std::string_view s) {
     for (char c : s) {
         switch (c) {
@@ -171,7 +162,6 @@ inline void SerializeInto(const Value& v, std::string& out) {
         }
     }
 }
-
 } // namespace detail
 
 inline std::string Value::ToString() const {
@@ -184,7 +174,6 @@ inline std::string Value::ToString() const {
 // Parsing
 // ---------------------------------------------------------------------------
 namespace detail {
-
 class Parser {
 public:
     explicit Parser(std::string_view s) : s_(s) {}
@@ -355,12 +344,10 @@ private:
     std::string_view s_;
     size_t pos_ = 0;
 };
-
 } // namespace detail
 
 inline Result<Value> Parse(std::string_view text) {
     detail::Parser p(text);
     return p.ParseDocument();
 }
-
 } // namespace bps::json

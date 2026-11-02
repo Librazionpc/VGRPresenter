@@ -1,11 +1,5 @@
 #pragma once
 
-// ThumbnailManager (docs/specs/13 §Thumbnail Manager): generates thumbnails
-// for assets. Ships with deterministic placeholder thumbnails (per-type SVG)
-// and image dimension extraction from PNG/JPEG headers. Real raster decode is
-// a documented future extension; the async pipeline (Core ThreadPool) is in
-// place so decode-based generators can be added behind the same interface.
-
 #include "modules/content/AssetMetadata.hpp"
 
 #include <cstdint>
@@ -15,7 +9,6 @@
 #include <unordered_map>
 
 namespace bps::content {
-
 struct ThumbnailSpec {
     int width = 96;
     int height = 96;
@@ -50,5 +43,4 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::string> cache_;   // "uuid:size" -> svg
 };
-
 } // namespace bps::content

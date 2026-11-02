@@ -1,9 +1,3 @@
-// Shared library-tab placeholder — consistent chrome while a tab's real
-// pane is unbuilt (Media/Audio/Overlays/Templates/Calendar/Functions until
-// their content lands). Same surface colors, borders and label typography
-// as the browser panes, one centered status message, and the bottom-right
-// "+ New …" pill from the reference design, wired to a signal so the pane's
-// future real action has a single funnel.
 import QtQuick
 import VGRPresenterUI
 

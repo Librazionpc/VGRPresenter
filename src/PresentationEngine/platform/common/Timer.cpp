@@ -4,7 +4,6 @@
 #include <thread>
 
 namespace bps::platform {
-
 int64_t TimerImpl::NowNs() const {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -37,10 +36,6 @@ ITimer::ClockParts FromTm(const std::tm& t) {
 } // namespace
 
 ITimer::ClockParts TimerImpl::UtcNow() const {
-    // std::gmtime/std::localtime are standard C++ (<ctime>) and build on every
-    // OS — unlike the POSIX-only gmtime_r/localtime_r. They return a pointer to
-    // a shared static buffer, which is fine here: these calls are infrequent
-    // (logs/timestamps) and the result is copied out immediately.
     std::time_t t = std::time(nullptr);
     return FromTm(*std::gmtime(&t));
 }
@@ -49,5 +44,4 @@ ITimer::ClockParts TimerImpl::LocalNow() const {
     std::time_t t = std::time(nullptr);
     return FromTm(*std::localtime(&t));
 }
-
 } // namespace bps::platform

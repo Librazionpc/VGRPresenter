@@ -18,9 +18,6 @@
 
 #include <cstdint>
 
-// See the header for why this exists. Two invariants worth stating where the
-// code is, because both were bugs waiting to happen:
-//
 //   1. The WORKER never reads a model. QAbstractListModel belongs to the
 //      interface thread, so every job below carries a snapshot (RowSpec) built
 //      on that thread, and the only thing that crosses back is plain data.
@@ -29,11 +26,6 @@
 //      worker filling it, and no QML binding can block on the engine.
 
 namespace {
-
-// The engine's speaker endpoint — AudioMixer::kSpeakersOutputId, spelled here
-// because the routing canvas draws it as the AUDIO sink row. This service does
-// not create it (AudioEngine::EnsureSpeakersOutput owns that: it is made with
-// exactly the caps the mixer needs) and never prunes it.
 constexpr const char *kSpeakersNodeId = "out:speakers";
 // Every node this service owns starts here ("out:<stable row id>").
 constexpr const char *kNodePrefix = "out:";
@@ -53,11 +45,6 @@ bool IsStreamKind(const QString &kind)
     return kind.compare(QLatin1String("STREAM"), Qt::CaseInsensitive) == 0;
 }
 
-// What a row's output node can carry. EVERY transport carries both signals: a
-// physical display (HDMI/projector) is a render target AND a sound destination,
-// exactly like NDI, SDI, recording and streaming, so all of them take an audio bus
-// beside the picture. The speaker endpoint is the mirror image — audio only; it
-// has no picture to send.
 bps::production::OutputConfig CapsFor(const QString &kind)
 {
     bps::production::OutputConfig cfg;
@@ -67,22 +54,11 @@ bps::production::OutputConfig CapsFor(const QString &kind)
         cfg.caps.supportsSeparateAudio = true;
         return cfg;
     }
-    // An OUTPUT is a transport, and a transport carries both signals: HDMI
-    // carries sound, and so does every other row that sends a picture somewhere.
-    // This table used to answer `!screen`, which is why an HDMI card had no audio
-    // dot and an audio wire onto it was refused at the caps with nothing on screen
-    // to aim at. A display with no speakers of its own still accepts the bus — its
-    // mix is rendered and simply has no device to come out of, which is a delivery
-    // fact, not a routing one.
     cfg.caps.supportsVideo = true;
     cfg.caps.supportsAudio = true;
-    // "Separate audio" means the row's audio can differ from the picture it shows;
-    // a display window still needs one audio bus of its own, so it is true for
-    // every transport the canvas draws (the speaker endpoint sets it above).
     cfg.caps.supportsSeparateAudio = true;
     return cfg;
 }
-
 } // namespace
 
 QPointer<RoutingService> RoutingService::s_instance;
@@ -120,9 +96,6 @@ RoutingService::RoutingService(QObject *parent)
         connect(outputs, &QAbstractItemModel::rowsInserted, this, [this] { refresh(); });
         connect(outputs, &QAbstractItemModel::rowsRemoved, this, [this] { refresh(); });
         connect(outputs, &QAbstractItemModel::modelReset, this, [this] { refresh(); });
-        // Content: a rename, a style, an enable toggle. The published snapshot
-        // is rebuilt here; a rename also reaches the graph's display name, so
-        // the node and the row keep reading the same.
         connect(outputs, &QAbstractItemModel::dataChanged, this, [this] { rebuildRows(); });
         connect(outputs, &OutputListModel::outputRosterChanged, this, [this] { refresh(); });
     }
@@ -140,10 +113,6 @@ RoutingService::RoutingService(QObject *parent)
     // graph commands below belong to the engine worker.
     QTimer::singleShot(0, this, [this] { refresh(); });
 
-    // FEED HEALTH. The routing facts change when someone wires something; the
-    // PICTURE changes every frame, so it needs its own heartbeat. 500 ms is fast
-    // enough to watch a wire take effect and slow enough that the cards' "live /
-    // no frames" is not a strobe (a 60 Hz output always reads live inside a
     // 1.5 s window — see kFeedLiveWindowMs).
     feedTimer_.setInterval(500);
     connect(&feedTimer_, &QTimer::timeout, this, &RoutingService::refreshFeedHealth);
@@ -162,9 +131,6 @@ RoutingService::~RoutingService()
 
 QString RoutingService::nodeIdFor(const QString &stableId, const QString &kind)
 {
-    // Every transport is "out:<stable id>", STREAM included: a stream row's target
-    // comes from its preset, so each row owns its own node (the old shared
-    // "out:stream" node is pruned as stale on the next refresh).
     Q_UNUSED(kind)
     if (stableId.isEmpty())
         return {};
@@ -195,11 +161,6 @@ int RoutingService::busRowFromNode(const QString &nodeId)
     return BusListModel::rowForBusNumber(number);
 }
 
-// "waveout:<n>" → n; anything else ("" included) → kNoAudioDevice. The roster id
-// is the audio layer's own naming, and a row whose saved endpoint is gone keeps
-// the string but opens NOTHING — falling back to the default endpoint would play
-// the sound somewhere the operator did not choose, which is the one thing the
-// per-output choice exists to prevent.
 constexpr uint32_t kNoAudioDevice = 0xFFFFFFFFu;
 uint32_t AudioDeviceNumber(const QString &id)
 {
@@ -286,11 +247,6 @@ void RoutingService::rebuildRows()
                 outputs->data(index, OutputListModel::IdRole).toString(), kind);
             const QPair<QString, QString> assignment = assignments_.value(node);
             const bool screen = IsScreenKind(kind);
-            // THE WIRED SETS, from the edges (see refresh): every bus each side
-            // reaches. `videoBus` is which of the video ones ON AIR — the config's
-            // own field, projected onto the set so a wire that was taken away can
-            // never be named — and `audioBus` the first, because audio is summed
-            // and has no "shown" bus.
             const QVector<int> videoSet = videoBuses_.value(node);
             const QVector<int> audioSet = audioBuses_.value(node);
             const int shownVideo = busRowFromNode(assignment.first);
@@ -323,11 +279,6 @@ void RoutingService::rebuildRows()
                          outputs->data(index, OutputListModel::EnabledRole).toBool());
             entry.insert(QStringLiteral("screen"), screen);
             entry.insert(QStringLiteral("system"), false);
-            // How many dots this card gets comes from the TRANSPORT's own caps —
-            // the same table its node is created with (CapsFor), not a guess made
-            // here. An HDMI display carries a picture, so its card has ONE dot;
-            // NDI, SDI, recording and streaming carry the audio bus beside the
-            // picture, so their cards have TWO (video in and audio in).
             const auto caps = CapsFor(kind).caps;
             entry.insert(QStringLiteral("acceptsVideo"), caps.supportsVideo);
             entry.insert(QStringLiteral("acceptsAudio"), caps.supportsAudio);
@@ -345,10 +296,6 @@ void RoutingService::rebuildRows()
             // "direct" | "compose": which picture this row shows (see OutputListModel).
             entry.insert(QStringLiteral("videoMode"),
                          outputs->data(index, OutputListModel::VideoModeRole).toString());
-            // THIS ROW's own Overlays / Media gates (see
-            // OutputListModel::setShowOverlay): they gate THIS output's picture and
-            // nobody else's, so its card is where they are read and toggled. Read
-            // as roles — the model owns the state and the persistence.
             entry.insert(QStringLiteral("showOverlay"),
                          outputs->data(index, OutputListModel::OverlayGateRole).toBool());
             entry.insert(QStringLiteral("showMedia"),
@@ -372,18 +319,6 @@ void RoutingService::rebuildRows()
         }
     }
 
-    // The speaker endpoint. It is NOT a roster row — AudioEngine creates the node
-    // (out:speakers) so the mixer has one place to sum the wired buses into — but
-    // it is a real sink all the same: a bus is wired to it exactly like one is
-    // wired to NDI, and "always on" was only ever true of the node's existence,
-    // never of a bus reaching it. A bus added after boot used to stay silent
-    // behind a card with no port, which is what this row now exposes.
-    //
-    // ONE difference matters: this sink is a SUM. AudioMixer::MixSelected sums
-    // every plane whose edge reaches out:speakers, so the endpoint carries as
-    // many buses as the operator wires — which is why the row publishes
-    // `audioBuses` (a LIST) and not just `audioBus`. `audioBus` stays as the
-    // first entry for any reader that wants one bus.
     QVariantList systemAudioBuses;
     const QVector<int> speakerSet = audioBuses_.value(QString::fromLatin1(kSpeakersNodeId));
     for (const int busRow : speakerSet)
@@ -423,15 +358,6 @@ void RoutingService::reportRefused(const QString &reason)
     vgr::EngineWorker::onInterfaceThread(this, [this, reason] { emit refused(reason); });
 }
 
-// WHAT THE ENGINE ACTUALLY DELIVERED, per output row.
-//
-// The canvas used to answer "is this output getting a picture?" from the wiring
-// alone — wired meant live — which is exactly the reading that cannot be debugged:
-// a wire whose bus never produced a frame, a buffer the loop never composed into,
-// and a sender that is behind all looked identical on screen. The render engine
-// already keeps the honest counters (each output's FramesReceived and the steady
-// clock of its last Present), so the cards read those instead. Atomic reads, no
-// device, no frame copy — safe to poll, and it never touches the model.
 void RoutingService::refreshFeedHealth()
 {
     auto *outputs = OutputListModel::instance();
@@ -471,11 +397,6 @@ void RoutingService::refreshFeedHealth()
     });
 }
 
-// The video wire, per roster row, from the published assignments — the one
-// thing OutputListModel needs to give each output its own picture. A bus row
-// that is gone (deleted, so busRowFromNode answers -1) publishes 0, which is
-// "nothing wired": the row falls back to the program slide instead of holding a
-// dangling bus number.
 void RoutingService::publishRoutedVideoBuses()
 {
     auto *outputs = OutputListModel::instance();
@@ -489,10 +410,6 @@ void RoutingService::publishRoutedVideoBuses()
     for (const RowSpec &spec : specs) {
         const QString video = assignments_.value(spec.nodeId).first;
         byRow.append(BusListModel::busNumberAt(busRowFromNode(video)));
-        // THE WHOLE WIRED SET, not just the one on air: an output may hold several
-        // video buses, and this list is the allow-list the engine gates the
-        // design's bus windows with (OutputStyleSpec::allowedVideoBuses). Bus
-        // NUMBERS, because that is the key CompositorState's frames use.
         QVector<int> wired;
         for (const int busRow : videoBuses_.value(spec.nodeId)) {
             const int number = BusListModel::busNumberAt(busRow);
@@ -533,9 +450,6 @@ bool RoutingService::acceptsSignal(int outputRow, const QString &kind) const
     const QString k = kind.trimmed().toLower();
     if (k != QLatin1String("video") && k != QLatin1String("audio"))
         return false;
-    // The speaker endpoint takes audio and nothing else (its node is typed Audio,
-    // so the graph would refuse a video edge anyway — say so here instead of
-    // letting a wire vanish on release).
     if (outputRow < 0)
         return k == QLatin1String("audio");
 
@@ -545,12 +459,6 @@ bool RoutingService::acceptsSignal(int outputRow, const QString &kind) const
 
     const QString rowKind =
         outputs->data(outputs->index(outputRow), OutputListModel::KindRole).toString();
-    // The speaker endpoint is the one sink that takes audio ONLY. Every other
-    // output — a display window (HDMI/projector) included — is a transport, and a
-    // transport carries both: HDMI carries sound, and a display output that
-    // refused an audio wire refused the very thing the transport is for. Answer
-    // from the SAME caps table the engine's node was created with (CapsFor), so a
-    // row cannot be draggable here and refused three calls down in the graph.
     if (IsSystemKind(rowKind))
         return k == QLatin1String("audio");
     const auto caps = CapsFor(rowKind).caps;
@@ -563,15 +471,6 @@ bool RoutingService::acceptsSignal(int outputRow, const QString &kind) const
 
 void RoutingService::refresh()
 {
-    // THE ROSTER HAS TO HAVE BEEN READ BEFORE ANYTHING IS PRUNED. OutputListModel
-    // is built at QML load, BEFORE the engine opens kernel.json, so its first
-    // hydrate always reads an EMPTY store — and an empty roster here means "no row
-    // owns any output node", which the prune below would take literally and delete
-    // every output node AND its wiring from the saved graph. (That is the boot race
-    // behind "my outputs and their wires are gone after a restart": the nodes the
-    // graph had restored were removed seconds after the restore, and the removal
-    // was persisted.) A roster that is not ready yet means "ask again later": the
-    // hydrate emits modelReset / outputRosterChanged, and both call this again.
     auto *outputs = OutputListModel::instance();
     if (!outputs || !outputs->rosterReady()) {
         if (!warnedRosterNotReady_) {
@@ -609,10 +508,6 @@ void RoutingService::refresh()
                 stale.append(node);
         }
         for (const QString &node : stale) {
-            // A deleted row takes its own audio stream with it: the node is gone,
-            // so nothing would ever stop that device's stream once it left the
-            // roster (a closed row that keeps a WASAPI client open is a device
-            // the rest of the machine can no longer use).
             bps::audio::AudioEngine::Instance().StopOutputAudio(node.toStdString());
             (void)graph.RemoveNode(node.toStdString());
         }
@@ -641,10 +536,6 @@ void RoutingService::refresh()
                 && node.value().enabled != spec.enabled)
                 (void)graph.SetEnabled(nodeId, spec.enabled);
 
-            // A STREAM row pushes where ITS PRESET says: the row's node carries the
-            // preset's RTMP target and encoder, so several presets side by side are
-            // several destinations. The node itself is kept when the preset changes
-            // (only the target is rewritten), so the row's wires survive an edit.
             if (stream) {
                 const bool hadTarget = [&] {
                     const auto before = graph.GetOutputConfig(nodeId);
@@ -669,20 +560,6 @@ void RoutingService::refresh()
                 }
             }
 
-            // Which outputs PLAY through the app's own audio stream. A display
-            // transport does — an HDMI/projector row's monitor IS the machine's
-            // render endpoint on a booth PC, so the bus wired to it must actually
-            // sound. NDI, recording and streaming hand their audio to their own
-            // sink (a mixer tap read by the sender or the encoder), so they stay
-            // off the flag or every feed would also play on the speakers.
-            //
-            // Written as node META because the mixer reads the graph SNAPSHOT,
-            // which carries meta and not the output config; written on every sync
-            // so a node created by an older build picks the flag up without a
-            // migration.
-            // ...AND NEVER WHEN THE ROW PLAYS ON AN ENDPOINT OF ITS OWN: its mix
-            // is then rendered by that device's own stream, and also summing it
-            // into the program is the same sound twice, from two places.
             const std::string wantLocal =
                 (spec.screen && spec.audioDevice.isEmpty()) ? "1" : "0";
             auto nodeInfo = graph.GetNode(nodeId);
@@ -725,19 +602,6 @@ void RoutingService::refresh()
         }
 
         // 4. WHAT IS WIRED, by side, for every output node — read from the EDGES,
-        //    never from the config. A row carries several buses per side now (the
-        //    wires are an allow-list, not a single assignment) and OutputConfig
-        //    still holds one id per side, so the config alone can no longer answer
-        //    "what does this output hold".
-        //
-        //    Edges are also what the ENGINE reads: AudioMixer sums every plane whose
-        //    edge reaches a sink, so the wires ARE the mix. The speaker endpoint is
-        //    in the same pass — it is AudioEngine's node, never created or pruned
-        //    here, and a graph that has not started playout simply has none, in
-        //    which case the Speakers card reads unwired and wiring it is a no-op
-        //    until the engine is up, instead of this service inventing a second node
-        //    with other caps (and, for the buses AudioEngine::EnsureSpeakersOutput
-        //    connected at boot, reading none of them).
         QHash<QString, QVector<int>> wiredVideo;
         QHash<QString, QVector<int>> wiredAudio;
         QStringList wiredNodes = found.keys();
@@ -762,12 +626,6 @@ void RoutingService::refresh()
             wiredAudio.insert(node, audioRows);
         }
 
-        // 4b. THE CONFIG NAMES A WIRED BUS. The video side keeps whichever bus is
-        //     ON AIR for as long as that bus is still wired — unplugging the one
-        //     being shown hands the output to the first wire still there, so a card
-        //     can never keep showing a bus somebody took away. The audio side names
-        //     the first wired bus, which is all a single-bus reader wants (the mixer
-        //     sums the edges, so nothing is lost by the field holding one).
         for (auto it = found.begin(); it != found.end(); ++it) {
             const QString node = it.key();
             const QVector<int> videoRows = wiredVideo.value(node);
@@ -813,17 +671,9 @@ void RoutingService::refresh()
             }
         }
 
-        // 4c. PLAY WHERE THE ROW SAYS. The picker on Settings · Outputs names an
-        // endpoint per row; the WIRES decide whether there is anything to play
-        // there. Both halves are read here, on the same pass that read them, so a
-        // device choice and a wire can never disagree about whether a stream
-        // should be open.
         bindOutputAudio(specs, wiredAudio);
 
         // 5. The screens whose picture feeds each sink. A screen is an Output node
-        //    too, so its feed is an EDGE from the screen's node. Only the nodes
-        //    this pass mirrored as screen rows count as screens, so a sink can
-        //    never be read as one.
         QSet<QString> screenNodes;
         for (const RowSpec &spec : specs)
             if (spec.screen && !spec.nodeId.isEmpty())
@@ -853,10 +703,6 @@ void RoutingService::refresh()
             screenFeeds_ = feeds;
             speakersEnabled_ = speakerEnabled;
             rebuildRows();
-            // THE ENGINE → THE PICTURE: what each output's video wire names is
-            // now published to the model that builds the live output specs, so
-            // a wired output composes its bus's feed and an unwired one keeps
-            // the program slide.
             publishRoutedVideoBuses();
             ++revision_;
             emit routingChanged();
@@ -904,16 +750,6 @@ void RoutingService::setSpeakersEnabled(bool enabled)
     });
 }
 
-// START/STOP THE PER-ROW STREAMS. Engine worker, from a snapshot of the roster.
-//
-// A row plays on its own endpoint when it HAS one and something is wired to it;
-// every other row is stopped. "Stopped, not left running" is the important half:
-// a stream on a row whose wire was pulled would keep a device open for a mix
-// nobody wired, and on Windows an open WASAPI client is a device another app
-// cannot take exclusive use of.
-//
-// The catalog of rows with an endpoint is deliberately NOT the speaker endpoint:
-// that sink is the program's own sum, so it has no stream of its own to open.
 void RoutingService::bindOutputAudio(const QVector<RowSpec> &specs,
                                      const QHash<QString, QVector<int>> &wiredAudio)
 {
@@ -987,10 +823,6 @@ bool RoutingService::assignBus(int outputRow, const QString &kind, int busRow)
             return;
         }
 
-        // The speaker endpoint is a SUM of edges, so wiring a bus onto it is one
-        // edge and nothing else: the config holds a single bus and would have
-        // thrown the previous one away. Unwiring names its bus (see unwireBus) —
-        // "clear this side" has no meaning on a sink several buses feed.
         if (speakers) {
             if (audio && !busNode.isEmpty()) {
                 // A refusal here used to vanish (the result was dropped), which read as "the
@@ -1010,10 +842,6 @@ bool RoutingService::assignBus(int outputRow, const QString &kind, int busRow)
         }
 
         if (busNode.isEmpty()) {
-            // "Clear this side": every bus of that signal leaves the row, and BOTH
-            // facts are cut — the EDGES (what the mixer and the renderer read) and
-            // the config id that named one of them. One wire leaving is unwireBus's
-            // job; this is the whole side, which is what the card menus offer.
             QVector<QString> dropping;
             for (const std::string &upstream : graph.Upstream(nodeId.toStdString())) {
                 const auto info = graph.GetNode(upstream);
@@ -1030,13 +858,6 @@ bool RoutingService::assignBus(int outputRow, const QString &kind, int busRow)
             auto cfg = graph.GetOutputConfig(nodeId.toStdString());
             if (!cfg.ok())
                 return;
-            // ADDING A WIRE NEVER TAKES ONE AWAY. This row holds several buses per
-            // side now, so the config (which holds ONE id per side) is written only
-            // when that side has none yet — the new wire then becomes the one ON AIR
-            // (video) / the first audio bus. An id that is already there stays, which
-            // is what keeps the bus being shown on air while a second one is wired
-            // beside it. AssignOutputBuses reads an empty id as "leave this side
-            // alone", so only the side being created is passed.
             QString video = QString::fromStdString(cfg.value().videoBusId);
             QString audioBus = QString::fromStdString(cfg.value().audioBusId);
             if ((audio ? audioBus : video).isEmpty()) {
@@ -1054,17 +875,6 @@ bool RoutingService::assignBus(int outputRow, const QString &kind, int busRow)
                 }
             }
 
-            // THE EDGE — always, and only ever added. The config is the graph's own
-            // validated field (persisted, what "which bus is on air" reads back);
-            // the mixer and every mix tap keyed by an output node id read the EDGE
-            // SET instead. Writing only the config is what made a wired audio bus
-            // silent, so both are written here — and the second bus on a side is one
-            // more edge, not a replacement for the first.
-            //
-            // An OUTPUT node takes ANY signal (ProductionGraph treats it as a sink;
-            // what a row may carry is its caps, enforced by AssignOutputBuses and by
-            // the Connect below), so both halves of a both-bus reach one node and the
-            // sink's tap has something to sum.
             const auto linked = graph.Connect(busNode.toStdString(), nodeId.toStdString(),
                                               audio ? SignalType::Audio : SignalType::Video);
             if (!linked.ok()) {
@@ -1081,18 +891,9 @@ bool RoutingService::assignBus(int outputRow, const QString &kind, int busRow)
         vgr::EngineWorker::onInterfaceThread(this, [this, nodeId, video, audioNow] {
             assignments_.insert(nodeId, qMakePair(video, audioNow));
             rebuildRows();
-            // A video wire just changed, so that output's PICTURE changes with
-            // it — published here, not on the next refresh, so the frame that
-            // follows the drop already shows the bus.
             publishRoutedVideoBuses();
             ++revision_;
             emit routingChanged();
-            // The row's WIRED SETS come from the edges (a side holds several
-            // buses), and the canvas draws every one of them, so a wire that only
-            // reached `assignments_` would not appear as a wire at all until
-            // something else triggered a mirror. This is exactly what happened on
-            // the speaker endpoint, where the second bus drew nothing. Re-mirror on
-            // the same gesture that changed the graph.
             refresh();
         });
     });
@@ -1114,10 +915,6 @@ bool RoutingService::unwireBus(int outputRow, const QString &kind, int busRow)
     if (busNode.isEmpty())
         return false;
 
-    // outputRow < 0 is the speaker endpoint: no roster row, so its node id is the
-    // engine's own. Everything below treats it like any other output — one wire
-    // leaving a sink is the same gesture whether the sink sums (speakers) or
-    // shows (a picture).
     QString nodeId;
     if (outputRow < 0) {
         nodeId = QString::fromLatin1(kSpeakersNodeId);
@@ -1137,15 +934,8 @@ bool RoutingService::unwireBus(int outputRow, const QString &kind, int busRow)
         auto &graph = ProductionEngine::Instance().Graph();
         if (!graph.HasNode(nodeId.toStdString()))
             return;
-        // The edge IS the wire: cut it and the mixer stops summing that bus and the
-        // renderer stops naming it. (Disconnect errors when the edge is already
-        // gone — a second click on a wire whose bus was deleted elsewhere — and that
-        // is a no-op, not a failure worth reporting.)
         (void)graph.Disconnect(busNode.toStdString(), nodeId.toStdString());
 
-        // If the config named the bus that just left, hand that field to a bus still
-        // wired (or clear it). A row must never keep naming a bus it no longer
-        // holds: that is a stale picture and a stale "on air" reading.
         auto cfg = graph.GetOutputConfig(nodeId.toStdString());
         if (cfg.ok()) {
             const QString named = audio ? QString::fromStdString(cfg.value().audioBusId)
@@ -1181,17 +971,6 @@ bool RoutingService::unwireBus(int outputRow, const QString &kind, int busRow)
     return true;
 }
 
-// SHOW ONE OF A ROW'S WIRED VIDEO BUSES.
-//
-// An output holds as many buses as are wired to it, but it sends ONE picture, so
-// exactly one of them is on air. That choice is the config's videoBusId (which the
-// renderer already reads through OutputListModel::setRoutedVideoBuses), and the
-// WIRED SET is the allow-list: a bus that is not wired to this row cannot be shown
-// here, and asking for one is refused out loud instead of silently showing the
-// program slide or somebody else's feed.
-//
-// Audio has no equivalent: every wired audio bus is summed, so "which one is
-// playing" is not a question with one answer.
 bool RoutingService::showBusOn(int outputRow, int busRow)
 {
     if (outputRow < 0 || busRow < 0)
@@ -1218,10 +997,6 @@ bool RoutingService::showBusOn(int outputRow, int busRow)
             reportRefused(QStringLiteral("the engine has not created this output's node yet — try again in a moment"));
             return;
         }
-        // THE ALLOW-LIST: the EDGE is the wire, so "is this bus wired here" is
-        // answered by the graph itself rather than by the last snapshot this
-        // service published. A gesture can land before a refresh, and the answer
-        // must still be the engine's.
         bool wired = false;
         for (const std::string &upstream : graph.Upstream(nodeId.toStdString())) {
             if (QString::fromStdString(upstream) == busNode) {

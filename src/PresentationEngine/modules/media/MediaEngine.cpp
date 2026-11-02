@@ -9,12 +9,7 @@
 #include <format>
 
 namespace bps::media {
-
 namespace {
-
-// Default provider: detects the media type + metadata from the extension and
-// the file metadata (PAL). No external codecs — real decoding is provider-
-// plugin territory; playback state machine + pipeline live in the engine.
 class DefaultMediaProvider final : public IMediaProvider {
 public:
     const char* Name() const noexcept override { return "Default"; }
@@ -79,7 +74,6 @@ std::vector<uint8_t> SolidThumbnail(const std::string& id, int w, int h) {
     }
     return px;
 }
-
 } // namespace
 
 MediaEngine& MediaEngine::Instance() {
@@ -289,9 +283,6 @@ bool MediaEngine::HasThumbnail(std::string_view mediaId) const {
 // Playback
 // ---------------------------------------------------------------------------
 Result<void> MediaEngine::Play(std::string_view mediaId, DecodePath path) {
-    // The decode path the event reports is read out while the record is alive:
-    // the publish happens after the lock is released, so no reference into the
-    // map may outlive it.
     std::string playDetail;
     {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -480,5 +471,4 @@ void MediaEngine::OnPressure(const events::ResourcePressureChanged& e) {
     if (e.to == PressureLevel::High || e.to == PressureLevel::Critical)
         TrimCache(64);
 }
-
 } // namespace bps::media

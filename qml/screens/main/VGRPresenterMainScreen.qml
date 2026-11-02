@@ -20,31 +20,9 @@ Rectangle {
     clip: true
     color: Theme.windowBg
 
-    // Side columns give width back to the main workspace on smaller windows.
-    //
-    // Each of the three is its OWN width, remembered by the engine (all three ride
-    // the settings store, -1 = "auto"): dragging the output-monitors column must
-    // not move the template column and vice versa, and a restart must come back to
-    // the widths the user left behind rather than to the defaults. The saved values
-    // are written on a short idle after a drag stops, not on every drag frame.
     property real projectsColumnOverride: Number(SettingsService.values["session.projectsColumnWidth"] ?? -1)
     property real outputsColumnOverride: Number(SettingsService.values["session.outputsColumnWidth"] ?? -1)
     property real templateColumnOverride: Number(SettingsService.values["session.templateColumnWidth"] ?? -1)
-    // Writes ONE column width, and only when it actually differs from what the store
-    // already holds.
-    //
-    // The four writes used to happen unconditionally on every timer fire, which wrote the
-    // three columns the user had NOT touched on every drag — and, because the overrides
-    // above are BOUND to the store, on every launch too: the store's `values` map is
-    // re-published once it finishes loading, that re-runs these bindings, the timer starts,
-    // and four settings nobody changed were written back (measured on a clean start with no
-    // drag at all: `[Settings] session.projectsColumnWidth = -1`, `session.outputsColumnWidth
-    // = -1`, `session.templateColumnWidth = -1`, `session.dockHeightTop = -1` in the log,
-    // and settings.json re-written for nothing).
-    //
-    // `SettingsService.values` is pre-seeded with every DECLARED default (see
-    // SettingsService's constructor), so an untouched column compares equal to its -1
-    // sentinel and is skipped instead of stored.
     function saveColumnWidth(key, value) {
         const stored = SettingsService.values[key]
         if (stored !== undefined && stored !== null && Number(stored) === value)
@@ -55,9 +33,6 @@ Rectangle {
         id: saveColumnWidthsTimer
         interval: 500
         onTriggered: {
-            // Not open yet: `values` still holds the ENGINE's defaults, so "saving" now
-            // would write a default over whatever the user chose last time. Retry rather
-            // than drop the drag that started this timer.
             if (!SettingsService.ready) {
                 saveColumnWidthsTimer.restart()
                 return
@@ -72,10 +47,6 @@ Rectangle {
     onProjectsColumnOverrideChanged: saveColumnWidthsTimer.restart()
     onOutputsColumnOverrideChanged: saveColumnWidthsTimer.restart()
     onTemplateColumnOverrideChanged: saveColumnWidthsTimer.restart()
-    // The room the two right-hand columns may take is measured against the WINDOW
-    // (and the left column), never against each other: that independence is the
-    // point. Each ceiling keeps a minimum centre workspace of its own, so the
-    // preview can never be squeezed to nothing by two wide side columns.
     readonly property real projectsColumnMaxWidth: Math.min(560, Math.max(160,
         width - Math.min(560, Math.max(240, width * 0.278)) - 400))
     readonly property real projectsColumnWidth: Math.max(160, Math.min(projectsColumnMaxWidth,
@@ -89,11 +60,6 @@ Rectangle {
         templateColumnOverride > 0 ? templateColumnOverride
                                    : (width - projectsColumnWidth - outputsColumnWidth) * 0.36))
 
-    // Emitted by BOTH "New show" buttons (the clock panel's primary CTA
-    // and the dock footer's red one) — Main.qml funnels it into
-    // EditScreen.newShow(), the single place the reset lives. The two
-    // buttons were dead Figma-export chrome: no MouseArea, no action —
-    // rendered clickable and weren't.
     signal newShowRequested()
     // A shows-table row was clicked — `path` is the .vgr to open (Main.qml
     // routes it into the engine with the unsaved-changes guard).
@@ -109,22 +75,10 @@ Rectangle {
     // ShowCenter can create a template from a show's text boxes and hand it to
     // the same editor route used by the Templates library.
     signal showTemplateEditRequested(string id)
-    // The Functions pane's action rows: run stored action `actionId` now.
-    // Main.qml owns the dispatcher (runEffect), so the request goes up rather
-    // than the pane growing a second copy of the effect switch.
     signal actionRunRequested(string actionId)
     // What the centre page shows (FreeShow's activeShow): a project item, or a show clicked in the Shows table. null = the splash.
     property var centerItem: null
     // ---- the Shows table's arrow keys (from the Hotkeys map) ---------------
-    // Up/Down walk the table one show at a time and put the one they land on in
-    // the centre page — the keyboard's version of clicking a row, with the row
-    // held in the MIDDLE of the list so the walk stays readable (the table is a
-    // virtualized ListView of up to 680 shows; without a positioning call the
-    // cursor is wherever row 400 is, i.e. off screen).
-    //
-    // Gated exactly like the reference pane's arrows: only while this screen and
-    // its Shows pane are the ones on screen, and never while a text field holds
-    // the keyboard (a window shortcut is delivered before the focus item).
     readonly property bool typingInField: {
         const w = Window.window
         const f = w ? w.activeFocusItem : null
@@ -134,9 +88,6 @@ Rectangle {
         && media_tab_bar.currentPane === "shows" && !vGRPresenter_Main_Screen.typingInField
     Shortcut { action: "previousPassage"; enabled: vGRPresenter_Main_Screen.showsKeysMine; onActivated: table_body.moveShowCursor(-1) }
     Shortcut { action: "nextPassage"; enabled: vGRPresenter_Main_Screen.showsKeysMine; onActivated: table_body.moveShowCursor(1) }
-    // Enter opens the row the arrows are on. `!Hotkeys.canAccept` keeps it out of
-    // the way of a dialog's own Enter (the window's accept binding), or the two
-    // would activate ambiguously and neither would run.
     Shortcut {
         action: "accept"
         enabled: vGRPresenter_Main_Screen.showsKeysMine && !Hotkeys.canAccept
@@ -154,10 +105,6 @@ Rectangle {
     // The Scripture tab's "Convert to show": the show's name and its slides ([{ title, background, blocks }]), built by the engine.
     signal scriptureShowRequested(string name, var slides)
 
-    // Esc, one level down from the window's cancel binding (qml/Main.qml): the
-    // centre page's “…” menu if it is up, otherwise its Close row — i.e. the
-    // page goes away and the splash behind it is what is left. False when there
-    // is nothing to close, so the caller knows the key had no job here.
     function escapeBack() { return showCenter.escapeBack() }
     // Opens a dock tab with a search already typed in it ("media" + a name = that media file, found).
     // The app-wide search uses this to take you to what it found.
@@ -170,11 +117,6 @@ Rectangle {
             }
         }
     }
-    // The app-wide search jumps straight to a sermon: switch to The Table and open
-    // the hit AT its paragraph (goTo). The result's title is a reference label
-    // ("1953 12 · ¶3") — pasted into the pane's citation search it matches nothing
-    // (the citation line reads "47-0412 - Faith Is The Substance"), which is the
-    // "quick search lands on an empty tab" bug.
     function openSermonAt(bookId, chapter, verse, matchText) {
         const t0 = Date.now()
         showInLibrary("table", "")          // the tab + a cleared query
@@ -187,10 +129,6 @@ Rectangle {
         EngineBridge.log("info", "OpenTrace",
                          "openSermonAt switch=" + (t1 - t0) + "ms goto=" + (Date.now() - t1) + "ms")
     }
-    // The app-wide search jumps straight to a Bible verse: switch to the Scripture
-    // tab and open the passage there (goTo selects the verse and scrolls to it).
-    // The hit carries its bibleId (which translation) + bookId/chapter/verse; a
-    // reference-pick result carries only the reference string (resolve it).
     function openVerseAt(r) {
         showInLibrary("scripture", "")      // the tab + a cleared query
         scripturePane.clearCitationMatches()
@@ -211,16 +149,8 @@ Rectangle {
 
         y: 48
 
-        // Fills the window under the header (it was a fixed 1440 x 852 design). The side
-        // columns keep their widths; the middle column and the dock take the rest, and the top
-        // region (slate / monitors) is the same 54% of the height it was designed with.
         height: parent.height - 48
         width: parent.width
-        // Where the top region ends and the library dock begins. Drag the splitter on that
-        // edge to change it (topOverride, in px; -1 = the default 54%, restored by double-click);
-        // it can't leave room for less than the top region's content or the dock's tab bar.
-        // Remembered by the engine like the side columns (session.dockHeightTop), because the
-        // dock is the other splitter whose edge the user sets up and then loses on restart.
         property real topOverride: Number(SettingsService.values["session.dockHeightTop"] ?? -1)
         readonly property real minTop: 320
         readonly property real maxTop: Math.max(minTop, height - 220)
@@ -249,15 +179,11 @@ Rectangle {
 
                 color: "transparent"
 
-
                 // The real Projects panel: the engine's folders and projects, the open project's items, drag and drop.
                 ProjectsPanel {
                     id: projects_list
                     objectName: "selfTestProjectsPanel"
 
-                    // Let the Projects panel's header, divider and scrollbar
-                    // reach the actual column edges. Its own cards retain
-                    // their internal spacing.
                     x: 0
                     y: 0
 
@@ -265,13 +191,6 @@ Rectangle {
                     width: parent.width
 
                     onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
-                    // Double-click here used to jump straight to Edit — the
-                    // same "everything else lands on the centre preview,
-                    // only a right-click edits" rule this session settled on
-                    // for the show library applies to the project sidebar
-                    // too, so double-click is now a no-op beyond the single
-                    // click's own centerItem (edit still reachable via the
-                    // centre preview's own right-click / Edit tab).
                     onItemOpened: {}
                     onImportRequested: vGRPresenter_Main_Screen.importRequested()
                     onSearchRequested: vGRPresenter_Main_Screen.searchRequested()
@@ -322,9 +241,6 @@ Rectangle {
                         height: 60
                         spacing: 0
 
-                        // The brand two-tone, matching the boot splash and the
-                        // menu bar's lockup: VGR WHITE (heavy) + Presenter GREY —
-                        // the whole wordmark was single purple before.
                         Text {
                             height: 60
                             color: Theme.textPrimary
@@ -456,9 +372,6 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            // The quick-search magnifier now comes from the shared
-                            // IconGlyph bank (name "search") rather than an inline
-                            // Shape, so the one source owns every icon.
                             IconGlyph {
                                 anchors.centerIn: parent
                                 name: "search"
@@ -483,10 +396,6 @@ Rectangle {
                             horizontalAlignment: Text.AlignLeft
                             text: qsTr("Quick search")
                             textFormat: Text.PlainText
-                            // Optical centering: the icon container is centered in the
-                            // 36px row; a top-aligned 15px Segoe line box put the glyphs
-                            // ~3px low (user call). VCenter centers the LINE BOX in the
-                            // item, which recenters the glyphs on the icon.
                             verticalAlignment: Text.AlignVCenter
                             wrapMode: Text.Wrap
                         }
@@ -649,13 +558,6 @@ Rectangle {
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                        // Same fixed x-offset convention as Quick search/New
-                        // project above (icon x=20, label x=42, chevron
-                        // x=208) — this row previously centered its own
-                        // icon+label+chevron Row as a group instead, which
-                        // put its icon/label at a DIFFERENT x than its two
-                        // siblings (the button is wider than that group),
-                        // reading as visibly misaligned against them.
                         Rectangle {
                             id: new_show_glyph
 
@@ -668,13 +570,6 @@ Rectangle {
                             clip: true
                             color: "transparent"
 
-                            // The app's own New-show mark (IconGlyph "newShow", from
-                            // qml/assets/new show add.svg — the shows cards with a plus), not a
-                            // bare "+": creating a show reads as a show action, where a plain
-                            // plus could have meant anything. This one asset covers every
-                            // button of the title "New show" — the "New project" row above keeps
-                            // its own plus, since a project is not a show. The glyph centres
-                            // itself in this 14px box.
                             IconGlyph {
                                 anchors.centerIn: parent
                                 name: "newShow"
@@ -741,11 +636,6 @@ Rectangle {
             Rectangle {
                 id: media_resource_dock
 
-                // Full-width bottom band (x=0 → window right edge) — the FreeShow
-                // samples: the library tabs + shows table start at the EXTREME
-                // LEFT and run the whole width, with the clock living inside
-                // the band at the right. Sits directly under the top region
-                // (slate / monitors), bottom edge at 852.
                 x: 0
                 y: workspace_body.topHeight
 
@@ -758,10 +648,6 @@ Rectangle {
                     id: dock_tab_bar
 
                     height: 39
-                    // Full width (the FreeShow sample): the tab pack hugs the
-                    // left edge and Search sits at the window's right edge —
-                    // the clock panel below the row no longer dictates the
-                    // bar's extent.
                     width: parent.width
 
                     border.color: Theme.border
@@ -769,22 +655,12 @@ Rectangle {
                     color: Theme.panelBg
 
                     // ---- Live tab bar ---- one shared component
-                    // (qml/components/LibraryTabBar.qml): all nine tabs —
-                    // including the new Media and THE TABLE (the sermon
-                    // app, riding the Scripture-architecture browser via
-                    // its JSON export) — share ONE delegate, so selected
-                    // underline, hover and metrics are identical by
-                    // construction.
                     LibraryTabBar {
                         id: media_tab_bar
                         x: 0
                         y: 0
                         width: parent.width
                         height: 39
-                        // A picked suggestion row (a sermon from The Table's multi-match
-                        // dropdown, a book from Scripture's) routes back to the pane that
-                        // offered it — the pane jumps to the row's ref. (The signal existed
-                        // but nothing consumed it: a dropdown pick did nothing.)
                         onSuggestionPicked: (paneKey, ref) => {
                             if (paneKey === "scripture")
                                 scripturePane.applySuggestion(ref)
@@ -811,38 +687,12 @@ Rectangle {
                     // Tracks the dock's taller body so every pane (shows
                     // table, browsers, media grid) fills to the bottom.
                     height: parent.height - 39
-                    // The Scripture-architecture tabs (Scripture and The
-                    // Table) take the clock's place: their preview /
-                    // template column sits at the far right, the way
-                    // FreeShow's does, instead of being squeezed in beside
-                    // the clock. Every other pane leaves the clock its 400px.
-                    // FULL width, whatever tab is showing — deliberately NOT
-                    // "the reference panes take the template column's place".
-                    // Widening the container for Scripture / The Table changed the
-                    // width of EVERY pane it holds, including the five that were
-                    // hidden at that moment: every realized Text in them re-shaped
-                    // (the captures' QWindowsFontEngineDirectWrite::stringToCMap
-                    // under QQuickText::geometryChange), every grid re-ran its
-                    // layout and built or released the cards the new cell size
-                    // called for — for a pane nobody was looking at. The panes now
-                    // state their OWN extent instead (the library panes reserve the
-                    // template column, the reference panes fill the dock), so a tab
-                    // switch changes only which pane is visible.
                     width: parent.width
 
                     clip: true
                     color: "transparent"
 
                     // ---- Per-tab panes ---- Shows keeps the original table
-                    // (gated below); Scripture and The Table share the
-                    // Scripture-architecture browser (ReferencePane, shared by both tabs).
-                    // BOTH PANES OWN NO DATA: the engine drives all library
-                    // content — the bridge pushes each library's document
-                    // into setLibrary() once wired; until then they show the
-                    // "Waiting for engine…" shell. Media binds the Settings
-                    // rosters (buses/video/audio) + playlists; everything
-                    // else gets the consistent coming-soon pane until its
-                    // content lands.
                     ScripturePane {
                         id: scripturePane
                         objectName: "selfTestScripturePane"
@@ -859,20 +709,9 @@ Rectangle {
                         // Live reference autocomplete: the pane builds the rows (its suggest()),
                         // the tab bar feeds them to the search box and routes picks back here.
                         onSuggestionChosen: (ref) => scripturePane.applySuggestion(ref)
-                        // The preview toolbar's ‹ › at the edge of the on-air
-                        // set: this tab re-picks the neighbouring passage and
-                        // replays it (its own stepAndPlay path) when ITS content
-                        // is the one on air.
                         Connections {
                             target: LiveOutputService
                             function onPassageStepRequested(direction) {
-                                // OWNERSHIP decides, not which tab is on screen: the
-                                // wall's toolbar sits on more than one screen (the
-                                // Show screen's dock and the Edit screen), so
-                                // requiring this pane to be VISIBLE made its ‹ ›
-                                // inert exactly where the operator was looking.
-                                // On air or staged on the tile — either is this
-                                // tab's content being stepped.
                                 if (scripturePane.adapter.liveIsOurs(scripturePane.referenceText)
                                         || scripturePane.adapter.stagedIsOurs(scripturePane.referenceText))
                                     scripturePane.stepAndPlay(direction)
@@ -915,28 +754,12 @@ Rectangle {
                         onVisibleChanged: if (visible) EngineBridge.log("info", "StartupTrace", "Media pane became visible")
                         Component.onCompleted: EngineBridge.log("info", "StartupTrace", "Media pane component completed")
                         onItemActivated: (item) => vGRPresenter_Main_Screen.centerItem = item
-                        // Double-click: drop it on the project (unchanged)
-                        // AND take it to the Main Output — the SAME toggle
-                        // the tile's own hover TAKE pill fires, so
-                        // double-click is a shortcut for it instead of a
-                        // dead gesture (it used to only drop on the
-                        // project, which is invisible with none open —
-                        // "double click does nothing" from the Media grid).
                         onItemOpened: (item) => {
                             ProjectService.dropOnProject("media", [{ ref: item.ref, name: item.name }])
-                            // ...and TO THE OUTPUT, always as a TAKE. The single click
-                            // already put this file on air (MediaLibraryPane's
-                            // tileClicked), so the old "already on air -> clear" half
-                            // read as the double-click undoing the take it had just
-                            // made it: the image went off the output as the project row
-                            // appeared. Taking it back down is the tile's TAKE pill.
                             LiveOutputService.takeMedia(item.ref, item.name)
                         }
                         visible: media_tab_bar.currentPane === "media"
                         filter: media_tab_bar.searches.media !== undefined ? media_tab_bar.searches.media : ""
-                        // Narrowed by the template column it shares the dock with: this
-                        // width no longer changes with the TAB, only with the column
-                        // itself being dragged (see media_table's own note).
                         width: parent.width - shows_template_sidebar.width; height: parent.height
                     }
                     DesignLibraryPane {
@@ -946,13 +769,6 @@ Rectangle {
                         noun: "overlay"
                         stateKey: "session.overlaysReading"
                         onDesignActivated: (id, name) => vGRPresenter_Main_Screen.centerItem = { type: "overlay", ref: id, name: name }
-                        // Double-click: drop it on the project (unchanged)
-                        // AND toggle it on the Main Output — multiple
-                        // overlays can be live at once, stacked in take
-                        // order (LiveOutputService.activeOverlays); a
-                        // second double-click on an already-live one takes
-                        // it back off, same re-click-to-release convention
-                        // media/input use.
                         onDesignOpened: (id, name) => {
                             ProjectService.dropOnProject("overlay", [{ ref: id, name: name }])
                             if (LiveOutputService.overlayIsOnAir(id))
@@ -996,21 +812,7 @@ Rectangle {
                     }
 
                     // ---- Categories sidebar (Shows tab) ---- the sample's
-                    // left rail: "All" row, Categories section, category
-                    // rows with counts, and the round + that creates new
-                    // ones. ENGINE-FED: the roster comes from
-                    // ShowService.libraryCategories (real sub-folders of the
-                    // show library — persisted across restarts); every CRUD
-                    // call goes straight to the engine, which validates and
-                    // republishes. Counts are the engine's shows-per-category.
                     property int currentCategory: 0   // 0 = All, -1 = Unlabeled, 1..n = category
-                    // WHERE THE SHOWS LIBRARY WAS LEFT (user call: "make the app remember
-                    // its state and position ... if i go to another page and come back
-                    // it will go number one"). ONE registered settings key holds the
-                    // category being browsed and the row at the top of the list, as
-                    // JSON. Written on a short idle as the operator moves and read back
-                    // when the library republishes, so a reload (or a restart) comes back
-                    // to the same category at the same row instead of "All" from the top.
                     property bool placeRestored: false
                     function saveShowsPlace() {
                         if (!SettingsService.ready || table_scroll.count === 0)
@@ -1048,9 +850,6 @@ Rectangle {
                                 ? rows.findIndex((s) => String(s.path) === String(state.top)) : -1
                             if (at >= 0)
                                 table_scroll.positionViewAtIndex(at, ListView.Beginning)
-                            // A baseline for the next run: without it the first move
-                            // is what ever records a place, and a session that only
-                            // clicked into a show came back to a blank one.
                             media_table.saveShowsPlace()
                         })
                     }
@@ -1061,35 +860,16 @@ Rectangle {
                         interval: 350
                         onTriggered: media_table.saveShowsPlace()
                     }
-                    // The row being renamed inline (-1 = none). Opened from
-                    // the right-click context menu; Enter/focus-loss commits,
-                    // Escape cancels.
                     property int renamingIndex: -1
                     property string deletingCategoryName: ""
                     property int deletingCategoryIndex: -1
-                    // Right-click context menu state — which row opened it
-                    // (-1 = closed). One shared menu instance lives at the
-                    // pane level (below), positioned over the clicked row.
                     property int menuIndex: -1
                     function openCatMenu(i, x, y) {
-                        // Only one popup menu at a time — opening this one
-                        // closes whatever else was open (right-clicking a
-                        // second row used to leave both menus up at once).
                         closeShowMenu()
                         menuIndex = i
-                        // DropdownPanel.openAt lifts the panel to the window
-                        // root and clamps it to `bounds`, so it can neither be
-                        // clipped by this pane nor land off-screen near an
-                        // edge — the hand-rolled menu clamped against the
-                        // pane's own rect by hand, and being parented inside
-                        // the pane is also what kept its dismiss layer from
-                        // covering the rest of the window.
                         catContextMenu.openAt(media_table, x, y, boundsItem())
                     }
                     function closeCatMenu() { menuIndex = -1 }
-                    // Picked from the panel's model (by label), so the row it
-                    // acts on is read FIRST — hiding the panel runs
-                    // closeCatMenu() through the panel's own visibleChanged.
                     function activateCatMenu(label) {
                         const i = menuIndex
                         catContextMenu.visible = false
@@ -1104,11 +884,6 @@ Rectangle {
                     // Show row context menu (right-click) — Rename/Duplicate,
                     // move to a library category, or Delete.
                     property int showMenuIndex: -1
-                    // The show the open menu acts on, CAPTURED WHEN IT OPENS.
-                    // The menu used to re-read it at click time through the
-                    // table's filtered list; capturing it means the action
-                    // always lands on the row you actually right-clicked, and
-                    // cannot be disturbed by the list rebuilding underneath.
                     property var showMenuTarget: null
                     readonly property string showMoveLabel: qsTr("Move to")
                     property var showMoveRow: null
@@ -1183,9 +958,6 @@ Rectangle {
                         }
                         return out
                     }
-                    // Bumped after every engine CRUD call so the binding above
-                    // (an engine list the engine doesn't NOTIFY per-call beyond
-                    // its own libraryChanged) re-reads fresh counts.
                     property int libRev: 0
                     Connections {
                         target: ShowService
@@ -1215,10 +987,6 @@ Rectangle {
                             renamingIndex = -1                 // empty = cancel
                             return
                         }
-                        // Categories come back case-insensitively SORTED, so a
-                        // rename can reshuffle rows — remember whether this row
-                        // was selected and re-point the selection by name after
-                        // the engine republishes.
                         const wasSelected = currentCategory === i + 1
                         ShowService.renameLibraryCategory(list[i].name, trimmed)
                         renamingIndex = -1
@@ -1285,14 +1053,9 @@ Rectangle {
                                     font.family: Theme.fontFamily; font.pixelSize: 12; font.bold: true
                                 }
                             }
-
                         }
 
                         // ---- Scrollable category rows --------------------
-                        // When the roster outgrows the sidebar the rows
-                        // flick vertically; the shared AppScrollBar (same
-                        // visual language as every other list in the app)
-                        // sits at the rail's right edge below.
                         Flickable {
                             id: catScroll
 
@@ -1306,11 +1069,6 @@ Rectangle {
                             contentHeight: catRows.height
                             boundsBehavior: Flickable.StopAtBounds
 
-                            // (Hover moved onto the rows themselves via
-                            // PositionHoverArea — the tracker-Math MouseArea
-                            // this replaces latched its containsMouse like
-                            // every hoverEnabled MouseArea in this build.)
-                            // Scrolling with the right-click menu open closes it.
                             onMovementStarted: media_table.closeCatMenu()
 
                             Column {
@@ -1328,9 +1086,6 @@ Rectangle {
                                         width: parent.width
                                         height: 38
                                         radius: 6
-                                        // Same pill ramp as the All row:
-                                        // subtle lift at rest, hover a step
-                                        // up, selected one more + edge.
                                         color: selected ? Theme.activeBg
                                              : (catHover.hovered ? Theme.hoverBg : Theme.rowBg)
                                         Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
@@ -1375,11 +1130,6 @@ Rectangle {
                                             onActiveFocusChanged: if (!activeFocus && visible)
                                                 media_table.renameCategory(index, text)
                                             Keys.onEscapePressed: media_table.renamingIndex = -1
-                                            // The menu's Rename entry only sets renamingIndex — this
-                                            // id lives inside a Repeater delegate, out of scope for
-                                            // that menu (a stray catNameEdit.forceActiveFocus() there
-                                            // threw a silent ReferenceError and never focused it, so
-                                            // the box opened with no caret/selection to type into).
                                             onVisibleChanged: if (visible) {
                                                 forceActiveFocus()
                                                 selectAll()
@@ -1419,10 +1169,6 @@ Rectangle {
                             }
                         }
 
-                        // Shared app scrollbar for the category list — a
-                        // sibling of the Flickable so it doesn't scroll with
-                        // the rows. Hides itself when the list doesn't
-                        // overflow (its own `visible` binding).
                         AppScrollBar {
                             flickable: catScroll
 
@@ -1442,21 +1188,9 @@ Rectangle {
                     }
 
                     // ---- Category context menu (right-click) ---- one
-                    // shared Rename/Delete menu for any row; a click anywhere
-                    // else in the WINDOW closes it (see MenuCatcher below).
-                    // The shared DropdownPanel every other menu in the app
-                    // uses (ProjectsPanel, DesignLibraryPane, the settings
-                    // screens): its rows derive hover from pointer POSITION
-                    // (PositionHoverArea) instead of containsMouse, which
-                    // latches in this build — that is the hover highlight the
-                    // hand-rolled rows never had reliably.
                     DropdownPanel {
                         id: catContextMenu
 
-                        // DropdownPanel drives `visible` imperatively (openAt
-                        // shows it, the consumer hides it). It must stay a
-                        // plain value, never a binding: MenuCatcher dismisses
-                        // by assigning it.
                         visible: false
                         z: 60
                         width: 148
@@ -1466,20 +1200,7 @@ Rectangle {
                         ]
                         onItemActivated: (label) => media_table.activateCatMenu(label)
                     }
-                    // The shared dismiss layer. The MouseArea it replaces was
-                    // parented INSIDE this pane, so it only caught clicks that
-                    // landed in the library — a click on the header, the
-                    // projects column or the output column left the menu
-                    // sitting there, which is the "it doesn't always close"
-                    // report. MenuCatcher lifts itself beside the menu at the
-                    // window root, covers the whole window, closes on PRESS
-                    // (release is the flaky half of click delivery in this
-                    // build) and takes EVERY button, not just the left one.
                     MenuCatcher { menu: catContextMenu }
-                    // MenuCatcher dismisses by assigning `visible` rather than
-                    // calling back in, so the table re-derives its own state
-                    // from the panel: however the menu closed — an activation,
-                    // a press anywhere else, a wheel — nothing is left "open".
                     Connections {
                         target: catContextMenu
                         function onVisibleChanged() {
@@ -1489,12 +1210,6 @@ Rectangle {
                     }
 
                     // ---- Show row context menu (right-click) ---- Rename/
-                    // Duplicate/Delete for one show: the same shared panel +
-                    // dismiss pair as the category menu above, which is where
-                    // the note on why the hand-rolled Rectangle + in-pane
-                    // catcher is gone lives. Nothing here needs to be declared
-                    // last any more: openAt lifts the panel out of this pane
-                    // to the window root, so no sibling can paint over it.
                     DropdownPanel {
                         id: showContextMenu
 
@@ -1626,48 +1341,18 @@ Rectangle {
                         onDismissed: showDeleteConfirm.close()
                     }
 
-                    // The old NAME/MODIFIED column header is gone — Scripture
-                    // and The Table's reference lists have no header row at
-                    // all, just rows starting near the top of their container
-                    // (ReferencePane's sourcesFlick: y: 42 for its OWN "Sources"
-                    // label above it; this list has no such label, so it starts
-                    // even higher). table_body's own y below was adjusted to
-                    // match: it used to leave room for this header.
                     Rectangle {
                         id: table_body
                         objectName: "selfTestShowsRows"
 
-                        // LAYOUT PROBE (VGR_LAYOUT_TEST): the show rows are a Flickable + Repeater,
-                        // so every row the library holds is built whether or not it is on screen.
-                        // Counting the rows built and thrown away is how a filter change (which
-                        // re-renders the whole list) is told apart from a pane switch.
                         property int showsRowBuilds: 0
                         property int showsRowDrops: 0
-                        // The scroll-cost probe's per-row binding count for THIS list (see the
-                        // scroll phase in Main.qml's layout probe): how many times a show row's
-                        // own name binding evaluated. Builds say a row was made; this says how
-                        // much binding work each row cost — and a scroll with drops == builds and
-                        // evals == 0 is a scroll whose rows cost nothing but paint.
-                        //
-                        // A JS object field rather than a `property int`, deliberately: writing a
-                        // QML property from inside a binding is reported as a binding loop (see
-                        // ReferencePane.probeEvals). A JS field cannot notify, so it is free of
-                        // that, and the probe reads the total on demand.
                         readonly property var probeEvals: ({ rows: 0 })
 
                         visible: media_tab_bar.currentPane === "shows"
                         x: categories_sidebar.width + 12
-                        // No header row above it any more (see the removed
-                        // NAME/MODIFIED comment above) — a small top margin,
-                        // same idiom as ReferencePane's own lists.
                         y: 8
 
-                        // No bottom reserve: the "+ New show" pill FLOATS
-                        // over the table (same idiom as DesignLibraryPane's
-                        // FAB) instead of the old fixed footer band, whose
-                        // hardcoded clearance (98 here vs the button's own
-                        // 61+31) left only ~2px of gap — the button visibly
-                        // touching the last row.
                         height: parent.height - y
                         width: parent.width - categories_sidebar.width - 24 - shows_template_sidebar.width
 
@@ -1690,10 +1375,6 @@ Rectangle {
                             return wanted.filter((s) => inScope[s.path] === true)
                         }
 
-                        // The keyboard cursor over the table (Up/Down): the index the
-                        // arrows are on, -1 for "none yet". Kept here beside shownShows
-                        // because a filter or a category change is a different list — the
-                        // cursor is dropped on a count change (see table_scroll).
                         property int showCursor: -1
                         function moveShowCursor(direction) {
                             const rows = table_body.shownShows
@@ -1701,9 +1382,6 @@ Rectangle {
                                 return
                             let at = table_body.showCursor
                             if (at < 0 || at >= rows.length) {
-                                // Nothing picked yet: take over from whatever the centre
-                                // page is already showing, so the first arrow continues
-                                // the operator's place instead of jumping to the top.
                                 const cur = vGRPresenter_Main_Screen.centerItem
                                 at = cur && cur.ref
                                    ? rows.findIndex((s) => s.path === cur.ref) : -1
@@ -1712,22 +1390,12 @@ Rectangle {
                             }
                             const next = Math.max(0, Math.min(rows.length - 1, at + direction))
                             table_body.showCursor = next
-                            // Scroll only when the cursor has reached an edge of the
-                            // viewport, and then put it back in the middle — centring on
-                            // every press slid the whole table under the eye (the same
-                            // "let it get to one end of the list first" rule the verse
-                            // list follows, see ReferencePane.centerRow).
                             const row = table_scroll.itemAtIndex(next)
                             const onScreen = row
                                 && row.y >= table_scroll.contentY - 1
                                 && row.y + row.height <= table_scroll.contentY + table_scroll.height + 1
                             if (!onScreen)
                                 table_scroll.positionViewAtIndex(next, ListView.Center)
-                            // The arrows only WALK the table — nothing is loaded into
-                            // the centre preview while browsing (a show read per
-                            // arrow press was both slow and a hijack of the page).
-                            // Enter is what opens the highlighted row, exactly as a
-                            // click on it does.
                         }
                         function openCursorShow() {
                             const rows = table_body.shownShows
@@ -1741,46 +1409,13 @@ Rectangle {
                             }
                         }
 
-                        // The rows live in a LISTVIEW, not a Flickable + Repeater. The
-                        // library is 680 shows (the engine's own log line: "Show library
-                        // scanned: 680 show(s)"), and a Repeater realizes EVERY one of them
-                        // whether or not it is on screen: 680 rows × (mark + name + date +
-                        // hover surface + drag source), built at boot and then re-laid-out
-                        // and RE-SHAPED — DirectWrite frames (QWindowsFontEngineDirectWrite::
-                        // stringToCMap under QQuickText::geometryChange) are what the hang
-                        // captures show the interface thread parked in — every time the
-                        // dock's width changes or a tab switch re-polishes this subtree.
-                        // A ListView builds only what the viewport holds (≈15 rows here,
-                        // measured with the layout probe) plus its own small cache, reuses
-                        // those rows across a filter, and keeps the AppScrollBar contract
-                        // (it is still a Flickable). Same rows, same order, same delegate.
                         // ---- Shows rows — ENGINE-FED -------------------
-                        // One view over ShowService.libraryShows (real .vgr files, newest
-                        // first); "All" lists every show, a selected category filters to its
-                        // sub-folder. Rows are click-to-open: the path goes up through
-                        // openShowRequested → Main.qml → the engine, with the unsaved-changes
-                        // guard. Hover = cursor-driven lift via a per-row PositionHoverArea
-                        // (the tabs' pattern — tracker-Math MouseAreas latch their
-                        // containsMouse in this build).
                         ListView {
                             id: table_scroll
-                            // The scroll probe scrolls THIS, not the named container above it:
-                            // a Flickable's contentY is what moves, and only the ListView owns
-                            // one (selfTestShowsRows stays the container that carries the rows'
-                            // counters).
                             objectName: "selfTestShowsList"
                             anchors.fill: parent
                             clip: true
                             boundsBehavior: Flickable.StopAtBounds
-                            // Pool the rows a scroll leaves behind instead of destroying
-                            // them (a row is a mark, two texts, a hover surface and a
-                            // drag source). A FILTER change is still a model reset and
-                            // rebuilds the rows in view — the probe measured 19 built /
-                            // 19 dropped for the 680 → 57 filter, against 57 built /
-                            // 680 dropped before — so this is the scroll pool, not the
-                            // filter fix. (The old hand-computed contentHeight binding
-                            // is gone with the Flickable: a ListView measures its own
-                            // content, one less binding re-entering this polish.)
                             reuseItems: true
                             model: table_body.shownShows
                             // The row at the top of the list is part of the remembered
@@ -1799,27 +1434,10 @@ Rectangle {
                                 Component.onDestruction: table_body.showsRowDrops++
 
                                 height: 32
-                                // NOT parent.width: a view may reparent a delegate (the
-                                // reuse pool), so a row asks the VIEW for its width —
-                                // ListView.view is the documented way in (the old
-                                // Repeater could rely on the contentItem).
-                                // -24 used to reserve room for an inline scrollbar
-                                // at this view's own right edge — the bar now
-                                // lives OUTSIDE table_body, in the gutter beside
-                                // shows_template_sidebar, so that reservation is
-                                // stale and left the rows stopping well short of
-                                // the scrollbar's new position.
                                 width: ListView.view.width - 8
 
                                 radius: 4
                                 readonly property bool selectorSelected: index === table_body.showCursor
-                                // The floating "New show" pill sits OVER the last rows.
-                                // PositionHoverArea reads pure geometry (AppCursor.hovered),
-                                // so it cannot see the pill on top of it — without the gate
-                                // the row beneath lit up while the pointer was on the pill.
-                                // Odd rows carry the app's shared list stripe
-                                // (ListRows), so the shows table reads in the same
-                                // bands as the action lists.
                                 color: selectorSelected ? Theme.activeBg : ListRows.stripeOverlay(index)
                                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                                 HoverGlow {
@@ -1834,10 +1452,6 @@ Rectangle {
                                     showCursor: false
                                 }
 
-                                // The show mark (IconGlyph "shows", from qml/assets/
-                                // shows icon.svg) in front of every show, same as the
-                                // Projects panel's rows — the list reads as shows at a
-                                // glance instead of as bare filenames.
                                 IconGlyph {
                                     x: 8
                                     anchors.verticalCenter: parent.verticalCenter
@@ -1885,9 +1499,6 @@ Rectangle {
                                     font.family: Theme.fontFamily; font.pixelSize: 13
                                     horizontalAlignment: Text.AlignRight
                                     text: {
-                                        // Subscribe to the LOCALE so the day/month names
-                                        // follow Settings > General > Language (QLocale has
-                                        // no signal of its own to re-evaluate this binding).
                                         SettingsService.localeRevision
                                         const d = new Date(modelData.modifiedMs)
                                         Qt.formatDate(d, "dddd d, MMMM yyyy")
@@ -1906,29 +1517,10 @@ Rectangle {
                                         const showRef = String(modelData.path)
                                         const showName = String(modelData.name)
                                         ProjectService.dropOnProject("show_drawer", [{ ref: showRef, name: showName }])
-                                        // Opening/creating a project can publish its active
-                                        // item back to centerItem (often a media item).
-                                        // Keep the show the user double-clicked in the
-                                        // centre preview after the project drop completes.
                                         vGRPresenter_Main_Screen.centerItem = {
                                             type: "show", ref: showRef,
                                             name: showName, category: modelData.category ?? "", layout: ""
                                         }
-                                        // Stage the show's first slide onto the monitor
-                                        // preview tile immediately (user call: a double-
-                                        // click should move it to the monitor preview right
-                                        // away), via the same read-only peekShow this pane
-                                        // already opens the show through, so nothing here
-                                        // touches the engine's shared "open document" the
-                                        // Edit screen owns.
-                                        //
-                                        // The WHOLE set goes over here, unlike the show
-                                        // centre's own pick (ShowCenter.qml takeSlideLive now
-                                        // stages just the clicked slide first): this path has
-                                        // no pane guaranteed to answer a step, so ‹ › has to be
-                                        // able to walk the set from the engine's side.
-                                        // Let Show Center resolve the selected show's
-                                        // category template before staging its first slide.
                                         Qt.callLater(() => showCenter.stageFirstSlide())
                                     }
                                     onContextRequested: (x, y) => {
@@ -1938,17 +1530,7 @@ Rectangle {
                                 }
                             }
                         }   // ListView table_scroll
-
                     }
-                    // A real draggable bar for the now-scrolling table
-                    // (auto-hides when every row already fits). Same
-                    // positioning convention ReferencePane's verse/paragraph
-                    // list uses: clear the floating "New show" FAB below
-                    // instead of running the track through it. A SIBLING of
-                    // table_body, not a child — table_body itself clips
-                    // (clip: true), so a bar positioned in the 24px gutter
-                    // between the table and shows_template_sidebar would be
-                    // cut off if it lived inside that clipped rectangle.
                     AppScrollBar {
                         flickable: table_scroll
                         visible: table_body.visible
@@ -1956,13 +1538,6 @@ Rectangle {
                         height: table_body.height - 60   // 2 top + 58 to clear new_show_dock_btn
                         x: table_body.x + table_body.width + 4   // into the gutter, beside the sidebar
                     }
-                    // A true FAB (DesignLibraryPane's "New <design>" pill is
-                    // the reference this now matches): no border, no footer
-                    // band behind it — it floats OVER the table on its own
-                    // stacked-rect soft shadow, with the table scrolling
-                    // freely beneath it. Replaces the old dock_footer band,
-                    // whose fixed 31px lane left the button flush against
-                    // the last row with no visible gap.
                     Rectangle {
                         id: new_show_dock_btn
 
@@ -1984,29 +1559,12 @@ Rectangle {
                         Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width + 6; height: parent.height + 4; radius: 20; color: "#26000000" }
                         Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 2; width: parent.width + 2; height: parent.height + 2; radius: 19; color: "#33000000" }
 
-                        // PositionHoverArea, the codebase's standard hover/click surface:
-                        // a hoverEnabled MouseArea latches containsMouse in this build
-                        // (hover-EXIT never delivers) and its cursorShape is unreliable.
-                        // Its id is what the table rows consult so the row under the
-                        // floating pill no longer highlights when the pill is hovered —
-                        // the pill now acts as its own independent button/popup.
                         PositionHoverArea {
                             id: newShowDockHover
                             anchors.fill: parent
                             onClicked: vGRPresenter_Main_Screen.newShowRequested()
                         }
 
-                        // CENTERED: the app's New-show mark (IconGlyph "newShow",
-                        // from qml/assets/new show add.svg) beside the label, ONE
-                        // Row — the pill's width is this Row's width + 32, so the
-                        // label has to live INSIDE the Row: as a sibling it was not
-                        // measured, the pill sized itself to the icon alone (48px),
-                        // and the label overflowed the pill with the centered icon
-                        // on top of it. Sized to the text's cap band like the plus
-                        // on the "New project" row (this glyph's ink is inset from
-                        // its 24 grid, so 16 here draws at roughly the old cross's
-                        // optical size), and nudged 1px the way every box-centered
-                        // glyph beside Segoe UI text is.
                         Row {
                             id: new_show_1
 
@@ -2038,20 +1596,6 @@ Rectangle {
                     }   // new_show_dock_btn
                 }   // media_table
                 // ---- The clock, in the preview column ----------------------
-                // This is the dock's right column: Shows fills it with its
-                // category's template preview, Scripture and The Table fill it
-                // with their own preview column. The libraries (Media,
-                // Overlays, Templates) have nothing to preview in it, so it sat
-                // EMPTY — a wide dead band beside the grid that read as a pane
-                // that had failed to load ("the right side pane that is empty").
-                // The shared ClockPanel stands in it, in the SAME slot and at
-                // the SAME width as the template column, so a tab switch moves
-                // nothing: every library pane already reserves this row with
-                // `width: parent.width - shows_template_sidebar.width`.
-                //
-                // This dock carried a clock panel here in the earlier build;
-                // this is that panel back, now the one shared component every
-                // clock in the app uses.
                 Rectangle {
                     visible: media_tab_bar.currentPane === "media"
                           || media_tab_bar.currentPane === "overlays"
@@ -2081,12 +1625,6 @@ Rectangle {
                 }
 
                 // ---- Shows template sidebar (Shows tab) ---- the right column
-                // Scripture/The Table have, per CATEGORY: each category keeps its
-                // own template pick (one declared JSON key, session.showsCategoryTemplates),
-                // shown and changed here with the same chooser popup Scripture
-                // uses (TemplatePickerModal, self-reparented to the window
-                // overlay). "All" selects no category, so the panel says so
-                // instead of showing some other category's pick.
                 Rectangle {
                     id: shows_template_sidebar
 
@@ -2098,10 +1636,6 @@ Rectangle {
 
                     color: Theme.panelBg
 
-                    // TemplateLibraryService.design() is an invokable read,
-                    // so bindings that only call it do not know when an
-                    // existing design is edited. Track the library signal so
-                    // both the name and the live canvas preview re-read it.
                     property int templateRevision: 0
                     Connections {
                         target: TemplateLibraryService
@@ -2111,11 +1645,6 @@ Rectangle {
                     // The selected category's name ("" for All — the DEFAULT row).
                     readonly property string categoryName: media_table.currentCategory <= 0
                                                            ? "" : media_table.showCategories[media_table.currentCategory - 1].name
-                    // Per-category storage — ONE declared JSON key, the same shape
-                    // session.audioRoster uses. A category's name only exists once
-                    // the user creates it, and settings keys must be declared up
-                    // front, so a per-name "shows.categoryTemplate.<name>" key was
-                    // refused by the store on every pick ("there is no setting …").
                     readonly property string categoryPicksKey: "session.showsCategoryTemplates"
                     readonly property var categoryPicks: {
                         const raw = SettingsService.values[categoryPicksKey]
@@ -2127,20 +1656,11 @@ Rectangle {
                             return ({})
                         }
                     }
-                    // THE FALLBACK RULE — the same one every template sidebar follows
-                    // (Scripture/The Table's engine default already works this way):
-                    // when no template is selected FOR a category, what is chosen for
-                    // All is used for it. All's own pick (shows.defaultTemplate) is
-                    // that fallback; a category overrides it with its own pick.
                     readonly property string defaultKey: "shows.defaultTemplate"
                     readonly property string defaultTemplateId: String(SettingsService.values[defaultKey] ?? "")
                     readonly property string ownTemplateId: categoryName === ""
                                                             ? "" : String(categoryPicks[categoryName] ?? "")
                     readonly property bool inherited: categoryName !== "" && ownTemplateId === "" && defaultTemplateId !== ""
-                    // The picker and the Clear ✕ both write through here: the All row owns
-                    // shows.defaultTemplate, every other category its own entry in the JSON
-                    // key — writing the map back WITHOUT an entry is how a category goes
-                    // back to inheriting All's pick.
                     function setOwnTemplate(id) {
                         if (categoryName === "") {
                             SettingsService.setValue(defaultKey, id)
@@ -2154,11 +1674,6 @@ Rectangle {
                     }
                     readonly property string templateId: categoryName === "" ? defaultTemplateId
                                                          : (ownTemplateId !== "" ? ownTemplateId : defaultTemplateId)
-                    // Resolved from the designs() CATALOG (its rows provably carry
-                    // id/name/color — design(key) only guarantees the preview
-                    // blocks). null = no template stored, or a stored key the
-                    // catalog no longer has (shows as "Missing template", Reset
-                    // still offered).
                     readonly property var templateDesign: {
                         shows_template_sidebar.templateRevision
                         if (templateId === "") return null
@@ -2168,14 +1683,8 @@ Rectangle {
                         return null
                     }
                     readonly property string templateName: templateDesign ? String(templateDesign.name ?? "") : ""
-                    // The round tune button swaps the panel between the template
-                    // view and the slide-options view — the same two-state panel
-                    // ReferencePane's footer button drives.
                     property bool optionsOpen: false
 
-                    // The whole catalog, mapped to the picker's {key,name,color,
-                    // category,categoryName} shape — copied from ReferencePane's
-                    // openTemplateMenu so both pickers list identical rows.
                     function openTemplatePicker() {
                         const categoryNames = {}
                         for (const c of TemplateLibraryService.categories) categoryNames[c.id] = c.name
@@ -2188,13 +1697,6 @@ Rectangle {
                         templatePicker.open = true
                     }
 
-                    // THE SHARED TEMPLATE COMPONENT — Scripture/The Table's
-                    // right column (ReferencePane's previewCol), rebuilt for
-                    // shows: the SAME 16:9 preview tile over the SAME Template
-                    // row (label in the red accent, name in DemiBold, and the
-                    // three icon actions: clear ✕, pick ⧉, edit ✎). The
-                    // preview renders the category's template the way
-                    // ReferencePane's renders the picked verses' slide.
                     readonly property var previewDesign: {
                         shows_template_sidebar.templateRevision
                         if (templateId === "") return null
@@ -2208,18 +1710,6 @@ Rectangle {
                         id: previewFlick
                         anchors.top: parent.top; anchors.bottom: parent.bottom
                         anchors.left: parent.left; anchors.right: parent.right
-                        // Reserve the scrollbar's strip so the toggles never sit
-                        // under it (ReferencePane's exact pattern) — ALWAYS, not
-                        // only while the bar is showing. "visible ? 9 : 0" made
-                        // the bar's own visibility change this Flickable's WIDTH,
-                        // which re-laid the column inside it, which changed
-                        // contentHeight (the template tile is sized from width),
-                        // which flipped the bar's visibility — a self-feeding
-                        // loop that never settled: the GUI thread spun inside
-                        // polishItems() forever (AppHangB1 "the moment I click
-                        // Settings", whose modal opening re-polishes the whole
-                        // screen behind it). The 9px strip belongs to the layout,
-                        // so it is reserved unconditionally now.
                         contentWidth: width
                         contentHeight: previewContent.height
                         clip: true
@@ -2294,10 +1784,6 @@ Rectangle {
                                         anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                                         spacing: 0
 
-                                        // back to no template (only when one is chosen) —
-                                        // for a category this clears ITS pick (it then
-                                        // inherits All's, per the fallback rule); for All
-                                        // it clears the default itself.
                                         Item {
                                             visible: shows_template_sidebar.categoryName === ""
                                                      ? shows_template_sidebar.templateId !== ""
@@ -2343,10 +1829,6 @@ Rectangle {
                             }
 
                             // ---- the slide options (the round tune button turns this on) —
-                            // ReferencePane's OptionToggle/OptionNumber rows verbatim, over the
-                            // shows.* keys ("Line numbers", "Divide long lines", "Max lines").
-                            // The engine consumes the scripture/table keys today; the shows
-                            // builder reads the same shape when it lands.
                             component ShowsOptionToggle: Item {
                                 id: opt
                                 property string settingKey: ""
@@ -2407,9 +1889,6 @@ Rectangle {
                                 }
                             }
 
-                            // The boxed options — ReferencePane's exact chrome:
-                            // the SLIDE OPTIONS caption, then ONE rounded box
-                            // (Theme.windowBg, Theme.border, r=8) holding every row.
                             Column {
                                 visible: shows_template_sidebar.optionsOpen
                                 x: 16; width: parent.width - 32
@@ -2430,22 +1909,11 @@ Rectangle {
                                         x: 14; y: 4; width: parent.width - 28
                                         spacing: 0
 
-                                        // No "... on individual lines" / "Smart split"
-                                        // rows: the fill always does what their defaults
-                                        // did. No "Tolerance" row either — it was a
-                                        // second, invisible rule over the words-per-slide
-                                        // number (see AppSettings::AddFillOptions).
                                         ShowsOptionToggle { settingKey: "shows.verseNumbers" }
                                         ShowsOptionToggle { settingKey: "shows.splitLongVerses" }
                                         Column {
                                             visible: SettingsService.values["shows.splitLongVerses"] === true
                                             width: parent.width
-                                            // The "Number the parts (1a, 1b)" row is gone
-                                            // (user call: "you can remove this") — see
-                                            // AppSettings::AddFillOptions.
-                                            // Words, not characters: "Max words per
-                                            // slide" — the whole rule for where a long
-                                            // item is divided.
                                             ShowsOptionNumber { settingKey: "shows.wordsPerSlide"; step: 5 }
                                         }
                                     }
@@ -2490,9 +1958,6 @@ Rectangle {
                         anchors.topMargin: 4; anchors.bottomMargin: 4; anchors.rightMargin: 3
                     }
 
-                    // The chooser — same popup Scripture's template row opens, fed
-                    // the whole catalog. Applied picks persist to THIS category's
-                    // settings key; Reset clears back to "no template".
                     TemplatePickerModal {
                         id: templatePicker
                         z: 30000
@@ -2506,10 +1971,6 @@ Rectangle {
                     }
                 }
 
-                // Resize the library's right-side pane (the template inspector
-                // on Shows, and the clock area on Media / Overlays / Templates /
-                // Calendar / Functions); the active list takes the remaining
-                // width. Double-click restores the responsive default.
                 SplitHandle {
                     visible: media_tab_bar.currentPane === "shows"
                           || media_tab_bar.currentPane === "media"
@@ -2537,46 +1998,17 @@ Rectangle {
             border.color: Theme.border
             border.width: 1
             color: Theme.workspacePaneBg    // ---- Monitor wall — the shared MonitorWall component
-            // (qml/components/MonitorWall.qml), driven by OutputListModel.
-            // The old preview_Main_Output / preview_Stage_Screen /
-            // preview_Nursery_Display / preview_Stream_Overlay blocks were
-            // fixed-position copies that never reacted to anything; the wall
-            // itself then lived inline here while the Edit screen's ITEMS tab
-            // hosted the same tiles in a plain Grid — "the same monitors"
-            // rendered differently per surface. The wall logic (hero page,
-            // 2×2 paging, snap swipe, dots) now lives in ONE component both
-            // hosts instantiate, so every surface shows the identical wall.
-            // Main Output is protected upstream (OutputListModel::removeOutput
-            // refuses it and its Delete affordance is hidden), so the wall
-            // always keeps a primary. Sits flush at the column's top — the
-            // old static "Congregation / Inner Thinks" header strip above it
-            // was removed (user call); the wall owns the whole column now.
             MonitorWall {
                 id: monitorWall
                 // Self-test handle (VGR_SELFTEST grabs this item to PNG for
                 // pixel-sampling the checkerboard/style-bg rendering).
                 objectName: "selfTestMonitorWall"
 
-                // FLUSH WITH THE COLUMN — 0 inset, full width. It used to be
-                // `Math.min(376, parent.width - 16)`, centered: on any column
-                // wider than 392px that capped the wall at 376 and left a
-                // strip of empty background at EACH end (measured on a live
-                // grab: the tiles spanned 34..501 inside a 532px column, ~27px
-                // of dead space per side). The wall owns the whole column
-                // (there is nothing else in it but the divider below), so the
-                // tiles now start at the column's left edge, run to its right
-                // edge, and sit flush against each other in between
-                // (columnGap is already 0) — live report: "the monitor tiles
-                // should touch the both ends, there should not be any space
-                // in between".
                 x: 0
                 y: 0
                 width: parent.width
             }
 
-            // Divider between the monitor wall and the clock panel (the
-            // original line_2 asset, repositioned to track the wall's
-            // bottom edge instead of a fixed y).
             Rectangle {
                 id: line_2
 
@@ -2585,12 +2017,8 @@ Rectangle {
                 height: 1
                 color: Theme.border   // Theme.border
             }
-
         }
 
-        // The projects/show list on the left is a resizable sidebar. Its
-        // width is shared by the Projects panel and the centre workspace;
-        // double-click restores the responsive default.
         SplitHandle {
             // Harness hook: the split-drag scenario grabs this strip and drags it, to
             // prove a sidebar width is actually REMEMBERED (session.projectsColumnWidth).
@@ -2614,9 +2042,6 @@ Rectangle {
             onResetRequested: { workspace_body.topOverride = -1; saveColumnWidthsTimer.restart() }
         }
 
-        // Drag the divider between the main preview workspace and the output
-        // monitors. The middle column and its preview canvas follow the new
-        // width; double-click restores the responsive default.
         SplitHandle {
             value: workspace_body.width - right_column.width
             minValue: left_column.width + 400

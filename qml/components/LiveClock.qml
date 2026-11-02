@@ -1,23 +1,5 @@
 import QtQuick
 
-// Shared ticking clock — one component every clock/timer-driven visual (the
-// Clock/Timer "+" menu pickers' live previews, and their canvas items in
-// EditScreen.qml) imports and reuses, instead of each maintaining its own
-// second-by-second Timer plus its own HH:MM:SS/12-vs-24-hour formatting
-// code. Named LiveClock rather than "Timer" (as originally asked for)
-// specifically so it doesn't shadow QtQuick's own built-in Timer element in
-// any file that imports both — this component wraps exactly one of those
-// internally.
-//
-// formatClock/timerSeconds are pure functions taking `now` as an explicit
-// argument rather than reading `root.now` internally — a consumer's binding
-// (e.g. `text: LiveClock.formatClock(ticker.now, ...)`) reads `ticker.now`
-// itself at the call site, which is a plain, guaranteed-reactive QML
-// property read. Reading it *inside* the function instead worked in
-// principle (QML is supposed to track property reads through a function
-// call), but wasn't actually updating the Clock picker's live preview in
-// practice — this shape removes any doubt about it by keeping the reactive
-// read and the pure computation clearly separate.
 Item {
     id: root
 
@@ -55,11 +37,6 @@ Item {
                             : (root.pad(h) + ":" + m + suffix)
     }
 
-    // Seconds remaining/elapsed for a Timer canvas item, given its mode
-    // ("countdown" | "countup" | "timeofday"), its configured duration (for
-    // "timeofday", interpreted as seconds-since-midnight instead), and the
-    // moment it was started — the same math a picker's live preview and the
-    // canvas visual both need, kept in one place instead of duplicated.
     function timerSeconds(now, mode, durationSeconds, startedAt) {
         const elapsed = Math.floor((now.getTime() - startedAt) / 1000)
         if (mode === "countup")

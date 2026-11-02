@@ -2,24 +2,6 @@ import QtQuick
 import Qt.labs.platform as Platform
 import VGRPresenterUI
 
-// What the Settings > General switches DO to the running app. The engine keeps the settings and their meaning
-// (bps::settings::AppSettings, through SettingsService); the things only the app itself can carry out live here:
-//
-//   Start minimized          the window starts in the task bar
-//   Open last project /      OPT-IN resume: the show (and screen) — or the template/overlay
-//   Restore last session     edit — you left comes back at start-up. Both are OFF by default
-//                            (see AppSettings.cpp): a launch starts on the home (Show) screen
-//                            with nothing opened, whatever the last session was doing.
-//   Autosave                 saves the open show by itself, every "Autosave every", once it has a file
-//   Automatic backups        a dated copy of the saved show every "Back up" interval, keeping "Keep last"
-//   Crash recovery           the unsaved show is written aside every few seconds while it is dirty; after an unexpected
-//                            exit the home screen says so and offers it back as a NEW show (nothing is overwritten)
-//                            with one click on the notice — the app does NOT open the editor over whatever you were
-//                            doing when it starts
-//   Close to tray            closing the window hides it to the system tray; the tray icon brings it back or quits
-//
-// (Notifications and Lock In Mode are applied by NotificationCenter; launch at login, the log level, the resource profile and
-// budgets are applied by the engine / SettingsService.) A plain Item: it draws nothing.
 Item {
     id: root
 
@@ -35,46 +17,18 @@ Item {
     property bool started: false
     // A recovery copy of the open show was written this run, so it is ours to clear once the show is saved.
     property bool recoveryWritten: false
-    // The token of the recovery-copy write in flight (0 = none). The copy is a
-    // QUEUED document job — the engine writes it off the interface thread — so its
-    // verdict comes back through ShowService.documentJobFinished, not as a return
-    // value (see writeRecoveryCopy).
     property int _recoveryToken: 0
-    // The copy an unexpected exit left behind, OFFERED but not opened: null once
-    // it has been taken up (or when there is nothing to offer). Held so the
-    // notice's own click can do the work later — see recover().
     property var pendingRecoveryOffer: null
 
     // ---- start-up ----------------------------------------------------------------------------------------------
 
-    // WAIT FOR THE ENGINE'S STORE, not a fixed delay. start() reads the
-    // preferences and the last session out of SettingsService, and those only
-    // carry the user's choices once the store has been read (its load runs on
-    // bootedChanged). SettingsService.whenReady is the one idiom
-    // for a pre-boot read; the timer below then gives the scene a beat to settle
-    // before the last show/screen comes back. (A bare fixed delay read the
-    // engine's DEFAULTS on a slow boot - startMinimized false, lastShowPath "",
-    // recovery path "" - so Start minimized, Restore last session, Open last
-    // project and crash recovery were silently ignored.)
-    // The recovery notice's one click, registered once: the card draws a button
-    // from the notice's own action id and this is what that id runs (the
-    // notification layer stays data-driven — see NotificationCenter.registerAction).
     Component.onCompleted: {
         NotificationCenter.registerAction("recovery.open", function() { root.openOfferedRecovery() })
-        // The bus delete's Undo. ONE id, because BusListModel keeps one deleted bus deep: the id
-        // can only ever mean the bus the notice on screen is about. (A media FILE's Undo is
-        // registered per notice instead — its id carries the file's trash token, so two deletions
-        // on screen each give their own file back; see the Connections below.)
         NotificationCenter.registerAction("buses.undoRemove", function() { BusListModel.restoreRemovedBus() })
         SettingsService.whenReady(function() { startTimer.start() })
     }
 
     // ---- the media file Undo's one click ---------------------------------------------------------
-    // A delete's notice carries the TRASH TOKEN of the file it removed, and the id is built from
-    // that token ("media.undoRemove.<token>") precisely so the click knows WHICH file it is
-    // putting back: "Undo" under one notice must never bring back a different deletion that
-    // happened after it. A payload is data and cannot carry a function, so the id is turned into
-    // one here — registrations live as long as the app, which outlives every notice.
     Connections {
         target: EventBus
         function onEventPosted(topic, payload) {
@@ -86,9 +40,6 @@ Item {
             const id = String(action.id)
             NotificationCenter.registerAction(id, function() {
                 MediaLibraryService.undoRemove(token)
-                // The click is the notice's last act (its card dismisses itself after
-                // running this), so the entry goes with it instead of piling up one
-                // closure per deletion for the rest of the session.
                 NotificationCenter.unregisterAction(id)
             })
         }
@@ -109,29 +60,10 @@ Item {
         if (root.values["preferences.startMinimized"] === true)
             root.window.showMinimized()
 
-        // Something an unexpected exit left behind comes first — as an OFFER, not
-        // as a takeover. Recovering used to open the copy on the Edit screen
-        // before the app had even settled, which hijacked the launch: you asked
-        // for the home screen and got somebody else's session back on the canvas,
-        // with the only thing telling you why being a toast you had already
-        // missed. The offer says what is waiting (on whatever screen you are on
-        // — the home screen, normally) and carries the single click that opens
-        // it; nothing is opened until you take it, and the copy stays put if you
-        // do not.
-        // The crash-recovery offer, asked for OFF the interface thread: the
-        // answer reads the recovery store from disk, so the request goes out
-        // here and the offer is raised when it arrives (onPendingRecoveryReady
-        // below). Startup does not wait for it, and nothing is offered twice.
         SettingsService.requestPendingRecovery()
 
         const restoring = root.values["preferences.restoreLastSession"] === true
         const wantsShow = root.values["startup.openLastProject"] === true || (restoring && lastView === "edit")
-        // WHERE you were, not just which tab: a template/overlay edit was an open
-        // DESIGN, and the branch below reopened the last SHOW instead — so
-        // quitting from a template edit came back as an unrelated show on the
-        // canvas in edit mode ("it will automatically open the first project in
-        // edit mode"). The design is tried first; a design that is gone (deleted
-        // meanwhile) falls through to the show/screen restore as before.
         const design = restoring && lastView === "edit" ? root.designToRestore() : null
         if (design !== null && root.editScreen.openDesign(design.kind, design.id)) {
             root.window.currentView = "edit"
@@ -141,13 +73,6 @@ Item {
         } else if (restoring && (lastView === "show" || lastView === "edit" && ShowService.hasShow)) {
             root.window.currentView = lastView
         }
-        // ...and the PAGE inside Settings, when that is where the session ended:
-        // it is remembered while the dialog is open and cleared the moment it
-        // closes (Main.qml's rememberSettingsPage), so an empty value means
-        // "Settings was shut" and nothing opens. With it set, the resume lands
-        // exactly where the user was — the Show or Edit screen behind it AND the
-        // page in front (Settings · Audio & Video, say) — instead of the home
-        // screen, and without a trip back through the nav rail to find it.
         if (restoring) {
             const section = String(root.values["session.lastSettingsSection"] ?? "")
             if (section !== "") {
@@ -158,10 +83,6 @@ Item {
         root.started = true
     }
 
-    // { kind, id } of the design the last session was editing, or null when that
-    // session ended on a show ("" is the recorded "no design"). openDesign is
-    // the one call that resolves the id against its library (and refuses one that
-    // is no longer there), so nothing is checked twice here.
     function designToRestore() {
         const saved = String(root.values["session.lastDesign"] ?? "")
         const cut = saved.indexOf(":")
@@ -170,40 +91,19 @@ Item {
         return { kind: saved.slice(0, cut), id: saved.slice(cut + 1) }
     }
 
-    // The offer itself: one notice, on the screen the app started on, whose name
-    // in bold is the show it is about (see NotificationToast.crux) and whose one
-    // button opens it. Raised instead of opening the editor, so a launch that has
-    // work waiting is still the launch the user asked for.
     function offerRecovery(waiting) {
         root.pendingRecoveryOffer = waiting
         const target = qsTr("%1 (recovered)").arg(waiting.showName)
-        // Level "error" on purpose: this is a fault report about work that is
-        // sitting unsaved, and it is the only notice in the app whose job is to
-        // tell the user something real is recoverable. NotificationCenter lets
-        // errors through even with notifications switched off or Lock In Mode on
-        // (every other notice is dropped then), which is the one case where
-        // dropping this offer would lose the user's work silently.
         EventBus.notify(qsTr("The app closed unexpectedly. Your unsaved changes to “%1” were written aside as “%2” — open them?")
                             .arg(waiting.showName).arg(target),
                         "error", qsTr("Crash recovery"), "settings.recovery.available",
                         [waiting.showName, target],
                         { id: "recovery.open", label: qsTr("Open recovered show") })
-        // Same reason the boot and missing-device notices log: the offer is a
-        // toast, the toast is gone in fifteen seconds, and "what did it say was
-        // waiting?" has to stay answerable — including in a build nobody was
-        // watching.
         EngineBridge.log("error", "Crash recovery",
                          qsTr("Offered the unsaved changes to \"%1\" as \"%2\" (not opened — one click on the notice opens it)")
                              .arg(waiting.showName).arg(target))
     }
 
-    // The offer, taken up: brings the interrupted show back as a new file in the
-    // library, named after it, and opens it — the same work start() used to do on
-    // its own, now happening because someone clicked. Answers false only when the
-    // copy cannot be opened, and says so rather than failing silently, because by
-    // then the user has asked for it.
-    // The copy the recovery store is being asked for (restoreFinished answers by
-    // target path), and the name it will be opened as.
     property string recoveryTarget: ""
     function openOfferedRecovery() {
         const waiting = root.pendingRecoveryOffer
@@ -216,10 +116,6 @@ Item {
                             "error", qsTr("Crash recovery"), "settings.recovery.failed")
             return false
         }
-        // The copy run on a worker: the store is being READ here, and this opens
-        // the recovered show when the engine reports the copy is there (see
-        // onRestoreFinished below — a failure says so rather than opening
-        // nothing). `target` doubles as the request's identity.
         root.recoveryTarget = target
         SettingsService.restoreRecovery(target)
         return true
@@ -271,13 +167,6 @@ Item {
                 SettingsService.setValue("session.lastView", root.window.currentView)
         }
     }
-    // The design being edited is part of "where you were" (see start()): the open
-    // template/overlay rides the settings store the same way the screen and the
-    // show do, so the edit that was interrupted comes back AS that design rather
-    // than as whatever show was open under it. Closing it records "no design", so
-    // a session that ends on a show can never come back into a stale template.
-    // Both signals matter: designMode flips on open/close, while opening ANOTHER
-    // design on top of the first leaves it true and only moves designId.
     Connections {
         target: root.session
         function onDesignModeChanged() { root.rememberDesign() }
@@ -293,9 +182,6 @@ Item {
     }
     Connections {
         target: ShowService
-        // The recovery copy landed: only now is it on disk, so only now is it
-        // recorded (a crash between the request and this line costs this run's
-        // copy, which is exactly what the next 15 s tick is for).
         function onDocumentJobFinished(token, kind, ok) {
             if (kind !== "saveCopy" || token !== root._recoveryToken)
                 return
@@ -378,18 +264,7 @@ Item {
         return !root.quitting && root.values["preferences.closeToTray"] === true && Platform.SystemTrayIcon.available
     }
 
-    // The app is really going away: nothing is waiting to be recovered — UNLESS an
-    // offer this run was never answered. That copy is still the only record of
-    // work the user has not opened yet, and a clean exit is not their answer to
-    // it, so it stays for the next launch's offer (the engine clears it as soon
-    // as the recovered show is saved, by the normal rule).
     function cleanExit() {
-        // The app is going away, so a queued READ (a show being opened, a template
-        // being loaded) has nobody left to answer: it is abandoned rather than run
-        // ahead of the teardown — see ShowService's cancelDocumentJobs. A save the
-        // user asked for is NOT abandoned: that write is why they pressed Save, and
-        // it is queued on the same worker main.cpp's aboutToQuit drains before the
-        // engines are torn down, so it still reaches the file.
         ShowService.cancelDocumentJobs(["open", "templateLoad"])
         if (root.pendingRecoveryOffer !== null)
             return

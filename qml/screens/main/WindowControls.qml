@@ -2,17 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// Minimize / maximize-restore / close for the frameless window — the app's own
-// title-bar buttons (the native ones are gone with the native title bar, which is
-// what lets the File/Edit/View/Help menu live in the top strip). Each button is a
-// full-height hit target with a hover wash (close goes red), like a native caption.
-//
-// Hover comes from PositionHoverArea (pointer-position truth) — this build never
-// delivers hover-exit to MouseAreas, so a containsMouse wash would stick.
-//
-// Colors read the Theme singleton: caption glyphs use iconChrome and the hover
-// wash is a textPrimary overlay (light in dark, dark in light), so the title-bar
-// buttons recolour with the app.
 Item {
     id: root
 

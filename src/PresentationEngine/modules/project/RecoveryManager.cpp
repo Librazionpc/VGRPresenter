@@ -10,7 +10,6 @@
 #include <cstdio>
 
 namespace bps::project {
-
 namespace {
 int64_t MsNow() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -133,13 +132,6 @@ size_t RecoveryManager::Count() const {
     return items_.size();
 }
 
-// Serializes the list and stores it. It takes the lock ITSELF to read the list
-// and calls the store AFTER releasing it: DatabaseManager is another engine
-// singleton, and a module lock held across a call into one is exactly what the
-// lock-scope rule forbids (Put is an in-memory map write, but the rule does not
-// get to depend on that, and the shape is DatabaseManager's own Flush(): build
-// under the lock, hand the bytes over outside it). Callers therefore no longer
-// call this with mutex_ held.
 Result<void> RecoveryManager::Persist() {
     json::Value::Array arr;
     {
@@ -148,5 +140,4 @@ Result<void> RecoveryManager::Persist() {
     }
     return DatabaseManager::Instance().Put("recovery", "items", json::Value(std::move(arr)));
 }
-
 } // namespace bps::project

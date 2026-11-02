@@ -8,9 +8,7 @@
 #include <format>
 
 namespace bps {
-
 namespace {
-
 constexpr int kMaxLine = 64 * 1024;
 
 long long RequestId(const json::Value& req) {
@@ -37,7 +35,6 @@ bool SendAll(platform::ISocket& conn, const std::string& data) {
     auto r = conn.Send(data);
     return r.ok() && r.value() == data.size();
 }
-
 } // namespace
 
 IpcServer& IpcServer::Instance() {
@@ -210,11 +207,6 @@ Result<void> IpcServer::Broadcast(std::string_view jsonLine) {
         std::lock_guard<std::mutex> lock(subscribersMutex_);
         targets.assign(subscribers_.begin(), subscribers_.end());
     }
-    // Send OUTSIDE the lock with shared_ptrs held: SendAll blocks on a
-    // slow/stalled subscriber, and Broadcast runs on the Logger pump thread — a
-    // stuck client must not stall logging nor block
-    // Subscribe/Unsubscribe/SubscriberCount. Holding the shared_ptr keeps the
-    // socket alive even if its connection thread is tearing down concurrently.
     std::vector<platform::ISocket*> dead;
     for (const auto& s : targets)
         if (!SendAll(*s, line)) dead.push_back(s.get());
@@ -251,5 +243,4 @@ HealthReport IpcServer::GetHealth() const {
                            requests_.load());
     return r;
 }
-
 } // namespace bps

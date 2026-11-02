@@ -1,9 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
 
-// A small "working on it" spinner: a three-quarter arc turning. Use it wherever something is
-// loading and would otherwise look empty (a folder being read, a list waiting for data).
-// It only turns while `running` (default: while visible), so a hidden one costs nothing.
 Item {
     id: root
 

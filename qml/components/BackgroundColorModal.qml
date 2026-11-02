@@ -2,47 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// Reusable color/gradient palette + picker, laid out the way FreeShow's own
-// colour popup is (its inputs/MaterialColorInput.svelte): a Normal / Gradient
-// TAB pair above the swatches, the palette itself, the Opacity of the pick, and
-// one "Choose custom" door to a colour outside the grid — one mode visible at a
-// time, instead of both palettes and both custom builders stacked in a column.
-// Selecting stays explicit here (Apply/Cancel), because this dialog edits
-// persisted slide/item state that is undoable; FreeShow's inline popup commits
-// on the swatch click because its values are already live. Matches
-// 1BBTIwaya/VGRPresenter_Main_Screen_Edit_Background_Color.qml's
-// bg_modal_dim/bg_modal_card popup, which ships only as a flat PNG in the
-// ground truth export (no element-level QML to copy) — rebuilt here as real
-// QML, model-driven (colorSwatches/gradientSwatches), so it can be dropped
-// in anywhere a color needs picking, not just the Edit screen's Background
-// row.
-//
-// OPACITY: an Opacity slider (0-100%). The first version of it only faded the preview - the
-// value was handed to consumers that ignored it, so it was removed. It is back and it WORKS: the alpha is
-// written INTO the applied colour (#AARRGGBB), so consumers need no change and nothing else is carried in the
-// payload. It applies to solid colours and to both stops of a gradient; Transparent stays transparent.
-//
-// THE SLIDER IS THE ITEM'S OWN OPACITY, not a multiplier over it. It SEEDS from the alpha of the colour being
-// edited (a #89000000 tint opens at 54%) and WRITES that alpha back on Apply, so what the slider shows is
-// always the value the item carries. It used to open at a hardcoded 100% and multiply while applying: the
-// picker for a 54% tint read "100%", and nothing the user could do with the slider told them what the item
-// actually held ("it doesn't remember the item opacity level, it always defaults back to 100").
-//
-// The palette is REAL COLOURS + Transparent, and nothing else: the six hardcoded TINTS (black / white at 25%,
-// 50% and 75% as #AARRGGBB) that used to sit at the end were removed at the user's call - a translucent swatch
-// can only be drawn as a checkerboard with a faint tint over it, which read as a broken/missing swatch ("the
-// hardcoded error"). Transparency is the Opacity slider's job now (pick the real colour, then set how opaque it
-// is), or the CUSTOM field for anyone who wants to type an alpha hex directly (#80ffffff).
-//
-// The whole picker state is a single `selection` value —
-//   { kind: "color", color } | { kind: "gradient", from, to, name, subtitle }
-// — whether it came from a swatch or was typed live into the CUSTOM fields.
-// Consumers just read `selection` on applied() and decide what to do with it
-// (this component owns no application state of its own beyond the picker UI).
-//
-// Colors read Theme tokens, so a Light choice recolours the modal with the
-// rest of the app. (The palette swatches themselves — the preset colours and
-// gradients — are CONTENT, not chrome, and keep their literal values.)
 Item {
     id: root
     // Shared top-level modal layer: keep the scrim and card above the page
@@ -52,9 +11,6 @@ Item {
     property bool open: false
 
     // ---- Esc = cancel, Enter = the Save button (qml/settings/Hotkeys.qml) --
-    // The picker's own pair, pushed as a Hotkeys scope while it is up; the
-    // footer's Save and this share one `accept()`, so the key and the button
-    // cannot drift.
     property int hotkeyScope: 0
     function accept() { root.applied(root.withOpacity(root.selection)) }
     onOpenChanged: {
@@ -77,32 +33,14 @@ Item {
     }
     Component.onDestruction: Hotkeys.close(root.hotkeyScope)
 
-    // 0-100 — the alpha the item is being edited AT. Seeded from the colour it
-    // is opened on (seedWith), written back into the applied colour
-    // (withOpacity). No reset-on-open: that reset is what made the picker drop
-    // a translucent tint back to 100% every time it was reopened.
     property real opacityPct: 100
 
     // Header text — rename when reusing the picker for something other than
     // the slide background (e.g. an item's border color).
     property string title: qsTr("Background Color")
 
-    // The one place "no background" is spelled out — a real, deliberately-
-    // chosen swatch (rendered as a checkerboard below), not just whatever a
-    // freshly-created background happens to default to, so "no background"
-    // is always one click away again after picking an actual color.
-    // Consumers of this component (e.g. EditScreen.qml's slideBackground
-    // default) read this property instead of hardcoding "transparent"
-    // themselves, so there's exactly one definition to change.
     readonly property string transparentValue: "transparent"
 
-    // Real colours only (+ Transparent, the deliberate "no background" pick): a
-    // translucent preset can only render as checkerboard + faint tint, which reads
-    // as a broken swatch. Opacity comes from the slider (or a typed alpha hex in
-    // CUSTOM), never from a hardcoded #AARRGGBB entry here.
-    // FreeShow's own default palette (its helpers/color.ts `defaultColors`),
-    // minus nothing, plus Transparent first: that is the grid an operator
-    // already knows from FreeShow, and five columns is exactly its row length.
     property var colorSwatches: [
         root.transparentValue,
         "#ffffff", "#d4d4d4", "#9ca3af", "#ef4444", "#facc15",
@@ -124,30 +62,11 @@ Item {
     property string customGradFrom: "#3b82f6"
     property string customGradTo: "#8b5cf6"
 
-    // Which palette tab is open — FreeShow's `normal` / `gradient` pair (see its
-    // inputs/MaterialColorInput.svelte Tabs). Seeded from the value being
-    // edited when the dialog opens, so a gradient reopens on its own swatches.
     property int paletteTab: 0
-    // "Choose custom" reveals the hex entry. FreeShow hands off to its own
-    // picker popup there; this dialog has no colour wheel, so the field IS the
-    // custom door and stays hidden until it is asked for.
     property bool showCustomColor: false
 
-    // "" | "color" | "gradient" — while non-empty, the preview/Apply follow
-    // whatever is currently typed in the CUSTOM fields directly instead of
-    // a swatch index, so the preview updates as you type instead of only
-    // after pressing Enter/clicking away. Clicking any swatch clears this
-    // back to swatch-driven selection.
     property string liveKind: ""
 
-    // Seed the palette from the CURRENT value — the picker shows the color
-    // being edited, not this component's hardcoded defaults (the old open
-    // path always displayed #1B2440 etc. until the user picked). A hex
-    // selects/highlights its swatch (adding it first when custom, same
-    // create-on-commit rule as typing); "transparent" (or anything that
-    // isn't a color) selects the Transparent swatch. Pure: does NOT touch
-    // `open`, so a caller that binds `open` to its own state (EditScreen's
-    // shared picker) can call this when opening without breaking the binding.
     function seedWith(color) {
         root.selectedGradientIndex = 0
         root.selectedColorIndex = -1
@@ -172,9 +91,6 @@ Item {
         }
     }
 
-    // For callers that hand the picker its visibility (no `open` binding):
-    // seed from the current value and show. Bound callers: seedWith() + set
-    // their own open flag.
     function openWith(color) {
         root.seedWith(color)
         root.open = true
@@ -183,10 +99,6 @@ Item {
     function isValidHex(h) {
         return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(h)   // 8 digits = #AARRGGBB
     }
-    // The opacity percentage a colour value carries, for seeding the slider:
-    // 100 for an opaque #RRGGBB (and for anything unparseable — "transparent"
-    // is a swatch, not an alpha), and the leading byte's share of 255 for the
-    // #AARRGGBB form this picker itself writes on Apply (see fadedColor).
     function alphaPctOf(color) {
         const hex = String(color ?? "").trim()
         if (hex.length === 9 && hex.charAt(0) === "#")
@@ -199,10 +111,6 @@ Item {
             hex = "#" + hex
         return hex
     }
-    // Typing a custom hex and leaving the field both selects it (so it
-    // drives the preview/Apply) and, if it's new, adds it as a swatch so
-    // it's there to reuse next time — same "create on commit" idea as the
-    // custom gradient builder below.
     function commitCustomColor(rawHex) {
         const hex = root.normalizeHex(rawHex)
         if (!root.isValidHex(hex)) {
@@ -212,10 +120,6 @@ Item {
         }
         root.customHex = hex
         hexInput.text = hex
-        // A typed alpha hex IS an opacity choice: hand it to the slider, so the
-        // two controls never show two different values for the one colour
-        // (typing #80ffffff moves the slider to 50%, and Apply then writes back
-        // what the slider says).
         root.opacityPct = root.alphaPctOf(hex)
         const existing = root.colorSwatches.indexOf(hex)
         if (existing >= 0) {
@@ -263,20 +167,6 @@ Item {
         root.liveKind = ""
     }
 
-    // The one value Apply carries — swatch-driven or typed live, unified
-    // into the same { kind, ... } shape either way.
-    // Does the Opacity row have anything to act on?
-    //
-    // NO for the Transparent swatch, and only for it: withOpacity() below
-    // deliberately hands Transparent back UNCHANGED (`sel.color ===
-    // transparentValue ? sel : …` — "no background" is not a colour with an
-    // alpha of 0%), and customSelection() applies the slider to a gradient's
-    // stops, never to this swatch. So on Transparent the slider could be
-    // dragged to any percentage and the applied value never moved — a control
-    // that reads as live but does nothing, which is exactly the confusion the
-    // row is disabled to prevent. A colour the user typed with its own alpha
-    // (`#80000000`) is NOT this case: the slider legitimately re-writes that
-    // alpha, so it stays live.
     readonly property bool opacityApplies: !(root.selection.kind === "color"
                                              && root.selection.color === root.transparentValue)
 
@@ -295,10 +185,6 @@ Item {
                  subtitle: root.gradientSwatches[root.selectedGradientIndex].subtitle }
     }
 
-    // Index into colorSwatches/gradientSwatches of whatever `selection`
-    // currently is, or -1 — so swatch highlighting stays in lockstep with
-    // the preview (including a custom hex that matches a swatch) instead of
-    // drifting from it. Live typing selects nothing until committed.
     readonly property int selectedSwatch: {
         if (root.liveKind !== "" || root.selection === null)
             return -1
@@ -311,18 +197,10 @@ Item {
         return -1
     }
 
-    // `color` with its alpha REPLACED by the Opacity slider, as "#AARRGGBB" /
-    // "#RRGGBB". Replaced, not scaled: the slider holds the item's own opacity,
-    // so applying it twice (open → Apply without touching anything) must land on
-    // the same value rather than compounding 54% into 29%.
     function fadedColor(color) {
         const c = Qt.color(color)
         return Qt.rgba(c.r, c.g, c.b, root.opacityPct / 100).toString()
     }
-    // A selection with the Opacity slider applied. Transparent stays transparent
-    // (it is a swatch, not a colour). At 100% an opaque colour comes back out
-    // unchanged; a translucent one comes back fully opaque, which is exactly
-    // what the slider then reads.
     function withOpacity(sel) {
         if (sel.kind === "color")
             return sel.color === root.transparentValue ? sel : Object.assign({}, sel, { color: root.fadedColor(sel.color) })
@@ -334,10 +212,6 @@ Item {
     signal applied(var selection)
     signal cancelled()
 
-    // One reusable gradient swatch: a rounded rect filled with a two-stop
-    // vertical gradient, a selection ring, and hover feedback. Used for
-    // both the preset gradients and the custom ones added by the builder —
-    // one definition instead of a hand-rolled copy per site.
     component GradientSwatch: Rectangle {
         id: gswatch
 
@@ -367,15 +241,6 @@ Item {
     anchors.fill: parent
     visible: root.open
 
-    // Dim scrim behind the card. Outside clicks are trapped without cancelling;
-    // the shared scrim also prevents wheel events reaching the canvas behind.
-    // The dialog belongs to the WINDOW, not to the pane that declares it. A modal
-    // declared inside a settings page (every Add / Edit dialog in Settings) must dim
-    // the whole app, not just that page's content column: parented in place its scrim
-    // covered one side of the settings card, so the dialog read as half-modal (user
-    // report: "the black box doesn't cover the whole settings modal, only one side").
-    // Reparented to the window overlay, this component has no scaled ancestor to
-    // inherit a scale from, so its CARD applies the app scale itself (see AppScale.qml).
     parent: Overlay.overlay
 
     ModalScrim {
@@ -383,12 +248,6 @@ Item {
         onDismissed: root.cancelled()
     }
 
-    // The card: pinned header (title + close X), scrollable palette middle,
-    // pinned Cancel/Apply footer — the same contract ModalCard gives every
-    // other dialog. The palette body is taller than a settings window; the
-    // old content-sized card centered itself with NO cap and clipped BOTH
-    // ends (close X off the top, Apply/Cancel off the bottom, nothing
-    // scrollable). Height now caps against the parent; the middle scrolls.
     Rectangle {
         id: card
         // The app's one scale, on the card (see AppScale.qml) — never on the root,
@@ -397,13 +256,6 @@ Item {
         transformOrigin: Item.Center
         anchors.centerIn: parent
         width: Math.min(460, root.width - 80)
-        // Height is decided HERE, in one place: the content plus the chrome,
-        // capped to the window. 62 = header (20 top margin + 28 close row + 14
-        // gap); footerRow.height + 34 = footer (34 buttons + 20 bottom margin
-        // + 14 of air between the scroll area and the buttons). The flick's
-        // height below derives from THIS, not the other way round — the old
-        // paired formulas met at exactly the footer's top edge, so scrolled to
-        // the bottom the last row's border sat under the Cancel/Apply buttons.
         readonly property int chrome: 62 + footerRow.height + 34
         height: Math.max(248, Math.min(root.height - 80, chrome + content.height))
         radius: 14
@@ -433,30 +285,9 @@ Item {
                 font.weight: Font.DemiBold
             }
 
-            Rectangle {
+            ModalCloseButton {
                 id: closeBtn
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                width: 28
-                height: 28
-                radius: 7
-                color: closeArea.containsMouse ? Theme.hoverBg : "transparent"
-                Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "✕"
-                    color: Theme.textSecondary
-                    font.pixelSize: 14
-                }
-
-                MouseArea {
-                    id: closeArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.cancelled()
-                }
+                onClicked: root.cancelled()
             }
         }
 
@@ -466,12 +297,6 @@ Item {
             x: 24
             y: headerItem.y + headerItem.height + 14
             width: parent.width - 48
-            // From the card's height (already capped): everything below the
-            // flick minus the 20px footer margin AND a 14px cushion, so at
-            // full scroll-down the last row never touches the buttons. The
-            // 120 floor keeps a degenerate-short window from collapsing the
-            // palette to nothing (the card may then clip — nothing to fix
-            // there, there is simply no room).
             height: Math.max(120, card.height - y - footerRow.height - 34)
             contentWidth: width
             contentHeight: content.height
@@ -483,11 +308,6 @@ Item {
                 width: flick.width
                 spacing: 18
 
-                // FreeShow's palette tabs (its MaterialColorInput: a `normal` /
-                // `gradient` Tabs pair directly above the swatches). Same two
-                // modes, one panel each — instead of stacking BOTH palettes plus
-                // both custom builders in one long column, which is what made
-                // this dialog read as three screens' worth of colour controls.
                 Row {
                     width: parent.width
                     spacing: 22
@@ -572,10 +392,6 @@ Item {
                             height: 40
                             radius: 8
                             clip: true
-                            // Hover feedback on the fill itself (same
-                            // lighten-on-hover language as every other
-                            // chip/button in this file family), in addition
-                            // to the selection ring below.
                             color: colorSwatch.isSolid
                                    ? (colorSwatchArea.containsMouse ? Qt.lighter(modelData, 1.15) : modelData)
                                    : (colorSwatchArea.containsMouse ? Theme.hoverBg : Theme.inset)
@@ -617,15 +433,6 @@ Item {
                                 onClicked: {
                                     root.selectedColorIndex = colorSwatch.index
                                     root.liveKind = ""
-                                    // Sync the hex field + Opacity slider to THIS
-                                    // swatch (user call: "i selected black why do
-                                    // now have hex color" — clicking a preset left
-                                    // the hex field and the slider showing
-                                    // whatever the PREVIOUS pick/item left behind,
-                                    // not black's own values). Same reseed a typed
-                                    // hex already gets via commitCustomColor —
-                                    // every way of picking a colour must agree on
-                                    // what the two readouts show for it.
                                     if (!colorSwatch.isTransparent) {
                                         root.customHex = colorSwatch.modelData
                                         hexInput.text = colorSwatch.modelData
@@ -638,10 +445,6 @@ Item {
                 }
             }
 
-            // CHOOSE CUSTOM — FreeShow's one button under its palette, opening
-            // the custom picker. Ours reveals the hex field below (there is no
-            // native colour wheel to hand off to), already focused so typing a
-            // hex works on the first keystroke.
             Rectangle {
                 objectName: "chooseCustomColor"
                 width: parent.width
@@ -675,11 +478,6 @@ Item {
                 }
             }
 
-            // OPACITY - the alpha of whatever is picked (colour or gradient); 100% = as chosen.
-            // GREYED OUT on the Transparent swatch: see opacityApplies. The row
-            // keeps its place in the layout (nothing moves when the pick
-            // changes) and dims, so it reads as "not available for this pick"
-            // rather than as a control that ignores the pointer.
             LabeledSlider {
                 objectName: "selfTestPaletteOpacity"
                 width: parent.width
@@ -725,9 +523,6 @@ Item {
                 }
             }
 
-            // CUSTOM hex entry — revealed by "Choose custom" above; committing
-            // (Enter/losing focus) both selects this colour and, if it's new,
-            // adds it to the palette.
             Column {
                 width: parent.width
                 spacing: 8
@@ -768,10 +563,6 @@ Item {
                             font.family: Theme.fontFamily
                             font.pixelSize: 14
                             selectByMouse: true
-                            // Live preview on every keystroke, not just once
-                            // the field loses focus — the swatch/name above
-                            // update as you type instead of only after
-                            // pressing Enter or clicking away.
                             onTextChanged: {
                                 const hex = root.normalizeHex(text)
                                 if (root.isValidHex(hex)) {
@@ -785,10 +576,6 @@ Item {
                 }
             }
 
-            // CUSTOM GRADIENT builder — two hex fields (from/to); committing
-            // either one both selects this gradient and, if it's new, adds it
-            // to the presets above. Same create-on-commit idea as the custom
-            // colour field.
             Column {
                 width: parent.width
                 spacing: 8
@@ -874,7 +661,6 @@ Item {
                     }
                 }
             }
-
             }
         }
 

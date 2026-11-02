@@ -1,12 +1,5 @@
 #pragma once
 
-// BroadcastEngine (docs/specs/29): the Phase 17 facade for NDI and SDI.
-// NDI (libndi) and SDI (Blackmagic DeckLink) are proprietary runtime SDKs, so
-// the engine never links them: providers resolve the SDK at runtime and the
-// engine stays testable without any hardware. A software loopback provider
-// ships in-tree so the full send/receive/discover contract runs in CI and in
-// operator rehearsal.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -23,7 +16,6 @@
 #include <vector>
 
 namespace bps::broadcast {
-
 class BroadcastEngine final : public IService {
 public:
     static BroadcastEngine& Instance();
@@ -39,9 +31,6 @@ public:
     Metrics MetricsSnapshot() const override;
     const char* ServiceName() const noexcept override { return "BroadcastEngine"; }
 
-    // --- Provider registry (docs/specs/29 §3) ---
-    // Register a provider. Duplicate names are rejected; the built-in
-    // "software" provider is pre-registered at Initialize.
     Result<void> RegisterProvider(std::shared_ptr<IBroadcastProvider> provider);
     std::vector<std::string> ProviderNames() const;
     Result<ProviderState> Probe(std::string_view name);
@@ -56,9 +45,6 @@ public:
                                 const void* data, size_t bytes);
     Result<void> StopSender(std::string_view senderId);
     std::vector<std::string> SenderIds() const;
-    // Receivers currently CONNECTED to this sender (-1 = unknown). The NDI
-    // provider reads the SDK's own count; "sending but 0 connected" is the
-    // firewall/discovery case the UI surfaces.
     int SenderConnectedReceivers(std::string_view senderId) const;
 
     Result<BroadcastReceiverId> CreateNdiReceiver(std::string_view sourceName);
@@ -78,9 +64,6 @@ public:
     // --- Introspection ---
     BroadcastStats Stats() const;
     bool NdiAvailable() const;
-    // Why NDI is or isn't usable — what the UI shows and acts on. NotInstalled
-    // is the actionable case (link the user to the runtime download); Error is
-    // "installed but unusable" (detail says why).
     struct NdiRuntimeStatus {
         enum class State { Ready, NotInstalled, Error };
         State state = State::NotInstalled;
@@ -88,25 +71,11 @@ public:
         std::string version;   // vendor runtime version (Ready only)
     };
     NdiRuntimeStatus NdiStatus() const;
-    // Pins sender/receiver creation to one provider ("software" makes tests
-    // deterministic on machines that have the real NDI runtime; "" = automatic:
-    // real NDI when usable, software loopback otherwise).
     void PreferProvider(std::string_view name);
     bool SdiAvailable() const;
 
-    // The "NDI Broadcast" feature switch (Settings · Plugins → AdaptiveRuntime's
-    // registry), engine-side: OFF refuses every NDI-shaped sender/receiver
-    // (including the software-loopback fallback — nothing NDI-shaped runs),
-    // empties discovery of real network sources, reports the switched-off
-    // state through NdiStatus()/NdiAvailable(), and tears down live senders
-    // and receivers created through the real provider. Default on.
     void SetNdiEnabled(bool enabled);
     bool NdiEnabled() const { return ndiEnabled_.load(); }
-    // The "sdi" feature switch (Settings · Plugins, OFF by default): while
-    // off, every sdi path refuses WITHOUT probing the DeckLink SDK — the
-    // absent-library probe used to publish "DeckLink SDK not installed" as
-    // an error toast on every device refresh (the "stop spamming me until
-    // we are ready for it" report).
     void SetSdiEnabled(bool enabled);
     bool SdiEnabled() const { return sdiEnabled_.load(); }
 
@@ -124,22 +93,12 @@ private:
     // plugin provider); returns Err::Broadcast_ProviderNotFound on miss.
     std::shared_ptr<IBroadcastProvider> Find(std::string_view name) const;
 
-    // A copy of the provider registry, for callers that must invoke providers
-    // OUTSIDE every lock (Probe / DiscoverSources / Send / Receive / Shutdown
-    // all enter vendor SDKs and can block for seconds).
     std::vector<std::shared_ptr<IBroadcastProvider>> ProviderSnapshot() const;
 
     void RecordError(std::string_view provider, std::string_view message);
 
     std::map<std::string, std::shared_ptr<IBroadcastProvider>, std::less<>> providers_;
     std::string preferredProvider_;   // "" = automatic (see PreferProvider)
-    // Off by default (matches AdaptiveRuntime's own "ndi" feature default —
-    // see its registration comment): NDI sending needs a firewall rule the
-    // user hasn't granted on a fresh install yet. EngineBridge::boot() also
-    // syncs this to the registry's actual state unconditionally, so this
-    // starting value only matters for the narrow window before that sync
-    // runs, or for a caller that reaches BroadcastEngine before EngineBridge
-    // boots at all — staying off is the safe default either way.
     std::atomic<bool> ndiEnabled_{false};   // the "ndi" feature switch (SetNdiEnabled)
     std::atomic<bool> sdiEnabled_{false};   // the "sdi" feature switch (SetSdiEnabled)
     std::map<BroadcastSenderId, std::string, std::less<>> senders_;    // id -> provider
@@ -157,22 +116,10 @@ private:
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     mutable std::recursive_mutex mutex_;
-    // The provider REGISTRY has its own lock, so a lookup (a map find, and the
-    // first thing every status query does) can never be queued behind a slow
-    // provider call. mutex_ still serializes the sender/receiver/capture maps
-    // and the preferred-provider setting.
     mutable std::shared_mutex providersMu_;
 };
 
-// Registers the built-in NDI and SDI providers (runtime SDK loading). Called by
-// BroadcastEngine::Initialize; declared here so the engine and Kernel can wire
-// providers without exposing provider internals.
 Result<void> RegisterBuiltinBroadcastProviders(BroadcastEngine& engine);
 
-// A fresh, unopened NDI provider instance (the concrete class is internal to
-// BroadcastProviders.cpp). SetNdiEnabled's off→ teardown → on cycle uses this
-// to re-register a clean provider after shutting the old one's SDK handles
-// down; Initialize registers through it too.
 std::shared_ptr<IBroadcastProvider> MakeNdiProvider();
-
 } // namespace bps::broadcast

@@ -2,44 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import VGRPresenterUI
 
-// "Select Media" picker — the app's ONE media chooser. Opened from the Edit
-// screen's + menu (Media → Picture / Video / Audio) and reused by Settings ·
-// Audio & Video's Media-kind "Browse..." option (an audio/video input's Source
-// field), restricted to one kind there via `fixedKind`.
-//
-// BUILT ON THE SHARED MODAL SHELL (ModalCard.qml) rather than its own scrim and
-// card, which is what every dialog in this app uses: the modal shell is where
-// the dim backdrop, the centered card, the pinned Cancel/Save footer, the
-// scrollable content slot and the AppScrollBar live. This dialog used to draw
-// its own chrome around a plain `Grid` — no scroll area and no scroll bar — so a
-// media folder with more than eight files simply ran off the bottom of the card
-// with no way to reach the rest. The shared shell caps the content against the
-// window, scrolls it, and the bar appears on its own when there is more than
-// fits (AppScrollBar hides itself otherwise).
-//
-// Cards carry the app's own hover language too: the tile under the pointer
-// lifts and takes the accent border, so the pick reads as "this one" before the
-// click, and a double-click inserts without reaching for the footer.
-//
-// `items` defaults to the real Media Library (MediaLibraryService.items()),
-// each { id, name, kind, path } — kind is "image" | "video" | "audio" (a video
-// card gets the small play-badge overlay, audio a note badge). A consumer that
-// wants a different set can still override `items` directly.
 Item {
     id: root
 
     property bool open: false
 
     // ---- the shared shell's own open/close --------------------------------
-    // `open` stays the public property callers bind to (the shell's is a
-    // function pair, and every use site here already speaks `open:`), so this is
-    // the one translation: opening resets the pick and raises the card, closing
-    // fades it out and releases its stacking slot.
     onOpenChanged: {
         if (root.open) {
-            // Reset the pick whenever the modal (re)opens on a fresh item set —
-            // an open with no items yet (async library scan) must not carry the
-            // PREVIOUS session's pick forward as a silently-wrong default.
             root.selectedId = ""
             card.open()
         } else {
@@ -59,9 +29,6 @@ Item {
     }
     property var items: root.libraryItems
 
-    // Single-kind mode — the Edit screen's three media chips and Settings only
-    // ever want ONE kind (an audio input's Source can't offer video files).
-    // Non-empty hides the tab row entirely and locks filtering to it.
     property string fixedKind: ""
 
     // "all" | "image" | "video" | "audio" — the tabs' own plural labels are UI
@@ -97,15 +64,7 @@ Item {
                 : root.fixedKind === "image" ? qsTr("Choose a picture")
                 : qsTr("Choose a picture, video or audio file")
         cardWidth: 900
-        // A picker asks nothing of what is behind it (no form is being edited),
-        // so a click on the dim backdrop is the same gesture as Cancel — the
-        // behaviour this dialog always had.
         clickOutsideToDismiss: true
-        // NO INSERT WITHOUT A PICK: the footer's Save IS this dialog's Insert,
-        // so it is drawn only once there is something to insert — the same
-        // reason the old hand-rolled button carried an `enabled` flag, done with
-        // the shell's own switch so Enter cannot confirm an empty pick either
-        // (ModalCard claims Enter only while a Save exists).
         showSave: root.selectedItem !== null
         saveText: qsTr("Insert")
         cancelText: qsTr("Cancel")
@@ -213,9 +172,6 @@ Item {
             }
         }
 
-        // The media grid. Inside the shell's scrollable content, so a library of
-        // hundreds scrolls (with the shell's own AppScrollBar) instead of
-        // running off the card.
         Grid {
             id: mediaGrid
             readonly property int gap: 14
@@ -233,11 +189,6 @@ Item {
                     readonly property bool hovered: cardHover.containsMouse
                     readonly property bool isVideo: mediaCard.modelData.kind === "video"
                     readonly property bool isAudio: mediaCard.modelData.kind === "audio"
-                    // Audio has no visual frame to fetch — never even asks the
-                    // engine for one; video/image do, and fall back to the icon
-                    // below while it loads or if the engine has no decoder for
-                    // that file (the provider answers with a 1x1 transparent
-                    // image, matching MediaTile.qml's own hasPicture rule).
                     readonly property bool hasPicture: !mediaCard.isAudio
                         && still.status === Image.Ready && still.sourceSize.width > 1
 
@@ -245,9 +196,6 @@ Item {
                     height: 118
                     radius: 8
                     clip: true
-                    // HOVER + SELECT, the same two states every other grid in the
-                    // app draws: the pointer's card lifts on its own (a fill and
-                    // an accent border) before any click commits to it.
                     color: mediaCard.selected ? Qt.alpha(Theme.accent, 0.15)
                          : (mediaCard.hovered ? Theme.rowBg : Theme.inset)
                     border.width: mediaCard.selected ? 1.5 : 1
@@ -256,10 +204,6 @@ Item {
                     Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
                     Behavior on border.color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
 
-                    // The still — the engine's real first frame for video, or the
-                    // image itself (MediaThumbnailProvider, the same
-                    // image://mediathumb URL MediaTile.qml uses for the Media
-                    // grid). Never requested for audio — nothing to decode.
                     Image {
                         id: still
                         anchors.fill: parent
@@ -271,9 +215,6 @@ Item {
                             : "image://mediathumb/250/-1/" + encodeURIComponent(mediaCard.modelData.path || "")
                     }
 
-                    // Placeholder icon — the only visual for audio (it has no
-                    // frame at all), or video/image while the engine is still
-                    // decoding / has no decoder for it.
                     IconGlyph {
                         anchors.centerIn: parent
                         visible: !mediaCard.hasPicture
@@ -283,9 +224,6 @@ Item {
                         width: 16; height: 16
                         scale: 2
 
-                        // Breathes while the engine is still making the picture,
-                        // so a loading tile doesn't read as "no picture" — same
-                        // convention as MediaTile.qml.
                         SequentialAnimation on opacity {
                             running: !mediaCard.isAudio && still.status === Image.Loading
                             loops: Animation.Infinite
@@ -364,10 +302,6 @@ Item {
             wrapMode: Text.WordWrap
         }
 
-        // The Media Library only covers folders you've added — a file that isn't
-        // indexed yet still needs a way in, so this opens the native picker
-        // instead (browseRequested; the consumer resolves it — see
-        // AudioVideoScreen.qml's settingsMediaPicker for the Settings reuse).
         Text {
             text: qsTr("Browse this PC…")
             color: browseArea.containsMouse ? Theme.accentLight : Theme.textSecondary

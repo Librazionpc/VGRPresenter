@@ -1,11 +1,5 @@
 #pragma once
 
-// ProductionEngine (docs/specs/27): the Phase 15 facade. Owns the production
-// graph (sources → processing → virtual sources → buses → outputs), routing,
-// mixing, planning, meters, ducking, clocks, control signals, snapshots and
-// health. It coordinates — it never renders pixels, plays audio, or routes
-// screens itself (Rendering/Media/Display engines own those).
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -21,7 +15,6 @@
 #include <vector>
 
 namespace bps::production {
-
 // A recorded macro step (docs/specs/27 §Macro Recording).
 struct MacroStep {
     std::string action;   // e.g. "set_scene_state", "set_volume", "assign_outputs"
@@ -43,10 +36,6 @@ public:
     Metrics MetricsSnapshot() const override;
     const char* ServiceName() const noexcept override { return "ProductionEngine"; }
 
-    // --- Graph access ---
-    // NOTE: Graph() returns the live graph. The facade's methods serialize via
-    // mutex_; direct Graph() mutation is intended for single-threaded
-    // configuration/automation use and is not synchronized (docs/specs/27).
     ProductionGraph& Graph() { return graph_; }
     const ProductionGraph& Graph() const { return graph_; }
 
@@ -139,11 +128,6 @@ private:
 
     void Record(const std::string& action, const std::string& payload);
 
-    // --- Auto-save coalescing (see Initialize's InstallSaver) ---
-    // The graph saver records the change in the in-memory store and marks a
-    // pending disk flush; the outermost mutating call flushes it AFTER mutex_
-    // is released. PersistGate must be declared BEFORE the lock_guard in a
-    // method, so it destructs last (i.e. with the lock gone).
     void RequestPersist();
     void FlushPersistPending();
     struct PersistGate {
@@ -160,10 +144,6 @@ private:
     };
     std::atomic<int> persistGateDepth_{0};
     std::atomic<bool> persistPending_{false};
-    // One deferred flush is queued at a time (see RequestPersist): a burst of
-    // edits — a fader drag, a bus creation's six mutators — becomes a single
-    // write, and a graph mutated through Graph() directly is still saved even
-    // when the app never shuts down cleanly.
     std::atomic<bool> persistFlushScheduled_{false};
 
     ProductionGraph graph_;
@@ -187,5 +167,4 @@ private:
     std::atomic<uint64_t> errorCount_{0};
     mutable std::recursive_mutex mutex_;
 };
-
 } // namespace bps::production

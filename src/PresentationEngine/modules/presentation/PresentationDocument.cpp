@@ -7,9 +7,7 @@
 #include <set>
 
 namespace bps::presentation {
-
 namespace {
-
 constexpr const char* kModule = "PresentationDocument";
 
 int64_t NowMs() {
@@ -22,15 +20,11 @@ int64_t NowMs() {
 std::string NewShowId() {
     return "show-" + std::to_string(NowMs());
 }
-
 } // namespace
 
 Result<void> PresentationDocument::Open(const std::string& path) {
     if (path.empty())
         return Error::Make(Err::InvalidArgument, kModule, "no file path given");
-    // VgrFile::Read verifies magic, version and every section's CRC32 — a
-    // truncated or damaged file is rejected here, before the current document is
-    // touched.
     auto doc = vgr::VgrFile::Read(path);
     if (!doc.ok()) return doc.error();
     const vgr::DocumentType type = doc.value().header.type;
@@ -117,9 +111,6 @@ Result<void> PresentationDocument::Save(const std::string& requestedPath) {
 
     std::lock_guard<std::mutex> lock(mutex_);
     path_ = target;
-    // Saving is not instantaneous: if the frontend pushed newer edits while the
-    // file was being written, the file holds the OLD state — keep the newer model
-    // and leave the document dirty rather than silently marking those edits saved.
     if (revision_ == savedRevision) {
         model_ = std::move(snapshot);
         dirty_ = false;
@@ -212,5 +203,4 @@ bool PresentationDocument::HasDocument() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return open_;
 }
-
 } // namespace bps::presentation

@@ -1,9 +1,5 @@
 #pragma once
 
-// Additional Notification interfaces (docs/specs/14 §Interfaces):
-// INotificationRule (policy), INotificationFormatter (templates + localization),
-// INotificationStorage (history persistence), INotificationFilter.
-
 #include "modules/notification/Notification.hpp"
 #include "core/config/Json.hpp"
 
@@ -15,11 +11,6 @@
 #include <vector>
 
 namespace bps::notification {
-
-// --- Rules / Policy Engine ------------------------------------------------
-// A rule decides: show?, which channels, priority, auto-dismiss, persistent,
-// suppress-in-presenting. Rules are evaluated in registration order; the first
-// matching rule wins, then the default policy applies.
 struct NotificationPolicy {
     bool show = true;
     std::vector<std::string> channels;   // empty = provider default mapping
@@ -41,9 +32,6 @@ public:
 // Default severity→policy mapping used when no rule matches.
 NotificationPolicy DefaultPolicyFor(Severity s);
 
-// --- Formatter -------------------------------------------------------------
-// Modules never build user-facing strings; the formatter owns them
-// (docs/specs/14 §Notification Formatter). Enables localization later.
 class INotificationFormatter {
 public:
     virtual ~INotificationFormatter() = default;
@@ -72,9 +60,6 @@ private:
     std::map<std::string, Tmpl, std::less<>> templates_;
 };
 
-// --- Storage ----------------------------------------------------------------
-// History persistence: memory + persistent (DatabaseManager-backed) so history
-// can survive restarts (docs/specs/14 §Notification Storage).
 class INotificationStorage {
 public:
     virtual ~INotificationStorage() = default;
@@ -114,5 +99,4 @@ class ConfigNotificationFilter final : public INotificationFilter {
 public:
     bool Allow(const Notification& n) const override;
 };
-
 } // namespace bps::notification

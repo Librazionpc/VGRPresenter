@@ -8,7 +8,6 @@
 #include <thread>
 
 namespace bps::platform {
-
 unsigned WindowsThreading::HardwareConcurrency() const {
     unsigned n = std::thread::hardware_concurrency();
     return n > 0 ? n : 1;
@@ -69,9 +68,6 @@ Result<void> WindowsThreading::SetThreadAffinity(std::thread& thread, unsigned c
                                " out of range for a " + std::to_string(sizeof(DWORD_PTR) * 8) +
                                "-bit affinity mask");
     DWORD_PTR mask = DWORD_PTR(1) << cpu;
-    // MinGW-w64's libstdc++ std::thread::native_handle_type is an integer
-    // (the raw HANDLE value), not HANDLE itself like MSVC's — the numeric
-    // value is a real Windows HANDLE either way, just needs the cast.
     HANDLE h = reinterpret_cast<HANDLE>(thread.native_handle());
     if (h == nullptr)
         return Error::Make(Err::InvalidArgument, "Threading", "invalid thread handle");
@@ -80,5 +76,4 @@ Result<void> WindowsThreading::SetThreadAffinity(std::thread& thread, unsigned c
                            "SetThreadAffinityMask failed: " + win::LastErrorString(GetLastError()));
     return Ok();
 }
-
 } // namespace bps::platform

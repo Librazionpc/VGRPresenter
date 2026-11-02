@@ -1,16 +1,11 @@
 #pragma once
 
-// PAL process subsystem (Phase 2): start/stop/inspect external processes and
-// read environment variables. Future plugin hosts (OBS, PowerPoint, AI tools)
-// and the plugin sandbox's out-of-process isolation will use this.
-
 #include "core/common/Common.hpp"
 
 #include <string>
 #include <vector>
 
 namespace bps::platform {
-
 class IProcess {
 public:
     virtual ~IProcess() = default;
@@ -38,5 +33,4 @@ public:
     virtual Result<std::string> Environment(std::string_view variable) const = 0;
     virtual Result<void> SetEnvironment(std::string_view variable, std::string_view value) = 0;
 };
-
 } // namespace bps::platform

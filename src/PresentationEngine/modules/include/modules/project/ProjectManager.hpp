@@ -1,11 +1,5 @@
 #pragma once
 
-// ProjectManager (docs/specs/15 §Project Manager): the workflow owner for
-// projects — create, open, save, save-as, close, rename, duplicate, delete,
-// archive. Multiple projects can be open; one is active. Metadata persists via
-// the DatabaseManager (collection "projects"); the project file itself is
-// written through the PAL filesystem (never std::filesystem).
-
 #include "modules/project/Project.hpp"
 #include "modules/project/ProjectRegistry.hpp"
 #include "interfaces/IService.hpp"
@@ -15,7 +9,6 @@
 #include <vector>
 
 namespace bps::project {
-
 class ProjectManager {
 public:
     static ProjectManager& Instance();
@@ -58,5 +51,4 @@ private:
     std::string dataDir_;
     std::atomic<bool> initialized_{false};
 };
-
 } // namespace bps::project

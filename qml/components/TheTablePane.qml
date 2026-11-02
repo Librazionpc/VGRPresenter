@@ -1,11 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Table tab: ReferencePane (the shared scripture-architecture UI) with
-// the TheTableService adapter — the sermon library (years = books, sermons =
-// chapters, paragraphs = verses). Same UI as Scripture, its own engine
-// module, and the SAME template + options chrome (its own "table" templates
-// and "table." settings keys).
 ReferencePane {
     id: pane
 
@@ -29,9 +24,6 @@ ReferencePane {
         // GO-LIVE identity (same contract as ScripturePane's adapter).
         readonly property string contentType: "table"
         readonly property string tabLabel: qsTr("The Table")
-        // WHERE THE READER WAS: the open sermon, the paragraphs picked in it, and the
-        // paragraph row at the top of the list, as one JSON value (ReferencePane's
-        // readingKey). One source, so the source id in it is just the tab's own.
         readonly property string readingKey: "session.tableReading"
 
         readonly property var sources: () => TheTableService.sources()
@@ -49,12 +41,6 @@ ReferencePane {
         readonly property var chapterPeekAsync: (src, bookId, n, token) => TheTableService.previewChapterAsync(bookId, n, token)
         readonly property var reference: (book, ch, nums) => TheTableService.reference(book, ch, nums)
         readonly property var resolve: (text, srcId) => TheTableService.resolve(text)
-        // `exact` = the pane's padlock: the typed words must appear verbatim as
-        // whole words in the sermon (the library matches them exactly when set).
-        // CHAPTER LOCK: The Table's books are the year collections and its
-        // chapters are the sermons, so the pane's search field offers the same
-        // lock Scripture has — the search is limited to the sermon on screen
-        // (the year id and sermon number the pane passes as `bookId`/`chapter`).
         readonly property bool supportsChapterLock: true
         readonly property var search: (text, srcId, exact, bookId, chapter) => TheTableService.search(text, 120, exact, false, bookId, chapter)
         // ASYNC pill search: the pane prefers this when present (token-guarded,
@@ -63,15 +49,9 @@ ReferencePane {
         readonly property var preview: (src, bookId, ch, nums) => TheTableService.preview(bookId, ch, nums)
         // The picked paragraphs as show slides, template-split by the tab's options.
         readonly property var slides: (src, bookId, ch, nums) => TheTableService.slides(bookId, ch, nums)
-        // A picked sermon paragraph STAGES (Main Output tile preview only) —
-        // same gate as ScripturePane.qml/ShowCenter.qml now; the top GO LIVE
-        // button is what actually commits it to the real output.
         readonly property var goLive: (name, slides) => LiveOutputService.stageSlides(name, slides)
         readonly property var liveIsOurs: (refText) => LiveOutputService.live
                                              && refText !== "" && LiveOutputService.onAirTitle === refText
-        // ...and its STAGED counterpart: the pick this tab double-clicked is on
-        // the Main Output tile (waiting for GO LIVE), which is what the pane's
-        // ‹ › steps and re-stages — see ReferencePane.stepAndPlay.
         readonly property var stagedIsOurs: (refText) => LiveOutputService.stagedIsOurs(refText)
         readonly property var importNew: () => TheTableService.newSermon()
         // The bulk action: pick the sermons root once, every .pdf/.txt under
@@ -81,16 +61,7 @@ ReferencePane {
         readonly property var importing: () => TheTableService.importing
         readonly property var progress: () => TheTableService.progress
         // ---- User data (notes & highlights, persisted in the library JSON) ----
-        // The SAME id-shaped surface ScripturePane's adapter answers, so the
-        // shared pane's stars/pencils/drawer serve both tabs. Reads pass the
-        // book's engine id straight through (the year-book grammar lives in
-        // TheTableService, once); writes take the pane's display reference
-        // ("1953 12:3" or a citation) and the service resolves it.
         readonly property var chapterUserData: (src, bookId, ch) => TheTableService.chapterUserData(bookId, ch)
-        // Same shape as chapterUserData above: ReferencePane.qml now passes
-        // its root.sourceId uniformly to every adapter (Scripture needs it
-        // to pick a Bible translation; The Table has one source and just
-        // ignores the extra argument, same as chapterUserData already did).
         readonly property var setNote: (src, reference, text) => TheTableService.setNote(reference, text)
         readonly property var setHighlighted: (src, reference, on) => TheTableService.setHighlighted(reference, on)
         readonly property var notes: (src) => TheTableService.notes()
@@ -100,15 +71,7 @@ ReferencePane {
             setHighlighted: ad.setHighlighted,
             notes: ad.notes
         })
-        // The shared pane re-syncs when this adapter signal fires (see below).
-        // (User-data notice is a revision counter, NOT a signal: the userData
-        // property already owns the change signal name `userDataChanged` — an
-        // explicit signal of that name is a QML duplicate-signal error.)
         signal changed()
-        // Declared because the shared pane's adapter contract carries it (the pane
-        // re-asks a query that went through its SYNC search fallback when the worker's
-        // answer lands — see ScripturePane's adapter, which forwards it). The Table
-        // never emits it: its search is async and answers with a token.
         signal searchCached(string text)
         property int userDataRevision: 0
     }

@@ -1,14 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The app's one search box. The header's Search button, Ctrl+K, the Projects
-// panel's "Quick search" and the menu item all open this, and it asks the engine
-// (SearchService) for shows, slides, templates, overlays, categories, settings,
-// songs and Bible verses — type "John 3:16" to jump straight to a verse.
-//
-// Up / Down move through the results, Enter (or a click) picks one; the host
-// decides what picking means (resultChosen carries the whole result:
-// kind, title, subtitle, text, id, path, key).
 ModalCard {
     id: root
 
@@ -22,23 +14,9 @@ ModalCard {
     property string query: ""
     property var results: []
     property int current: 0
-    // EXACT WORDS (the padlock at the field's far end — user call: "add a pad
-    // lock icon at the extreme end of the search so once it lock it means i want
-    // exact word search for the both word search"). Locked, every typed word
-    // must appear VERBATIM as a whole word: no completion ("word" stops finding
-    // "words"), no inner substring, no typo correction — and the engine's
-    // resolved-words hint (which offers those corrections) stays quiet, since
-    // accepting it would contradict the lock. Kept across opens: the mode is the
-    // user's, not the query's.
     property bool exact: false
-    // What the engine actually searched for ("frend" -> "friend"): the highlight
-    // must wrap the CORRECTED words or a typo query lights nothing (the snippet
-    // says "friend", the raw query said "frend"). Falls back to the live query.
     property string highlightSource: query
     property bool searchPending: false
-    // Snippets are engine-anchored on the first query-word occurrence, so the
-    // highlighted words are inside the visible text — not past the 2-line cap
-    // where they only appear on hover.
     readonly property bool canHighlight: {
         const words = root.highlightSource.trim().toLowerCase().split(/\s+/)
             .filter((w) => w.length >= 2)
@@ -59,11 +37,6 @@ ModalCard {
     })
 
     function openSearch() {
-        // Every open starts FRESH (user call, after the restore-on-reopen try:
-        // "the search should close since im using the other search" — picking a
-        // result hands over to The Table/Scripture, and a reopening dialog that
-        // still shows the old query gets in the way. Tried restore+select-all
-        // 2026-09-24; user rejected it the same day — do not reintroduce).
         root.query = ""
         queryInput.text = ""
         root.searchPending = false
@@ -80,12 +53,6 @@ ModalCard {
     }
 
     // ---- pick memory (user call: "cache what was actually picked, picked first") ----
-    // What the user CHOSE, keyed kind+id (a stable identity: a path for shows,
-    // a reference for a verse, book+chapter+paragraph for a sermon), most recent
-    // first, persisted in the session settings so it survives restarts. On a new
-    // search, a result the user picked before floats to the TOP of its kind group —
-    // the other results still show below (nothing is hidden, they just rank after
-    // the proven pick).
     readonly property string picksKey: "session.quickSearchPicks"
     property var picks: []               // [{ key, title, kind }] most-recent-first
     function loadPicks() {
@@ -109,22 +76,6 @@ ModalCard {
         // store refuses Text values past 4096 chars — slim keeps 40 picks far clear.
         SettingsService.setValue(picksKey, JSON.stringify(root.picks))
     }
-    // Which KIND carries the query as a NEAR-VERBATIM PHRASE (the typed words in
-    // order, close together) in one of its rows. Comparable across kinds without
-    // pretending the Bible's and The Table's scores share a scale — and it is the
-    // signal the user named: a sentence The Table has word-for-word must not sit
-    // below a kind that merely has the words scattered around ("this exist in the
-    // table but it showing bible at the top when the table has a better
-    // percentage"). PUNCTUATION never counts as part of the match, for exact and
-    // loose search alike (user call: "punctuation [is] not counted the same for
-    // normal search as well") — "compulsory, that" and "compulsory that" are the
-    // same phrase. UP TO 2 extra words may sit between each typed word too (user
-    // call: "because i missed some words in between ... if it can find [a]
-    // similar sentence['s] exact words" — a real connector the typed query itself
-    // skipped, like "and" in "compelling AND compulsory, that", must not make an
-    // otherwise near-exact sentence read as mere scattered words): bounded so a
-    // genuinely scattered match (the words anywhere in a long paragraph) still
-    // does not count as "the sentence".
     function queryMatchRank(result) {
         const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
         if (words.length === 0) return 3
@@ -141,13 +92,6 @@ ModalCard {
         }
         return best
     }
-    // HOW MUCH OF THE QUERY a single row carries: the count of the typed words
-    // that appear in it WHOLE. The cross-kind order below needs a signal that is
-    // comparable between a verse, a sermon paragraph and a show name, and this is
-    // it — deliberately not the engines' own scores (a Bible score and a sermon
-    // score are not the same scale) and deliberately not the kind groups (which
-    // said a verse carrying only "you that" outranks the sermon that says
-    // "compelling and compulsory, that you receive": the user's report, twice).
     function queryCoverage(result) {
         const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
         if (words.length === 0) return 0
@@ -157,30 +101,12 @@ ModalCard {
         let carried = 0
         for (let i = 0; i < words.length; ++i) {
             const safe = words[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-            // The LAST word is the one under the caret: it counts at a WORD START,
-            // not only whole — the same prefix rule the engine matched with — so a
-            // row that says "received" for a typed "rec" is not billed as missing
-            // the word it plainly carries.
             const re = new RegExp(i + 1 === words.length ? "\\b" + safe : "\\b" + safe + "\\b", "i")
             if (re.test(source)) carried++
         }
         return carried
     }
-    // How tightly a row's covered words sit together (an afterthought on top of
-    // queryCoverage, ordered 0 = the exact sentence, 1 = nearly exact, 2 = the
-    // words merely scattered, 3 = the row does not carry them all). Deliberately
-    // worth LESS THAN ONE WORD, so adjacency can only order rows that carry the
-    // SAME number of words — it can never lift a row that is missing a typed
-    // word above one that has them all.
     readonly property var adjacencyBonus: [0.90, 0.55, 0.20, 0.0]
-    // A ROW'S MATCH RATING: the percentage of the typed query the row itself
-    // carries — the ranking key, shown on every row so the order reads instead of
-    // having to be taken on trust (user call, looking at "compelling that you
-    // recieve" listing verses that carry only "you that": "why is showing me that
-    // when there is a better one with the word compelling in there").
-    // Whole-word coverage over the row's own text, plus a sub-word adjacency
-    // bonus; see rankByPicks — the same two terms, so a higher rating always
-    // means a higher rank.
     function matchRating(result) {
         const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
         if (words.length === 0)
@@ -201,29 +127,14 @@ ModalCard {
         })
     }
     function rankByPicks(results) {
-        // The padlock keeps exact whole words, but allows other words between
-        // them. Service-side ranking puts nearby/orderly matches first; this is
-        // the final guard against broad index candidates.
         if (root.exact)
             results = results.filter((r) => (r.kind === "bible" || r.kind === "table")
                                             ? root.isExactWordsMatch(r) : true)
         if (results.length < 2)
             return results
-        // QML's Array.sort is NOT stable: a comparator returning 0 for
-        // different kinds let equal-key swaps SCRAMBLE the groups (sermons
-        // ranked above the Bible reference row). The engine's group order
-        // (first appearance) is authoritative — compare group index first,
-        // pick rank second, so picks float WITHIN their group only.
         const groupOf = {}
         for (const r of results)
             if (groupOf[r.kind] === undefined) groupOf[r.kind] = Object.keys(groupOf).length
-        // Within each kind group the ENGINE SCORE ranks the rows when the
-        // service provides one (table rows do); a previously-picked row floats
-        // only within a score tie, then the engine's own order stands. The old
-        // pick-over-everything rule let one stale click bury the verbatim
-        // "Then, friends" paragraph under ¶s the engine scored far lower —
-        // the user saw the wrong passage lead and called the scoring faulty.
-        // Rows without a score (bible etc.) keep pick-then-engine order.
         const MISSING = -1
         const scoreOf = (r) => (typeof r.score === "number" ? r.score : null)
         const rankOf = (r) => {
@@ -232,30 +143,14 @@ ModalCard {
             return i < 0 ? MISSING : i   // unpicked = after every pick
         }
         return results.slice().sort((a, b) => {
-            // RELEVANCE FIRST: the rating shown on the row — how much of the
-            // typed query it carries — decides the order across EVERY kind, so
-            // the column of percentages never goes up as you read down. This is
-            // the fix for the report this dialog's ranking kept failing: verses
-            // carrying only "you that" sat above the sermon that says
-            // "compelling and compulsory, that you receive".
             const ra = root.matchRating(a), rb = root.matchRating(b)
             if (ra !== rb) return rb - ra
             // Equal rating: the tighter phrase leads (the exact sentence before
             // a nearly-exact one before the words merely scattered).
             const ma = root.queryMatchRank(a), mb = root.queryMatchRank(b)
             if (ma !== mb) return ma - mb
-            // Same relevance: keep the engine's kind groups together, in the
-            // order the service found them (the Bible reference row, then its
-            // verses, then the sermons, ...).
             const ga = groupOf[a.kind], gb = groupOf[b.kind]
             if (ga !== gb) return ga - gb
-            // Within a kind the ENGINE SCORE ranks the rows when the service
-            // provides one (table rows do); a previously-picked row floats only
-            // within a score tie, then the engine's own order stands. The old
-            // pick-over-everything rule let one stale click bury the verbatim
-            // "Then, friends" paragraph under ¶s the engine scored far lower —
-            // the user saw the wrong passage lead and called the scoring faulty.
-            // Rows without a score (bible etc.) keep pick-then-engine order.
             const sa = scoreOf(a), sb = scoreOf(b)
             if (sa !== null && sb !== null && sa !== sb) return sb - sa   // engine first
             const pa = rankOf(a), pb = rankOf(b)
@@ -268,13 +163,6 @@ ModalCard {
     // are applied (SearchService drops stale ones too — belt and braces).
     property int searchToken: 0
     property int resolveToken: 0
-    // The LAST resolved word list for the current query (the async answer), and
-    // whether Tab is waiting for one. Tab needs the engine's corrections to
-    // rewrite the box, and rewriting used to ask for them SYNCHRONOUSLY —
-    // resolveWords scans the whole vocabulary per misspelled token, on the
-    // interface thread, exactly what resolveWordsAsync was added to stop. Tab
-    // now reuses the list the hint was built from, and when that answer is
-    // still in flight it asks for one and applies it on arrival (below).
     property var resolvedWords: []
     property bool pendingTabFix: false
     function fixQueryWith(words) {
@@ -299,10 +187,6 @@ ModalCard {
             root.fixQueryWith(words)
             return
         }
-        // The hint reads the corrections AND the half-typed last word's candidate
-        // ladder (most confident first): "recieve -> receive" as before, and
-        // "rec -> receive \u00b7 received \u00b7 record" while the word is still being
-        // typed — several readings, the likeliest named first (user call).
         const interesting = words.filter((w) => w.changed === true
                                            || (w.candidates && w.candidates.length > 0))
         hint.text = interesting.length === 0 ? ""
@@ -318,9 +202,6 @@ ModalCard {
         root.results = root.rankByPicks(root.results)
     }
     function refresh() {
-        // OFF the GUI thread: a big query ("the", ~1,200 candidates) blocked
-        // typing for hundreds of ms synchronously. Rows come back via
-        // resultsReady; the empty query path clears inline as before.
         root.resolvedWords = []      // never a correction from the PREVIOUS query
         root.pendingTabFix = false
         if (root.query.trim() === "") {
@@ -336,9 +217,6 @@ ModalCard {
             root.searchPending = true
             root.results = []
             root.current = 0
-            // Show a broader capped set per category so relevant matches lower
-            // in the ranking are reachable without letting one category flood
-            // the quick-search list.
             SearchService.searchAsync(root.query, 8, root.searchToken, root.exact)
             root.resolveToken++
             SearchService.resolveWordsAsync(root.query, root.resolveToken)
@@ -362,9 +240,6 @@ ModalCard {
         root.searchToken++
         root.resolveToken++
         root.close()
-        // Let the row's click finish and the modal close settle before the host
-        // switches tabs and opens a pane. Doing both synchronously from the
-        // dialog's own MouseArea could tear down the active delegate mid-event.
         Qt.callLater(function() { root.resultChosen(result) })
     }
 
@@ -375,11 +250,6 @@ ModalCard {
     }
 
     // ---- yellow highlight of the typed words in a result's text -------------------
-    // The query's words (2+ chars — the same floor the search itself uses) are
-    // wrapped in <b><span style="background-color:#7a5c00">…</span></b>. The text
-    // MUST go through StyledText for that to render, so &<> and the needle words
-    // are escaped first — otherwise a verse containing "<" would swallow markup.
-    // Case-insensitive, every occurrence, on both the snippet and the hover preview.
     function highlight(text) {
         const source = String(text ?? "")
         if (source === "")
@@ -391,10 +261,6 @@ ModalCard {
         const safeWords = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
         const boundary = root.exact ? "\\b" : ""
         const re = new RegExp(boundary + "(" + safeWords.join("|") + ")" + boundary, "gi")
-        // Unmissable: Qt's StyledText subset does NOT honor background-color on a
-        // span (the first attempt: bold applied, the yellow silently dropped —
-        // "it still showing white"). A colored <font> IS honored: bright gold on
-        // the dark card reads as the yellow highlight.
         const gold = String(Theme.highlightInk)
         return esc(source).replace(re, '<b><font color="' + gold + '">$1</font></b>')
     }
@@ -422,22 +288,12 @@ ModalCard {
         interval: 140
         onTriggered: root.refresh()
     }
-    // A published verse read landed: the hovered row re-asks for its full text (see
-    // the entry's `fullText` binding). Bumped by a signal rather than polled, so a
-    // row fills WHILE the pointer is still on it — which is the whole point of the
-    // preview.
     property int verseRevision: 0
 
     // A Bible finishing its background load makes new results possible.
     Connections {
         target: SearchService
         function onBibleChanged() { if (root.shown && root.query !== "") root.refresh() }
-        // fullVerse is a PUBLISHED read (see SearchService's header): it answers ""
-        // for a verse nobody has read yet and queues the read, and this is what says
-        // the answer is in. Nothing re-asked at all before this existed — the
-        // service's own comment claimed "the dialog re-asks" and the dialog had no
-        // verseCached handler — so the preview stayed the row's two-line snippet
-        // until the pointer left the row and came back.
         function onVerseCached(bibleId, bookId, chapter, verse) { root.verseRevision++ }
         // The async search's rows: applied only when this request is still the
         // latest (a fast typist's older keystrokes answer into the void).
@@ -511,9 +367,6 @@ ModalCard {
             Keys.onEnterPressed: root.activate()
             Keys.onEscapePressed: root.close()
             Keys.onTabPressed: {
-                // Accept the engine's resolved words: "thn frend" + Tab -> "then
-                // friends". Only when a hint is showing (a well-spelled query has
-                // nothing to fix, and Tab keeps its normal focus behavior).
                 if (hint.text === "") return
                 // The words the hint was built from, when they have landed.
                 if (root.resolvedWords.length > 0) {
@@ -536,10 +389,6 @@ ModalCard {
             }
         }
 
-        // The exact-words padlock, at the extreme end of the search field (user
-        // call). Open (dim) = the search's normal fuzzy matching; closed (accent)
-        // = every typed word must appear verbatim as a whole word. Text on the
-        // state so the meaning is not left to the icon alone.
         Item {
             id: exactLock
             anchors.right: parent.right
@@ -580,9 +429,6 @@ ModalCard {
             }
             PositionHoverArea {
                 id: exactLockHover
-                // The self-test names the CLICK-SINK itself (not the wrapper Item):
-                // it is the object that knows whether the pointer is genuinely over
-                // the control, and the one a synthetic click has to reach.
                 objectName: "selfTestSearchExactLock"
                 anchors.fill: parent
                 checkAncestors: false
@@ -594,10 +440,6 @@ ModalCard {
         }
     }
 
-    // The engine's resolved-words hint: "thn frend → then friends", gold like the
-    // match highlight. Only exists when a word needed fixing; Tab accepts it.
-    // (No height binding — a Column skips invisible items, and height-from-
-    // implicitHeight here was the binding loop Qt reported.)
     Text {
         id: hint
         objectName: "selfTestSearchHint"   // (the self-test reads the gold spell-fix line)
@@ -649,34 +491,11 @@ ModalCard {
                 readonly property var info: root.kindInfo[modelData.kind] || root.kindInfo["show"]
                 readonly property bool firstOfKind: index === 0 || root.results[index - 1].kind !== modelData.kind
                 readonly property bool selected: root.current === index
-                // A sermon-code hit names the whole sermon (verse 0). Its
-                // citation already contains both the code and title; paragraph
-                // snippets and hover fetches add noise and can stall the UI on
-                // unusually large opening paragraphs.
                 readonly property bool sermonCodeResult: modelData.kind === "table"
                     && Number(modelData.verse) === 0
-                // A Bible verse or sermon paragraph with a known location: hovering
-                // fetches the FULL text (the row normally carries only a capped
-                // snippet; a spread-across-two-paragraphs sermon match needs BOTH
-                // paragraphs) and expands to show it — the same hover-preview the
-                // The Table pane's match rows give.
                 readonly property bool isLocatedVerse: (modelData.kind === "bible" || modelData.kind === "table")
                                                         && modelData.bookId !== undefined && modelData.bookId !== ""
                                                         && !sermonCodeResult
-                // SearchService already supplies the full matched passage for
-                // Bible and sermon results. Reuse it here: fetching a sermon
-                // chapter synchronously on hover can block the UI behind an
-                // in-flight library search and make a result click look like a
-                // crash.
-                // The hover preview as a BINDING on the published read: it asks
-                // while the pointer is on the row, and re-asks when a verse read
-                // lands (verseRevision) or when the row's own data changes. The old
-                // shape fetched once into this property from the hover handler, and
-                // since fullVerse answers "" while its worker read is in flight, a
-                // cold row showed its snippet for as long as the pointer stayed on
-                // it. Rows that already carry the full passage (modelData.fullText —
-                // a Bible reference hit) keep it, and an unhovered row reads exactly
-                // as it did before the text was ever fetched.
                 property string fullText: {
                     root.verseRevision
                     const seeded = String(modelData.fullText ?? "")
@@ -688,10 +507,6 @@ ModalCard {
                         return TheTableService.paragraphPair(modelData.bookId, modelData.chapter,
                                                              modelData.verse,
                                                              modelData.spanned === true ? 2 : 1)
-                    // The published read first, the row's own passage while its answer
-                    // is in flight: fullVerse answers "" until its worker read lands
-                    // (and verseCached re-asks for it), so a hovered row must not drop
-                    // the text it was already carrying in the meantime.
                     const asked = SearchService.fullVerse(modelData.bibleId, modelData.bookId,
                                                           modelData.chapter, modelData.verse)
                     return asked !== "" ? asked : seeded
@@ -742,11 +557,6 @@ ModalCard {
                         }
                     }
 
-                    // The row's MATCH RATING: the percentage of the typed query this
-                    // row itself carries — the very key the list is ordered by (see
-                    // matchRating), so it explains the order instead of asking the
-                    // reader to trust it. Rows that carry none of the query (a kind
-                    // match, a code hit) show no pill rather than a "0%".
                     Rectangle {
                         id: ratingPill
                         readonly property int percent: root.matchRating(entry.modelData)
@@ -792,11 +602,6 @@ ModalCard {
                             elide: Text.ElideRight
                             textFormat: root.canHighlight ? Text.StyledText : Text.PlainText
                         }
-                        // A verse's text (the reference's verses, or the words that matched).
-                        // Hovered located verse: the FULL text replaces the snippet and the
-                        // two-line cap lifts — the verse reads whole, in place. The query's
-                        // words are highlighted yellow in both (highlight() escapes the
-                        // text, so StyledText can't be abused by verse content).
                         Text {
                             visible: !entry.sermonCodeResult && (entry.modelData.text !== "" || entry.fullText !== "")
                             width: parent.width
@@ -827,9 +632,6 @@ ModalCard {
                     PositionHoverArea {
                         id: rowHover
                         anchors.fill: parent
-                        // The preview itself is the entry's `fullText` binding (it
-                        // needs the pointer's state, which the binding reads), so
-                        // hovering only moves the selection here.
                         onHoveredChanged: {
                             if (hovered) root.current = entry.index
                         }
@@ -838,7 +640,6 @@ ModalCard {
                 }
             }
         }
-
                 }   // resultsCol
             }   // Flickable
 

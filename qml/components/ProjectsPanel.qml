@@ -1,20 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Projects panel - a copy of FreeShow's Projects.svelte + ProjectList.svelte + ProjectContentList.svelte, with its "dark" theme's
-// colours and measurements (defaultThemes.ts, MaterialButton.svelte, FloatingInputs.svelte).
-//
-//   no project open   a header ("Projects" and a vertical-dots menu), then cards of folders and projects: every root folder is a card
-//                     with its contents, the projects that are in no folder share the "No Folder" card. A click opens a project.
-//   a project open    a header (back arrow, its name, the dots menu), then cards of its items: a card starts at each section, the
-//                     section heading first, then what the section holds. A click puts an item on the centre page.
-//   the + button      bottom right, a gradient ring that turns its plus into an x while its menu is open. The menu is a column of
-//                     pill buttons: Project / Folder / Import in the tree, Show / Scripture / Media / Import / Section in a project.
-//
-// It owns nothing: the tree, the items, what a project may hold, what may be dropped where and how items move are the ENGINE's
-// (ProjectService -> bps::library::ProjectLibrary). Rows are drag sources (reorder an item, move a project into a folder) and the
-// list takes drops from the other panes - the Shows table, the media tiles, overlays - through the window's DragLayer; a drop lights
-// up only when the engine says the project takes that kind of thing.
 Item {
     id: root
 
@@ -25,27 +11,11 @@ Item {
     signal searchRequested()        // the + button's Show: the app-wide search
     signal dockTabRequested(string tab)   // the + button's Scripture / Media: that tab of the library dock
 
-    // THE PANEL'S PALETTE COMES FROM THE THEME, not from FreeShow's own dark
-    // literals. It used to be a private copy (#f0f0ff names on #12121c/#191923
-    // cards), which made this column the one surface that ignored the app's
-    // appearance: picking Light left the panel dark, and the NAMES — the thing
-    // read most here — stayed that panel-local off-white instead of the theme's
-    // own text colour. Names are the theme's primary text now, and the surfaces
-    // under them come from the same place, so dark stays as it looked and Light
-    // is readable rather than white-on-white.
     readonly property color cLighter: Theme.borderSubtle
     readonly property color cDarker: Theme.rowBg
     readonly property color cDarkest: Theme.panelBg
     readonly property color cText: Theme.textPrimary
     readonly property color cSecondary: Theme.accent
-    // Font follows the theme too (user call: "the fonts as well... meant to
-    // use font and colour that [other] tabs['] text is using") — this panel
-    // kept FreeShow's own monospace face for every label (names, headers,
-    // menu entries, counts) even after the colours above moved to Theme
-    // tokens, so it was the one surface still typefacing itself differently
-    // from Media/Overlays/Templates/Scripture/The Table. None of these
-    // labels are digit-aligned columns that would benefit from a fixed
-    // width, so there's no case left for keeping it separate.
 
     readonly property bool inProject: ProjectService.activeProjectId !== ""
     readonly property var items: ProjectService.activeProject.items ?? []
@@ -146,21 +116,12 @@ Item {
             entries.push({ label: qsTr("Collapse all folders") }, { label: qsTr("Expand all folders") }, { divider: true },
                          { label: root.showArchived ? qsTr("Hide archived projects") : qsTr("Show archived projects") })
         } else if (kind === "tree") {
-            // A project's own right-click: Rename, Duplicate, Delete, then Archive below a
-            // divider. No separate "Open": a click already does that (see the row's own
-            // onActivated below), the same reasoning FreeShow's own list has none either.
-            // No "Convert to template" either (user call: "remove the convert to template
-            // from it") — it was never a stored template, only a move into a "Templates"
-            // folder, and the + menu already offers a project to start from.
             if (target.type === "project") entries.push({ label: qsTr("Rename") }, { label: qsTr("Duplicate"), trailing: "Ctrl+D" }, { label: qsTr("Delete"), trailing: "Del", danger: true },
                                                         { divider: true }, { label: target.archived ? qsTr("Restore from archive") : qsTr("Archive") })
             else entries.push({ label: qsTr("New project here") }, { label: qsTr("New folder here") }, { label: qsTr("Rename") }, { divider: true }, { label: qsTr("Delete folder"), danger: true })
         } else if (kind === "item") {
             entries.push({ label: qsTr("Rename") }, { label: qsTr("Add section above") }, { divider: true }, { label: qsTr("Remove from project"), danger: true })
         } else if (kind === "projectTemplate") {
-            // Not a separate stored "template" (the engine has no such concept) - picking an existing project duplicates it as the
-            // new one's starting point, same as its own "Duplicate" action, just reachable from the + menu the way FreeShow's own
-            // "Project template" entry is.
             const projects = ProjectService.tree.filter((r) => r.type === "project")
             if (projects.length === 0) entries.push({ label: qsTr("No projects yet to start from") })
             else projects.forEach((p) => entries.push({ label: p.name }))
@@ -240,17 +201,7 @@ Item {
         menu.openAt(addTray, 0, 0, Window.window.contentItem)
     }
 
-    // A project: FreeShow's document icon, in the app's accent purple rather
-    // than FreeShow's own red (that red was the last non-purple accent left in
-    // this panel and read as a foreign colour next to the purple selections and
-    // buttons; the inner bars keep the same darkened-relative-to-the-body shade
-    // the red version used).
     component ProjectDoc: Item {
-        // The pill is lighter than the accent, not the accent itself (user
-        // call: "this pill is meant to be lighter than its base color") —
-        // same ratio the item rows already use for a section's own colour
-        // (Qt.lighter(sectionColor, 1.4) below), so the two lightening
-        // conventions in this file agree.
         readonly property color pillColor: Qt.lighter(root.cSecondary, 1.4)
         width: 16; height: 20
         Rectangle { anchors.fill: parent; radius: 3; color: parent.pillColor }
@@ -259,9 +210,6 @@ Item {
         Rectangle { x: 3; y: 14; width: 6; height: 1.6; radius: 0.8; color: Qt.darker(parent.pillColor, 2.2) }
     }
 
-    // The panel itself.
-    // The Projects column is the lighter alternate surface in the home
-    // workspace; cards and nested project rows keep their own darker tones.
     Rectangle { anchors.fill: parent; color: Theme.workspacePaneBg }
 
     // ---- the tree: cards of folders and projects -------------------------------------------------------------------------------
@@ -294,10 +242,6 @@ Item {
                     Column {
                         id: cardBody
                         width: parent.width
-                        // No gap between a folder's header row and its own
-                        // children — one continuous block, like the
-                        // reference. Cards (different folders) still get
-                        // breathing room from treeColumn's own spacing.
                         spacing: 0
                         // "No Folder": the heading of the projects that are in no folder
                         Rectangle {
@@ -316,13 +260,6 @@ Item {
                                 readonly property bool isFolder: modelData.type === "folder"
                                 readonly property bool active: !isFolder && modelData.id === ProjectService.activeProjectId
                                 readonly property real indent: 14 * modelData.depth
-                                // Flat, edge-to-edge rows — EVERY row (folder
-                                // or a project nested under one) starts right
-                                // at the panel's own left edge, matching the
-                                // reference: a folder's children sit flush
-                                // with it, not shifted right. Depth still
-                                // nudges the row's own CONTENT (see the Row
-                                // below), just not its background bounds.
                                 x: 0
                                 width: card.width
                                 height: isFolder ? 34 : 30
@@ -331,23 +268,13 @@ Item {
                                      : (isFolder || active ? root.cDarkest : root.cDarker)
                                 opacity: modelData.archived ? 0.55 : 1
 
-                                // The pointer's light is the app's shared hover
-                                // layer, so a project row fades like every other
-                                // surface instead of snapping on and off.
                                 HoverGlow {
                                     anchors.fill: parent
                                     radius: parent.radius
                                     hovered: treeHover.hovered
-                                    // The global hover wash is too faint over
-                                    // these dark project rows; keep the accent
-                                    // visible while preserving the row's base.
                                     glowColor: Qt.alpha(Theme.accent, 0.18)
                                 }
 
-                                // Flush at the row's own left edge (no rounded
-                                // corner to overhang now) — the accent bar the
-                                // reference design uses to mark a folder or
-                                // the active project.
                                 Rectangle { width: 4; height: parent.height; color: treeRow.active || treeRow.isFolder ? root.cSecondary : root.cDarker }
 
                                 Row {
@@ -363,17 +290,10 @@ Item {
                                     ProjectDoc { visible: !treeRow.isFolder; anchors.verticalCenter: parent.verticalCenter }
                                     Text {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        // Project names fill from the document
-                                        // icon to the card's right edge; folder
-                                        // names reserve room for the item count.
                                         width: Math.max(0, treeRow.width - treeRow.indent - (treeRow.isFolder ? 100 : 32))
                                         text: treeRow.modelData.name
                                         color: root.cText; elide: Text.ElideRight
                                         font.family: Theme.fontFamily; font.pixelSize: 16
-                                        // Medium for BOTH: a Normal stroke on this
-                                        // mono face never fills its pixels at this
-                                        // size, so a project's or folder's name read
-                                        // grey however white its colour was set.
                                         font.weight: Font.Medium
                                     }
                                 }
@@ -393,9 +313,6 @@ Item {
                                     label: treeRow.modelData.name
                                     onActivated: treeRow.isFolder ? root.toggleFolder(treeRow.modelData.id) : ProjectService.openProject(treeRow.modelData.id)
                                     onOpened: if (!treeRow.isFolder) ProjectService.openProject(treeRow.modelData.id)
-                                    // Same duplicate-right-click-handler fix as the item row
-                                    // below — DragSource's own contextRequested replaces the
-                                    // separate TapHandler that used to race it.
                                     onContextRequested: (x, y) => root.openMenu("tree", treeRow.modelData, treeRow, x, y)
                                 }
 
@@ -470,13 +387,6 @@ Item {
                     height: itemCardBody.height + 2 * 8 + 2
                     Item {
                         y: 8; width: parent.width; height: itemCardBody.height + 2
-                        // No more boxed card around a section's rows (flat
-                        // FreeShow-style list, like the tree above) — each row
-                        // is its own rounded pill, inset from the panel edge.
-                        // itemCardBody keeps zero spacing: the drag/drop
-                        // insertion math in root.itemLayout computes each
-                        // row's y from sectionHeight/itemHeight alone, with no
-                        // inter-row gap, so the Column can't add one either.
                         Column {
                             id: itemCardBody
                             y: 1; width: parent.width
@@ -490,18 +400,12 @@ Item {
                                     readonly property bool isSection: modelData.type === "section"
                                     readonly property bool selected: modelData.index === ProjectService.activeIndex
                                     readonly property color sectionColor: modelData.color !== "" && modelData.color !== undefined ? modelData.color : ""
-                                    // Flat, edge-to-edge (no floating pill
-                                    // inset) — matches the tree view above and
-                                    // the reference flat-list design.
                                     width: itemCardBody.width
                                     height: isSection ? root.sectionHeight : root.itemHeight
                                     radius: 0
                                     color: isSection ? (sectionColor !== "" ? Qt.rgba(Qt.color(sectionColor).r, Qt.color(sectionColor).g, Qt.color(sectionColor).b, 0.2) : root.cDarkest)
                                                      : (selected ? root.cDarkest : root.cDarker)
 
-                                    // Hover = the shared layer (selection and a
-                                    // section's tint are state, so they stay on
-                                    // the row itself).
                                     HoverGlow {
                                         anchors.fill: parent
                                         radius: parent.radius
@@ -530,10 +434,6 @@ Item {
                                             color: itemRow.isSection && itemRow.sectionColor !== "" ? Qt.lighter(itemRow.sectionColor, 1.4) : root.cText
                                             elide: Text.ElideRight
                                             font.family: Theme.fontFamily; font.pixelSize: itemRow.isSection ? 13 : 14
-                                            // Medium, not Normal — same reason as the
-                                            // tree rows above: these are the names the
-                                            // operator reads down the list, and a thin
-                                            // stroke at 14 px is what made them grey.
                                             font.weight: itemRow.isSection ? Font.Bold : Font.Medium
                                         }
                                     }
@@ -552,15 +452,6 @@ Item {
                                         label: itemRow.modelData.name
                                         onActivated: { ProjectService.selectItem(itemRow.modelData.index); root.itemActivated(itemRow.modelData) }
                                         onOpened: root.itemOpened(itemRow.modelData)
-                                        // DragSource already owns right-click (its own internal
-                                        // TapHandler, contextRequested) — a SEPARATE TapHandler
-                                        // used to sit here too, right-click-only, covering the
-                                        // same full row: two Pointer Handlers racing for the same
-                                        // tap, which is exactly the kind of flaky "menu doesn't
-                                        // open / remove doesn't work" symptom reported live.
-                                        // Wiring the signal DragSource already emits (same
-                                        // pattern the show table's own row menu already uses)
-                                        // removes the duplicate instead of adding a second one.
                                         onContextRequested: (x, y) => root.openMenu("item",
                                             { index: itemRow.modelData.index, name: itemRow.modelData.name }, itemRow, x, y)
                                     }
@@ -638,9 +529,6 @@ Item {
         z: 10
         width: parent.width; height: 30
         clip: true
-        // (rounded at the bottom only: the top rounding sits above the panel)
-        // The bar is the panel's own surface at 94%, so it follows the theme
-        // with it instead of staying FreeShow's dark literal in Light.
         Rectangle { y: -10; width: parent.width; height: 40; radius: 10; color: Qt.alpha(Theme.panelBg, 0.94) }
 
         // back (inside a project): 42px wide, full height

@@ -1,10 +1,5 @@
 #pragma once
 
-// ProjectRegistry (docs/specs/15 §Project Registry): maps project id → Project.
-// Fast lookup by id, name and path; duplicate detection. Follows the
-// Manager → Registry → Interfaces pattern: the registry is pure storage, the
-// ProjectManager owns the workflow.
-
 #include "modules/project/Project.hpp"
 
 #include <map>
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 class ProjectRegistry {
 public:
     ProjectRegistry() = default;
@@ -33,5 +27,4 @@ private:
     std::map<std::string, std::string, std::less<>> byName_;  // name → id
     std::map<std::string, std::string, std::less<>> byPath_;  // path → id (when saved)
 };
-
 } // namespace bps::project

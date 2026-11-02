@@ -15,25 +15,6 @@ struct Design;
 class QQmlEngine;
 class QJSEngine;
 
-// The UI's window onto a DESIGN LIBRARY - the overlays or templates the user picks from, and the
-// categories they are filed under. The ENGINE owns everything (bps::library::DesignLibrary: the
-// defaults, the rules, the JSON file); this service only turns engine results into the QML shapes
-// the dock panes draw, and reports refusals as toasts.
-//
-// One class serves both libraries; each QML singleton passes its own engine config (see
-// DesignCatalogs.hpp): overlays ship the "Visuals" defaults, templates ship FreeShow's starter set.
-//
-// A design is { id, name, color, category, contentType, isDefault, locked, placeUnderSlide,
-// displayDuration, background, blocks }. Its BLOCKS are exactly what the Edit screen already draws
-// for slides - { key, kind, text, x, y, width, height, bind, meta, style } in stage units
-// (kStageWidth x kStageHeight) - so the editor edits a design with its slide code, and a card
-// preview is the same drawing at small scale.
-//
-// A category is { id, name, icon, isDefault, count }.
-//
-// The content calls (setBlocks, addBlock, duplicateBlock, block, removeBlock) are what the Edit
-// screen's canvas flushes through while a design is open: block ids are issued by the ENGINE, like
-// a slide's, never invented by the UI.
 class DesignLibraryService : public QObject
 {
     Q_OBJECT
@@ -107,9 +88,6 @@ signals:
 
 protected:
     explicit DesignLibraryService(QObject *parent = nullptr);
-    // Wires the service up: adopts the library at once when the engine has booted (its file path needs the
-    // engine's platform layer), otherwise builds nothing and retries the moment boot completes. `noun`
-    // names the library in messages ("overlay" / "template"); `toastChannel` is where its toasts go.
     void open(bool forTemplates, QString noun, QString toastChannel);
 
 private:
@@ -157,13 +135,6 @@ public:
     static TemplateLibraryService &instance();
     static TemplateLibraryService *create(QQmlEngine *engine, QJSEngine *jsEngine);
 
-    // DOES THE ENGINE'S VOCABULARY HAVE AN ANSWER for `token` (the literal
-    // placeholder, braces included) in this content family? The metadata palette is a
-    // hand-written mirror of that vocabulary (MetadataFields.qml's two lists), and
-    // nothing but a unit test watched the two apart — this is what lets the registry
-    // check ITSELF against the engine at load, so a field the engine cannot fill for
-    // its own family is reported at boot instead of sitting in the menu looking
-    // implemented (BookFill::FamilyAnswersToken is the answer, one call).
     Q_INVOKABLE bool metadataTokenResolves(const QString &contentType, const QString &token) const;
 
 private:

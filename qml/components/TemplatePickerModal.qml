@@ -4,35 +4,13 @@ import QtQuick.Controls
 // draws its own literal chrome, but the keys are the app's.
 import VGRPresenterUI
 
-// "Choose template" — opens from EditStyleModal's Template row ("Change"),
-// matching 1BBTIwaya/VGRPresenter_Settings_Outputs_Edit_Template_Pick.qml's
-// picker_dialog.png reference (that file ships only flat PNGs, no element-
-// level QML — rebuilt here as real, model-driven QML like every other
-// picker in this app).
-//
-// `templates` is the one canonical registry of layout templates — both this
-// picker and EditStyleModal's own Template-row summary read from it (the
-// latter to resolve a stored templateKey back to a display name), so there
-// is exactly one place template metadata lives, not two lists to keep in
-// sync.
-//
-// Favorites are session-only (not persisted to StyleListModel or disk) —
-// a real "starred templates" feature would need its own storage; this is
-// just enough for the All/Favorites tabs to be genuinely functional today.
 Item {
     id: root
-    // Shared top-level modal layer: keep the scrim and card above the page
-    // so clicks and hover never reach the controls behind the dialog.
-    // This picker opens over another settings modal (Edit Style). Keep it
-    // above that parent dialog on the shared window overlay.
     z: 31000
 
     property bool open: false
 
     // ---- Esc = cancel, Enter = the Apply button (qml/settings/Hotkeys.qml) --
-    // This picker opens ON TOP of the Style dialog, which is exactly why the
-    // stack (not a Keys handler) owns the keys: the newest scope answers, so
-    // Esc closes the picker and leaves the style dialog open.
     property int hotkeyScope: 0
     function accept() { root.applied(root.templateFor(root.selectedKey)) }
     onOpenChanged: {
@@ -55,22 +33,8 @@ Item {
     property string contentTypeLabel: "Shows"
     property string selectedKey: "lowerThird"
 
-    // Just key + name — a template's NAME is what identifies it; it
-    // doesn't need a separate description/tag pulling double duty saying
-    // the same thing a different way. The preview pane (below) reads the
-    // name generically too, not a per-key hardcoded layout.
-    // Settable (not readonly): every consumer now hands the ENGINE's template
-    // catalog in (StylesScreen included — its old default was a hardcoded
-    // five-preset list that had nothing to do with the Template library the
-    // rest of the app edits, and the engine's LayoutFor still accepts those
-    // five keys as legacy presets). The list shape: { key, name, color?,
-    // category?, categoryName? } — the extra fields light the category
-    // dropdown + colour chip the catalog rows carry.
     property var templates: []
 
-    // Looks up a template's display name for a stored key — what
-    // EditStyleModal calls to show "Template: <name>" without needing its
-    // own copy of the registry.
     function nameFor(key) {
         return root.templateFor(key).name
     }
@@ -79,21 +43,11 @@ Item {
             if (root.templates[i].key === key)
                 return root.templates[i]
         }
-        // Not in the handed-in list. Two honest fallbacks: a legacy preset
-        // key ("lowerThird"...) — the engine's built-in layouts, which are
-        // real choices even though no design carries them — displays as its
-        // own name; anything else resolves to an empty row, NEVER to
-        // templates[0] (that silently renamed every unknown key to the first
-        // template's name, and with the engine catalog handed in it also
-        // crashed on an empty list before the catalog loaded).
         if (typeof key === "string" && key.length > 0)
             return { key: key, name: legacyPresetNames[key] ?? key }
         return { key: "", name: "" }
     }
 
-    // The engine's built-in layout presets (StyleBuilder::LayoutFor's five
-    // keys) — styles saved before the engine catalog was connected, and any
-    // "legacy preset" choice, still carry these keys.
     readonly property var legacyPresetNames: ({
         lowerThird: qsTr("Lower Third"),
         title: qsTr("Title"),
@@ -118,9 +72,6 @@ Item {
     }
 
     property string searchQuery: ""
-    // "" = every category (the default: nothing here filters out a template until asked to). A consumer whose templates carry
-    // `category`/`categoryName` (Scripture / The Table's engine catalog does) gets a dropdown of the ones actually present in
-    // `templates`; one that doesn't (Settings' fixed layouts, with no such fields) just never shows the dropdown.
     property string categoryFilter: ""
     readonly property var categoryOptions: {
         const seen = {}
@@ -158,15 +109,7 @@ Item {
     signal applied(var template)
     signal cancelled()
 
-    // Whoever instantiates this (a Settings screen filling the whole window, or - like The Table/Scripture tab - a pane nested under
-    // the app's own persistent top bar and tab row) only hands it a LOCAL parent. Reparented to the ApplicationWindow's own overlay
-    // layer instead, so `anchors.fill: parent` truly fills the whole window and the card centers on the whole app, not just
-    // whatever smaller area its caller happens to occupy.
     parent: Overlay.overlay
-    // The scrim below is NOT scaled (see AppScale.qml): it IS the picker's black
-    // box, and a scale on this root shrinks it away from the window's own edges.
-    // The app scale goes on the CARD instead — read from the window, because the
-    // reparenting above leaves no scaled ancestor to inherit it from.
     anchors.fill: parent
     visible: root.open
 
@@ -175,13 +118,6 @@ Item {
         onDismissed: root.cancelled()
     }
 
-
-    // A soft drop shadow behind the card - stacked, growing, fading rectangles (this app's own stand-in for a real blur effect,
-    // the same trick its other floating panels already use), so the card visibly lifts off the dimmed backdrop instead of just
-    // sitting flush with it.
-    // The app's one scale, on the card and its two shadows (see AppScale.qml) —
-    // never on the root, whose scrim has to stay window-sized. The shadows are
-    // sized from the card, so scaling them too keeps them proportional to it.
     Rectangle {
         anchors.centerIn: card
         anchors.verticalCenterOffset: 10
@@ -205,9 +141,6 @@ Item {
         scale: AppScale.cardScale(card)
         transformOrigin: Item.Center
         width: 700
-        // At least the header + a couple of rows + the footer, however little room a cramped parent (a tab's own content area, not
-        // the full window Settings gets) leaves - short of that, the body below scrolls instead of the footer buttons being clipped
-        // off with no way to reach them.
         height: Math.min(Math.max(360, parent.height - 40), content.height + 40)
         radius: 14
         color: Theme.surface
@@ -328,10 +261,6 @@ Item {
                         border.width: 1
                         clip: true
 
-                        // The engine's own design for the selected key, when it has one (Scripture / The Table's real templates
-                        // do) - the SAME renderer the Templates library's own cards and the Edit screen's slide thumbnails use, so
-                        // this shows the template's real layout, not a placeholder. A caller with no such thing (Settings' fixed,
-                        // not-yet-engine-backed layouts) falls back to the plain name-only visual underneath it.
                         readonly property var liveDesign: TemplateLibraryService.design(root.selectedKey)
                         readonly property bool hasRealPreview: previewStage.liveDesign.blocks !== undefined && previewStage.liveDesign.blocks.length > 0
 
@@ -377,9 +306,6 @@ Item {
                     width: parent.width - (parent.width - 20) * 0.42 - 20
                     spacing: 8
 
-                    // Category, above Templates: which one is picked decides what Templates below even has to show.
-                    // The shared select box (the same field and list as every other dropdown in the app); only for a
-                    // consumer whose templates carry more than one category. Defaults to "All categories".
                     SelectField {
                         visible: root.hasCategoryFilter
                         width: parent.width
@@ -589,9 +515,6 @@ Item {
         }
         }
 
-        // The catalog (now the WHOLE template library) overflows the modal on
-        // a short window — wheel-only before. Sits in the rightMargin strip
-        // the Flickable reserves.
         AppScrollBar {
             flickable: pickerFlick
             anchors.top: parent.top; anchors.bottom: parent.bottom

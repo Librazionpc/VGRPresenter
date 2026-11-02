@@ -1,9 +1,5 @@
 #pragma once
 
-// Winsock backend of the PAL ISocket interfaces (Windows). Lives in the PAL —
-// the only place that includes <winsock2.h>. WSAStartup is performed once per
-// process by the factory (ref-counted); errors carry nativeError = WSAGetLastError().
-
 #include "../ISocket.hpp"
 
 #include <winsock2.h>
@@ -11,7 +7,6 @@
 #include <string>
 
 namespace bps::platform {
-
 class WindowsSocket final : public ISocket {
 public:
     explicit WindowsSocket(SOCKET s) : sock_(s) {}
@@ -57,5 +52,4 @@ private:
     static void EnsureWinsock();
     static void ReleaseWinsock();
 };
-
 } // namespace bps::platform

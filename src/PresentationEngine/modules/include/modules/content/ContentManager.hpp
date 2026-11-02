@@ -1,11 +1,5 @@
 #pragma once
 
-// ContentManager (docs/specs/13 §Content Manager): the ONLY public API for
-// content. Every module uses this. Find/load/save/import/export/delete/move/
-// rename/duplicate/search. Integrates the Core (Logger, Config, EventBus,
-// ThreadPool, Scheduler, ResourceManager, DatabaseManager) and the PAL (all
-// file I/O through the VFS). Implements the full IService lifecycle contract.
-
 #include "modules/content/AssetCache.hpp"
 #include "modules/content/AssetDatabase.hpp"
 #include "modules/content/AssetIndexer.hpp"
@@ -30,7 +24,6 @@
 #include <vector>
 
 namespace bps::content {
-
 struct ImportOptions {
     std::string destinationDir;   // VFS dir inside the library mount
     std::string suggestedName;
@@ -157,5 +150,4 @@ private:
     std::chrono::microseconds opLatencySum_{0};
     std::string activeWatchDir_;
 };
-
 } // namespace bps::content

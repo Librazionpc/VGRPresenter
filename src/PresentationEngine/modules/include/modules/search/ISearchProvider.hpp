@@ -1,9 +1,5 @@
 #pragma once
 
-// Search interfaces (docs/specs/20 §Interfaces). Everything is interface-based:
-// adapters turn content into documents, ranking strategies score results, and
-// providers (future: vector/semantic/hybrid) plug in without engine changes.
-
 #include "core/common/Common.hpp"
 #include "modules/search/SearchTypes.hpp"
 
@@ -11,7 +7,6 @@
 #include <vector>
 
 namespace bps::search {
-
 // Turns a content object (any type) into a searchable document. Adapters are
 // registered by plugins; the Search Engine never knows concrete content types.
 class IIndexAdapter {
@@ -30,9 +25,6 @@ public:
     virtual ~IRankingStrategy() = default;
     // Scores a candidate document for a query. Higher is better.
     virtual double Score(const SearchDocument& doc, const SearchQuery& query) const = 0;
-    // True for the engine's built-in ranker: RawSearch then takes its fast path
-    // (ranking recomputed inline from the index's precomputed lowercase views).
-    // A custom strategy returns false and keeps the classic per-candidate call.
     virtual bool IsDefault() const { return false; }
 };
 
@@ -43,5 +35,4 @@ public:
     virtual const char* Name() const noexcept = 0;
     virtual Result<std::vector<SearchResult>> Search(const SearchQuery& query) const = 0;
 };
-
 } // namespace bps::search

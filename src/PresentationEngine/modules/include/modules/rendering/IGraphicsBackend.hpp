@@ -1,11 +1,5 @@
 #pragma once
 
-// IGraphicsBackend (docs/specs/17 §Backends): the ONLY graphics seam in the
-// engine. The renderer talks exclusively to this interface; DirectX12 / Vulkan /
-// Metal / OpenGL implementations are drop-in. Nothing outside this file touches
-// a graphics API. Raw CPU-side pixels are exchanged as RGBA8 buffers so the
-// interface stays backend-agnostic (a GPU backend uploads them to textures).
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 
@@ -16,7 +10,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 struct TextureId {
     uint64_t id = 0;
     bool valid() const { return id != 0; }
@@ -44,9 +37,6 @@ struct BackendCapabilities {
     bool supportsPresent = true;
 };
 
-// A generic GPU command: the backend interprets high-level draw requests.
-// Shader names are recorded (and compiled/validated where supported) but the
-// software backend performs the equivalent pixel operations.
 struct DrawCommand {
     enum class Type : int {
         Clear = 0,
@@ -63,11 +53,6 @@ struct DrawCommand {
     Color color;
     TextureId texture;
     Rect srcRect;               // source region (blit)
-    // Rounded-rect corner radius in DESTINATION pixels (DrawShape only; 0 =
-    // square corners). Carried through the generic command so a GPU backend can
-    // upload it the same way the software rasterizer uses it — the shape's
-    // radius is authored on the stage grid and scaled by the caller
-    // (SceneBuilder), so a backend only ever sees real pixels.
     float cornerRadius = 0.0f;
     uint32_t shaderId = 0;      // 0 = default
     int effect = 0;             // EffectType
@@ -105,5 +90,4 @@ public:
     virtual Result<void> EndFrame() = 0;
     virtual Result<void> Shutdown() = 0;
 };
-
 } // namespace bps::rendering

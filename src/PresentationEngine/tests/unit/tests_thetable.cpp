@@ -1,10 +1,3 @@
-// Unit tests: the TheTableLibrary — the sermon reference library behind
-// "The Table" (books = years, chapters = sermons, verses = paragraphs).
-// Drives the REAL module: txt import, PDF import (a real minimal PDF with an
-// uncompressed content stream, built in-test), persistence round-trip,
-// chapter lookup and search. The library file lives in /tmp so the user's
-// real library is never touched.
-//   ./bps_unit_tests table
 #include "TestHarness.hpp"
 
 #include "modules/library/TheTableLibrary.hpp"
@@ -43,11 +36,6 @@ std::string QuarantineOf(const std::string& dir, const std::string& name) {
     return {};
 }
 
-// A minimal single-page PDF with an UNCOMPRESSED content stream — every
-// parser path (string harvesting, Td line breaks) exercised without zlib.
-// Lines inside one text object are HARD-WRAPPED source lines: our extractor
-// joins them into one paragraph (exactly what the real sermon PDFs need —
-// their line breaks are visual, not paragraph breaks).
 std::string MinimalPdf(const std::string& line1, const std::string& line2) {
     std::string stream;
     stream += "BT /F1 12 Tf 72 720 Td (" + line1 + ") Tj 0 -20 Td (" + line2 + ") Tj ET\n";
@@ -131,13 +119,6 @@ void TestTheTableLibrary() {
     CHECK(reopened->VerseCount() == 3);
 
     // ---- search: all-terms matching, reference shape ----
-    // The reference is the citation line ("53-0218 - My Angel 1"): year minus
-    // the "19", a dash, the sermon's own date-code, the title stripped to
-    // alphanumerics, then the paragraph number.
-    // Search rides the Search Engine's index (one document per sermon — the
-    // boot path indexes every sermon, and the library's Search() ranks
-    // candidates through it). The test must mirror production: index what was
-    // imported, or the candidate stage answers empty and nothing is scanned.
     CHECK(lib->IndexWithSearchEngine().ok());
 
     auto hits = reopened->Search("angel road");
@@ -157,10 +138,6 @@ void TestTheTableLibrary() {
     CHECK(lib->CitationCode("Y1953", 2) == "53-0218");
     CHECK(lib->CitationCode("Y1953", 99).empty());   // unknown chapter
     // ---- a typed HANDLE reads the same however its dash is spaced ----
-    // The citation line is written without spaces beside its dash, and people
-    // type a date code either way; both sides of the comparison are squeezed
-    // onto one form, so "47 - 1020" reaches the sermon "47-1020" names.
-    // (fully qualified: `lib` is the local library handle in this function)
     CHECK(bps::library::TheTableLibrary::CitationNeedle("47-1020") == "47-1020");
     CHECK(bps::library::TheTableLibrary::CitationNeedle("47 - 1020") == "47-1020");
     CHECK(bps::library::TheTableLibrary::CitationNeedle("47 -1020") == "47-1020");
@@ -168,9 +145,6 @@ void TestTheTableLibrary() {
     CHECK(bps::library::TheTableLibrary::CitationNeedle("  47  -  1020  ") == "47-1020");
     // A title's own spaces survive: they are what makes a typed word findable.
     CHECK(bps::library::TheTableLibrary::CitationNeedle("Faith Is The Substance") == "faith is the substance");
-    // ...which is what makes a HANDLE reach a stored citation line: the two forms
-    // differ only in the spaces the stored line never has, so a spaced handle is
-    // a prefix of the citation exactly as the unspaced one is.
     CHECK(bps::library::TheTableLibrary::CitationNeedle(lib->Citation("Y1953", 1, 0))
               .rfind(bps::library::TheTableLibrary::CitationNeedle("53 - 0217"), 0) == 0);
     // A code-less sermon keeps its slot empty instead of inventing one.
@@ -194,12 +168,6 @@ void TestTheTableLibrary() {
     CHECK(miss.value().empty());
 
     // ---- code-tier: a citation-CODE query names the sermon itself ----
-    // (Quick search's "47-1100X" used to show only Bible rows: the tier compared
-    // the typed "47-0412" against the STORED bare date-code "0412" and never
-    // matched. The tier now tests every citation form: yy-code, bare code, and
-    // the title's leading code-token with its trailing letter.)
-    // (These run against `lib` — it holds the 47_0412 sermon; `reopened` was
-    // opened before that import and must not see it.)
     auto exact = lib->Search("47-0412");
     CHECK(exact.ok() && !exact.value().empty());
     CHECK(exact.value()[0].reference == "47-0412 - Faith Is The Substance");   // sermon-level row (verse 0)
@@ -223,12 +191,6 @@ void TestTheTableLibrary() {
     for (const auto& h : bareYear.value())
         CHECK(!(h.verse == 0 && h.bookId == "Y1947"));   // no sermon-level code row
     // ---- citation + paragraph: the paragraph answers as its OWN row ----
-    // "47-0412 2" names the sermon's SECOND paragraph: the hit carries that
-    // paragraph (verse = 2, its text as the snippet), not the sermon-level
-    // listing. The trailing number used to fold into the space-stripped code
-    // ("47-04122") and match nothing, so a typed paragraph was silently
-    // dropped and the picker landed on the sermon's first paragraph — the
-    // app-wide quick search and The Table's own search box both read the hit.
     auto paraHit = lib->Search("47-0412 2");
     CHECK(paraHit.ok() && paraHit.value().size() == 1);
     CHECK(paraHit.value()[0].bookId == "Y1947");
@@ -243,10 +205,6 @@ void TestTheTableLibrary() {
     CHECK(paraMiss.value()[0].bookId == "Y1947");
     CHECK(paraMiss.value()[0].verse == 0);
     // ---- exact words (the search boxes' padlock) ----
-    // Locked, the typed words must appear VERBATIM as whole words: no completion
-    // ("word" stops finding "words"), no inner substring, and no typo/resolution
-    // pass over the typing. Unlocked, the same query finds the paragraph — the
-    // pair below is the whole point of the toggle, so both halves are asserted.
     auto looseWord = lib->Search("word");            // fuzzy: "words" completes it
     CHECK(looseWord.ok() && !looseWord.value().empty());
     auto exactWord = lib->Search("word", 60, true);
@@ -254,10 +212,6 @@ void TestTheTableLibrary() {
     auto exactRoad = lib->Search("road", 60, true);      // a whole word: still found
     CHECK(exactRoad.ok() && exactRoad.value().size() == 1);
     CHECK(exactRoad.value()[0].reference == "53-0218 - My Angel 1");
-    // Two words that sit in the SAME paragraph but not next to each other are not
-    // a combination: locked, that paragraph is not listed at all (the angel
-    // sermon says "My angel shall go before thee this night, and the road is
-    // prepared." — angel, then road, with half a sentence between them).
     auto exactApart = lib->Search("angel road", 60, true);
     CHECK(exactApart.ok() && exactApart.value().empty());
     auto looseApart = lib->Search("angel road");   // loose: the same pair is found
@@ -269,13 +223,6 @@ void TestTheTableLibrary() {
     CHECK(exactCode.ok() && !exactCode.value().empty());
     CHECK(exactCode.value()[0].verse == 0);
     // ---- the sentence first, then the NEXT COMBINATION (never lone words) ----
-    // User calls: "you have to make it prioritize the sentence first; if the main
-    // sentence does not work then now you work with other words — so make it more
-    // resilient", then "no individual words, the next available word combination".
-    // The fixture:
-    //   ¶1 says "my wife and the children..."  (the combination "my wife and")
-    //   ¶2 says "My brother said that my wife would help us..."  ("my wife", and
-    //      both "wife" and "brother" — never next to each other)
     auto rSent = lib->ImportSermon("downloads/1947/47_0513_Test_Words.txt",
                                    "My wife and the children went out into the field, and the work waited.\n\n"
                                    "My brother said that my wife would help us, and my mother agreed.");
@@ -297,20 +244,12 @@ void TestTheTableLibrary() {
     CHECK(exactSprinkle.ok() && exactSprinkle.value().empty());
     auto looseSprinkle = lib->Search("wife brother");
     CHECK(looseSprinkle.ok() && looseSprinkle.value().size() == 1);   // loose: found
-    // A typed sentence the corpus does not have verbatim: the NEXT available
-    // combination answers, the longest one first — ¶1's "my wife and" (3 words)
-    // leads ¶2's "my wife" (2), both under the lock.
     auto exactCombos = lib->Search("my wife and brother", 60, true);
     CHECK(exactCombos.ok() && exactCombos.value().size() == 2);
     CHECK(exactCombos.value()[0].verse == 1);
     CHECK(exactCombos.value()[1].verse == 2);
 
     // ---- the chapter lock: search inside the sermon that is open --------------
-    // The pane's book pill locks search to what is on screen (user call: open
-    // "faith is the substance", turn the lock, and the words are looked for in
-    // THAT sermon instead of the 1,205 others). The fixture's two sermons both
-    // say "my" and "wife"/"the", so the same query answers differently scoped:
-    // the book ("Y1947") or the one sermon (chapter 2) — and never both sermons.
     {
         auto wholeLibrary = lib->Search("my wife", 60, false);
         CHECK(wholeLibrary.ok() && wholeLibrary.value().size() == 2);
@@ -329,10 +268,6 @@ void TestTheTableLibrary() {
         CHECK(lockedSermon.ok() && lockedSermon.value()[0].verse == 1);
         CHECK(lockedSermon.ok() && lockedSermon.value()[1].verse == 2);
 
-        // The sibling sermon (47-0412, chapter 1 of the same year) is out of scope.
-        // Its own word is unreachable from the open sermon — and reachable again
-        // when the lock is only on the year: the lock narrows the search rather
-        // than merely labelling it.
         auto siblingOnly = lib->Search("substance", 60, false, "Y1947", 2);
         CHECK(siblingOnly.ok() && siblingOnly.value().empty());
         auto siblingIn = lib->Search("substance", 60, false, "Y1947", 1);
@@ -354,10 +289,6 @@ void TestTheTableLibrary() {
         CHECK(codeOut.ok() && codeOut.value().empty());
 
         // ---- a BARE PARAGRAPH NUMBER inside the lock is a LOCATION -----------
-        // (user call: "current book for paragraph search so if i turn it on and 50
-        // it should bring it up"). The scope names the sermon being read, so "2"
-        // is its second paragraph — the row opens straight there, exactly like a
-        // typed citation paragraph.
         auto paraInScope = lib->Search("2", 60, false, "Y1953", 1);
         CHECK(paraInScope.ok() && paraInScope.value().size() == 1);
         CHECK(paraInScope.value()[0].bookId == "Y1953");
@@ -373,9 +304,6 @@ void TestTheTableLibrary() {
         CHECK(written.ok() && written.value().size() == 1 && written.value()[0].verse == 2);
         auto singleDigit = lib->Search("1", 60, false, "Y1953", 1);
         CHECK(singleDigit.ok() && singleDigit.value().size() == 1 && singleDigit.value()[0].verse == 1);
-        // A paragraph the sermon does NOT have is not a location: the query falls
-        // through to the word scan (nothing here says "54") rather than inventing
-        // a row past the sermon's end.
         auto tooHigh = lib->Search("54", 60, false, "Y1953", 1);
         CHECK(tooHigh.ok() && tooHigh.value().empty());
         // A YEAR keeps its word meaning inside the lock (three digits is the most a
@@ -394,9 +322,6 @@ void TestTheTableLibrary() {
         CHECK(unlockedNumber.ok() && unlockedNumber.value().empty());
         CHECK(!lib->Search("2").ok());   // one character is not a word, and nothing scopes it
     }
-    // This test indexed its sermons into the SHARED Search Engine; the next
-    // suite owns "table:*" documents and asserts a clean slate — drop ours
-    // (production never shares one process across two libraries, tests do).
     CHECK(lib->UnindexFromSearchEngine().ok());
 
     // ---- second year becomes a second book ----
@@ -470,11 +395,6 @@ void TestTheTableLibrary() {
             if (isOne && why.find(':') != std::string::npos) ++named;
         }
         CHECK(named == 3);
-        // The EXACT sentences, not merely that a reason exists: this is the
-        // wording the import's notice prints, and the QML service only joins
-        // what the library words here (a service has no unit coverage, which
-        // is exactly why the wording is pinned at its source rather than
-        // eyeballed on screen).
         const auto reasonFor = [&](const std::string& base) -> std::string {
             for (const std::string& why : mixed.value().rejected)
                 if (why.rfind(base + ":", 0) == 0)
@@ -492,10 +412,6 @@ void TestTheTableLibrary() {
     }
 
     // ---- MORE REFUSALS THAN THE OLD CAP: every one is still named ----
-    // The report used to carry at most five reasons (kMaxRejections), so a
-    // folder of wrong files answered "8 not sermon files" and explained five -
-    // the operator could not tell which files to fix. All eight are named now,
-    // and the counts stay exact.
     {
         for (int i = 0; i < 8; ++i)
             WriteFileBytes(folder + "/1955/55_030" + std::to_string(i) + "_Sheet.xlsx",
@@ -522,15 +438,9 @@ void TestTheTableLibrary() {
         CHECK(!lib::TheTableLibrary::ConvertToCleanText("x/1958/58_0103_Bad.pdf", "not a pdf at all, sorry").ok());
     }
     // ---- the FORMAT gate: a file the library cannot read is refused, by name ----
-    // The dialog's "All files (*.*)" option can hand over anything, and binary
-    // bytes read as text import "successfully" as pages of mangled glyphs - so the
-    // refusal has to happen before a byte is parsed, and it has to say why.
     {
         const std::string sermon = "This paragraph is long enough to survive the forty character filter, and it is real text.";
         std::string why;
-        // "This name and these bytes are a sermon file" - the reason is read
-        // fresh every time (`why` is an out-parameter that is only written on a
-        // refusal, so a stale one from an earlier case would prove nothing).
         const auto accepted = [](const char* name, const std::string& content) {
             std::string reason;
             return lib::TheTableLibrary::IsSermonFile(name, content, reason) && reason.empty();
@@ -560,9 +470,6 @@ void TestTheTableLibrary() {
         CHECK(why.find("rename it .pdf") != std::string::npos);
 
         // 3. A real .txt is NOT refused, whatever is in it: control characters,
-        //    Windows-1252 quotes and a stray form feed are the clean-up stage's
-        //    job (the gate is about FORMAT, never about content), and a sermon is
-        //    still a sermon with an "MZ" or "BM" opening a paragraph.
         CHECK(accepted("x/1958/58_0211_Plain.txt", sermon));
         const std::string messy = std::string("BMW\x0Cthe car\x01 in the story\r\n\r\n\x93" "Come\x94 to Me, \xADnow.\r\n");
         CHECK(accepted("x/1958/58_0212_Odd.txt", messy));
@@ -612,9 +519,6 @@ void TestTheTableLibrary() {
         CHECK(coded.value().find("full stop.\n\nE-2 The second one follows") != std::string::npos);
         CHECK(coded.value().find("\n\nE-3") == std::string::npos);
     }
-    // A sermon that numbers ITS OWN paragraphs ("2 And now...") but whose opening (verse 1) our own blank-line splitting still cut into
-    // several pieces: all those pieces fold into verse 1, not become wrongly-numbered verses of their own; and a sermon that never
-    // numbers its own paragraphs keeps one verse per blank-line paragraph, as before.
     {
         auto numbered = lib::TheTableLibrary::Open(PathOf("numbered.json"));
         auto r = numbered->ImportSermon("x/1959/59_0101_Opening.txt",
@@ -743,9 +647,6 @@ void TestTheTableRealPdfs() {
     std::fflush(stdout);
 }
 
-// User data — notes and highlights persisted with the library (the Bible
-// module's AddNote/SetHighlight, keyed "bookId:chapter:verse"). The JSON
-// round-trip is the point: a note must survive a full Load of the file.
 void TestTheTableUserData() {
     std::filesystem::remove_all(kRoot);
     auto lib = lib::TheTableLibrary::Open(PathOf("userdata.json"));
@@ -814,18 +715,10 @@ void TestTheTableUserData() {
     std::filesystem::remove_all(kRoot);
 }
 
-// Search Engine integration (docs/specs/20 §DocumentAdapterRegistry, the Bible
-// precedent): IndexWithSearchEngine puts one document per sermon into the
-// platform index — type "table", upsert-safe, removable — so the app-wide
-// search finds the sermons alongside everything else. Runs after the library
-// tests, on a fresh library file, so the document ids are deterministic.
 void TestTheTableSearchIndexing() {
     auto& eng = s::SearchEngine::Instance();
     CHECK(eng.Initialize().ok());
 
-    // A clean slate for the document ids this test owns ("table:*") — and for
-    // the library file itself, so the suite is idempotent (a previous run's
-    // sermons would otherwise still be in it).
     std::filesystem::remove_all(kRoot);
     auto lib = lib::TheTableLibrary::Open(PathOf("index.json"));
     CHECK(lib->UnindexFromSearchEngine().ok());
@@ -907,10 +800,6 @@ void TestTheTableSearchIndexing() {
     CHECK(eng.Initialize().ok());   // other tests re-start the engine
 
     // ---- a DAMAGED store never fails the read, and its bytes survive -------
-    // The store carries the operator's notes and highlights as well as the
-    // sermons: reading a damaged one as "empty" and then saving over it is what
-    // this prevents. The bytes are set aside under `.corrupt-<stamp>` and the
-    // next save rebuilds a healthy document at the same path.
     {
         const std::string path = PathOf("damaged.json");
         WriteFileBytes(path, "{ not json");
@@ -940,17 +829,6 @@ void TestTheTableSearchIndexing() {
 // ===========================================================================
 // THE TYPING TAIL (the sermon pane's own search box)
 // ===========================================================================
-// The user's report, with the pane's screenshot: typing
-//   "compelling that you rec"
-// listed ONE sermon — one whose paragraph happened to carry whatever single word
-// the resolver guessed "rec" meant — while the sermon that says
-//   "... absolutely essential and necessary, and compelling and compulsory, that
-//    you receive the Holy Ghost now ..."
-// was missing. The last word is the one the caret is on, so it is a PREFIX: it
-// matches every word starting with what was typed, the readings ordered most
-// confident first (how often the corpus uses them), and every word before it is
-// still required. The padlock (exact words) keeps meaning verbatim, so it does
-// NOT prefix-match.
 void TestTheTableTypingTail() {
     const std::string path = PathOf("tail/library.json");
     std::filesystem::remove_all(kRoot + "/tail");
@@ -1007,22 +885,11 @@ void TestTheTableTypingTail() {
     CHECK(locked.ok() && locked.value().empty());
 }
 
-// THE CITATION NAMES ITS CODE ONCE. A sermon's stored title opens with its own
-// date-code ("0217 Only Believe"), and The Table's codes are not always all
-// digits ("0109E"). The citation's leading code slot used to strip only a
-// digits-before-a-space run, so a suffixed code stayed in the title too and every
-// surface built from it — the reference chip, the pill's search box, each search
-// row, the pane's own reference — read "55-0109E - 0109E Beginning And Ending …".
-// The title keeps the code that IS its identity in the chapter list; the
-// citation line, which prints the code in its own slot, does not repeat it.
 void TestTheTableCitationSuffixCode() {
     const std::string path = PathOf("suffix/library.json");
     std::filesystem::remove_all(kRoot + "/suffix");
     auto lib = lib::TheTableLibrary::Open(path);
     CHECK(lib->Books().empty());
-    // The corpus' own naming: a leading year, then the date-code and the title
-    // ("1955 0109E Beginning And Ending …"). The shipped library holds titles in
-    // exactly this shape, which is what puts a suffixed code in front of the text.
     CHECK(lib->ImportSermon(
         "downloads/1955/1955 0109E Beginning And Ending Of The Gentile Dispensation.txt",
         "And Daniel was the prophet to the Gentiles, and Daniel saw all the Gentile ages rise and "

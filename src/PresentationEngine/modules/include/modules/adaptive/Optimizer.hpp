@@ -1,17 +1,5 @@
 #pragma once
 
-// RuntimeOptimizer (docs/specs/16 §4, §22–§25): the brain. Every subsystem
-// asks it instead of deciding for itself:
-//   Renderer → GetTextureBudget / ShouldUseGpuText / ShouldUseGpuBlur
-//   Media    → ShouldUseHardwareDecoder / GetStreamingQuality
-//   AI       → GetAIModelTier
-//   Search   → GetSearchTier
-//   Import   → GetBatchSize
-//   Cache    → GetCacheBytes
-//   Any      → GetRecommendedThreadCount
-// Decisions derive from hardware + budgets + quality profile + pressure +
-// user preference. Nothing outside this file hardcodes those numbers.
-
 #include "modules/adaptive/Budgets.hpp"
 #include "modules/adaptive/Hardware.hpp"
 #include "modules/adaptive/PerformanceProfiler.hpp"
@@ -20,7 +8,6 @@
 #include <mutex>
 
 namespace bps::adaptive {
-
 enum class GpuTask : int {
     Text, Decode, Blur, Transitions, Scaling, Compositing, Effects
 };
@@ -29,9 +16,6 @@ class RuntimeOptimizer {
 public:
     RuntimeOptimizer() = default;
 
-    // Wire the inputs the optimizer reads. Called by the facade at start.
-    // settingsMutex guards *settings (written by the facade's Recompute on the
-    // heartbeat/event threads, read by any module thread here).
     void Bind(const HardwareInfo* hw, const CapabilityDetector* caps,
               const PerformanceProfiler* profiler, ResourceBudgetManager* budgets,
               UserModeManager* modes, QualitySettings* settings,
@@ -81,5 +65,4 @@ private:
     std::mutex* settingsMutex_ = nullptr;
     mutable std::mutex mutex_;
 };
-
 } // namespace bps::adaptive

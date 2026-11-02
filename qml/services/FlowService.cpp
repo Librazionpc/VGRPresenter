@@ -15,7 +15,6 @@ namespace fa = bps::automation;
 using bps::Result;   // the engine's Result<T> (IAction::Execute's return type)
 
 namespace {
-
 void toast(const QString &message, const QString &level = QStringLiteral("error"))
 {
     EventBus::instance().notify(message, level, QStringLiteral("Functions"),
@@ -78,9 +77,6 @@ constexpr const char *kStarterFlow =
     "{\"id\":\"end\",\"label\":\"End\",\"kind\":\"end\"}"
     "]}}";
 
-// The app's domain actions — real commands against the live services,
-// registered into the engine's action registry (its plugin pattern: the
-// engine core never learns about the presentation layer).
 void installDomainActions()
 {
     auto &flow = fa::FlowEngine::Instance();
@@ -175,7 +171,6 @@ void installDomainActions()
         return std::make_shared<A>();
     });
 }
-
 } // namespace
 
 FlowService *FlowService::s_instance = nullptr;
@@ -197,10 +192,6 @@ FlowService *FlowService::create(QQmlEngine *engine, QJSEngine *jsEngine)
     Q_UNUSED(engine)
     Q_UNUSED(jsEngine)
     QJSEngine::setObjectOwnership(&instance(), QJSEngine::CppOwnership);
-    // The engine boots after the kernel; the pane may be built before that.
-    // Wire (register actions + starter flow + poll pump) on first
-    // refreshFlows() after boot — the engine registry refuses registrations
-    // until Initialize() anyway.
     return &instance();
 }
 
@@ -217,10 +208,6 @@ void FlowService::registerDomainActions()
 {
     if (engineWired_)
         return;
-    // Claimed HERE, on the interface thread, so a second caller cannot queue a
-    // second wiring while the first is still in flight (the engine part below
-    // runs on the worker, and the posts are FIFO: a command queued right after
-    // this one still finds a started engine).
     engineWired_ = true;
     if (!pump_) {
         // A QTimer belongs to the thread that created it: made here, started and
@@ -229,9 +216,6 @@ void FlowService::registerDomainActions()
         pump_->setInterval(250);
         connect(pump_, &QTimer::timeout, this, &FlowService::pumpTick);
     }
-    // WIRING THE ENGINE IS ENGINE WORK: Initialize/Start, the domain actions and
-    // the starter flow all go to the worker, never the interface thread (this
-    // used to run on the thread that draws, on the first pane visit).
     vgr::EngineWorker::instance().runOffThread([this] {
         auto &flow = fa::FlowEngine::Instance();
         if (auto r = flow.Initialize(); !r.ok()) {
@@ -248,9 +232,6 @@ void FlowService::registerDomainActions()
     refreshFlows();
 }
 
-// Reads the engine's flow registry ON THE WORKER and publishes the list here.
-// The rows QML binds to are built off the interface thread and handed over as a
-// finished value — the thread that draws only assigns and emits.
 void FlowService::refreshFlows()
 {
     registerDomainActions();
@@ -284,9 +265,6 @@ void FlowService::refreshFlows()
     });
 }
 
-// Loading is engine work; the ANSWER is what makes its way back (the toast says
-// which way it went). True means "accepted for loading" — the load itself and
-// its outcome land on the flow list a moment later.
 bool FlowService::loadFlow(const QString &document)
 {
     registerDomainActions();
@@ -347,12 +325,6 @@ void FlowService::start(const QString &flowId)
     });
 }
 
-// The four transport commands share one shape: the engine call goes to the
-// worker with the id it applies to; the refreshed state comes back through
-// refreshExecution (which is itself off-thread). The helper is NAMED for what it
-// does — it runs the command off the interface thread — because that is the
-// hand-off shape the GUI-thread guard recognizes (tools/check_gui_thread_blocks),
-// and the name keeps it recognizable to a reader too.
 void FlowService::pause()   { runTransportOffThread(QStringLiteral("pause")); }
 void FlowService::resume()  { runTransportOffThread(QStringLiteral("resume")); }
 void FlowService::skip()    { runTransportOffThread(QStringLiteral("skip")); }
@@ -420,10 +392,6 @@ bool FlowService::executeAction(const QString &actionType, const QString &payloa
 // State + pump
 // ---------------------------------------------------------------------------
 
-// Reads the engine's execution state ON THE WORKER and publishes the map here
-// (the pane binds `execution`, `running` and `executionId`, and the pump calls
-// this every 250 ms — a quarter-second cadence is exactly where a lock wait on
-// the thread that draws would be felt).
 void FlowService::refreshExecution()
 {
     const QString id = executionId_;
@@ -499,9 +467,6 @@ void FlowService::refreshExecution()
 
 void FlowService::pumpTick()
 {
-    // The engine is externally-clocked: Poll() advances delay/timer nodes whose
-    // deadline has passed (the Drain loop re-reads NowMs()). Engine work — on
-    // the worker — and the state read that follows it goes there too.
     vgr::EngineWorker::instance().runOffThread([this] {
         (void)fa::FlowEngine::Instance().Poll();
         vgr::EngineWorker::onInterfaceThread(this, [this] {

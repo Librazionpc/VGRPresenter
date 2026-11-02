@@ -1,6 +1,3 @@
-// Unit tests: Scene Composition Engine (docs/specs/23).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests scene
 #include "TestHarness.hpp"
 
 void TestSceneComposition() {

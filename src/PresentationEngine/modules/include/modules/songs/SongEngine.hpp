@@ -1,11 +1,5 @@
 #pragma once
 
-// SongEngine (docs/specs/25): the Phase 13 facade. Owns the provider registry,
-// song registry, import/validation pipeline, chord transposition, arrangement
-// management, collections, duplicate detection, versioning/recovery, and
-// Search Engine integration. Knows nothing about presentation, rendering,
-// display, or UI — it only provides structured musical content.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -22,7 +16,6 @@
 #include <vector>
 
 namespace bps::song {
-
 class SongEngine final : public IService {
 public:
     static SongEngine& Instance();
@@ -118,5 +111,4 @@ private:
     std::atomic<uint64_t> errorCount_{0};
     std::atomic<uint64_t> importCount_{0};
 };
-
 } // namespace bps::song

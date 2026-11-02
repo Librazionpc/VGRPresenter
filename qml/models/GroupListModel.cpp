@@ -47,9 +47,6 @@ GroupListModel::~GroupListModel()
 
 void GroupListModel::seedDefaults()
 {
-    // FreeShow's own eight (src/electron/data/defaults.ts) — same names,
-    // same colours, same shortcuts — so a user coming from FreeShow finds
-    // the identical starter set.
     struct Seed { const char *name; const char *color; const char *shortcut; };
     static constexpr Seed kDefaults[] = {
         { "break",      "#f5255e", "" },
@@ -80,11 +77,6 @@ void GroupListModel::reloadFromStore()
 
     const std::vector<bps::project::StoredGroup> stored = bps::project::GroupStore::Instance().Get();
     if (stored.empty()) {
-        // First run (or a document that was never saved): seed the eight
-        // built-ins and save them once, so the roster this app shows matches
-        // what GroupStore::Get() returns on every later read (reloadFromStore
-        // on a FRESH boot would otherwise seed again every launch — the save
-        // here is what makes the seed a one-time event).
         seedDefaults();
         endResetModel();
         save();
@@ -204,9 +196,6 @@ void GroupListModel::renameGroup(int index, const QString &name)
         return;
 
     m_groups[index].name = trimmed;
-    // Renaming a default detaches it (FreeShow's own rule: changeGroup()
-    // deletes the `default` tag the moment the name changes) — a default's
-    // name is meant to stay the translation key it was seeded with.
     m_groups[index].isDefault = false;
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { NameRole, DefaultRole });
@@ -255,10 +244,6 @@ void GroupListModel::setTemplate(int index, const QString &templateId)
     const QModelIndex changed = this->index(index);
     emit dataChanged(changed, changed, { TemplateRole });
     save();
-    // The composition has to re-compose the slides this group owns (the tag
-    // turns into a template in StyleSpecBuilder), and the outputs' own spec may
-    // be the one carrying it — the same "a roster edit lands on the next frame"
-    // contract every other roster mutation follows.
     if (OutputListModel *outputs = OutputListModel::instance())
         outputs->repushActiveStyleForTag(m_groups.at(index).name);
 }

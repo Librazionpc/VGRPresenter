@@ -4,19 +4,7 @@
 #include <cmath>
 
 namespace bps::display {
-
 namespace {
-
-// Scale/crop of a frame region into a destination rectangle. Downscale
-// area-averages (box filter — every source pixel contributes to every output
-// pixel it touches, so a 2× reduction can no longer alias thin text strokes
-// away); upscale bilinearly interpolates (no blocky 2× pixels). The old
-// nearest-neighbor pick was the CPU-hotspot AND the quality complaint in one:
-// at output scales ≈1:1 it sampled ONE source pixel per output pixel, so
-// song lyrics on a 1600×900 screen from a 1920×1080 feed shimmered/aliased
-// on every frame. Pixels are Color::Pack 0xAABBGGRR; channels are unpacked
-// and averaged in wider integers (premultiplied-alpha is NOT assumed — the
-// compositor hands over flattened frames).
 rendering::Frame ScaleFrame(const rendering::Frame& src, const rendering::Rect& srcRect,
                             const rendering::Rect& dstRect) {
     rendering::Frame out;
@@ -63,10 +51,6 @@ rendering::Frame ScaleFrame(const rendering::Frame& src, const rendering::Rect& 
             const double fx1 = static_cast<double>(srcW) * (dx + 1) / out.width;
             uint32_t px;
             if (fx1 - fx0 >= 1.0 || fy1 - fy0 >= 1.0) {
-                // DOWNSCALE (footprint ≥ 1 source px): box-average the
-                // covered area. Integer core + edge fractions keeps it fast;
-                // accumulate in 64-bit so a 100×100 footprint cannot roll
-                // a 8-bit channel over.
                 const int ix0 = sx0 + static_cast<int>(fx0);
                 const int iy0 = sy0 + static_cast<int>(fy0);
                 const int ix1 = sx0 + static_cast<int>(std::ceil(fx1));
@@ -134,7 +118,6 @@ rendering::Frame ScaleFrame(const rendering::Frame& src, const rendering::Rect& 
     }
     return out;
 }
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -317,5 +300,4 @@ void OutputRouter::RouteFrame(const rendering::Frame& frame, const DeviceResolve
         sink(output, destRect, scaled);
     }
 }
-
 } // namespace bps::display

@@ -1,20 +1,12 @@
 import QtQuick
 import VGRPresenterUI
 
-// The clickable LIVE/MUTE pill — THE mute toggle for every signal-carrying
-// card on the routing board (audio input, video source, bus). One component
-// so position recipe (top-right, 10/8 insets), muted styling, and the
-// hit-area can't drift across the three columns. Controlled component:
-// `muted` is owned by the caller; report intent via toggleRequested().
 Pill {
     id: root
 
     property bool muted: false
     property color accent: Theme.success
     property color accentLight: Theme.successLight
-    // The off-state label — "MUTE" fits an audio-carrying row, but a
-    // camera/screen feed isn't "muted" when off, it's paused. Callers pass
-    // whatever fits (see AudioVideoScreen.qml's Edit/Add Video dialogs).
     property string offLabel: qsTr("MUTE")
     signal toggleRequested()
 

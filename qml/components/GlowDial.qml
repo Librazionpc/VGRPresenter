@@ -2,20 +2,6 @@ import QtQuick
 import QtQuick.Shapes
 import VGRPresenterUI
 
-// A compact GLOWING dial -- the Audio and Video channel knob's glow-ring idea,
-// promoted from a knob decoration into a small readout instrument. A
-// 240-degree arc (the SAME sweep SpeedometerGauge uses, so the app's
-// instruments agree with each other) glows in a caller-chosen colour: green
-// healthy, amber near a limit, red past it. The value sits inside the arc and
-// the caption sits on its own row underneath.
-//
-// Three separate bands -- arc, number, caption -- and no sweeping needle. An
-// earlier version pivoted a needle at the value's own centre, so the arm swept
-// straight through the number and the caption collided with the ring's bottom
-// edge. A filled arc can never reach the middle of the dial, and the caption
-// owns its own row, so nothing overlaps at any size. The dial is square and
-// centred in whatever width the caller gives it, so a row of these lines up
-// automatically; a call site only ever sets the width.
 Item {
     id: root
 
@@ -24,13 +10,7 @@ Item {
     property string unit: ""
     property string caption: ""
     property real maxValue: 100
-    // The glow colour: the caller's message (a resource tile picks it from the
-    // budget the dial stands for). Instrument artwork, like SpeedometerGauge --
-    // not an IconGlyph.
     property color dialColor: Theme.success
-    // false: the machine cannot report this reading, so the dial goes quiet,
-    // the arc stays empty and the number reads a dash instead of inventing a
-    // value.
     property bool measured: true
 
     // The dial is square and capped, so a wide tile centres it rather than
@@ -99,9 +79,6 @@ Item {
             }
         }
 
-        // The empty track. Theme.borderSubtle, NOT Theme.inset: inset is a
-        // hair off the card's own background, so an unmeasured dial (no live
-        // arc over it) read as an empty hole rather than a quiet gauge.
         Shape {
             anchors.fill: parent
             preferredRendererType: Shape.CurveRenderer

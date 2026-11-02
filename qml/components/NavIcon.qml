@@ -1,9 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// Small glyph drawn from primitives, matching the nav-rail icon set.
-// kind: "sliders" | "spark" | "monitor" | "layoutTemplate" | "recordDot" |
-//       "grid" | "routing"
 Item {
     id: root
     property string kind: "sliders"

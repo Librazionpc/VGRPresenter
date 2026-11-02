@@ -34,13 +34,8 @@
 namespace bi = bps::import;
 
 namespace {
-
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
-// The template Quick Lyrics' fresh-typed slides look like — the same
-// overridable "song" category pick Scripture/Table already use
-// (SlideBuilder::templateId reads the "song.template" setting, falling back
-// to this plain default when unset or the chosen template was deleted).
 constexpr const char *kSongTemplate = "tpl-default";
 const SlideBuilder::Profile kSongProfile{ "song", "song.template", kSongTemplate };
 
@@ -88,18 +83,6 @@ QVariantMap failure(const QString &why)
              { QStringLiteral("files"), 0 }, { QStringLiteral("warnings"), QStringList() }, { QStringLiteral("firstShow"), QString() } };
 }
 
-// Saves one imported show into the shows library as its own .vgr; returns the path ("" when it could not be saved).
-// `libraryFolder`: the library CATEGORY sub-folder to save into ("" = the
-// show's own category, the historical behavior). A FreeShow library import
-// passes "FreeShow" so the whole batch lands in one manageable folder instead
-// of scattering into the root.
-// `applyTemplate`: Quick Lyrics (fresh-typed content, nothing to lose) gets
-// the configured song template's layout; a real FILE import (ChordPro/
-// OpenSong/OpenLP/ProPresenter/EasyWorship) does NOT — forcing our own
-// template's fixed text-box layout onto an already-arranged imported show
-// would overwrite whatever structure it came in with. Leaving
-// ShowBuildOptions.templateBlocks empty falls back to ShowFromImported's own
-// neutral single-textbox-per-slide layout instead.
 QString saveImportedShow(const bi::ImportedShow &imported, bool applyTemplate, const QString &libraryFolder, QString *why)
 {
     bi::ShowBuildOptions options;
@@ -153,9 +136,6 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
     if (saved > 0)
         ShowService::instance().refreshLibrary();
     if (bibles > 0)
-        // And with it the published id list is re-walked, so the new Bible is in
-        // `bibles` when bibleChanged arrives (see refreshBibles — hand-emitting the
-        // signal here announced a list that still held the ids from before).
         SearchService::instance().refreshBibles();
 
     QString summary;
@@ -175,13 +155,6 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
              { QStringLiteral("warnings"), warnings }, { QStringLiteral("firstShow"), firstPath } };
 }
 
-// A screenshot on the clipboard becomes a still image MEDIA SOURCE. Media comes
-// into this app as FOLDERS ("adding a folder is how media is brought in" —
-// MediaLibraryService's contract), so the bitmap is written as a PNG into an
-// app-owned clipboard folder that is then added to the library exactly like a
-// folder the user picked: the picture stays a real file the operator can put on
-// air, and nothing has to learn a second way of holding media.
-// `folder` receives the folder to add; "" means the picture could not be saved.
 QString saveClipboardImage(const bps::platform::ClipboardImage &image, QString *folder)
 {
     const QString base = dataroot::appDataRoot();
@@ -204,7 +177,6 @@ QString saveClipboardImage(const bps::platform::ClipboardImage &image, QString *
         *folder = dir;
     return path;
 }
-
 } // namespace
 
 ImportService &ImportService::instance()
@@ -285,11 +257,6 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
     if (input.empty())
         return failure(tr("None of the files could be opened."));
 
-    // A FreeShow LIBRARY import lands in a category named after the imported
-    // files' own folder ("FreeShow" when it cannot be told) — one manageable
-    // batch per source folder, not hundreds of loose shows in the library
-    // root. Re-importing clears that category first (to the recoverable
-    // .deleted bin), so a fresh import REPLACES the old batch.
     const bool isFreeShow = formatId == QLatin1String("freeshow") || formatId == QLatin1String("freeshow_project");
     QString libraryFolder;
     if (isFreeShow) {
@@ -323,36 +290,16 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
             result.value().warnings.push_back(name.toStdString() + ": could not be opened");
         result.value().files = total;
 
-        // THE WHOLE SAVE SWEEP runs here on the worker: parse and save are the
-        // slow parts (a 700-file batch takes a minute or more), and running
-        // them on the GUI thread is exactly the AppHang this threading fixed.
-        // Everything the sweep touches is thread-safe or moved to the worker:
-        // ShowLibrary is mutex-protected, EventBus marshals cross-thread, and
-        // progress hops back via QueuedConnection. Only the final library
-        // republish + toast run on the GUI thread below.
         const int showCount = static_cast<int>(result.value().shows.size());
         int saved = 0;
         QStringList warnings;
         for (const std::string &w : result.value().warnings)
             warnings.append(qstr(w));
         QString firstPath;
-        // The category CLEAR and per-show saves run on the worker: the engine
-        // ShowLibrary is mutex-protected. The one GUI-side effect inside
-        // clearLibraryCategory (republishing the QML-facing lists) is skipped
-        // here — publishLibrary() writing QStringList members + emitting on a
-        // worker thread would race the GUI thread's reads; the sweep ends with
-        // one refreshLibrary() on the GUI thread anyway.
         if (isFreeShow && showCount > 0)
             ShowService::instance().clearLibraryCategoryNoPublish(libraryFolder);
 
         // ---- the artwork the documents reference ----------------------------
-        // A ProPresenter deck names its pictures in Media/Assets; the engine has
-        // already resolved those to files that exist here. They are COPIED into
-        // the app's own media folder for this source library (one folder per
-        // library, so two libraries' "logo.png" cannot collide), and the folders
-        // are added to the media library below on the interface thread: adding a
-        // folder is how media comes into the app, so the deck's art turns up in
-        // the Media dock as real files the operator can put on air.
         const QString mediaRoot = dataroot::appDataRoot() + QStringLiteral("/media/imported");
         QStringList mediaFolders;
         int mediaCopied = 0;
@@ -365,9 +312,6 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
             for (const std::string &ref : show.mediaRefs) {
                 const QString source = qstr(ref);
                 const QString target = dir + QLatin1Char('/') + QFileInfo(source).fileName();
-                // Already brought in by an earlier show of this batch (or an
-                // earlier import): the same asset serves both, and a second copy
-                // would only double the disk.
                 if (!QFileInfo::exists(target)) {
                     if (!QFile::copy(source, target)) continue;
                     ++mediaCopied;
@@ -378,11 +322,6 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         }
         for (const bi::ImportedShow &show : result.value().shows) {
             QString why;
-            // Each show is filed under the folder ITS OWN file came from, so an
-            // import that spans several source folders keeps their structure
-            // ("Only Believe SongBook", "Tabernacle Songs", ...) instead of
-            // piling every song into one category. FreeShow's library import is
-            // one batch by design, and keeps its own folder.
             const QString folder = !libraryFolder.isEmpty() ? libraryFolder : qstr(show.sourceFolder);
             const QString path = saveImportedShow(show, /*applyTemplate=*/false, folder, &why);
             ++saved;   // progress counts attempts, so the bar always reaches the end
@@ -470,18 +409,6 @@ struct ImportService::ClipboardPick {
     QString imageFolder;  // ... and the folder it landed in
 };
 
-// ASYNC, and it has to be. READ THROUGH THE PLATFORM LAYER, not QClipboard:
-// the PAL's clipboard open WAITS OUT another process's write (a screenshot
-// posts a full-screen bitmap, which takes a moment, so a first-attempt read
-// fails on a machine doing nothing wrong), and Qt's own probing is what emits
-// "Retrying to obtain clipboard." when that happens — the amber "Application
-// — ..." notice the notification area had to learn to suppress. Qt is
-// consulted only when there is no platform layer at all (headless/test).
-//
-// The read runs on a worker because that wait belongs to somebody else's
-// process: the interface thread has no business in it, and neither has the
-// screenshot's PNG encode (tens of megabytes of pixels). Only the library
-// notify and the emits need the interface thread — applyClipboardRead below.
 void ImportService::importClipboard()
 {
     auto *runner = QThread::create([this] {
@@ -494,10 +421,6 @@ void ImportService::importClipboard()
                 pick.kind = ClipboardPick::Kind::Text;
                 pick.text = qstr(text.value());
             } else {
-                // A SCREENSHOT is the ordinary clipboard content on Windows —
-                // Win+Shift+S posts a bitmap and no text at all — so an image
-                // is not an error, it is the thing to import: it lands in the
-                // media library as a still source the operator can put on air.
                 auto image = clipboard.ReadImage();
                 if (image.ok() && !image.value().empty()) {
                     pick.kind = ClipboardPick::Kind::Image;
@@ -529,9 +452,6 @@ void ImportService::importClipboard()
     runner->start();
 }
 
-// The interface thread's half: what the pick MEANS, said out loud and handed
-// back to the dialog. Everything here touches app state (the media library,
-// the notice bus, the emits), which is why the half that must stay there.
 void ImportService::applyClipboardRead(const ClipboardPick &pick)
 {
     switch (pick.kind) {

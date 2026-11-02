@@ -1,22 +1,3 @@
-// Engine unit test runner (docs/specs/00 §8).
-// Usage:
-//   ./bps_unit_tests                 run every phase
-//   ./bps_unit_tests flow            run only the 'flow' phase
-//   ./bps_unit_tests bible song      run suites in phases/labels matching 'bible' or 'song'
-//   ./bps_unit_tests proj-mgr        run a single suite label
-//
-// Build: `cmake -B build && cmake --build build && ./build/bps_unit_tests [phase]`
-//
-// Phase fixture: because the tests are split into per-phase files, a single
-// phase may run alone (./bps_unit_tests media). Modules such as MediaModule and
-// AdaptiveRuntime schedule work on the TaskScheduler/ThreadPool singletons, and
-// RenderEngine/AdaptiveRuntime resize the ThreadPool, so those singletons are
-// booted here before any suite runs and torn down afterwards. This guarantees
-// every phase gets the same environment the full suite gets from TestKernel's
-// boot/shutdown (scheduler running, workers joined at exit), without ordering
-// the phases by accident. Initialize/Shutdown are idempotent, so this is a no-op
-// for suites that manage their own lifecycle (TestThreadPool/TestScheduler/
-// TestKernel).
 #include "TestHarness.hpp"
 #include "TestDecls.hpp"
 
@@ -26,11 +7,6 @@
 
 #include <cstdio>
 #include <cstring>
-
-// The free space every suite starts with, as a SIMULATED number — pinned before
-// each suite below. It lives in TestHarness.hpp so the suites that simulate disk
-// pressure re-pin the SAME number instead of a second copy of it (see its
-// comment there, and TestRecordingLifecycle's emergency-disk case).
 
 struct Suite {
     const char* phase;
@@ -81,9 +57,6 @@ static const Suite kSuites[] = {
     {"cams", "cams", TestCamsContentManager},
     {"modules", "plugins", TestPluginManager},
 #if !defined(_WIN32)
-    // TestIpcLogStream itself is #if !defined(_WIN32) in tests_modules.cpp
-    // (not yet verified on Windows) — the registration has to match or this
-    // is an undefined reference on a Windows link.
     {"modules", "ipcstream", TestIpcLogStream},
 #endif
     {"notify", "notify", TestNotifyQueue},
@@ -138,6 +111,7 @@ static const Suite kSuites[] = {
     {"rendering", "line-spacing-bands", TestLineSpacingAndLineBands},
     {"rendering", "reading-flow-draw-cost", TestReadingFlowDrawCost},
     {"rendering", "reading-flow-window-refresh", TestReadingFlowWindowRefresh},
+    {"rendering", "flow-scroll-math", TestFlowScrollMath},
     {"rendering", "reading-page-keeps-pick", TestReadingPageKeepsPick},
     {"rendering", "rtypes", TestRenderTypes},
     {"rendering", "rbackends", TestRenderBackends},
@@ -288,24 +262,13 @@ static void TearDownPhaseFixture() {
     (void)TaskScheduler::Instance().Shutdown();
 }
 
-// Run on the discrete GPU of a hybrid (Optimus / switchable-graphics) laptop. This is the
-// documented opt-in the NVIDIA and AMD drivers read from the executable. Without it the
-// process lands on the integrated GPU, and the NVIDIA hardware H.264 encoder (NVENC) then
-// refuses to start (E_UNEXPECTED), so a preset could never use it. A machine with one GPU
-// ignores both.
 extern "C" {
 __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
 int main(int argc, char** argv) {
-    // Unbuffered stdout: a suite that dies (the known pre-existing teardown
-    // segfault) must not take its own PASS/FAIL summary with it — buffered
-    // output vanished with the process and the results were unreadable.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    // Same for stderr — redirected to a file it is FULLY buffered, so the
-    // [phase]/[mark] progress lines (and any CHECK failure text) were lost
-    // with the crash instead of telling us where it happened.
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::vector<std::string> filters;
     for (int i = 1; i < argc; ++i) filters.emplace_back(argv[i]);

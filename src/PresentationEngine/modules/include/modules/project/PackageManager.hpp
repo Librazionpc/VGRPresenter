@@ -1,11 +1,5 @@
 #pragma once
 
-// PackageManager (docs/specs/15 §Package Manager): builds and consumes
-// portable project packages — a single .bpspkg ZIP file containing the project
-// document, its referenced CAMS assets, and a dependency manifest. Building on
-// the CAMS ZipWriter means the package pipeline inherits CRC-32 integrity and
-// standard ZIP compatibility (no new file-format code).
-
 #include "modules/project/Project.hpp"
 #include "interfaces/IService.hpp"
 
@@ -15,7 +9,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct PackageManifest {
     std::string format = "bps-project-package";
     int version = 1;
@@ -54,5 +47,4 @@ private:
     mutable std::mutex mutex_;
     std::atomic<uint64_t> importedCount_{0};
 };
-
 } // namespace bps::project

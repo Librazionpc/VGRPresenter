@@ -2,9 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// One persistent card displays the head of NotificationCenter's FIFO queue.
-// Keeping the same instance alive means enqueuing another notice cannot restart
-// the visible notice's timeout. Changing the front item (after dismissal) does.
 Column {
     id: root
     spacing: Theme.space2

@@ -9,7 +9,6 @@
 #include <format>
 
 namespace bps {
-
 ConfigurationManager& ConfigurationManager::Instance() {
     static ConfigurationManager instance;
     return instance;
@@ -53,10 +52,6 @@ Result<void> ConfigurationManager::LoadFileInto(ConfigScope scope, const std::st
     auto parsed = json::Parse(ss.str());
     if (!parsed.ok()) {
         loadErrors_.fetch_add(1);
-        // SELF-HEALING: a config scope this engine wrote must never stop a load.
-        // The damaged bytes are set aside as evidence and the scope starts
-        // empty, which is exactly the state a first run has — so a torn write
-        // (or a hand edit that broke the JSON) costs the file, not the session.
         (void)recovery::SetAsideDamagedDocument(path, "ConfigurationManager",
                                                parsed.error().message);
         std::lock_guard<std::mutex> lock(mutex_);
@@ -105,10 +100,6 @@ Result<void> ConfigurationManager::Save(ConfigScope scope) {
         path = it->second;
         value = scopes_[scope];
     }
-    // Through the PAL, and ATOMICALLY: a scope file is read back on the next
-    // load, so a truncated or zero-filled one is a silent settings loss. This
-    // used a raw std::ofstream on the live path — the same in-place truncate
-    // that left kernel.json full of NULs — and bypassed the PAL besides.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     if (auto wrote = fs.WriteAtomic(path, value.ToString() + "\n"); !wrote.ok())
         return Error::Make(Err::IoError, "ConfigurationManager",
@@ -277,5 +268,4 @@ HealthReport ConfigurationManager::GetHealth() const {
     r.detail = loadErrors_.load() == 0 ? "config loaded" : "config load errors present";
     return r;
 }
-
 } // namespace bps

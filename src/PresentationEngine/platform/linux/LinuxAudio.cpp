@@ -8,14 +8,8 @@
 #include <sstream>
 
 namespace bps::platform {
-
 namespace {
-
 // ---------------------------------------------------------------------------
-// Runtime-loaded libasound — fills idle sample-rate/channel gaps that
-// /proc/asound/pcm cannot see. Mirrors the BroadcastEngine NDI loader: the
-// library is resolved through the PAL ILibrary seam and degrades to the
-// /proc-based path (rate/channels 0 = unknown) when libasound is absent.
 // ---------------------------------------------------------------------------
 struct AsoundApi {
     // snd_pcm_open(pcm, name, stream, mode); SND_PCM_STREAM_PLAYBACK=0, CAPTURE=1.
@@ -96,9 +90,6 @@ bool AlsaProbeIdle(int card, int device, bool input, uint32_t& rate, uint32_t& c
     if (api.hw_params_any(pcm, params) == 0) {
         unsigned int r = 48000;   // preferred; clamped to the device's range
         int dir = 0;
-        // set_rate_near stores the actual (clamped) rate back into r — on
-        // "any" params get_rate alone returns a range minimum (e.g. 4000 Hz),
-        // which would be misleading; the near-clamp gives a representative one.
         if (api.hw_params_set_rate_near(pcm, params, &r, &dir) == 0 && r > 0) {
             rate = r;
             ok = true;
@@ -113,7 +104,6 @@ bool AlsaProbeIdle(int card, int device, bool input, uint32_t& rate, uint32_t& c
     (void)api.pcm_close(pcm);
     return ok;
 }
-
 
 // card index -> friendly card name, from /proc/asound/cards:
 //   ' 0 [PCH            ]: HDA-Intel - HDA Intel PCH'
@@ -169,7 +159,6 @@ int DefaultCard() {
     if (std::regex_search(line, m, re)) return std::stoi(m[1].str());
     return -1;
 }
-
 } // namespace
 
 std::vector<AudioDeviceInfo> LinuxAudio::Enumerate() const {
@@ -240,5 +229,4 @@ std::string LinuxAudio::Fingerprint() const {
         fp += d.id + (d.isInput ? ":in;" : ":out;");
     return fp;
 }
-
 } // namespace bps::platform

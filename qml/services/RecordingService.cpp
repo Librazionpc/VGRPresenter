@@ -28,7 +28,6 @@ namespace rr = bps::recording;
 namespace bpr = bps::production;
 
 namespace {
-
 void toast(const QString &message, const QString &level = QStringLiteral("error"))
 {
     EventBus::instance().notify(message, level, QStringLiteral("Recording"),
@@ -48,9 +47,6 @@ QVariantMap storageToVariant(const rr::StorageInfo &info)
     };
 }
 
-// WHERE A TAKE LANDS when its preset names no folder: the app's own "recording" folder (a dev
-// build's profile, or the installed profile), in a "video" subfolder for a recording with
-// pictures and an "audio" one for an audio-only preset.
 std::string defaultRecordingDir(bool audioOnly = false)
 {
     return bps::platform::PlatformAccessor::Get().Paths().UserDataDir() + "/recording/" +
@@ -130,9 +126,6 @@ rr::RecordingProfile profileFromSettings(const QVariantMap &settings)
     p.segmentDurationMs = 0;       // single file per session (MKV recommended)
     p.priority = rr::RecordingPriority::Critical;   // protect the service
 
-    // Output directory: the preset's own folder, else <app data>/recording. Created
-    // by the take's worker (beginRecording), where a folder that cannot be made is
-    // refused with its own toast instead of being ignored here.
     const QString folder = settings.value(QStringLiteral("outputFolder")).toString().trimmed();
     p.directory = folder.isEmpty()
         ? defaultRecordingDir()
@@ -140,7 +133,6 @@ rr::RecordingProfile profileFromSettings(const QVariantMap &settings)
 
     return p;
 }
-
 } // namespace
 
 RecordingService *RecordingService::s_instance = nullptr;
@@ -152,9 +144,6 @@ RecordingService::RecordingService(QObject *parent)
 
     connect(&SettingsService::instance(), &SettingsService::changed,
             this, [this] {
-                // Every settings change may move where recordings land, so the
-                // storage snapshot is re-read on each one (the engine's disk
-                // monitor answers once its storage seam is up).
                 refreshStorage();
             });
     refreshStorage();
@@ -165,15 +154,8 @@ RecordingService::RecordingService(QObject *parent)
     refreshCapabilities();
 }
 
-// What the engine can really write, from its registered providers. This is a fact about
-// the BUILD (only MP4 + the software encoder exist today), not a probe of the machine's
-// GPU, so a preset can be kept to choices that will not be refused at record time.
 void RecordingService::refreshCapabilities()
 {
-    // ITS OWN THREAD, not the engine worker: finding the hardware encoders wakes the GPU's
-    // encoder (about 19 s measured on a hybrid laptop), and the worker is the one queue every
-    // engine write waits behind. The result comes back by a queued call, dropped if the
-    // service is gone.
     QPointer<RecordingService> guard(this);
     QThreadPool::globalInstance()->start([this, guard] {
         auto &rec = rr::RecordingEngine::Instance();
@@ -240,17 +222,6 @@ RecordingService::~RecordingService()
 // Transport
 // ---------------------------------------------------------------------------
 
-// Every RECORD/STREAM gesture is ENGINE WORK, and all of it now runs on the
-// engine worker: the profile build, the session start, the metadata, the stop
-// and the pause all live in the engine (which takes its own locks and writes
-// the file), and the QML-visible flags/status are published here when the
-// worker's answer arrives. True from these calls means ACCEPTED — the outcome
-// (a session on this screen, or the refusal toast) follows a moment later.
-// "Record" without naming an output (File > Record…, Ctrl+R, the automation action):
-// the FIRST Recording output on the Routing canvas, recording with ITS preset. There
-// is no program-wide recording any more — a take always belongs to one output and one
-// preset — so with no Recording output (or one with no preset yet) this says what to
-// set up instead of recording something nobody configured.
 bool RecordingService::startPrimaryRecording()
 {
     auto *outputs = OutputListModel::instance();
@@ -320,21 +291,12 @@ bool RecordingService::beginRecording(const QVariantMap &settings, const QString
             return;
         }
 
-        // WHERE the take goes: its folder has to exist before the engine opens a
-        // segment in it. A preset's own folder that cannot be made is refused here,
-        // not silently swapped for another one.
         const QString directory = QString::fromStdString(profile.directory);
         if (!QDir().mkpath(directory)) {
             refuse(QStringLiteral("the folder %1 cannot be created").arg(directory));
             return;
         }
 
-        // WHICH node this take listens to: the node the canvas wired (the Routing
-        // canvas's Recording card). RecordingEngine attaches its audio tap to that
-        // node, and the mixer sums only the buses with an EDGE into it — so the take
-        // records exactly what the canvas shows wired to it. Refused when nothing is
-        // wired, because a take of silence is worse than a refusal: it looks like a
-        // recording.
         QString bus;
         {
             auto &graph = bpr::ProductionEngine::Instance().Graph();
@@ -378,9 +340,6 @@ bool RecordingService::beginRecording(const QVariantMap &settings, const QString
         const QString busLabel = bus;
         vgr::EngineWorker::onInterfaceThread(this, [this, sessionId, busLabel, settings, nodeId] {
             recordingId_ = sessionId;
-            // WHICH CARD OWNS THIS TAKE: the node it was started on ("" for a
-            // program take). The Routing canvas's REC / STREAM cards read it, so
-            // pressing Stop on a card can never end a take started elsewhere.
             recordingNode_ = nodeId;
             profileId_ = QStringLiteral("ui-program");
             if (pump_ && !pump_->isActive())
@@ -403,9 +362,6 @@ void RecordingService::stopRecording()
     if (!recording_)
         return;
     const QString id = recordingId_;
-    // The UI's own state turns over immediately — the button says stopped the
-    // moment it is pressed; the engine's finalize (the container writes its
-    // trailer) happens on the worker and the status is re-read from it after.
     recordingId_.clear();
     recordingNode_.clear();
     if (pump_)
@@ -498,10 +454,6 @@ void RecordingService::refreshStorage()
 // Status + the 1 Hz pump
 // ---------------------------------------------------------------------------
 
-// The session state QML binds to, read and assembled ON THE WORKER and handed
-// back as a finished map. This runs at 1 Hz while a take is up (and on every
-// transport click) — a lock wait on the thread that draws is exactly what the
-// 1 Hz cadence would have turned into a visible hitch.
 void RecordingService::refreshStatus()
 {
     const QString id = recordingId_;
@@ -577,9 +529,6 @@ void RecordingService::refreshStatus()
 
 void RecordingService::pumpTick()
 {
-    // The engine is externally-clocked (Tick advances durations, segmentation
-    // and the disk monitor) — driven at 1 Hz on the worker, with the status
-    // read that follows it there too.
     vgr::EngineWorker::instance().runOffThread([this] {
         (void)rr::RecordingEngine::Instance().Tick(1000);
         vgr::EngineWorker::onInterfaceThread(this, [this] {
@@ -598,9 +547,6 @@ void RecordingService::shutdown()
 {
     if (pump_)
         pump_->stop();
-    // A still-active session finalizes cleanly on app exit (the file on disk
-    // must be complete — a crashed recording recovers via the journal, but a
-    // planned shutdown has no excuse).
     if (recording_) {
         (void)rr::RecordingEngine::Instance().StopRecording(recordingId_.toStdString(),
                                                         std::string_view("shutdown"));

@@ -1,31 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The boot splash — the first face of the app, matching the brand sheet:
-// the hexagon-play logo tile, the VGR (white) / Presenter (grey) wordmark
-// and a thin booting bar. NO full-window backdrop: the splash IS the card —
-// a small frameless always-on-top window centered on the screen (the classic
-// Photoshop-style splash), floating over the app while the engine boots.
-// The user asked for exactly this: "remove the bg filler, leave the model
-// alone" — the card (its logo, wordmark, status line and bar) is untouched;
-// only the black Rectangle backdrop is gone.
-//
-// Why this exists: the engine used to boot synchronously BEFORE any QML
-// loaded, so the screen stayed blank for the whole kernel boot. Boot is now
-// DEFERRED (main.cpp fires it once this splash has painted), and this
-// floating card is what the user sees instead of a dead desktop: the kernel
-// boots behind it, and the app only opens when the engine has settled.
-//
-// Reveal contract: done means the boot RETURNED — success (EngineBridge.
-// booted) or FAILURE (EngineBridge.bootError). A failure must still bring
-// the splash down: the UI is designed to keep working against mock data,
-// and the error surfaces as its own toast. Minimum on-screen time (1.2 s)
-// stops a fast boot from strobing the splash for a single frame.
-//
-// Holding still is by design: boot() runs ON the GUI thread (EngineBridge.h
-// forbids a worker-thread boot), so this splash freezes for the boot's
-// duration — the logo, wordmark and status line are static, so nothing
-// looks broken mid-freeze.
 Window {
     id: root
 
@@ -43,10 +18,6 @@ Window {
     property bool revealing: false
     property bool hidden: false
 
-    // FULLY OPAQUE FROM THE FIRST FRAME — deliberately no entrance fade.
-    // The boot blocks the GUI thread ~200 ms after this loads (main.cpp),
-    // and a fade-in would freeze half-done. Only the hand-over fades — by
-    // then the loop is alive again, so that animation actually runs.
     opacity: 1
     visible: true
     Behavior on opacity {
@@ -84,11 +55,6 @@ Window {
 
     onHiddenChanged: if (root.hidden) root.close()
 
-    // Centered on the SCREEN the app's main window is on (a QML Window with
-    // no explicit x/y lands wherever the OS puts it — pin it to the primary
-    // screen's centre so the splash reads as part of the app, not a stray
-    // window on a second monitor). Recomputed on screen changes (a display
-    // hotplug between launches).
     function recenter() {
         const scr = Qt.application.screens[0] ?? null
         if (!scr)
@@ -100,9 +66,6 @@ Window {
     onWidthChanged: root.recenter()
     onHeightChanged: root.recenter()
 
-    // The splash CARD — the whole splash now (678×378, no backdrop behind
-    // it). Card color stays the brand asset's own page background
-    // (rgb 17,19,27): the logo tile's rounded corners blend into it, no halo.
     Rectangle {
         id: card
         anchors.fill: parent
@@ -153,9 +116,6 @@ Window {
         }
 
         // ---- Boot status + thin indeterminate bar, pinned INSIDE the card
-        // below the lockup. During the boot itself these hold still (GUI-
-        // thread boot — see the header); the "Ready" beat before the fade
-        // proves it was worth the wait.
         Column {
             width: 190
             anchors.horizontalCenter: parent.horizontalCenter

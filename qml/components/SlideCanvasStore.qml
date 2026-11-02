@@ -1,21 +1,5 @@
 import QtQuick
 
-// Per-slide canvas state, keyed by SlideListModel's stable slide id (NOT the
-// display `num` — that renumbers whenever slides are inserted/removed).
-//
-// `current` is the working set EditScreen's canvas renders and edits live;
-// `slides` archives each slide's { items, background } so switching slides
-// swaps the canvas: load() re-archives the outgoing slide under its id and
-// installs the incoming one. The archived item objects are the SAME objects
-// that were on the canvas (no copies), so thumbnails can bind directly to
-// their properties and update in real time while the slide is being edited.
-//
-// Slide lifecycle is driven by the consumer (EditScreen) — this store never
-// touches SlideListModel itself:
-//   add slide     -> nothing needed; the new id simply has no archive yet
-//   duplicate     -> cloneSlide(fromId, duplicateSlide()'s returned id)
-//   remove        -> dropSlide(id) BEFORE removeSlide(), so the archive and
-//                    its item objects die with the slide
 QtObject {
     id: store
 
@@ -29,26 +13,11 @@ QtObject {
     // The live working set for the active slide.
     readonly property QtObject current: QtObject {
         property var items: []
-        // One spelling of "no background" lives in BackgroundColorModal
-        // (transparentValue); this is the state-side equivalent for a slide
-        // that has never had a background picked — keep the two in sync.
         property string background: "transparent"
-        // The slide's filter set — the seven values of the engine's
-        // rendering::SlideFilterValues, in the units its UI rows use (hue in
-        // degrees, blur in pixels, invert/grayscale as 0–1, and
-        // brightness/contrast/saturate as multipliers where 1 is identity).
-        // It is a SLIDE value, not an item one: the on-air pass applies it to
-        // the composed frame for this slide alone (see Effects.hpp's
-        // ApplyFilters), which is why it is archived with the slide next to its
-        // background. Replaced, never mutated, so every binding that reads it
-        // re-evaluates on a slider move.
         property var filters: ({ hueRotate: 0.0, invert: 0.0, blur: 0.0, grayscale: 0.0,
                                  brightness: 1.0, contrast: 1.0, saturate: 1.0 })
     }
 
-    // A FRESH identity filter set. Shared objects would be a trap here: the
-    // panel writes a new value by reassigning the whole map, but a consumer that
-    // ever mutates one would then be editing every unfiltered slide at once.
     function identityFilters() {
         return ({ hueRotate: 0.0, invert: 0.0, blur: 0.0, grayscale: 0.0,
                   brightness: 1.0, contrast: 1.0, saturate: 1.0 })
@@ -69,9 +38,6 @@ QtObject {
 
     // ---- Save / load -------------------------------------------------------
 
-    // Archives the current working set under the active slide's id. A fully
-    // empty, never-archived slide is skipped (no entry appears until the
-    // slide actually holds something or a background was picked).
     function save() {
         if (store.activeSlideId < 0)
             return
@@ -97,10 +63,6 @@ QtObject {
 
     // ---- Slide lifecycle ---------------------------------------------------
 
-    // Forgets a slide's archive and destroys its item objects. Call BEFORE
-    // SlideListModel.removeSlide() — if the removed slide is active, the
-    // working set is cleared first so the following load() can't re-archive
-    // dying objects.
     function dropSlide(slideId) {
         const entry = store.slides[slideId]
         if (!entry)
@@ -116,27 +78,16 @@ QtObject {
         store.slides = copy
     }
 
-    // Clones a slide's whole archive (items keep their exact positions; each
-    // clone gets fresh keys and its own style copy) onto the new id returned
-    // by SlideListModel.duplicateSlide().
     function cloneSlide(fromSlideId, toSlideId) {
         const entry = store.slides[fromSlideId]
         if (!entry || entry.items.length === 0)
             return
         const clones = entry.items.map((it) => store.cloneItem(it, 0, 0))
-        // A duplicate is a copy of the slide, filters included (a filtered
-        // backdrop duplicated should not come out clean) — a fresh map, so the
-        // two slides never share one object.
         store.slides = Object.assign({}, store.slides,
             { [toSlideId]: { items: clones, background: entry.background,
                              filters: Object.assign({}, entry.filters || store.identityFilters()) } })
     }
 
-    // Forgets EVERY archive and empties the working set ("New show"). Call
-    // BEFORE SlideListModel.clear() — same ordering contract as dropSlide:
-    // the dying slide's archive must be gone before the active-slide
-    // transition fires, or load() would re-archive dead items. The current
-    // background resets to transparent so the next addSlide() starts clean.
     function clear() {
         // Archive what is live first. The active slide's archive can list items an undo/redo has since destroyed and
         // replaced (restoreItems); refreshing it means the loop below only ever destroys objects that still exist.
@@ -169,12 +120,6 @@ QtObject {
         })
     }
 
-    // Creates a CanvasItem owned by the store. When `styleFrom` is given,
-    // the new item starts with a copy of that style; otherwise the new item
-    // uses CanvasItem's own defaults (border off, radius 0, no padding).
-    // `key`: pass the ENGINE-issued block id — the engine owns item identity, so a key
-    // it generated can never collide with one this store would invent. Omitted only
-    // for items that never reach the engine.
     function createItem(kind, text, x, y, width, height, styleFrom, key) {
         const item = canvasItemComponent.createObject(null, {
             key: key !== undefined && key !== "" ? key : "item-" + (store.m_nextKey++),
@@ -205,22 +150,6 @@ QtObject {
 
     // ---- Undo/redo support (EditScreen.qml) -----------------------------
 
-    // Freezes the working set's current field values into plain data — the
-    // CanvasItem objects themselves keep changing live, so a snapshot for
-    // undo/redo has to copy values out, not just remember which objects
-    // were on the canvas.
-    //
-    // backgroundColor/borderColor are stringified (QML `color` -> "#aarrggbb")
-    // rather than left as live color value-types: a snapshot taken here can
-    // end up captured inside a JS closure that crosses into C++ (the engine-
-    // backed undo history stores pending do/undo closures as QJSValue inside
-    // a plain std::vector, well outside QML's own object lifetime tracking)
-    // and read back out much later. A `color` gadget doesn't reliably
-    // survive that round trip — it comes back as something `property color`
-    // rejects with "Could not find any constructor for value type
-    // QQuickColorValueType to call with value QVariant(Invalid)". A plain
-    // hex string has no such problem and `property color` accepts it
-    // identically to a real color value on assignment.
     function snapshotOf(items) {
         return items.map((it) => ({
             key: it.key, kind: it.kind, text: it.text,
@@ -240,9 +169,6 @@ QtObject {
         return store.snapshotOf(store.current.items)
     }
 
-    // The same snapshot shape IS the engine's block shape (key/kind/text/x/y/width/
-    // height/meta/style) — so undo snapshots, engine syncs and .vgr files all speak
-    // one format. These two turn engine blocks into live CanvasItem objects.
     function itemFromBlock(d) {
         const item = store.canvasItemComponent.createObject(null, {
             key: d.key, kind: d.kind, text: d.text,
@@ -261,11 +187,6 @@ QtObject {
             // Defensive defaults: a show saved before this field existed has
             // no opacity/mediaFit in its .vgr block data at all.
             item.style.opacity = d.style.opacity !== undefined ? d.style.opacity : 1.0
-            // Fit reads from meta.media.fit when the block carries no style value:
-            // the ENGINE's ContentStyle has no mediaFit field, so a saved show comes
-            // back with the fit only in the meta mirror the MEDIA tab writes (and
-            // SceneBuilder reads). Without this a cover-fit picture reopened as
-            // contain on the canvas while the output kept covering.
             const metaFit = d.meta && d.meta.media && d.meta.media.fit ? String(d.meta.media.fit) : ""
             item.style.mediaFit = d.style.mediaFit !== undefined ? d.style.mediaFit
                                 : metaFit !== "" ? metaFit : "contain"
@@ -276,10 +197,6 @@ QtObject {
         return blocks.map((d) => store.itemFromBlock(d))
     }
 
-    // Replaces the working set with fresh CanvasItem objects rebuilt from a
-    // snapshot (see snapshotItems), preserving each item's original key so
-    // selection/thumbnail bindings by key survive an undo/redo. Destroys
-    // the current items first, same as removeItems/dropSlide.
     function restoreItems(snapshot) {
         store.current.items.forEach((it) => it.destroy())
         store.current.items = store.itemsFromBlocks(snapshot)
@@ -297,18 +214,12 @@ QtObject {
         const entry = store.slides[slideId]
         return entry ? entry.background : "transparent"
     }
-    // The slide's filter set (see `current.filters`). The engine's patch shape
-    // reads it through ShowSession.slidePatch, so a filter edit reaches the
-    // on-air pass by the same door an item edit does.
     function filtersOf(slideId) {
         if (slideId === store.activeSlideId)
             return store.current.filters
         const entry = store.slides[slideId]
         return entry && entry.filters ? entry.filters : store.identityFilters()
     }
-    // One value of the ACTIVE slide's filter set. Reassigns the map (not a
-    // nested write) so bindings reading `current.filters` — the canvas effect,
-    // the panel's rows, the thumbnail — all see the change.
     function setFilter(key, value) {
         if (store.activeSlideId < 0)
             return
@@ -348,15 +259,6 @@ QtObject {
 
     // ---- Live thumbnails -----------------------------------------------------
 
-    // Every item of any slide, in canvas order — the real CanvasItem
-    // objects (not copies), so SlideListItem's preview binds straight to
-    // their properties and re-renders the instant the canvas is edited.
-    // An inactive slide reads its archive; the active one reads the live
-    // set. NO filtering on item contents (text etc.) here: a filter inside
-    // this function would evaluate only when the ARRAY changes, so a bound
-    // thumbnail would never notice a property edit like typed text. The
-    // consumer filters structurally (by kind) and binds to item properties
-    // for the live parts.
     function items(slideId) {
         if (slideId === store.activeSlideId)
             return store.current.items

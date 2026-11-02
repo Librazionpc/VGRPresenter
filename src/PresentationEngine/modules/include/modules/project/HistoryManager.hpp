@@ -1,10 +1,5 @@
 #pragma once
 
-// HistoryManager (docs/specs/15 §History Manager): maintains edit history,
-// project save history and recovery checkpoints. The UndoRedoManager owns the
-// live command stacks; this manager keeps the *persistent* record (what was
-// changed, when, by which command) so recovery and audit work.
-
 #include "core/config/Json.hpp"
 #include "interfaces/IService.hpp"
 
@@ -13,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 class HistoryManager {
 public:
     static HistoryManager& Instance();
@@ -56,5 +50,4 @@ private:
     std::vector<Entry> checkpoints_;      // chronological
     size_t limit_ = 2000;
 };
-
 } // namespace bps::project

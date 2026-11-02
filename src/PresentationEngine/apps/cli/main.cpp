@@ -1,7 +1,3 @@
-// bps_cli — boots the engine core and demonstrates the systems working together
-// (Kernel boot/shutdown, EventBus fan-out, ThreadPool, TaskScheduler, MemoryManager,
-// ResourceManager, ModuleManager + a demo module). See docs/specs/.
-
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
 #include "core/ipc/IpcServer.hpp"
@@ -30,18 +26,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <format>
-// GCC 14+ ships <print>, but the msys2 GCC 15.2 (Rev8) MinGW package's
-// libstdc++ DLL lacks the std::__open_terminal/__write_to_terminal exports
-// its std::println needs (the vprint_unicode terminal path) — the link dies
-// with undefined references. The <format>+cstdio shim below is the same
-// surface; the real std::print comes back when the package is fixed.
 #if defined(__cpp_lib_print) && !defined(BPS_PRINT_TERMINAL_BROKEN)
 #include <print>
 #else
 #include <string_view>
-// MinGW 13's libstdc++ predates <print> (GCC 14 ships it); same surface via
-// <format> + cstdio until the toolchain moves up. The real std::print /
-// std::println are used unchanged once __cpp_lib_print is defined.
 namespace std {
 template <typename... Args>
 void print(string_view fmt, Args&&... args) {
@@ -94,10 +82,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // PACKAGING: the design libraries the installer ships, written from the CATALOGS rather than
-    // copied out of an operator's appdata. tools/make_installer.sh runs this before compiling, so what a
-    // fresh install starts with is exactly the shipped designs this build defines — including their
-    // font-free blocks and the catalog revision that lets an existing store migrate itself.
     if (!catalogsDir.empty()) {
         auto& fs = platform::PlatformAccessor::Get().Filesystem();
         struct Dump { const char* file; std::string json; };

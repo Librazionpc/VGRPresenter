@@ -1,12 +1,5 @@
 #pragma once
 
-// Display & Output Engine (Phase 7, docs/specs/18). The engine no longer thinks
-// in terms of "Monitor 1 / Monitor 2 / Projector" — it thinks in terms of
-// Outputs. A monitor is just one type of output; tomorrow an output could be
-// OBS, NDI, an LED wall, a web browser, a mobile app, a virtual display, a
-// recording, a screenshot, AI vision, or a remote stage display. This module
-// contains display logic only — never WinUI/HWND/XAML/dialogs.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/RenderTypes.hpp"
 
@@ -14,7 +7,6 @@
 #include <vector>
 
 namespace bps::display {
-
 // --- Scaling (docs/specs/18 §4) -------------------------------------------------
 enum class ScalingMode : int {
     Native = 0,       // 1:1 at native device resolution
@@ -156,5 +148,4 @@ struct DisplayProfile {
     std::vector<Output> outputs;
     std::vector<LayoutItem> layout; // optional visual layout
 };
-
 } // namespace bps::display

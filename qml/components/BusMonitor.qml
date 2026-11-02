@@ -1,26 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// ONE BUS, read the way the Media pane's Inputs tab reads it.
-//
-// The bus picker and the bus item on the canvas have to say the same thing as
-// the card in Media › Inputs — which source feeds the bus, whether its frames
-// are really arriving (so a live thumbnail is worth drawing), and the
-// three-state light the operator learned there:
-//
-//   green  "connected"  a source is routed in and its device is there
-//   amber  "offline"    routed, but the device it names is gone
-//          "starved"    routed and there, but the tap the app holds is handing
-//                       nothing over (same amber, different sentence)
-//   red    "none"       nothing routed into this bus at all
-//
-// The rules are copied from MediaLibraryPane's bus card because that card is
-// where the operator's model was worked out ("green connect, but the source is
-// not active yellow, not connected red"). Pulling the same answers through one
-// component is what keeps a future bus surface from disagreeing with the pane —
-// and nothing here STARTS work: the routing graph is a model read, reachability
-// is a cached-roster probe, and the delivery question reads the taps the app
-// already holds.
 QtObject {
     id: root
 
@@ -28,14 +8,6 @@ QtObject {
     property int busRow: -1
 
     // ---- SOURCE MODE ------------------------------------------------------
-    // A bus is not the only thing these questions are asked about. The "New bus"
-    // picker offers the SOURCES a bus could be built from, and a source card has
-    // to answer exactly what a bus card answers — is a feed actually flowing, is
-    // the device there, what colour is the light — before any bus exists to
-    // route it into. Set sourceKind ("video"|"audio") and sourceRow to the
-    // roster row and every answer below comes from that row instead of a bus;
-    // the defaults ("" / -1) leave the bus behaviour exactly as it was. One
-    // component, so a source and a bus can never disagree about a device.
     property string sourceKind: ""
     property int sourceRow: -1
     readonly property bool sourceMode: root.sourceKind !== "" && root.sourceRow >= 0
@@ -43,21 +15,8 @@ QtObject {
     // re-route or a roster change re-answers on its own.
     property int rev: 0
 
-    // The owner's own re-ask (the picker bumps it when it opens, so a picker
-    // built at boot cannot greet the operator with the answer it read before a
-    // single device was enumerated).
     property int tick: 0
 
-    // The models' own change signals. A QtObject has no default property, so
-    // these cannot be child items — they are Connections held by PROPERTIES,
-    // the shape DesignBackend/ShowSession already use. The property is what
-    // makes the teardown right: a Connections is a QObject owned by this
-    // monitor, so it drops its hooks when the monitor is destroyed. A bare
-    // `Model.signal.connect(handler)` in Component.onCompleted cannot: the
-    // models outlive every monitor, the connection keeps the monitor (and its
-    // status probe) alive, and a parked delegate then bumps a dead object for
-    // the rest of the session (QML logged "Cannot read property 'rev' of
-    // null" for exactly that, on every roster change).
     property Connections busConn: Connections {
         target: BusListModel
         function onDataChanged() { root.bump() }
@@ -79,23 +38,10 @@ QtObject {
         function onRowsRemoved() { root.bump() }
         function onModelReset() { root.bump() }
     }
-    // THE MISSING HALF OF THE PROBE: inputAvailable() may PING the machine
-    // when its cached roster cannot answer, and that answer arrives later
-    // through EngineBridge.devicesChanged. The Media pane's own points listen
-    // to it (its devicesRev), which is why a bus could read green there and red
-    // here at the same moment — this monitor read the cold "no" and nothing
-    // ever told it the roster had filled in.
     property Connections deviceConn: Connections {
         target: EngineBridge
         function onDevicesChanged() { root.bump() }
     }
-    // A WINDOW source that is closed is in no device sweep until it exists, and
-    // sweeps are rare for a source that stays missing (every one of them wakes the
-    // cameras). So while its light reads "offline" this monitor asks the bridge to
-    // re-list the open windows — windows only, cheap, off the interface thread — and
-    // the answer comes back through devicesChanged above, so the light and the
-    // picture follow the moment the window opens. Held by a property for the same
-    // teardown reason as the Connections: it stops when the monitor is destroyed.
     property Timer windowWatch: Timer {
         interval: 2000
         repeat: true
@@ -103,10 +49,6 @@ QtObject {
         onTriggered: EngineBridge.refreshWindow(root.videoLabel)
     }
 
-    // A signal handler takes the emit's arguments and ignores them; the revision
-    // is all this needs. The `root` guard stays as a belt beside the connections'
-    // own teardown: these run from a singleton's emit, and a signal already in
-    // flight when the destruction begins must not touch a torn-down object.
     function bump() { if (root) root.rev++ }
 
     readonly property var bus: {
@@ -133,9 +75,6 @@ QtObject {
     readonly property real busLevel: root.bus.level !== undefined ? root.bus.level : 0
     readonly property int busId: root.bus.id !== undefined ? root.bus.id : 0
 
-    // The FIRST routed video source — the one whose frames a bus thumbnail can
-    // show (the pane's card makes the same choice, so the two cannot pick
-    // different feeds for the same bus).
     readonly property int videoSourceIndex: {
         void root.rev
         if (root.sourceMode)
@@ -152,32 +91,19 @@ QtObject {
     readonly property string videoKind: root.videoSource.kind !== undefined
         ? String(root.videoSource.kind) : ""
 
-    // Is a thumbnail actually flowing? cardPreviews is the app's list of taps it
-    // is pulling frames for; asking it means this component never starts a tap
-    // of its own just to fill a picture.
     readonly property bool previewing: {
         void root.rev
         void LiveOutputService.inputRev
         return root.videoLabel !== "" && LiveOutputService.cardPreviews.indexOf(root.videoLabel) >= 0
     }
 
-    // Frames really arriving for this label — under EITHER hold: a card preview
-    // or an output take. inputProducing() is a plain call, so inputRev (the
-    // pump's own tick) is the tracked dependency.
     readonly property bool producing: {
         void root.rev
         void LiveOutputService.inputRev
         return root.videoLabel !== "" && LiveOutputService.inputProducing(root.videoLabel)
     }
-    // Is there a picture to draw? Bus mode keeps its long-standing answer (a
-    // CARD PREVIEW is what fills a thumbnail there); a source card also shows
-    // the feed when the source is simply on the output, because those frames are
-    // arriving anyway and hiding them would be the odd thing to do.
     readonly property bool showingFeed: root.sourceMode ? root.producing : root.previewing
 
-    // The URL the thumbnail Image binds to. The `?n=` nonce is what makes a
-    // still URL refresh (the image provider caches by URL); it rides inputRev,
-    // the same pump tick the pane's own preview uses.
     readonly property string previewSource: root.showingFeed
         ? "image://videopreview/" + encodeURIComponent(root.videoLabel) + "?n=" + LiveOutputService.inputRev
         : ""
@@ -187,24 +113,6 @@ QtObject {
         void root.rev
         void root.tick
         void LiveOutputService.inputRev
-        // A SOURCE is asked exactly what a bus card is asked, with the same
-        // probe behind the answer — the light must not say "ready" about a
-        // device the pane's own card already calls gone, and the pane's card is
-        // the reference the operator learned this light from:
-        //
-        //   red    "none"       the row names no device to capture at all
-        //   amber  "offline"    the device it names is not there (a closed
-        //                       window, an unplugged camera)
-        //   amber  "starved"    there, and a tap the app holds is delivering
-        //                       nothing
-        //   green  "connected"  there and usable
-        //
-        // The probe is the bridge's own (EngineBridge::inputSourceAlive): a
-        // cached union of the device sweeps when it can answer, and a real ping
-        // when it cannot. It is the same call, and the same cost, the bus cards
-        // in the picker right beside these ones already pay — the light's own
-        // one-line-per-source diagnostic lands in the engine log when it cannot
-        // answer, which is what makes a wrong light diagnosable.
         if (root.sourceMode) {
             const audio = root.sourceKind === "audio"
             const label = audio

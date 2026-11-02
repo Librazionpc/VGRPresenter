@@ -1,11 +1,5 @@
 #pragma once
 
-// PerformanceProfiler (docs/specs/16 §3): continuously measures CPU usage, GPU
-// usage, memory, VRAM, disk, frame time, import speed, cache hit ratio and
-// video decode latency. Rolling-window averages; the AdaptiveRuntime heartbeat
-// calls Record* from subsystems (or computes from the PAL Snapshot) and the
-// RuntimeOptimizer reads Snapshot() to decide.
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -13,7 +7,6 @@
 #include <mutex>
 
 namespace bps::adaptive {
-
 struct ProfilerSample {
     double cpuPct = 0.0;
     double gpuPct = 0.0;
@@ -61,5 +54,4 @@ private:
     uint64_t ramTotal_ = 0, vramTotal_ = 0;
     std::atomic<size_t> samples_{0};
 };
-
 } // namespace bps::adaptive

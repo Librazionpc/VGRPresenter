@@ -7,7 +7,6 @@
 #include <iterator>
 
 namespace bps::presentation {
-
 CompositorState& CompositorState::Instance() {
     static CompositorState instance;
     return instance;
@@ -29,12 +28,6 @@ CompositorState::TakenInput CompositorState::GetTakenInput() const {
     return takenInput_;
 }
 
-// ONE LINE PER TRANSITION, never per frame — a video source hands a frame in at
-// its own frame rate, and a per-frame log would bury engine.log. This is the
-// ENGINE half of the "media hand-off" diagnostic (the UI half is in
-// LiveOutputService::pushMediaFrameToCompositor): a media layer that renders
-// black is either a frame the engine never received or one it received and
-// mis-drew, and these two lines tell the two apart in one run.
 void CompositorState::SetMediaFrame(MediaFrame frame) {
     const bool incomingEmpty = frame.empty();
     const uint32_t width = frame.width;
@@ -62,9 +55,6 @@ void CompositorState::SetMediaFit(std::string fit) {
     // (the next SetMediaFrame carries its own from the take).
     if (mediaFrame_.empty()) return;
     mediaFrame_.fit = std::move(fit);
-    // A fit change REPLACES the picture's layout without new pixels, and a
-    // consumer that skips an unchanged frame (see GetMediaSeq) must not skip
-    // this one: the numbers say something moved.
     ++mediaSeq_;
 }
 
@@ -102,11 +92,6 @@ bool CompositorState::MediaFrameIsTransparent() const {
 }
 
 // ---- Bus video planes ---------------------------------------------------
-// One line per CHANGE of the feed list (never per frame): which buses the
-// on-air composition asked for, and what feeds them. A bus block that shows an
-// empty window on NDI/HDMI is answered from here — either the list was empty
-// (the block never reached the compositor) or the bus is listed and its
-// device is named (the tap, not the mirror, is what is quiet).
 void CompositorState::SetBusFeeds(std::vector<BusFeed> feeds) {
     auto describe = [](const std::vector<BusFeed>& list) {
         std::string out;
@@ -183,11 +168,6 @@ CompositorState::MediaFrame CompositorState::GetBusFrame(int busId) const {
     return it == busFrames_.end() ? MediaFrame{} : it->second;
 }
 
-// The cheap half of GetBusFrame: no pixel copy, so a composition can ask "did
-// this bus push anything since I last drew it?" at its own rate (see
-// SceneBuilder::LayerFrameUnchanged). A bus dropped from the feed list lost its
-// counter with its frame (see SetBusFeeds), which is what keeps a re-added bus
-// from being mistaken for the one that left.
 uint64_t CompositorState::GetBusFrameSeq(int busId) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = busFrameSeqs_.find(busId);
@@ -220,5 +200,4 @@ bool CompositorState::HasActiveOverlays() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return !activeOverlays_.empty();
 }
-
 } // namespace bps::presentation

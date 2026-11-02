@@ -1,9 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// One row in the settings nav rail. Selected state = tinted pill + left accent
-// bar + tinted icon chip + accent label/icon, matching the pattern used across
-// every Settings screen.
 Item {
     id: root
 
@@ -72,10 +69,6 @@ Item {
 
         Text {
             anchors.verticalCenter: parent.verticalCenter
-            // Bounded + elided so a long label (this row's own width is the
-            // rail's, not this component's unused implicitWidth — see
-            // NavRail's `width: parent.width` override) can never overflow
-            // the pill the way "Appearance & Actions" did unbounded.
             width: root.width - 14 - 28 - Theme.space3 - Theme.space2
             text: root.label
             elide: Text.ElideRight

@@ -2,14 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "../../components"
 
-// The VGRPresenter logo button plus the File / Edit / View / Help menu bar,
-// each with its own dropdown panel. Extracted out of VGRPresenterMainScreen.qml
-// so the interactive menu behavior lives in one small, focused file instead of
-// being scattered through the generated screen.
-//
-// Expects to be sized to fill the whole window (anchors.fill: parent) so the
-// click-outside-to-close catcher covers the full screen and the dropdown
-// panels land at their intended screen coordinates.
 Item {
     id: root
 
@@ -24,18 +16,8 @@ Item {
         openMenu = ""
     }
 
-    // Emitted for the two menu items that open the Settings dialog (logo
-    // menu's "Settings", Edit menu's "Preferences…") — Main.qml owns the
-    // dialog and shows it on this signal. `section` is a ModalShell nav key
-    // ("general", "smart", …) — the plain click and Preferences… both still
-    // just land on "general"; the Settings row's hover flyout (below) is
-    // the only thing that ever passes a specific one.
     signal settingsRequested(string section)
 
-    // Menu actions are presentation-only for now (the underlying commands
-    // don't exist yet) — except Settings/Preferences, which are live, and
-    // "New show" (both menus list it), which funnels into the same deck
-    // reset as the Show screen's New show buttons.
     signal newShowRequested()
     // Show file actions — the engine reads/writes the .vgr (see ShowSession.qml).
     signal openShowRequested()
@@ -44,9 +26,6 @@ Item {
     signal quickSearchRequested()
     // File > Import: the Import screen (every file format the engine reads).
     signal importRequested()
-    // File > Record…: toggles a REAL RecordingEngine session on the program
-    // bus (the settings screen's transport start/stop, driven from the
-    // menu; the engine's honest refusal toasts either way).
     signal recordToggled()
     function activateItem(menuName, label) {
         closeMenu()
@@ -82,12 +61,6 @@ Item {
         { label: "Exit" }
     ]
 
-    // Same seven sections ModalShell's own nav rail lists (kept in sync by
-    // hand — there's no shared source both a QML nav list and this menu's
-    // plain {label,key} shape can pull from without one depending on the
-    // other's internal structure). Hovering "Settings" flies this out
-    // instead of making every settings section a two-step trip through the
-    // dialog's own nav rail.
     readonly property var settingsSubmenuItems: [
         { label: "General", key: "general" },
         { label: "Smart Config", key: "smart" },
@@ -99,19 +72,6 @@ Item {
         { label: "Recording", key: "recording" },
         { label: "Plugins", key: "plugins" }
     ]
-    // Open while EITHER the "Settings" row or the flyout itself is
-    // hovered — OR the flyout is PINNED by clicking the "Settings" row
-    // (see onItemActivated below). Hover alone was too fragile to rely on:
-    // the row and the flyout are two separate, non-overlapping items, so
-    // the cursor crosses a real gap moving from one to the other — a
-    // diagonal move (the natural way to reach a lower item) samples a
-    // mouse position outside BOTH areas for at least a frame. That flips
-    // both flags false, which used to hide the flyout immediately; once
-    // hidden, its rows stop receiving hover events at all, so it could
-    // never recover even once the cursor actually arrived.
-    // settingsFlyoutVisible below is the same signal with a short grace
-    // period on the way to false — and the click-pin is the deterministic
-    // path that doesn't depend on hover timing at all.
     property bool settingsRowHovered: false
     onSettingsRowHoveredChanged: recomputeSettingsFlyout()
     property bool settingsFlyoutHovered: false
@@ -119,39 +79,7 @@ Item {
     // The row item from the last "Settings" hover — lets the click-pin
     // path position the flyout without re-deriving the row's geometry.
     property var lastSettingsRow: null
-    // Open = GEOMETRY truth, not event truth. The old relay (Settings row
-    // exit → 300 ms grace timer → flyout row enter) could miss the enter —
-    // this build's hover events are exactly what PositionHoverArea exists to
-    // avoid — and the timer then hid the flyout while the cursor sat on
-    // "General" (the reported disappearance).
-    //
-    // This is deliberately NOT a binding. The first version WAS one — a
-    // readonly property reading AppCursor.hovered(logoPanel) and
-    // hovered(settingsFlyout) — and Qt flagged a binding loop on it: the
-    // changed-handler writes settingsFlyoutVisible (→ the flyout's visible,
-    // → its layout) while the binding itself reads that geometry, so the
-    // write could re-enter the read. The imperative form has no re-entrancy:
-    // the value is written once per trigger (flag change, menu change,
-    // pointer move), never during its own read. settingsFlyoutVisible gates
-    // the flyout term so a hidden panel's geometry is never even read.
     property bool settingsFlyoutOpen: false
-    // Keep-open regions are ONLY the Settings row (its relay flag) and the
-    // flyout itself — the logo PANEL is deliberately NOT one: the cursor
-    // sits over that panel the whole time the logo menu is open (right
-    // after clicking the logo, over "New show", …), so counting it kept
-    // the flyout popped open over the menu without Settings ever being
-    // touched (the reported overlay bug).
-    // RE-ENTRANCY GUARD. The remaining "Binding loop detected for property
-    // settingsFlyoutOpen" was not an accidental binding: showing the flyout
-    // (settingsFlyoutVisible, written from the changed-handler below) puts it
-    // under a pointer that has not moved, and DropdownPanel delivers that row
-    // enter (itemHovered → settingsFlyoutHovered → recomputeSettingsFlyout)
-    // while the previous recompute is still writing settingsFlyoutOpen. Qt
-    // reports the nested write as a loop on that property. The nested call is
-    // COALESCED rather than dropped — its inputs are the newer truth (the
-    // flyout's own geometry can only be read once it is visible) — so the
-    // outer call re-runs its computation and settles; the iteration cap means
-    // a source that fires on every iteration cannot spin.
     property bool flyoutRecomputing: false
     property bool flyoutRecomputeQueued: false
     function recomputeSettingsFlyout() {
@@ -171,17 +99,11 @@ Item {
         } while (flyoutRecomputeQueued && ++settle < 8)
         flyoutRecomputing = false
     }
-    // Clicking "Settings" pins the flyout open (click again to unpin) —
-    // so the section list is selectable at leisure, not in a race against
-    // the hover grace timer. Hover still previews it.
     property bool settingsPinned: false
     onSettingsPinnedChanged: recomputeSettingsFlyout()
 
     property bool settingsFlyoutVisible: false
     onSettingsFlyoutOpenChanged: {
-        // The implicit handler value, not `root.settingsFlyoutOpen`: reading the
-        // property this handler is reacting to, inside the write that triggered
-        // it, is the other half of what Qt flagged.
         if (settingsFlyoutOpen) {
             settingsCloseTimer.stop()
             root.settingsFlyoutVisible = true
@@ -189,12 +111,6 @@ Item {
             settingsCloseTimer.restart()
         }
     }
-    // The whole menu bar closing (outside click, an item activated) drops
-    // the flyout instantly AND clears every hover/pin flag: hiding a panel
-    // swallows the hover-exit events its rows would have delivered (the
-    // same invisible-item trap the cursor stack had), so a flag left true
-    // here would instantly re-show the flyout — unpositioned — the next
-    // time the logo menu opened.
     onOpenMenuChanged: {
         if (root.openMenu !== "logo") {
             settingsCloseTimer.stop()
@@ -203,9 +119,6 @@ Item {
             root.settingsRowHovered = false
             root.settingsFlyoutHovered = false
         }
-        // Re-derive on EVERY menu change, including "logo" opening — the
-        // flags above are only reset when leaving, and opening must start
-        // from a freshly computed (closed) flyout state.
         root.recomputeSettingsFlyout()
     }
     Timer {
@@ -220,10 +133,6 @@ Item {
         function onPointerMoved() { root.recomputeSettingsFlyout() }
     }
 
-    // Positions the flyout just to the right of the hovered row, in THIS
-    // item's coordinate space (where settingsFlyout.x/y actually apply) —
-    // plain assignment, not a binding, so it only moves on hover-enter
-    // rather than fighting `visible`'s own binding below.
     function positionSettingsFlyout(rowItem) {
         const p = rowItem.mapToItem(root, rowItem.width, 0)
         settingsFlyout.x = p.x
@@ -291,10 +200,6 @@ Item {
         { label: "About VGRPresenter", trailing: qsTr("v%1").arg(SettingsService.appVersion) }
     ]
 
-    // Swallows the next click anywhere on screen to close an open menu,
-    // without intercepting input at all when no menu is open. Click-only:
-    // hover delivery is broken app-wide (KNOWN_ISSUES.md) and this catcher
-    // needs no hover state of its own.
     MouseArea {
         id: outsideCatcher
         anchors.fill: parent
@@ -307,9 +212,6 @@ Item {
         id: header_left
 
         x: 16
-        // Top-anchored, not vertically centered: the logo + File/Edit/View/
-        // Help row belongs at the window's top edge (standard menu-bar
-        // position — user call), not floating mid-strip beside the tabs.
         y: 4
 
         height: 23
@@ -326,11 +228,6 @@ Item {
             height: parent.height
 
             readonly property bool isOpen: root.openMenu === "logo"
-            // Position truth, not containsMouse — hover-exit never delivers
-            // to MouseAreas in this build (KNOWN_ISSUES.md), so a containsMouse
-            // wash would stick forever. PositionHoverArea derives hover from
-            // the AppCursorCatcher's pointer-position stream, which exits
-            // flawlessly the moment the pointer moves off.
             readonly property bool isHover: logoHover.hovered
 
             Rectangle {
@@ -342,9 +239,6 @@ Item {
                 color: logoButton.isOpen || logoButton.isHover
                        ? Qt.alpha(Theme.accent, 0.1)
                        : "transparent"
-                // Soft hover fade — 100 ms read as a snap; 180 ms ease-out
-                // reads as a breathe. Same treatment on the File/Edit/View/
-                // Help pills below.
                 Behavior on color { ColorAnimation { duration: Theme.hoverFade; easing.type: Theme.hoverEasing } }
             }
 
@@ -352,11 +246,6 @@ Item {
                 id: logoText
                 height: 23
                 spacing: 0
-                // The brand two-tone, matching the boot splash's lockup: VGR
-                // (primary text) + Presenter (secondary grey) — not the old
-                // single purple wordmark. Both read the Theme singleton, so
-                // the wordmark stays legible when Light turns the header pale
-                // (a hardcoded near-white "VGR" would vanish on it).
                 Text {
                     height: 23
                     color: Theme.textPrimary
@@ -381,12 +270,6 @@ Item {
                     text: qsTr("Presenter")
                     textFormat: Text.PlainText
                 }
-                // Was "Outfit" - a Google Font this app never bundles (same gap "Inter" had everywhere else), so it silently fell
-                // back to a plain system font and never looked like the distinctive wordmark it was meant to be. Bahnschrift is
-                // Microsoft's own font (every Windows 10/11 install has it), with the geometric, slightly condensed look a
-                // logotype wants, so it renders as intended instead of gambling on a font that isn't there.
-                // Both texts are vertical-center aligned in their 23 px boxes (see above), which is what keeps the two-tone
-                // wordmark level with the File/Edit/View/Help row beside it.
             }
 
             PositionHoverArea {
@@ -468,11 +351,6 @@ Item {
 
     DropdownPanel {
         id: logoPanel
-        // Directly under the logo, FLUSH with its hover pill (the pill is
-        // the control's rect expanded 4px each way, so the panel's top edge
-        // = logo bottom + 4). y was 48 — the OLD single-row header height —
-        // which left a 16 px gap with the screen behind peeking through;
-        // then 36, still a 5 px float above the pill.
         x: 16
         y: header_left.y + logoButton.y + logoButton.height + 4
         fitContentWidth: true
@@ -481,10 +359,6 @@ Item {
         headerSubtitle: qsTr("v%1").arg(SettingsService.appVersion)
         model: root.logoMenuItems
         onItemActivated: (label) => {
-            // "Settings" doesn't activate — it PINS the section-list flyout
-            // open (hover still previews it). Activating straight into the
-            // dialog bypassed the list entirely, so a click could never
-            // reach e.g. Outputs or Styles without hover gymnastics first.
             if (label === "Settings") {
                 if (root.lastSettingsRow)
                     root.positionSettingsFlyout(root.lastSettingsRow)
@@ -504,9 +378,6 @@ Item {
         }
     }
 
-    // Settings' hover flyout — a second, independent DropdownPanel (not
-    // nested inside the logo menu's) so it isn't clipped by that panel's
-    // own `clip: true`; positioned imperatively via positionSettingsFlyout.
     DropdownPanel {
         id: settingsFlyout
         // Self-test handle: the scenario reads this panel's own `visible` as
@@ -523,19 +394,11 @@ Item {
         }
         onItemHovered: (label, hovering) => root.settingsFlyoutHovered = hovering
     }
-    // Keyboard affordance matching the pinned flyout: Escape (with the
-    // logo menu open) unpins first, closes the menu only on a second
-    // press — so pinning never feels like a trap.
     Shortcut {
         sequence: "Esc"
         enabled: root.openMenu === "logo" && root.settingsPinned
         onActivated: root.settingsPinned = false
     }
-    // Each dropdown's left edge sits under its own menu label — bound to
-    // the label's real position, because the old literals (154/186/220/260)
-    // predate the current logo width and landed left of File/Edit/View/Help.
-    // Top edge is FLUSH with that label's hover pill (label bottom + the
-    // pill's 4 px overhang) — zero gap, like a native menu on its item.
     DropdownPanel {
         x: header_left.x + sys_menu.x + file.x
         y: header_left.y + sys_menu.y + file.y + file.height + 4

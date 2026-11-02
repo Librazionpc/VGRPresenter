@@ -11,7 +11,6 @@
 #include <vector>
 
 namespace bps::modules {
-
 struct Song {
     std::string id;
     std::string title;
@@ -19,10 +18,6 @@ struct Song {
     std::vector<std::string> verses;   // 0-based lyric blocks
 };
 
-// Songs feature module (docs/specs/08): a lyric library with verse navigation.
-// Publishes `songs.selected` and `songs.verse_changed`; lyric output systems
-// (display, remote, lower-third) subscribe independently — the core has no
-// knowledge of songs.
 class SongsModule final : public IModule {
 public:
     static std::shared_ptr<SongsModule> Create();
@@ -58,5 +53,4 @@ private:
     std::atomic<int> currentVerse_{0};
     std::atomic<bool> started_{false};
 };
-
 } // namespace bps::modules

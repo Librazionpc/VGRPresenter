@@ -11,12 +11,7 @@
 #endif
 
 namespace bps::adaptive {
-
 void HardwareProfiler::Refresh() {
-    // Gather from the PAL FIRST, with no lock held. Info/Sample/Monitor/Power/
-    // Environment are OS calls — a monitor enumeration can block on a sleeping
-    // panel or a hung display driver — and mutex_ is shared with every reader
-    // (Info/CoreCount/TotalRamBytes), so it must never be held across them.
     HardwareInfo info;
     auto& platform = platform::PlatformAccessor::Get();
     auto sys = platform.Info();
@@ -156,5 +151,4 @@ std::vector<Capability> CapabilityDetector::Supported() const {
     }
     return out;
 }
-
 } // namespace bps::adaptive

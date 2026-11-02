@@ -13,7 +13,6 @@
 #include <format>
 
 namespace bps::media {
-
 namespace {
 namespace textmatch = bps::search::textmatch;
 
@@ -80,10 +79,6 @@ bool NaturalLess(const std::string& a, const std::string& b) {
     return (a.size() - i) < (b.size() - j);
 }
 
-// The item list's order (the one Scan() stores and Items() hands out): natural name
-// order, then the path as the tie-breaker. Shared so an item that arrives by a MOVE
-// takes its place in the destination folder's order instead of landing at the end of
-// the grid.
 bool ItemLess(const LibraryItem& a, const LibraryItem& b) {
     if (NaturalLess(a.name, b.name)) return true;
     if (NaturalLess(b.name, a.name)) return false;
@@ -108,7 +103,6 @@ std::vector<std::string> Components(const std::string& path) {
     if (!part.empty()) out.push_back(std::move(part));
     return out;
 }
-
 } // namespace
 
 std::string MediaPathHash(std::string_view path) {
@@ -127,9 +121,6 @@ std::optional<MediaKind> MediaKindOf(std::string_view path) {
     const size_t dot = path.find_last_of('.');
     if (dot == std::string_view::npos) return std::nullopt;
     const std::string ext = Lower(path.substr(dot + 1));
-    // What is listed is what the library shows; whether a picture can be made of it depends on the
-    // decoders the machine has (a file nothing can decode still appears, with a placeholder tile).
-    // Audio files are listed too (their "picture" is their cover art, when they have one).
     for (const char* e : {"png", "jpg", "jpeg", "jpe", "jfif", "bmp", "dib", "gif", "webp", "tif", "tiff",
                           "ico", "heic", "heif", "avif", "svg", "jp2", "tga"})
         if (ext == e) return MediaKind::Image;
@@ -146,18 +137,12 @@ MediaLibrary::MediaLibrary(std::string storageFile) : storageFile_(std::move(sto
     const size_t cut = storageFile_.find_last_of("/\\");
     const std::string dir = cut == std::string::npos ? std::string() : storageFile_.substr(0, cut + 1);
     indexFile_ = dir + "media-index.json";
-    // The per-file fills live in their OWN document: the index is rebuilt from
-    // the disk by every scan (and is the big one), while a fit is a choice the
-    // operator made and must survive a rescan untouched.
     fitsFile_ = dir + "media-fits.json";
 }
 
 // The PAL half: resolve the path (a filesystem call, so callers run this with
 // NO lock held).
 std::string MediaLibrary::CanonicalKey(std::string_view path) const {
-    // An empty query matches nothing. Without this guard the lookup below
-    // would compare an empty key against every stored folder — and any folder
-    // whose normalised form is also empty would be returned as a match.
     if (path.empty()) return {};
     auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(path);
     return Norm(absolute.ok() ? absolute.value() : std::string(path));
@@ -174,10 +159,6 @@ std::string MediaLibrary::MatchKey(const std::string& key) const {
 Result<void> MediaLibrary::Load() {
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
 
-    // THE PER-FILE FILLS, read first and OUTSIDE every lock (a PAL read): this
-    // document is independent of the folder list and of the index, and a damaged
-    // one is simply ignored — the files keep their output's default, which is
-    // exactly "nobody chose one".
     std::map<std::string, std::string, std::less<>> storedFits;
     if (fs.Exists(fitsFile_)) {
         if (auto fitsText = fs.ReadText(fitsFile_); fitsText.ok()) {
@@ -203,16 +184,10 @@ Result<void> MediaLibrary::Load() {
     auto text = fs.ReadText(storageFile_);
     if (!text.ok()) return text.error();
     auto parsed = json::Parse(text.value());
-    // A parse failure AND a document with no 'folders' array are the same loss:
-    // nothing loadable is in there, and reading it as "no folders" then saving
-    // over it is how the bytes disappear.
     const std::string problem =
         parsed.ok() ? recovery::DocumentShapeProblem(parsed.value(), "folders", json::Value::Type::Array)
                     : parsed.error().message;
     if (!problem.empty()) {
-        // SELF-HEALING: the folder list is an internal document; set the damaged
-        // file aside as evidence and load no folders, so the Media pane opens on
-        // an empty (re-scannable) library instead of failing every read.
         (void)recovery::SetAsideDamagedDocument(storageFile_, kModule, problem);
         std::lock_guard<std::mutex> lock(mutex_);
         order_.clear();
@@ -235,11 +210,6 @@ Result<void> MediaLibrary::Load() {
                 if (!known) loadedOrder.push_back(path);
             }
 
-    // The remembered index (what was in each folder last time). It is an
-    // internal document like the folder list above, so a damaged one is set
-    // aside as evidence and the library comes up unscanned — the first Scan()
-    // of each folder rebuilds it — instead of the bytes being overwritten by a
-    // save the operator never got told about.
     if (fs.Exists(indexFile_)) {
         auto indexText = fs.ReadText(indexFile_);
         if (indexText.ok()) {
@@ -324,9 +294,6 @@ void MediaLibrary::SaveFits(const std::string& text) const {
 }
 
 void MediaLibrary::SaveIndex(const std::string& text) const {
-    // ATOMIC: the media index is the only record of the user's folders and
-    // metadata; a truncated one loses the whole library view. Best-effort by
-    // signature, but the swap still guarantees a readable file.
     (void)platform::PlatformAccessor::Get().Filesystem().WriteAtomic(indexFile_, text);
 }
 
@@ -340,9 +307,6 @@ std::string MediaLibrary::BuildFoldersJsonLocked() const {
 
 Result<void> MediaLibrary::CommitFolders(const std::string& json) const {
     if (storageFile_.empty() || json.empty()) return {};
-    // ATOMIC: same document class as the index above (folder order, metadata).
-    // PAL: callers call this AFTER releasing mutex_ (it used to be Save(), called
-    // from inside AddFolder's and RemoveFolder's locked scopes).
     return platform::PlatformAccessor::Get().Filesystem().WriteAtomic(storageFile_, json);
 }
 
@@ -408,9 +372,6 @@ std::vector<LibraryFolder> MediaLibrary::Folders() const {
 }
 
 Result<size_t> MediaLibrary::Scan(std::string_view path) {
-    // Empty path: CanonicalKey()/MatchKey() answer {} for it, which the check
-    // below reports as "not in the library". Stated explicitly so the intent is
-    // readable — an empty folder name is not a library folder.
     if (path.empty())
         return Error::Make(Err::NotFound, kModule, "that folder is not in the library");
     const std::string key = CanonicalKey(path);   // PAL, resolved before any lock
@@ -463,10 +424,6 @@ Result<size_t> MediaLibrary::Scan(std::string_view path) {
 // ---------------------------------------------------------------------------
 // The FILES themselves: rename, delete, move
 // ---------------------------------------------------------------------------
-// One shape for all three, and each half is where it is on purpose: the PAL
-// (resolve the path, rename/delete/move the file, read the new file's metadata)
-// runs with NO lock held, and only the index re-key does — the same split this
-// module's folder writes already use (BuildFoldersJsonLocked/CommitFolders).
 bool MediaLibrary::FindItemLocked(const std::string& key, std::string& folderOut,
                                   size_t& indexOut) const {
     if (key.empty()) return false;
@@ -486,10 +443,6 @@ bool MediaLibrary::FindItemLocked(const std::string& key, std::string& folderOut
 
 std::string MediaLibrary::ApplyItemChangeLocked(const std::string& oldKey,
                                                 const LibraryItem* replacement) {
-    // THE FILL FOLLOWS THE FILE. Rename and move re-key the item, and the fit
-    // is about the FILE, not about where it sat: leaving it on the old key would
-    // hand it to whatever is written at that path next. A permanent Remove drops
-    // it (replacement == nullptr) — the file it described is gone.
     if (const auto held = fits_.find(oldKey); held != fits_.end()) {
         const std::string fit = held->second;
         fits_.erase(held);
@@ -506,10 +459,6 @@ std::string MediaLibrary::ApplyItemChangeLocked(const std::string& oldKey,
             } else if (Norm(replacement->folder) == Norm(folder)) {
                 it->second[index] = *replacement;
             } else {
-                // A MOVE into another library folder re-FILES the item: the list it
-                // lives in is keyed by that folder, so leaving it in the old one
-                // would keep the file showing where it no longer is (and hide it
-                // where it now is).
                 it->second.erase(it->second.begin() + static_cast<std::ptrdiff_t>(index));
                 auto& target = items_[replacement->folder];
                 target.push_back(*replacement);
@@ -602,9 +551,6 @@ Result<void> MediaLibrary::RemoveItem(std::string_view path) {
             return Error::Make(Err::NotFound, kModule, "that file is not in the library");
         current = items_.at(folder)[index];
     }
-    // The FILE goes; its cached pictures stay in the cache. They are keyed by the
-    // file's path hash, so they are reused if the same file is put back, and the
-    // cache is not the library's to clean.
     if (auto removed = fs.Remove(current.path); !removed.ok())
         return removed.error();
     std::string index;
@@ -620,13 +566,6 @@ Result<void> MediaLibrary::RemoveItem(std::string_view path) {
 // Undoable delete: the file goes into the library's own trash
 // ---------------------------------------------------------------------------
 namespace {
-
-// A DELETE MUST SURVIVE LEAVING THE DRIVE. TrashItem puts the file in the
-// library's trash, which lives in the app's data folder — and a rename cannot
-// cross volumes (EXDEV), which is exactly the case of media kept on a second
-// drive or a USB stick. So: rename, and when that fails, copy then delete. The
-// copy path costs the file's size once on the way out and once on the way back,
-// on a worker thread, and only ever for a delete the operator asked for.
 Result<void> MoveFileAcross(platform::IFilesystem& fs, const std::string& from,
                             const std::string& to) {
     if (auto moved = fs.Move(from, to); moved.ok())
@@ -640,9 +579,6 @@ Result<void> MoveFileAcross(platform::IFilesystem& fs, const std::string& from,
     return {};
 }
 
-// How long a deleted file waits in the trash before the sweep removes it. The
-// undo that makes the trash worth having lives for seconds; a week covers "I
-// deleted this last night" without letting a dead library hold gigabytes.
 constexpr int64_t kTrashRetentionMs = 7LL * 24 * 60 * 60 * 1000;
 
 int64_t NowMs() {
@@ -650,14 +586,9 @@ int64_t NowMs() {
                std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
-
 } // namespace
 
 std::string MediaLibrary::TrashDir() const {
-    // Beside the library's own documents (media-folders.json, the index), and
-    // deliberately NOT under any library folder: a scan walks folders
-    // recursively, so trash inside one would list the file the operator just
-    // deleted right back into the grid.
     const std::string parent = ParentDir(storageFile_);
     return parent.empty() ? std::string("media-trash")
                           : platform::PlatformAccessor::Get().Filesystem().Join(parent, "media-trash");
@@ -745,9 +676,6 @@ Result<std::string> MediaLibrary::RestoreTrashedItem(std::string_view token) {
                                "that deletion can no longer be undone");
         entry = it->second;
     }
-    // THE WAY HAS TO BE CLEAR: a photo that came back while this one was deleted
-    // must not be overwritten by the restore — the trashed copy stays where it is
-    // and the same Undo works again once the name is free.
     if (fs.Exists(entry.item.path))
         return Error::Make(Err::AlreadyExists, kModule,
                            std::format("'{}' is back in that folder — the deleted copy stays in the trash",
@@ -799,10 +727,6 @@ Result<void> MediaLibrary::MoveItem(std::string_view path, std::string_view targ
         root = ContainingFolderLocked(targetKey);
         if (root.empty())
             return Error::Make(Err::InvalidArgument, kModule, "that folder is not in the library");
-        // A target that IS one of the library's own folders takes the library's own
-        // spelling: a move must never mint a second spelling of a folder the
-        // library already knows ("C:\\media" and "c:/media" would otherwise both
-        // name a real folder and only one of them would match later lookups).
         knownFolder = !MatchKey(targetKey).empty();
         std::string folder;
         size_t index = 0;
@@ -922,9 +846,6 @@ std::string MediaLibrary::ItemFit(std::string_view path) const {
 }
 
 std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
-    // The PAL path resolution runs BEFORE the library lock: a filesystem call
-    // must never sit under mutex_ (the lock-scope guard flags it, and a slow
-    // volume would otherwise stall every other library reader).
     std::string absoluteFolder;
     if (!folder.empty()) {
         auto absolute = platform::PlatformAccessor::Get().Filesystem().Absolute(folder);
@@ -934,9 +855,6 @@ std::vector<LibraryItem> MediaLibrary::Items(std::string_view folder) const {
 
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<LibraryItem> out;
-    // THE FILE'S OWN FILL rides every item handed out (see LibraryItem::fit):
-    // the store keeps it keyed by path because a scan rebuilds the items from
-    // the disk, so it is merged here, once, for every caller.
     auto withFits = [this](std::vector<LibraryItem>& list) -> std::vector<LibraryItem> {
         for (LibraryItem& item : list) {
             const auto it = fits_.find(Norm(item.path));
@@ -969,12 +887,6 @@ std::vector<LibraryItem> MediaLibrary::Search(std::string_view text, std::string
     std::vector<LibraryItem> pool = Items(folder);
     if (words.empty()) return pool;
 
-    // Every item name is a vocabulary word: "gideons_battle.mp4" carries
-    // "gideons", "battle". Typos correct ("batle" -> "battle") against it —
-    // the same rules The Table, songs and Bible search get from the shared
-    // engine. A raw word stays primary: an incomplete word ("gide") already
-    // substring-matches everything its completion would, so completions never
-    // NARROW results.
     std::vector<std::string> vocabulary;
     vocabulary.reserve(pool.size() * 2);
     for (const LibraryItem& it : pool)
@@ -1001,12 +913,6 @@ std::vector<LibraryItem> MediaLibrary::Search(std::string_view text, std::string
             if (!any) { all = false; break; }
         }
         if (!all) continue;
-        // WHERE the first word was found, among the alternatives that matched. The
-        // raw word is not necessarily one of them: a query that only landed through
-        // a typo CORRECTION ("img10" -> "img2") is in no name at all, and asking
-        // for its position gave npos — which then read the name at npos - 1 and
-        // aborted the app. A corrected-only match is rank 2 by definition (a fuzzy
-        // hit, not the word the operator typed).
         size_t at = std::string::npos;
         for (const std::string& w : lookFor.front()) {
             const size_t found = name.find(w);
@@ -1031,5 +937,4 @@ size_t MediaLibrary::Count() const {
     for (const auto& [folder, list] : items_) n += list.size();
     return n;
 }
-
 } // namespace bps::media

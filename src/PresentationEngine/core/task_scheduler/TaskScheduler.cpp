@@ -12,7 +12,6 @@
 #endif
 
 namespace bps {
-
 TaskScheduler& TaskScheduler::Instance() {
     static TaskScheduler instance;
     return instance;
@@ -23,15 +22,6 @@ Result<void> TaskScheduler::Initialize() {
     running_.store(true);
     shuttingDown_.store(false);
 #if defined(_WIN32)
-    // Windows' default timer resolution is ~15.6ms (64Hz) — every
-    // condition-variable timed-wait/sleep in the timer loop below is
-    // quantized to that, not the millisecond precision the API promises.
-    // For most engine timers this just adds slop; it broke fast-cadence
-    // consumers outright (a 10ms-period animation over a 45ms duration
-    // could fire only 2 ticks instead of the promised >=4, since ticks
-    // land ~15-16ms apart instead of ~10ms). timeBeginPeriod(1) raises the
-    // whole PROCESS to 1ms resolution for as long as the scheduler runs;
-    // matching timeEndPeriod(1) in Shutdown() releases it.
     timeBeginPeriod(1);
 #endif
     thread_ = std::thread(&TaskScheduler::TimerLoop, this);
@@ -42,10 +32,6 @@ Result<void> TaskScheduler::Shutdown() {
     if (!running_.load()) return Ok();
     shuttingDown_.store(true);
     {
-        // Drop all pending tasks: recurring tasks are re-armed on every tick,
-        // so a live recurring task (e.g. the platform OS-event watcher) would
-        // otherwise keep the timer loop firing forever and this join would hang
-        // (07 §Stop tasks).
         std::lock_guard<std::mutex> lock(mutex_);
         timeline_.clear();
         byId_.clear();
@@ -383,10 +369,6 @@ void TaskScheduler::TimerLoop() {
 
             if (shuttingDown_.load() && timeline_.empty() && due.empty()) break;
 
-            // Re-arm recurring/cron/heartbeat/countdown/animation tasks; a
-            // time-budgeted task (countdown/animation) whose budget is spent is
-            // marked expired (its `done` runs at dispatch). Sequences keep
-            // firing until their own final step cancels them.
             for (auto& t : due) {
                 if (t->kind != TaskKind::OneShot && t->paused.load() == 0) {
                     if ((t->kind == TaskKind::Countdown || t->kind == TaskKind::Animation) &&
@@ -394,18 +376,6 @@ void TaskScheduler::TimerLoop() {
                         t->expired = true;
                         continue;
                     }
-                    // Anchor to the PREVIOUS deadline (t->next, still holding
-                    // its just-fired value here), not `now` — computing from
-                    // `now` adds however long this cycle's processing/
-                    // dispatch/lock-contention took to every single period,
-                    // so the effective cadence silently drifts slower than
-                    // requested. Small and easy to miss on a scheduler with
-                    // low wake-latency, but real: a 10ms-period animation
-                    // over a 45ms window intermittently produced only 2
-                    // ticks instead of >=4 under real thread-pool dispatch
-                    // overhead. t->next and `now` are always within one
-                    // loop iteration of each other here, so this changes
-                    // nothing about which wall-clock minute Cron aligns to.
                     t->next = ComputeNext(*t, t->next);
                     timeline_.insert(t);
                 }
@@ -461,5 +431,4 @@ Metrics TaskScheduler::MetricsSnapshot() const {
     m.health = GetHealth().state;
     return m;
 }
-
 } // namespace bps

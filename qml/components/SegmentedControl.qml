@@ -1,20 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// ONE control for "pick exactly one of a few": a single rounded track with the
-// choices side by side and a highlight that SLIDES to the picked one. It replaces
-// a row of separately bordered buttons, which read as a cluster of competing
-// boxes; here the whole set reads as one object and the picked choice is the only
-// thing lit.
-//
-//   SegmentedControl {
-//       options: [{ key: "a", label: "Performance" }, ...]
-//       current: "a"
-//       marked: "a"            // optional: a small dot on the recommended choice
-//       onPicked: (key) => ...
-//   }
-//
-// Controlled: `current` is owned by the caller; a click only reports `picked`.
 Item {
     id: root
 

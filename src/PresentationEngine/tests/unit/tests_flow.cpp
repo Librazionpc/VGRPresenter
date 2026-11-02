@@ -1,6 +1,3 @@
-// Unit tests: Service Flow & Automation Engine (docs/specs/26).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests flow
 #include "TestHarness.hpp"
 
 namespace {

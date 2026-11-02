@@ -27,7 +27,6 @@
 #include <sstream>
 
 namespace bps::library {
-
 namespace {
 namespace textmatch = bps::search::textmatch;
 
@@ -112,11 +111,6 @@ using textmatch::ContainsPhrase;
 using textmatch::ContainsNearPhrase;
 using textmatch::StartsWord;
 
-// "50", "¶50", "p50", "p.50", "para 50", "paragraph 50" -> 50; anything else -> 0.
-//
-// A PARAGRAPH DESIGNATOR is the WHOLE query, never part of one — "50 words" is a
-// word search, not paragraph 50 — and it only means anything inside a LOCKED
-// search, which is what names the book/sermon the number belongs to.
 int ParagraphDesignator(std::string_view query) {
     std::string s = Trim(std::string(query));
     if (s.empty()) return 0;
@@ -158,9 +152,6 @@ std::string Collapse(const std::string& s) {
     return out;
 }
 
-// "53_0217_Only_Believe.pdf" -> { year "1953", title "0217 Only Believe" }.
-// The filename encodes yy_mmdd-style prefixes (53_0217); a 19xx/20xx folder
-// name is authoritative for the year, the leading number becomes the title.
 struct SermonName {
     std::string year;
     std::string title;
@@ -227,9 +218,6 @@ std::string CodeOf(const std::string& fileName) {
     return {};
 }
 
-// The date-code inside a stored TITLE ("0217 Only Believe" -> "0217"): the
-// leading numeric run before the first space. Empty when the title opens with
-// words (sermons imported without a code in their file name).
 std::string CodeFromTitle(const std::string& title) {
     size_t sp = title.find(' ');
     std::string head = sp == std::string::npos ? title : title.substr(0, sp);
@@ -246,14 +234,6 @@ std::string CodeFromTitle(const std::string& title) {
     return {};
 }
 
-// A sermon's citation line, the way these sermons are cited: the year without
-// its "19" prefix, a dash, the sermon's own date-code, another dash, the
-// title with every non-alphanumeric character dropped, then the paragraph
-// number — "1947" + "0412 Faith Is The Substance" + 3 becomes
-//   47-0412 - Faith Is The Substance 3
-// The stored parts (year / code / title) stay as imported; only the display
-// cleans them up. An empty `code` keeps its slot out of the line; a zero
-// `verse` drops the trailing paragraph number (the sermon-level citation).
 std::string SermonCitation(const std::string& year, const std::string& code,
                            const std::string& title, int verse) {
     // The book name ("1947") loses a leading "19" when what is left is still
@@ -272,13 +252,6 @@ std::string SermonCitation(const std::string& year, const std::string& code,
             pendingSpace = true;   // runs of punctuation/spaces become one space
         }
     }
-    // The stored title opens with the code when there is one ("0217 Only
-    // Believe", "0109E Beginning And Ending …"); the code stands on its own in
-    // the citation, so that opening token comes out of the title (kept when the
-    // title is ONLY a code). Compared against `code` as a WHOLE token, not as a
-    // numeric run: a code with a letter suffix ("0109E") is not digits-then-space,
-    // and the old digits-only scan left it in place — the duplicated
-    // "55-0109E - 0109E Beginning And Ending …" this rule exists to remove.
     std::string display = clean;
     if (!code.empty() && !display.empty()) {
         const size_t sp = display.find(' ');
@@ -298,21 +271,8 @@ std::string SermonCitation(const std::string& year, const std::string& code,
     return out;
 }
 
-// The typed-HANDLE formatter, file-local: the class method of the same idea
-// (TheTableLibrary::CitationNeedle) is the public door, defined with the rest of
-// the public surface further down — this is the body it delegates to, so the
-// rule sits next to SermonCitation, which writes the lines it reads.
 std::string CitationNeedleText(std::string_view handle)
 {
-    // Every run of spaces next to a '-' goes; nothing else is touched. The
-    // stored citation has no spaces beside its dash ("47-0412 - Faith Is The
-    // Substance"), while a hand-typed handle may put them on either side
-    // ("47 - 0412", "47- 0412") — the same sermon, so both sides of a comparison
-    // are squeezed onto this one form. A title's own spaces stay: they are what
-    // makes a typed word findable at all.
-    // Trimmed first and last: a handle arrives with whatever the search box or
-    // a paste left on its ends, and a leading space would otherwise stop the
-    // needle matching the citation line at all.
     const std::string in = Trim(std::string(handle));
     std::string out;
     out.reserve(in.size());
@@ -333,9 +293,6 @@ std::string CitationNeedleText(std::string_view handle)
 
 constexpr const char* kUnfiledYear = "Unfiled";
 
-// Where a sermon file goes: its year book and its chapter title ("0217 Only Believe" - the numeric code before the title is kept so
-// chapters sort naturally). ImportSermon and the folder import's duplicate check both ask this, so they cannot disagree about what
-// "the same sermon" is.
 struct Placement {
     std::string year;
     std::string title;
@@ -351,9 +308,6 @@ Placement PlacementOf(const std::string& fileName) {
 }
 
 // ---------------------------------------------------------------------------
-// PDF text extraction (built-in, dependency-free): walks the objects, inflates
-// FlateDecode content streams through the engine's zlib DeflateCompressor and
-// collects the strings of text-showing operators (Tj, TJ, ', ").
 // ---------------------------------------------------------------------------
 std::string UnescapePdfString(const std::string& raw) {
     std::string out;
@@ -385,10 +339,6 @@ std::string UnescapePdfString(const std::string& raw) {
 }
 
 // ---- PDF text, the way a reader gets it -------------------------------------------------------------------------------------------
-// A page's text is not in its strings as they are: a font with an Identity-H encoding writes glyph numbers (often as hex, <0012003A>),
-// and the font's /ToUnicode table says which character each number is. So: read the objects, find the pages in order, load the fonts
-// each page uses (and their ToUnicode tables), then read the page's content stream with those fonts. Line breaks and paragraph breaks
-// come from where the lines sit on the page.
 
 bool LooksLikeTextOps(const std::string& s) {
     return s.find("Tj") != std::string::npos || s.find("TJ") != std::string::npos;
@@ -449,10 +399,6 @@ int IntAfter(const std::string& dict, const char* key, int fallback) {
     return end != p ? static_cast<int>(v) : fallback;
 }
 
-// Compressed object streams (PDF 1.5+, "/Type /ObjStm"): many of a PDF's smaller objects - font dictionaries and their ToUnicode
-// tables among them - packed into one compressed stream instead of each appearing as its own "N 0 obj", which the scan above cannot
-// see at all. Its own header (right after decompressing) is N pairs of "object-number offset-from-First"; each object's dictionary runs
-// from its offset to the next one's (or the stream's end). None of them carries a stream of its own - the format does not allow it.
 void ReadObjectStreams(PdfObjects& out) {
     std::vector<int> containers;
     for (const auto& [num, obj] : out)
@@ -744,12 +690,6 @@ struct PdfLine {
 };
 using FontTable = std::unordered_map<std::string, PdfFont*>;
 
-// Some sermon PDFs display correctly but carry no ToUnicode table at all: their font's own codes are the real character's ASCII code
-// plus one constant that stays the same for every letter, space and mark that font shows anywhere in the document - a copy-paste
-// deterrent, not a real encoding. It is found by trying every possible shift (0..255) and keeping the one whose result looks the most
-// like English prose - mostly lower-case letters and spaces, since those two dominate ordinary text far more than any other bytes do -
-// rather than assuming which raw byte is the space (the space is not always this font's single commonest byte). Too little text, or no
-// shift that reads convincingly as prose, is not trusted (0: read the bytes as they already are).
 int DetectShift(const std::array<int, 256>& hist) {
     int total = 0;
     for (int b = 0; b < 256; ++b) total += hist[b];
@@ -767,9 +707,6 @@ int DetectShift(const std::array<int, 256>& hist) {
     return bestScore * 100 >= total * 55 ? bestShift : 0;
 }
 
-// A pass over a content stream that reads nothing but which font is showing which raw bytes (Tf switches the current font; a string
-// operand's bytes, still undecoded, are tallied against it) - everything else (positioning, other operators) is skipped over. Used
-// before the real read, to find each no-ToUnicode font's shift (see DetectShift) from its own text across the whole document.
 void CollectFontBytes(const std::string& ops, const FontTable& fonts, std::unordered_map<PdfFont*, std::array<int, 256>>& hist) {
     PdfFont* font = nullptr;
     std::string pendingName;
@@ -978,9 +915,6 @@ std::string NormalizeSpaces(std::string s) {
 
 bool StartsLowercase(const std::string& t) { return !t.empty() && t[0] >= 'a' && t[0] <= 'z'; }
 
-// Removes what is printed on the page but is not the sermon: a bare page number, and a running head or footer - a line that opens or
-// closes many pages with the same words ("The Spoken Word", "Adoption 1 60-0515E"). Digits and spacing do not count in the comparison,
-// so "Page 3" and "Page 4" are the same line.
 void DropRunningLines(std::vector<std::vector<PdfLine>>& pages) {
     constexpr size_t kEdge = 2;   // lines from the top and from the bottom of a page that can be a head or foot
     auto key = [](const std::string& raw) {
@@ -1238,10 +1172,6 @@ std::string TidyMarkers(const std::string& s) {
     return out;
 }
 
-// "The Spoken Word" - the running head printed on nearly every page of these sermons (the series' own name, not something anyone
-// said) - some pages' header font has no space glyph at all, so it (and a glued page number, and sometimes a glued "IS") comes out as
-// one run of capitals with no spaces: "2THESPOKENWORD", "THESPOKENWORDIS". Struck wherever that exact run of capitals appears - never
-// the ordinary, mixed-case "the spoken Word" the sermons themselves say constantly, which this never matches.
 std::string StripSpokenWordBanner(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -1303,9 +1233,6 @@ bool ValidUtf8(const std::string& s) {
     return true;
 }
 
-// The clean-up stage: any sermon text (extracted from a PDF, or a .txt of unknown make) as plain UTF-8 with one paragraph per block,
-// blocks separated by one blank line. Nothing is left that is not text: no byte-order mark, control characters, soft hyphens,
-// zero-width marks, odd spaces or runs of spaces and blank lines.
 std::string CleanSermonText(const std::string& raw) {
     std::string text = raw;
     if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
@@ -1338,23 +1265,11 @@ std::string CleanSermonText(const std::string& raw) {
     return out;
 }
 
-// Many of these sermons print their own paragraph number ("2 And now we have a very wonderful pastor...") - the number a citation of
-// the sermon names ("53-0325 12"). Where a paragraph carries one, it becomes the verse's number (and the printed digits come out of its
-// text), and that is where a new verse begins; that is what makes the library's chapter:verse match the source.
-//
-// A sermon like this prints a number on SOME of its paragraph breaks, not all of them: the opening is one long unlabeled paragraph
-// (verse 1) that our own blank-line splitting may still have cut into several pieces (a typographic gap, not a new verse), before the
-// first number appears. So once a sermon shows it numbers its own paragraphs at all, every blank-line break with no number on it is
-// folded into the verse before it, rather than becoming a wrongly-numbered verse of its own; a sermon that never prints a number keeps
-// the plain shape (one verse per blank-line paragraph, numbered in order) it always had.
 struct NumberedParagraph {
     int number = 0;
     std::string text;
 };
 
-// A leading "N " on `para` that reads as a real label (a capital letter, a quote mark, or another script right after it - never a
-// digit or a lower-case letter, so "3 million people..." mid-paragraph is never mistaken for one) and goes up from `after` - a real
-// paragraph number only ever increases. 0 when there is none.
 int ParagraphLabel(const std::string& para, int after) {
     size_t k = 0;
     while (k < para.size() && std::isdigit(static_cast<unsigned char>(para[k]))) ++k;
@@ -1406,10 +1321,6 @@ bool ReadableText(const std::string& s) {
     return total > 0 && letters * 100 >= total * 55 && junk * 100 <= total * 2;
 }
 
-// (ContainsWord / ContainsPhrase live in modules/search/TextMatching.hpp —
-// shared with the Search Engine so both search surfaces can never disagree
-// again about what counts as a word or a phrase.)
-
 bool ChapterReadable(const TheTableChapter& ch) {
     std::string sample;
     for (const TheTableVerse& v : ch.verses) {
@@ -1419,7 +1330,6 @@ bool ChapterReadable(const TheTableChapter& ch) {
     }
     return ReadableText(sample);
 }
-
 } // namespace
 
 bool TheTableLibrary::VerseKnownLocked(std::string_view bookId, int chapter, int verse) const {
@@ -1437,9 +1347,6 @@ bool TheTableLibrary::VerseKnownLocked(std::string_view bookId, int chapter, int
 }
 
 // ---------------------------------------------------------------------------
-// User data (notes and highlights) — the Bible module's user-data section,
-// keyed the table way: "bookId:chapter:verse". Persisted with the library
-// JSON (Persist writes it, Load reads it back), never inside the sermon text.
 // ---------------------------------------------------------------------------
 namespace {
 std::string NoteKey(std::string_view bookId, int chapter, int verse) {
@@ -1469,9 +1376,6 @@ Result<void> TheTableLibrary::AddNote(std::string_view bookId, int chapter, int 
         note.chapter = chapter;
         note.verse = verse;
         note.text = text;
-        // Monotonic stamp: two notes in the same wall-clock millisecond must
-        // not tie (the drawer sorts most-recent-first, and a tie makes the
-        // order ambiguous — the round-trip test caught exactly that).
         note.createdMs = note.modifiedMs = std::max(NowMs(), lastNoteMs_ + 1);
         lastNoteMs_ = note.modifiedMs;
         notes_[NoteKey(bookId, chapter, verse)] = std::move(note);
@@ -1617,36 +1521,18 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
     root["highlights"] = J(std::move(hlArr));
 
     auto& platform = platform::PlatformAccessor::Get();
-    // ATOMIC (WriteAtomic creates the file's own parent, which the library may
-    // need anywhere — tests use a temp dir, production the user data dir): the
-    // file carries the user's highlights and notes, so a truncated save must not
-    // be observable.
     return platform.Filesystem().WriteAtomic(filePath_, J(std::move(root)).ToString());
 }
 
 Result<void> TheTableLibrary::Load() {
-    // scanMutex_ first: a concurrent Search()'s scan must never see the
-    // between-clears state (books_ empty, cache alive → stale pointers) nor
-    // interleave with the reload.
-    // The PAL file read happens BEFORE either lock: filesystem I/O must never
-    // run under mutex_/scanMutex_ (a slow or network-backed volume would stall
-    // every reader and search). The clear-and-reload below keeps its exact
-    // semantics — a missing file still leaves the library empty.
     auto& platform = platform::PlatformAccessor::Get();
     auto body = platform.Filesystem().ReadText(filePath_);
 
-    // The parse — and the set-aside of a damaged store, which is itself disk
-    // work — also happen BEFORE either lock, for the same reason as the read:
-    // the whole read/parse/recover path stays out of the library's locked scope.
     bool damaged = false;
     std::string damage;
     J parsedRoot;
     if (body.ok()) {
         if (auto parsed = json::Parse(body.value()); parsed.ok()) {
-            // A store that parses but carries no 'books' section holds neither
-            // the sermons nor the operator's notes and highlights: the same
-            // loss as a parse failure, so it is set aside the same way rather
-            // than being read as "empty" and then saved over.
             damage = recovery::DocumentShapeProblem(parsed.value(), "books", J::Type::Array);
             if (damage.empty())
                 parsedRoot = std::move(parsed.value());
@@ -1658,11 +1544,6 @@ Result<void> TheTableLibrary::Load() {
         }
     }
     if (damaged) {
-        // SELF-HEALING: set the damaged store aside as evidence and come up
-        // empty. The books are re-imported, but they are the operator's, so the
-        // bytes are kept under `.corrupt-<stamp>` rather than being overwritten
-        // by the next save — which is what repairing from an empty library would
-        // otherwise do.
         (void)recovery::SetAsideDamagedDocument(filePath_, kModule, damage);
     }
 
@@ -1740,9 +1621,6 @@ Result<void> TheTableLibrary::Load() {
 }
 
 // ---------------------------------------------------------------------------
-// Search Engine integration (docs/specs/20 §DocumentAdapterRegistry): makes the
-// platform Search Engine content-aware for type "table". Verse documents would
-// carry their paragraph text as content; this adapter extracts it verbatim.
 // ---------------------------------------------------------------------------
 namespace {
 class TheTableIndexAdapter final : public search::IIndexAdapter {
@@ -1757,18 +1635,10 @@ public:
 };
 } // namespace
 
-// The document id of one sermon in the platform Search Engine. `chapter` is the
-// 1-based sermon index within its year book — the same shape the Bible module
-// uses ("bible:<bibleId>:<book>:<chapter>:<verse>", one level shorter).
 std::string TheTableDocId(std::string_view bookId, int chapter) {
     return std::format("table:{}:{}", bookId, chapter);
 }
 
-// One document per SERMON: title + every paragraph's text. A paragraph-per-
-// document split (the Bible's granularity) would put 300k+ documents into the
-// engine for this library alone — the engine re-copies every candidate document
-// per query — so the sermon stays one document and paragraph-level hits keep
-// coming from this library's own Search().
 std::string TheTableContent(const TheTableChapter& ch) {
     std::string content = ch.title;
     for (const TheTableVerse& v : ch.verses) {
@@ -1826,10 +1696,6 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
     engine.SuspendCacheInvalidation();
     for (const TheTableBook& book : snapshot) {
         for (const TheTableChapter& ch : book.chapters) {
-            // A set flag ends the walk BEFORE the next upsert (see the header):
-            // this is what keeps a shutdown's join short — the pass stops within
-            // one document instead of walking the whole library into an engine
-            // that is being torn down underneath it.
             if (cancelled && cancelled->load(std::memory_order_relaxed)) {
                 engine.ResumeCacheInvalidation();   // (end the batch scope even when cancelled)
                 return indexed;
@@ -1934,9 +1800,6 @@ std::string TheTableLibrary::CitationNeedle(std::string_view handle)
 
 std::string TheTableLibrary::CitationCode(std::string_view bookId, int chapter) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    // The citation builder with no title and no paragraph: "47-0412". Asking for
-    // the same line the reader sees keeps the code and the citation from ever
-    // disagreeing (a second formatter is how they drift).
     for (const TheTableBook& book : books_) {
         if (book.id != bookId) continue;
         for (const TheTableChapter& ch : book.chapters)
@@ -1958,10 +1821,6 @@ SermonParts TheTableLibrary::Parts(std::string_view bookId, int chapter) const {
             const std::string code = ch.code.empty() ? CodeFromTitle(ch.title) : ch.code;
             out.year = book.name;
             out.code = SermonCitation(book.name, code, std::string(), 0);
-            // ONE BUILDER: the citation line is written here and the title is
-            // read back OFF it, so the two can never drift apart (a second
-            // title formatter is exactly how "Faith Is The Substance" and
-            // "Faith is the substance" end up on the same slide).
             out.citation = SermonCitation(book.name, code, ch.title, 0);
             const size_t dash = out.citation.find(" - ");
             if (dash != std::string::npos)
@@ -2005,10 +1864,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                                                           const std::function<bool()>& cancelled) const {
     if (cancelled && cancelled())
         return std::vector<TheTableSearchHit>{};
-    // A bare paragraph number inside a LOCKED search is a LOCATION, not a word (see
-    // the block further down). It is recognised HERE because the word requirement
-    // below rejects a one-character query ("5"), which is a perfectly good
-    // paragraph number when the pane's lock names the sermon it belongs to.
     const int wantedParagraph = ParagraphDesignator(query);
     const bool numberedLookup = wantedParagraph > 0 && !scopeBookId.empty();
 
@@ -2028,21 +1883,11 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     if (terms.empty() && !numberedLookup)
         return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     if (limit == 0) limit = 1;
-    // THE CHAPTER LOCK (the reference panes' pill): set, the query is answered by
-    // the sermon the pane has OPEN — its paragraphs, never another sermon and
-    // never another year — so "search" inside a sermon means that sermon. Set on
-    // the engine side, not by filtering rows afterwards: the scan then visits one
-    // sermon instead of the corpus, which is also the difference between a keystroke
-    // and a wait. `scopeChapter == 0` = the whole book; empty bookId = the library.
     const auto inScope = [&](const TheTableBook& book, const TheTableChapter& ch) {
         if (!scopeBookId.empty() && book.id != scopeBookId) return false;
         if (scopeChapter > 0 && ch.number != scopeChapter) return false;
         return true;
     };
-    // Deduplicated, keeping the USER'S word order — the verbatim-phrase test must
-    // honor what was typed ("then, friends" looks for then→friends, not a sorted
-    // friends→then). Bitmask positions below come from this same vector, so the
-    // dedupe keeps them collision-free.
     {
         std::vector<std::string> ordered;
         for (const std::string& t : terms)
@@ -2050,32 +1895,10 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         terms = std::move(ordered);
     }
 
-    // The SAME word resolution every other search surface uses (the engine's
-    // ResolveTerms): incomplete words completed ("friend" -> "friends") and
-    // typos corrected ("thn" -> "then", "frend" -> "friend") against the
-    // sermon vocabulary. The RESOLVED words are what the paragraph scan below
-    // hunts (they are what actually exists in the text); each raw spelling that
-    // differs from its resolution rides along as an optional bonus word — a
-    // paragraph containing BOTH the correction and the raw misspelling (a
-    // verbatim quote of the typo) outranks one with the correction alone.
-    // EXACT WORDS (the search boxes' padlock): spelling corrections are allowed,
-    // but completion and jam-splitting are not. Every resulting term must still
-    // appear as a whole word in the same paragraph (or adjacent paragraph pair).
-    // (The typing tail: the pane's box searches on every keystroke, so the LAST
-    // word is usually half typed — "compelling that you rec" must find the
-    // paragraph that says "receive" instead of hunting one guessed completion.
-    // The padlock is the exception: locked, words are meant verbatim.)
     std::vector<std::string> bonusWords;
     auto resolved = search::SearchEngine::Instance().ResolveTermsWithSplits(terms, !exactWords);
     if (cancelled && cancelled())
         return std::vector<TheTableSearchHit>{};
-    // THE TYPING TAIL'S CANDIDATE LADDER, most confident first ("rec" -> receive,
-    // received, record, ...). The tail itself stays the TYPED PREFIX — it matches
-    // any word starting with it — and this ladder decides WHICH of those readings
-    // a paragraph is credited for below: earlier candidate = stronger result, so
-    // the list starts with what the user most likely meant and reaches the merely
-    // possible ones after (user call: "start from the ones it confident about then
-    // come as far as possible options exist").
     std::vector<std::string> tailCandidates;
     if (resolved.ok() && !exactWords && resolved.value().size() == terms.size()
         && !resolved.value().empty())
@@ -2085,9 +1908,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         fixed.reserve(terms.size() + 1);
         for (size_t i = 0; i < terms.size(); ++i) {
             const std::string& r = resolved.value()[i].term;
-            // The padlock forgives spelling typos, but does not complete a
-            // partial word or split joined words. Those are fuzzy expansions,
-            // while a sub-1 weight specifically marks a typo correction.
             const bool applyCorrection = !exactWords || resolved.value()[i].weight < 1.0;
             const std::string& chosen = (applyCorrection && !r.empty()) ? r : terms[i];
             std::istringstream ins(chosen);
@@ -2100,22 +1920,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         terms = std::move(fixed);
     }
 
-    // WORD QUERIES SCAN EVERY SERMON (the b887811 behavior the user verified):
-    // paragraph gems are invisible at sermon granularity. Engine-side candidate
-    // picking — either Search()'s 48-doc fetch slice or a BM25 ranking of whole
-    // sermons — drops the long, word-rich sermon whose ¶7 opens with the verbatim
-    // query (47-0412 "Then, friends," went missing twice this way), and the
-    // paragraph scan's +500 phrase bonus can never rescue a sermon that was never
-    // scanned. The per-query lag that once forced candidate picking is gone: the
-    // lowered paragraphs are CACHED per sermon (lowerParagraphs_), so the expensive
-    // part (Lower() of ~100MB) happens once ever, not per query.
-
-    // A citation-CODE query ("47-", "47-0412", "63-0628e") is naming a SERMON,
-    // not searching paragraph words — the codes live in the chapter metadata and
-    // never in the paragraph text, so the word scan below can never answer them
-    // (Quick search's "47-1100X" showed only Bible rows). Strictly code-shaped
-    // queries (digits/dash/letters only, at least one digit) ALSO scan the codes
-    // themselves; anything with other punctuation ("revelation 1:1") is not.
     const bool codeShaped = [&query] {
         bool digits = false;
         for (char c : query) {
@@ -2127,21 +1931,9 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     }();
     struct CodeCand { const TheTableBook* b; const TheTableChapter* ch; int score; };
     std::vector<CodeCand> codeHits;
-    // ONE pointer phase under ONE lock pair: the code gather, the paragraph
-    // walk, the sort, the per-sermon cap and the materialization all store or
-    // read &book/&ch/&verse into books_ — every one of those pointers is only
-    // valid while nobody clears or grows books_, so the pair holds until the
-    // last read (released just before return). Nothing in between blocks.
     std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     if (codeShaped) {
-        // The query's RAW whitespace-separated tokens, before any stripping: a
-        // trailing bare number after a citation is the PARAGRAPH the reference
-        // names ("64-0617 54" = sermon 64-0617, paragraph 54). The number must
-        // NOT fold into the code: the old space-stripped "64-061754" matched no
-        // code at all, and the answer was loose sermon-level rows that dropped
-        // the user at the sermon's first paragraph (the "let the quick accept
-        // verse for the table" report).
         std::vector<std::string> rawTokens;
         {
             const std::string rawQuery(query);   // (not `istringstream in(std::string(query))` — that is a function declaration, not a stream)
@@ -2174,11 +1966,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                         return std::vector<TheTableSearchHit>{};
                     if (!inScope(book, ch)) continue;   // the chapter lock scopes the code tier too
                     const std::string bare = Lower(ch.code.empty() ? CodeFromTitle(ch.title) : ch.code);
-                    // The typed form is the CITATION shape — "47-0412" (yy-code),
-                    // possibly with the spoken letter ("47-1100x"). A code may also
-                    // live only in the TITLE ("1100x Fellowship" — no file code),
-                    // so the leading code-like token of the title is a candidate
-                    // too. The needle is compared to every candidate form.
                     std::string yy = book.name;
                     if (yy.size() == 4 && yy.compare(0, 2, "19") == 0) yy = yy.substr(2);
                     std::string head;   // leading [0-9]+[a-z]? of the stored title
@@ -2206,20 +1993,10 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                 }
             }
 
-            // A citation query names sermons, not their paragraph text. Return
-            // these hits directly: scanning every paragraph while holding the
-            // library lock made opening a result wait for the entire corpus.
             std::stable_sort(codeHits.begin(), codeHits.end(),
                              [](const CodeCand& a, const CodeCand& b) {
                                  return a.score > b.score;
                              });
-            // A citation WITH a paragraph ("64-0617 54") names that ONE
-            // paragraph: it answers as its own hit — verse = the typed number,
-            // snippet = the paragraph's text — so BOTH the app-wide quick search
-            // and The Table's own search box list it as a row and open straight
-            // there. Only the EXACT code match answers (a fully-specified
-            // reference must not drag the loose digit matches along), and a
-            // paragraph the sermon does not have falls back to the sermon rows.
             if (wantPara > 0) {
                 for (const CodeCand& c : codeHits) {
                     if (c.score != 2000)
@@ -2261,18 +2038,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     }
 
     // ---- a BARE PARAGRAPH NUMBER inside a LOCKED search -------------------------
-    // (user call: "current book for paragraph search so if i turn it on and 50 it
-    // should bring it up"). With the pane's chapter lock on, the scope IS the book
-    // and sermon being read, so "50" is not a word to hunt: it is the fiftieth
-    // paragraph of what is open. The hit is shaped like a typed citation paragraph
-    // ("47-0412 - … 50"), so both the pane's list and the app-wide quick search
-    // open straight there.
-    //
-    // Only a LOCKED search reads it this way, and only a query that is nothing but
-    // the number: unlocked, "50" stays an ordinary word — the app-wide search must
-    // never turn a quantity into a location. A paragraph the scope does NOT have
-    // falls through to the word scan below, which is what someone typing "50" into
-    // a two-paragraph sermon (or naming a year) expects.
     if (numberedLookup) {
         std::vector<TheTableSearchHit> numbered;
         for (const TheTableBook& book : books_) {
@@ -2297,48 +2062,15 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             if (numbered.size() >= limit) break;
         }
         if (!numbered.empty()) return numbered;
-        // The scope has no such paragraph: fall through to the word scan, which is
-        // what a quantity or a year typed there expects — but a ONE-CHARACTER query
-        // ("9") has no word to scan, so it is refused rather than scanned empty.
         if (terms.empty())
             return Error::Make(Err::InvalidArgument, kModule, "search needs a word");
     }
 
     // One pass over EVERY sermon (reading order = the sermonRank tiebreak below).
 
-    // One sermon's paragraphs against the terms. TWO match shapes (user call: the
-    // words need not sit in ONE paragraph — "it can be in a paragraph or max two"):
-    //   exact     — every term in the one paragraph (the original rule, best rank);
-    //   spanned   — every term across the paragraph and its NEXT one together
-    //               (neither alone has all of them). The hit reports the FIRST of
-    //               the pair, so picking it opens at where the passage starts.
-    // Ranking (user calls: "words that fully match first before words that partly
-    // match"; the para-7 probe): within a shape, VERBATIM phrase presence adds a
-    // large bonus (the paragraph really says what was typed), then whole-word hits
-    // outrank partial ones. `sermonRank` keeps the engine's candidate order as the
-    // sermon-level tiebreak.
-    //
-    // THE SENTENCE FIRST, THEN THE NEXT COMBINATION (user calls: "you have to make
-    // it prioritize the sentence first; if the main sentence does not work then
-    // now you work with other words — so make it more resilient", then "no
-    // individual words, the next available word combination"). `run` is that
-    // tier: the LENGTH of the longest run of the typed words this paragraph
-    // carries as a verbatim COMBINATION (in the typed order, next to each other).
-    // The ladder is then automatic:
-    //   * run == terms.size()  — the sentence as typed;
-    //   * otherwise the longest combination the corpus actually has ("my wife"
-    //     for a typed sentence "and my wife said"), and never a single word: a
-    //     multi-word lock requires at least TWO of its words next to each other
-    //     (floorRun below), so the loose sprinkling of the words is exactly what
-    //     the padlock refuses. A one-word lock is a whole-word search, as before.
-    // `phrase` records a contiguous, punctuation-insensitive exact phrase. Keep
-    // it separate from `run`: a full run may contain up to two filler words.
     struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int score; bool spanned; bool phrase; int run; int sermonRank; };
     std::vector<Acc> hits;
     auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch, int sermonRank) {
-        // The lowered paragraphs, computed once per sermon and kept (the fallback
-        // scan re-lowercast the whole library per query — the lag this module's
-        // rewrite removed, back for every short-word query without this cache).
         const std::string key = book.id + ":" + std::to_string(ch.number);
         auto cached = lowerParagraphs_.find(key);
         if (cached == lowerParagraphs_.end()) {
@@ -2355,16 +2087,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         }
         const std::vector<std::string>& hay = cached->second;
         const size_t n = ch.verses.size();
-        // The ranking tests below need a paragraph's WORDS. They used to build
-        // one std::string per word (textmatch::TokenizeWords) for every
-        // candidate paragraph — hundreds of allocations per paragraph, tens of
-        // thousands of paragraphs per keystroke, which is what made a
-        // common-word or multi-word sermon search take SECONDS. They work on
-        // WORD SPANS into the already-lowered paragraph text instead, filled
-        // into ONE scratch vector that the whole scan reuses (see
-        // AppendWordSpans): no per-word, no per-paragraph allocation, and the
-        // comparison semantics are unchanged (same word byte class, same
-        // whole-word equality).
         std::vector<std::string_view> spans;
         std::string_view spanSegs[2]{};
         int spansKey = -1;   // paragraph i, or -(i+1) for the pair (i, i+1)
@@ -2385,29 +2107,15 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                 return;
             unsigned m = 0, w = 0;
             for (size_t t = 0; t < terms.size(); ++t) {
-                // ONE walk of the paragraph per term for all three questions
-                // (present at all / as a whole word / at a word start) — this
-                // loop is the floor cost of every search, and it used to walk
-                // the paragraph up to three times per term.
                 const textmatch::TermPresence seen = textmatch::PresenceOf(hay[i], terms[t]);
                 if (!seen.found) continue;
-                // LOCKED (exact words): only the word itself counts — a word-start
-                // extension ("friends" for "friend") and a mid-word substring
-                // ("boyfriend") are both NOT what the user asked for.
                 if (exactWords && !seen.whole) continue;
                 m |= (1u << t);
-                // Whole word AND word-start extension count FULL ("friend" in
-                // "friends" is the completion shape — the user's word plus an
-                // ending, exactly what they meant); only a mid-word substring
-                // ("friend" in "boyfriend") is the weak partial.
                 if (seen.whole || seen.start) w |= (1u << t);
             }
             bm[i] = m;
             wm[i] = w;
         }
-        // Optional bonus words (the user's raw spellings when they differed from
-        // the resolution): a paragraph that verbatim-quotes the misspelling —
-        // the user was quoting something — outranks one that only has the fix.
         std::vector<unsigned> bx(n, 0u);
         for (size_t i = 0; i < n && !bonusWords.empty(); ++i) {
             unsigned b = 0;
@@ -2422,14 +2130,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             for (; m; m &= m - 1) ++c;
             return c;
         };
-        // THE TYPING TAIL'S LADDER, applied per paragraph: the half-typed last
-        // word is matched as a prefix (any word starting with it), and this says
-        // WHICH of the words it can become the paragraph actually carries. The
-        // likeliest reading (candidate 0 — the one the corpus uses most) earns the
-        // most, each later candidate less, so the results begin with what the user
-        // most likely meant and only then reach the merely possible readings (see
-        // tailCandidates above). Nothing runs when the tail was not half typed: the
-        // ladder is empty for a complete or corrected word.
         std::vector<int> ladder(n, 0);
         if (!tailCandidates.empty()) {
             for (size_t i = 0; i < n; ++i) {
@@ -2457,29 +2157,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         const bool phraseWhole = exactWords;
         const auto bitsOf = [](unsigned m) { int c = 0; for (; m; m &= m - 1) ++c; return c; };
         if (exactWords) {
-            // THE LOCKED LADDER: the longest verbatim combination of the typed
-            // words this text carries, and a floor of 2 words for a multi-word
-            // query (no individual words). The windows are tried longest first,
-            // so the sentence wins the moment it is there.
             const size_t floorRun = terms.size() > 1 ? 2 : 1;
-            // Up to 2 OTHER words may sit between consecutive typed words and the
-            // combination still counts as "together" (user call: the padlocked
-            // Quick search and Bible search both got this same tolerance — The
-            // Table's own search box drives this exact ladder too, so it was
-            // asking for the identical fix). A connector word the query itself
-            // skipped ("and" in "compelling AND compulsory, that") must not read
-            // as scattered — but a match spread across the whole paragraph still
-            // must not count as the sentence, hence the bound.
             constexpr size_t kMaxGapWords = 2;
-            // The longest combination of the typed words this text carries —
-            // longest window first, so the sentence wins the moment it is there.
-            // The window test itself is textmatch::ContainsTermRunWords (the
-            // shared primitive, so this ladder and the search surfaces cannot
-            // drift), run over WORD SPANS rather than freshly built strings.
-            // `present` is the text's own term bitmask: a window can only match
-            // when EVERY one of its terms is in the text at all, so the mask
-            // throws the window away before the span walk — most windows of a
-            // paragraph that carries only some of the typed words die there.
             const auto longestRun = [&](const std::vector<std::string_view>& words, int& outRun,
                                         size_t minK = 1, unsigned present = 0xFFFFFFFFu) {
                 outRun = 0;
@@ -2497,35 +2176,16 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                         }
                     }
             };
-            // The prefilter keeps the window scan off the vast majority: a
-            // paragraph needs at least `floorRun` of the typed words in it before
-            // its combinations are worth testing (the bitmask already knows).
             std::vector<int> runOf(n, 0);
             for (size_t i = 0; i < n; ++i) {
                 if (size_t(bitsOf(bm[i])) < floorRun)
                     continue;
-                // A ONE-WORD lock asks "is this word here" — which the bitmask
-                // already answers (locked, a bit is only set by a WHOLE word).
-                // Splitting the paragraph into word spans to reach the same
-                // answer cost a full pass over the text of every paragraph that
-                // carried the word, which for a common word is the whole corpus;
-                // the run is 1 and the hit is emitted below like any other.
                 if (terms.size() == 1) {
                     runOf[i] = 1;
                 } else {
                     fillSpans(i, false);
                     longestRun(spans, runOf[i], 1, bm[i]);
                 }
-                // No verbatim combination in this paragraph? LOCKED, that is
-                // the end of it: the words merely sprinkled through the text
-                // ("angel" here, "road" a sentence later) are exactly what the
-                // padlock refuses (user call: "no individual words, the next
-                // available word combination"). Emitting them anyway — the old
-                // fallback here — answered a multi-word lock with scattered
-                // words and made the toggle a no-op on pages that held them.
-                // The ladder above already degrades to the SHORTEST real
-                // combination, so a typed sentence the corpus lacks still
-                // answers; it just never answers with loose words.
                 if (size_t(runOf[i]) < floorRun)
                     continue;
                 const bool exactPhrase = ContainsPhrase(hay[i], terms, nullptr, true);
@@ -2535,12 +2195,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                                     + 20 * bonusOf(i, n),
                                 false, exactPhrase, runOf[i], sermonRank});
             }
-            // A ONE-WORD lock never needs the pair phase: a word sitting in the
-            // pair is already a hit from whichever paragraph holds it (locked, a
-            // bit is only set by a WHOLE word), and the duplicate is dropped by
-            // the same-combination check below — so the walk only ever burned
-            // spans. For a word like "the" that is every adjacent paragraph pair
-            // in the library.
             const bool pairPhase = terms.size() > 1;
             for (size_t i = 0; pairPhase && i + 1 < n; ++i) {
                 const unsigned pair = bm[i] | bm[i + 1];
@@ -2550,32 +2204,17 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                 // only a spread-out match that BEATS both halves lands here)
                 if (bm[i] == all && bm[i + 1] == all)
                     continue;
-                // A combination that lives wholly inside one half is that half's
-                // own run, already known — so a pair can only ever offer
-                // something new when its combination CROSSES the boundary, i.e.
-                // some typed word of the pair sits left of the split and the
-                // NEXT typed word sits right of it. The bitmasks answer that
-                // before a single word span is built, which is what keeps the
-                // span walk off most pairs (the spans of a pair used to be built
-                // for every pair in the corpus, valid or not).
                 bool crosses = false;
                 for (size_t t = 0; t + 1 < terms.size() && !crosses; ++t)
                     crosses = (bm[i] & (1u << t)) && (bm[i + 1] & (1u << (t + 1)));
                 if (!crosses)
                     continue;
                 int run = 0;
-                // The pair must BEAT both halves (a combination no longer than
-                // one half's own is dropped below), so the ladder starts at that
-                // length and skips the windows that cannot win — same result,
-                // far fewer window scans.
                 const size_t need = size_t(std::max(runOf[i], runOf[i + 1])) + 1;
                 if (need > terms.size())
                     continue;
                 fillSpans(i, true);   // the pair's words, in one reused scratch
                 longestRun(spans, run, need, pair);
-                // Same rule across the paragraph pair: only a combination that
-                // really sits in the two paragraphs together qualifies, never
-                // the two halves' words read apart.
                 if (size_t(run) < floorRun)
                     continue;
                 if (run < runOf[i] || run < runOf[i + 1])
@@ -2593,23 +2232,9 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         } else {
             for (size_t i = 0; i < n; ++i)
                 if (bm[i] == all) {
-                    // Word spans are built only when a test needs them: for a
-                    // ONE-word query the near-phrase answer IS the phrase answer
-                    // (both are the whole-word test), so the common single-word
-                    // keystroke never pays for the paragraph walk at all.
                     if (terms.size() > 1)
                         fillSpans(i, false);
                     const bool phrase = ContainsPhrase(hay[i], terms, nullptr, phraseWhole);
-                    // Loose mode's SENTENCE tier: the typed words in order with up
-                    // to 2 fillers between them ("compelling AND compulsory,
-                    // that") - not the verbatim phrase, but far from scattered
-                    // words. It must outrank a paragraph that merely holds all
-                    // the words somewhere (user report: the Bible's scattered-
-                    // word rows sat above the sermon carrying the sentence).
-                    // The near-phrase test reads the SAME spans the other
-                    // checks use (it used to re-tokenize the paragraph into a
-                    // fresh vector<string> — the single biggest per-keystroke
-                    // cost on a common-word query).
                     const bool near = terms.size() > 1
                         ? textmatch::ContainsNearPhraseWords(spans, terms, 2)
                         : phrase;
@@ -2638,9 +2263,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             }
         }
     };
-    // (Still inside the pointer-phase pair opened above the code gather —
-    // the walk's original separate scope is what left the sort/cap/materialize
-    // reading dangling pointers after an import or Load slipped in between.)
     int rank = 0;
     for (const TheTableBook& book : books_) {
         for (const TheTableChapter& ch : book.chapters) {
@@ -2665,12 +2287,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     }
     if (cancelled && cancelled())
         return std::vector<TheTableSearchHit>{};
-    // ONE order for both paths: a contiguous phrase first, then the longest
-    // ordered combination (see the ladder above), then within a shape the score,
-    // the engine's candidate order as the sermon-level tiebreak, then reading
-    // order. Then the per-sermon variety cap — a long sermon matching
-    // a common-word query hundreds of times must not flood the list and push other
-    // sermons' (often better) matches past the display limit (the para-7 probe).
     std::stable_sort(hits.begin(), hits.end(), [](const Acc& a, const Acc& b) {
         if (a.phrase != b.phrase) return a.phrase;
         if (a.run != b.run) return a.run > b.run;    // THE SENTENCE, then the next combination
@@ -2717,21 +2333,8 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
             if (verse != h.ch->verses.end() && std::next(verse) != h.ch->verses.end())
                 s.fullText += "\n\n" + std::next(verse)->text;
         }
-        // THE GLOW RULE (The Table's side): the snippet is anchored where the
-        // words actually sit, not at the paragraph head — a 400-word paragraph
-        // whose match is at word 300 put the match past the visible two lines
-        // and the yellow highlight was swallowed. Anchor = the EARLIEST query
-        // word in the paragraph (the passage's start; a couple of bounded finds
-        // per SHOWN row, nothing per candidate).
         {
             const std::string low = Lower(h.v->text);
-            // Anchor the snippet to the same nearby ordered word run that makes
-            // this result rank well. A verbatim phrase is best; when the typed
-            // query skipped a connector or source word, its bounded near-phrase
-            // match still anchors at the first word of that sequence. Falling
-            // back to the earliest individual query word showed unrelated text
-            // (for example, an earlier "you" in paragraph 150 instead of the
-            // matching "compelling ... that you receive" in continuation 150-3).
             size_t anchor = std::string::npos;
             if (!(ContainsPhrase(low, terms, &anchor) && anchor != std::string::npos))
                 anchor = NearPhrasePosition(low, terms, 2);
@@ -2755,10 +2358,6 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
         s.spanned = h.spanned;
         out.push_back(std::move(s));
     }
-    // Code matches lead: a sermon-CODE query ("47-", "47-0412") is naming the
-    // sermon itself, so each matching sermon gets ONE sermon-level row (verse 0,
-    // "chapter 1" opening) ahead of any paragraph word-hits. Sermon order = the
-    // library's reading order; scores rank which rows lead within the code tiers.
     if (!codeHits.empty()) {
         std::stable_sort(codeHits.begin(), codeHits.end(),
                          [](const CodeCand& a, const CodeCand& b) { return a.score > b.score; });
@@ -2802,25 +2401,12 @@ TheTableBook& TheTableLibrary::BookForYear(std::string_view year) {
 }
 
 namespace {
-
 // The file name without its directories, for a message that names the file.
 std::string BaseNameOf(const std::string& path) {
     const size_t slash = path.find_last_of("/\\");
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
-// What a file's FIRST BYTES say it really is, or nullptr when they say nothing.
-//
-// WHY THIS EXISTS: the extension is a claim, not a fact. A sermon.docx renamed
-// to sermon.txt (or picked through the dialog's "All files" option) reaches the
-// text reader, and binary bytes read as text are pages of mangled glyphs - they
-// import "successfully", so nothing downstream can tell the user it was never a
-// sermon. Every signature here is one a text file cannot begin with, so a real
-// sermon can never be refused by this check: the refusals are a ZIP (a .docx,
-// .xlsx, .pptx or an outright archive), an image, an older Office document, an
-// executable, a compressed or media container, or a PDF saved under another
-// name. Kept deliberately short - two ASCII letters ("BM", "MZ") are NOT
-// signatures, because "BMW..." can open a paragraph.
 const char* BinaryKindOf(const std::string& data) {
     struct Signature { const char* magic; size_t length; const char* kind; };
     static const Signature kSignatures[] = {
@@ -2857,7 +2443,6 @@ std::string ExtensionOf(const std::string& name) {
         return {};
     return Lower(file.substr(dot));
 }
-
 } // namespace
 
 bool TheTableLibrary::IsSermonFile(std::string_view fileName, std::string_view content, std::string& whyNot) {
@@ -2898,9 +2483,6 @@ bool TheTableLibrary::IsSermonFile(std::string_view fileName, std::string_view c
     return true;
 }
 
-// Step one of an import: whatever the file is (.pdf or .txt) becomes clean UTF-8 text. Nothing is stored here.
-// The FORMAT gate comes first (IsSermonFile): a file that is not a sermon is refused here with a sentence naming
-// what it actually is, so the one click that imported it says so instead of storing mangled bytes.
 Result<std::string> TheTableLibrary::ConvertToCleanText(std::string_view fileName, std::string_view content) {
     const std::string data(content);
     if (std::string whyNot; !IsSermonFile(fileName, content, whyNot))
@@ -2994,15 +2576,7 @@ Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
             files.push_back(path);
             continue;
         }
-        // NOT a sermon format: never read, and not a failure - but counted and
-        // named. A folder of 40 sermons beside 300 spreadsheets used to answer
-        // "40 imported" with nothing said about the rest.
         ++report.unsupported;
-        // EVERY refusal is named, with its own reason. A bound here (the old
-        // kMaxRejections) meant a folder of 40 spreadsheets reported "40 not
-        // sermon files" and explained only the first few — the operator could
-        // not tell which files to fix. The reasons are short sentences, so the
-        // list is bounded by the folder, not by a guess.
         report.rejected.push_back(BaseNameOf(path) + ": not a sermon file (the library reads .txt and .pdf)");
     }
     std::sort(files.begin(), files.end());   // deterministic order (year, then code)
@@ -3086,5 +2660,4 @@ Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
     }
     return report;
 }
-
 } // namespace bps::library

@@ -4,12 +4,7 @@
 #include <cctype>
 
 namespace bps::bible {
-
 namespace {
-
-// Canonical 66-book table (docs/specs/24 §Reference Resolution). Serves both
-// as the fallback abbreviation source and the name/id table when no Bible is
-// loaded yet, so "John 3:16" resolves against canonical spellings alone.
 struct CanonicalBook {
     const char* id;        // "JHN"
     const char* name;      // "john" (lowercase, for matching)
@@ -67,7 +62,6 @@ const CanonicalBook kCanonicalBooks[] = {
     {"1SA", "1 samuel", "1 sam"},
     {"2SA", "2 samuel", "2 sam"},
 };
-
 } // namespace
 
 std::string ReferenceResolver::Normalize(std::string_view text) {
@@ -166,9 +160,6 @@ Result<PassageRef> ReferenceResolver::Resolve(std::string_view text,
     if (normalized.empty())
         return Error::Make(Err::Bible_InvalidReference, "BibleEngine", "empty reference");
 
-    // Build the book lookup: the caller's books first (name, id, aliases),
-    // plus the canonical table (name + abbreviation) as a fallback so common
-    // spellings resolve even when a Bible omits aliases.
     struct Key {
         std::string key;
         BibleBook book;
@@ -212,11 +203,6 @@ Result<PassageRef> ReferenceResolver::Resolve(std::string_view text,
         }
     }
     if (!best) {
-        // FreeShow parity (their Scripture input bookSearch): a typed PREFIX that
-        // uniquely names one book resolves - "gene" opens Genesis, "1 sam" opens
-        // 1 Samuel. Drop trailing tokens until some book key starts with the
-        // remaining head; require a SINGLE distinct book across the matching keys
-        // (ambiguous prefixes like "j" or "1 c" stay unresolved, no guessing).
         std::vector<std::string> tokens;
         size_t pos = 0;
         while (pos < normalized.size()) {
@@ -286,5 +272,4 @@ Result<std::vector<PassageRef>> ReferenceResolver::ResolveAll(
                            "no references resolved from: " + std::string(text));
     return out;
 }
-
 } // namespace bps::bible

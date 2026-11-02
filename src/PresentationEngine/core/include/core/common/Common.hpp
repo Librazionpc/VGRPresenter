@@ -1,10 +1,6 @@
 #pragma once
 
 // ============================================================================
-// bps::Common — shared vocabulary of the Believers Presentation Software engine
-// core. Every system includes this header. Per docs/specs/00-cross-system-rules.md
-// all systems return Result<T>, expose HealthReport GetHealth(), and publish
-// dot-namespaced events.
 // ============================================================================
 
 #include <chrono>
@@ -19,7 +15,6 @@
 #include <vector>
 
 namespace bps {
-
 // ---------------------------------------------------------------------------
 // Engine version
 // ---------------------------------------------------------------------------
@@ -356,13 +351,7 @@ struct Error {
     // Raw OS error code (errno / GetLastError) when a PAL backend surfaced one
     // (PAL DoD §19); 0 when none applies.
     int nativeError = 0;
-    // Call-site backtrace captured by PAL backends in debug builds
-    // (platform::CaptureStack()); empty in release builds and when the OS has
-    // no stack API. PAL DoD §19 "Stack (Debug)".
     std::string stack;
-    // Chained root cause. shared_ptr (not optional<Error>) so the type stays
-    // complete-free at the member declaration (libstdc++ instantiates optional
-    // eagerly, which would fail on the recursive type).
     std::shared_ptr<Error> cause;
 
     static Error Make(ErrorCode code, std::string_view module, std::string_view message,
@@ -528,5 +517,4 @@ inline int Version::Compare(const Version& o) const noexcept {
     }
     return 0;
 }
-
 } // namespace bps

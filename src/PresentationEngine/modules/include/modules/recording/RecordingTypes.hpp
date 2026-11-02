@@ -1,11 +1,5 @@
 #pragma once
 
-// RecordingTypes (docs/specs/28): the canonical Phase 16 model. Recording is a
-// first-class output consumer of the Phase 15 production graph — anything that
-// is a valid signal (source, bus, virtual source, scene, output) can be
-// recorded with its own profile, tap point, format, quality and lifecycle.
-// Pure data; logic lives in RecordingEngine.
-
 #include <cstdint>
 #include <map>
 #include <string>
@@ -13,7 +7,6 @@
 #include <vector>
 
 namespace bps::recording {
-
 // Recording queue states (user brief §39).
 enum class RecordingState { Preparing, Recording, Paused, Finalizing, Completed, Recovering, Failed, Archived };
 
@@ -253,5 +246,4 @@ inline const char* ToString(TapPoint t) {
     }
     return "?";
 }
-
 } // namespace bps::recording

@@ -1,20 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The Settings dialog's title bar: logo, search box, close button.
-//
-// The search is a command palette: typing asks the backend (SearchService.
-// searchSettings) for the matching settings entries and opens a
-// suggestions dropdown under the box — each row shows the entry's label
-// plus a tag chip naming the section it lives in, exactly like the
-// reference. Rows are keyboard-navigable (↑↓ move, Enter opens, Escape
-// closes — the footer hints say so) and the list SCROLLS via the shared
-// AppScrollBar once results exceed the visible row count: it's a list,
-// so it gets the same scrollbar treatment as every other list in the app.
-//
-// Selecting a row emits sectionRequested(key) — ModalShell forwards that
-// to its own sectionSelected, so the nav rail highlight and the content
-// loader both follow.
 Rectangle {
     id: root
 
@@ -119,9 +105,6 @@ Rectangle {
 
             onTextChanged: root.runSearch()
 
-            // Keyboard palette behavior — only intercept while the
-            // dropdown is open, so normal caret movement is untouched
-            // otherwise. Escape closes AND clears.
             Keys.onUpPressed: {
                 if (!root.searchOpen)
                     return
@@ -157,9 +140,6 @@ Rectangle {
     }
 
     // ---- Suggestions dropdown ----
-    // A child of the TitleBar so it can float below the bar over the nav
-    // rail; ModalShell raises the whole TitleBar (z: 10) so this paints
-    // above the rail and content rather than under its later siblings.
     Rectangle {
         id: suggestionsPanel
         visible: root.searchOpen

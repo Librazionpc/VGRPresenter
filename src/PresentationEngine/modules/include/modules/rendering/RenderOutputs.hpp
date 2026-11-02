@@ -1,11 +1,5 @@
 #pragma once
 
-// Render Outputs (docs/specs/17 §Render Outputs). The Render Engine generates
-// frames; each IRenderOutput decides where they go. One scene can feed audience,
-// stage, preview, thumbnail, stream and screenshot outputs simultaneously with
-// zero duplicated rendering logic. This is the seam Phase 6 (Display Engine)
-// uses to route to monitors / NDI / OBS.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/IGraphicsBackend.hpp"
 #include "modules/rendering/RenderTypes.hpp"
@@ -18,7 +12,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 enum class OutputKind : int {
     Audience = 0,
     Stage,
@@ -67,24 +60,8 @@ public:
     virtual bool Enabled() const = 0;
     virtual void SetEnabled(bool enabled) = 0;
 
-    // May the main pass's distribute step write this output? A PER-OUTPUT-PASS
-    // output (one the live loop rasterizes its own styled scene into — see
-    // LiveOutputController::RenderPerOutputPasses) says NO: two writers on one
-    // buffer means the NDI/HDMI consumer samples whichever of the two landed
-    // last, i.e. the feed visibly alternating between the program scene and
-    // the output's own scene. Every other output (preview, screenshot, real
-    // display) keeps the default.
     virtual bool AcceptsDistributedFrames() const { return true; }
 
-    // WHEN this output last received a frame — steady-clock milliseconds of its
-    // last Present(), 0 = never. This is a FEED HEARTBEAT, not a picture-change
-    // counter: the live loop re-presents the composed frame to every output once
-    // a second even while the scene is static (LiveOutputController's
-    // kHeartbeatMs), so a healthy output's stamp advances ~1/s whatever the
-    // slides are doing. A stamp that stops moving while the session is live is a
-    // genuine stall (a dead loop, a dropped device, a buffer nobody writes) and
-    // NOT "the verse did not change" — which is the distinction the automatic
-    // feed blackout depends on.
     virtual int64_t LastPresentSteadyMs() const { return 0; }
 };
 
@@ -108,9 +85,6 @@ public:
     void SetTargetSize(Size s) override { target_ = s; }
     bool Enabled() const override { return enabled_.load(); }
     void SetEnabled(bool enabled) override { enabled_.store(enabled); }
-    // See IRenderOutput::AcceptsDistributedFrames — a per-output pass turns
-    // this OFF for its own buffer (and back ON if it cannot build its scene,
-    // so the output falls back to the program feed instead of going stale).
     bool AcceptsDistributedFrames() const override { return acceptsDistributed_.load(); }
     void SetAcceptsDistributedFrames(bool accepts) { acceptsDistributed_.store(accepts); }
 
@@ -152,5 +126,4 @@ private:
     mutable std::mutex mutex_;
     std::vector<std::shared_ptr<IRenderOutput>> outputs_;
 };
-
 } // namespace bps::rendering

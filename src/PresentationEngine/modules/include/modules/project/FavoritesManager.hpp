@@ -1,9 +1,5 @@
 #pragma once
 
-// FavoritesManager (docs/specs/15 §Favorites Manager): lets users mark
-// projects, assets, templates, songs and bibles as favorites. Persisted via
-// the DatabaseManager.
-
 #include "interfaces/IService.hpp"
 
 #include <mutex>
@@ -11,7 +7,6 @@
 #include <vector>
 
 namespace bps::project {
-
 struct FavoriteItem {
     std::string kind;   // "project" | "asset" | "template" | "song" | "bible"
     std::string id;
@@ -38,5 +33,4 @@ private:
     mutable std::mutex mutex_;
     std::vector<FavoriteItem> items_;
 };
-
 } // namespace bps::project

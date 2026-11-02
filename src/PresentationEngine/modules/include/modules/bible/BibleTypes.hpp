@@ -1,10 +1,5 @@
 #pragma once
 
-// Bible Engine canonical model (Phase 12, docs/specs/24). The internal,
-// format-independent representation every provider converts into. The engine
-// never exposes USFM/OSIS/XML/JSON shapes to the rest of the platform — only
-// these types.
-
 #include "core/common/Common.hpp"
 
 #include <functional>
@@ -14,7 +9,6 @@
 #include <vector>
 
 namespace bps::bible {
-
 // --- Translation / version metadata -------------------------------------------
 struct TranslationMetadata {
     std::string id;             // stable id ("KJV", "vgr", ...)
@@ -138,11 +132,6 @@ struct ImportOptions {
     std::string name;            // override display name
     bool index = true;           // auto-index into the Search Engine
     bool replace = false;        // replace an existing Bible with the same id
-    // Optional progress sink: called from inside Import with (verses indexed,
-    // total verses, book id being indexed). The caller keeps it alive for the
-    // duration of the call; Import runs on the caller's thread. Default-empty
-    // (with the default initializer here) so existing aggregate inits keep
-    // compiling warning-free.
     std::function<void(size_t, size_t, std::string_view)> onProgress = {};
 };
 
@@ -154,5 +143,4 @@ struct FormatOptions {
     bool includeFootnotes = false;
     bool redLetterMarkers = false;   // wrap red-letter text in markers
 };
-
 } // namespace bps::bible

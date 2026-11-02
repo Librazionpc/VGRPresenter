@@ -1,42 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// Settings · Appearance & Actions · "Manage groups": the global registry of
-// named song-section tags a
-// slide can carry (verse, chorus...), each with its own colour and an
-// optional single-letter LIVE shortcut — press it during GO LIVE to jump to
-// the next slide carrying that group (see LiveOutputService.jumpToGroup /
-// GroupListModel.shortcutMap).
-//
-// Built on ModalCard — the SAME shared shell every other settings dialog in
-// this app uses (Screens' Add/Edit, StylesScreen's own dialogs): the scrim,
-// scaling, Esc/Enter via Hotkeys' scope stack, header and scrollbar all come
-// from there, so this dialog can't drift from (or quietly break, the way a
-// hand-rolled copy of that same wiring did) the rest of the app. No footer:
-// every row writes straight through to GroupListModel the moment it
-// changes, the same "no Save button, it applies as you go" contract every
-// other roster editor here follows (StylesScreen, OutputsScreen) — Esc or
-// the header's own close-X is the only way out, and both just mean "done".
-//
-// THE ROW IS A JOINED TABLE, not a stack of separate fields: one strip whose
-// cells touch edge to edge (a 1px divider between them, no inner corner
-// radius), holding in order
-//     Name        caption over the value, flex 1
-//     Colour      a whole CELL of colour, not a small chip
-//     Shortcut    the group's live letter
-//     Template    the template the group's slides are laid out with
-//     Bin         removes the group
-// and then a full-width outlined "+ Add" under the list. The version this
-// replaced was four detached controls inside a rounded row, with a colour chip
-// and a stray "default" caption — it read as a form, not a roster.
-//
-// Three things stay this app's own, deliberately:
-//   * the colours of the cells' INTERNAL captions follow the app's own
-//     "filled = accent, empty = muted" rule (ShortcutCaptureField's own cue);
-//   * there is no per-row reset/undo control: this dialog writes through on
-//     every change, so "Reset to defaults" above the list is the only reset
-//     the app offers;
-//   * the delete cell is the app's own trash glyph on a danger hover.
 ModalCard {
     id: root
     objectName: "manageGroupsModal"
@@ -57,10 +21,6 @@ ModalCard {
     readonly property int innerWidth: rowsCol.width - 2
     readonly property int innerHeight: 48      // 50px row less the 1px borders
 
-    // Which row's colour swatch is being edited — latched the same way
-    // EditScreen's openBackgroundPicker latches its target (an apply must
-    // land on what the picker was opened for, not on whatever the live
-    // selection happens to be when it closes).
     property int colorPickerRow: -1
     // Which row is capturing its next keypress as a shortcut ("" = none).
     property int shortcutCaptureRow: -1
@@ -97,11 +57,6 @@ ModalCard {
         width: parent.width
         height: resetRow.height
 
-        // resetRow is an Item (not a Row) specifically so its MouseArea can
-        // anchors.fill it — a Row's own direct children may not use fill/
-        // left/right/horizontalCenter/centerIn anchors at all (it silently
-        // disables the WHOLE Row's layout the moment one does; that was the
-        // actual bug here). The icon+label still lay out via an inner Row.
         Item {
             id: resetRow
             anchors.right: parent.right
@@ -144,12 +99,6 @@ ModalCard {
 
         Repeater {
             model: GroupListModel
-            // Item, not Rectangle: the model's own "color" role (the
-            // group's colour) would collide with Rectangle's NATIVE `color`
-            // property if the delegate itself painted — both bindings land
-            // on the same name, and the cells below read whichever one won
-            // instead of the group's actual hex (the white rows / black
-            // cells bug). Every surface here is a plain CHILD Rectangle.
             delegate: Item {
                 id: row
                 required property int index
@@ -212,10 +161,6 @@ ModalCard {
                 }
 
                 // ---- cell 2 · the colour, as a CELL not a chip ----
-                // An ITEM, not a Rectangle: a bare Rectangle paints WHITE by
-                // default, so the cell showed a white block behind its swatch and
-                // broke the row's own dark surface (reported from the first build
-                // of this layout: "it cant be whit let match with others bg colour").
                 Item {
                     id: colourCell
                     x: nameCell.x + nameCell.width
@@ -265,10 +210,6 @@ ModalCard {
                 }
 
                 // ---- cell 4 · the group's own template ----
-                // A group can name the template its slides use: the picker is the
-                // app's own Choose-template dialog (the same list the style and
-                // the reference tabs pick from), so there is one template
-                // registry and one picker, not a per-dialog copy.
                 Item {
                     id: templateCell
                     x: shortcutCell.x + shortcutCell.width

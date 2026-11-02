@@ -1,10 +1,5 @@
 #pragma once
 
-// NotificationService (docs/specs/14): the ONLY system that decides if/when/
-// where/how the user is informed. Subscribes to the EventBus, runs the pipeline
-// (Factory → Rules → Queue → Manager → Providers), and never touches the UI.
-// Fully headless-capable; providers are the only UI boundary.
-
 #include "modules/notification/INotificationProvider.hpp"
 #include "modules/notification/Notification.hpp"
 #include "modules/notification/NotificationFactory.hpp"
@@ -23,7 +18,6 @@
 #include <vector>
 
 namespace bps::notification {
-
 class NotificationService final : public IService {
 public:
     static NotificationService& Instance();
@@ -39,9 +33,6 @@ public:
     Metrics MetricsSnapshot() const override;
     const char* ServiceName() const noexcept override { return "NotificationService"; }
 
-    // --- Public API ---
-    // Programmatic entry: build + deliver a notification (equivalent to an
-    // event reaching the service).
     Result<uint64_t> Publish(const NotificationSeed& seed);
     // Deliver immediately (bypasses queue for direct UI feedback).
     Result<uint64_t> NotifyNow(Notification n);
@@ -116,5 +107,4 @@ private:
     std::vector<std::shared_ptr<INotificationRule>> rules_;
     uint64_t pollTask_ = 0;
 };
-
 } // namespace bps::notification

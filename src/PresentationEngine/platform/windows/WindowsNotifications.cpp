@@ -8,9 +8,7 @@
 #include <string>
 
 namespace bps::platform {
-
 namespace {
-
 // Escapes a value for a PowerShell single-quoted string ('' = one quote).
 std::wstring PsQuote(std::string_view s) {
     std::wstring out = L"'";
@@ -21,7 +19,6 @@ std::wstring PsQuote(std::string_view s) {
     out += L"'";
     return out;
 }
-
 } // namespace
 
 bool WindowsNotifications::Supported() const {
@@ -47,11 +44,6 @@ Result<void> WindowsNotifications::Show(std::string_view title, std::string_view
                               std::to_wstring(::GetCurrentProcessId()) + L".ps1";
 
     {
-        // .c_str() (const wchar_t*), not the std::wstring itself — this
-        // libstdc++'s wofstream constructor overload set resolves a
-        // filesystem::path-like template parameter for a bare wstring and
-        // fails deduction (wants .make_preferred(), a path-only method);
-        // the plain wchar_t* pointer overload is unambiguous.
         std::wofstream out(scriptPath.c_str(), std::ios::trunc);
         if (!out) return Error::Make(Err::IoError, "Notifications", "cannot write script");
         out << script;
@@ -78,5 +70,4 @@ Result<void> WindowsNotifications::Show(std::string_view title, std::string_view
     (void)::DeleteFileW(scriptPath.c_str());
     return Error::Make(Err::IoError, "Notifications", "CreateProcessW failed");
 }
-
 } // namespace bps::platform

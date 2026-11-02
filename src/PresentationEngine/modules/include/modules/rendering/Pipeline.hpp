@@ -1,10 +1,5 @@
 #pragma once
 
-// Render Pipeline + Render Graph (docs/specs/17 §Render Pipeline / §Render
-// Graph). The pipeline owns the fixed pass order — nothing renders outside it.
-// The RenderGraph is the extensible layer: custom passes register as nodes with
-// dependencies and execute in topological order without modifying the renderer.
-
 #include "core/common/Common.hpp"
 #include "modules/rendering/Effects.hpp"
 #include "modules/rendering/RenderObject.hpp"
@@ -17,7 +12,6 @@
 #include <vector>
 
 namespace bps::rendering {
-
 // --- Render passes (fixed order; nothing bypasses the pipeline) -------------
 enum class PassId : int {
     Background = 0,
@@ -118,5 +112,4 @@ private:
     std::vector<GraphNode> nodes_;
     std::map<std::string, PassFn, std::less<>> passFns_;
 };
-
 } // namespace bps::rendering

@@ -1,14 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The small outlined action that sits at the end of a value row ("Change", "None",
-// "Pick", "Remove image"). One shape, one height, so the rows of a form stop each
-// carrying their own hand-built copy:
-//
-//   PillButton { text: qsTr("Change"); onClicked: ... }
-//   PillButton { text: qsTr("None"); tone: "muted"; onClicked: ... }
-//
-// tone: "accent" (the primary action of the row) or "muted" (a quiet secondary one).
 Rectangle {
     id: root
 

@@ -6,13 +6,8 @@
 #include <thread>
 
 namespace bps::vgr {
-
 namespace {
 constexpr const char* kModule = "VgrFile";
-// The synced-folder rename retry that used to live here (the ~8% failure rate
-// when importing 680 shows into a OneDrive library) is now the PAL's
-// IFilesystem::RenameRetry, shared with the plain atomic writers via
-// WriteAtomic — one retry policy instead of one per saver.
 } // namespace
 
 Result<VgrDocument> VgrFile::Read(const std::string& path) {
@@ -27,17 +22,12 @@ Result<VgrDocument> VgrFile::Read(const std::string& path) {
 }
 
 namespace {
-
-// The folder a file lives in, or "" for a bare name. There is no ParentPath in
-// the filesystem interface, and this is the one place that needs it: see the
-// CreateDirectories call in Write below.
 std::string ParentOf(const std::string& path) {
     const auto slash = path.find_last_of("/\\");
     if (slash == std::string::npos || slash == 0)
         return std::string();
     return path.substr(0, slash);
 }
-
 } // namespace
 
 Result<void> VgrFile::Write(const std::string& path, const VgrDocument& doc) {
@@ -50,14 +40,6 @@ Result<void> VgrFile::Write(const std::string& path, const VgrDocument& doc) {
     const std::string tmp = path + ".tmp";
     const std::string bak = path + ".bak";
 
-    // THE FOLDER MAY NOT EXIST YET, and the write below is the plain one (no
-    // parent creation, unlike WriteAtomic). The crash-recovery copy is the case
-    // that found this: %LOCALAPPDATA%\bps\recovery is a folder nothing else in
-    // the app creates, so the first periodic copy of an unsaved show failed at
-    // the very open with "cannot open for writing: …\unsaved-show.vgr.tmp" — a
-    // toast about a background copy the operator never asked for. One mkdir
-    // here is a no-op for every path that already works, and it makes the copy
-    // path work wherever the store is pointed.
     if (const std::string parent = ParentOf(path); !parent.empty()) {
         if (auto made = fs.CreateDirectories(parent); !made.ok())
             return made.error();
@@ -92,5 +74,4 @@ Result<void> VgrFile::Write(const std::string& path, const VgrDocument& doc) {
     if (hadOld) (void)fs.Remove(bak);
     return Ok();
 }
-
 } // namespace bps::vgr

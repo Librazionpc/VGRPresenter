@@ -1,6 +1,3 @@
-// Unit tests: Plugin manager + IPC log streaming.
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests modules
 #include "TestHarness.hpp"
 
 void TestPluginManager() {

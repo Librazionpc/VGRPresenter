@@ -8,9 +8,7 @@
 #include <format>
 
 namespace bps::media {
-
 namespace {
-
 constexpr const char* kModule = "ThumbnailCache";
 
 // A file that failed is not tried again for this long (FreeShow lets a failure be retried on
@@ -25,7 +23,6 @@ constexpr double kStillFraction = 0.5;
 double FrameFraction(int step) {
     return std::min(0.98, static_cast<double>(step + 1) / ThumbnailCache::kFrameSteps);
 }
-
 } // namespace
 
 ThumbnailCache::ThumbnailCache(std::string cacheDir, std::shared_ptr<IFrameSource> source,
@@ -89,16 +86,6 @@ Result<std::string> ThumbnailCache::Ensure(std::string_view mediaPathView, Media
     const std::string outPath = CachePath(mediaPath, size, step);
     if (Fresh(outPath, mediaPath)) return outPath;
 
-    // THE LOCK ONLY GUARDS THE BOOKKEEPING. Every PAL call in this function —
-    // both freshness probes, the stale-file remove and Generate() itself — runs
-    // with mutex_ RELEASED. It used to be one lock held across all of them (the
-    // decode is the slowest thing here, and the interface thread asks for
-    // thumbnails), which is the shape the lock-scope guard exists for.
-    //
-    // The loop is the dedupe, kept exactly as it was: wait for anyone already
-    // making this picture, look again (their file may be the answer now), and
-    // only then claim it — atomically with the in-flight check that the claim
-    // depends on.
     for (;;) {
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -151,14 +138,9 @@ Result<void> ThumbnailCache::Generate(const std::string& mediaPath, MediaKind ki
                                          frame.value().height);
     if (!png.ok()) return png.error();
 
-    // Written beside the final name and swapped in, so a half-written picture is
-    // never read — through the shared helper now (WriteBinaryAtomic), which adds
-    // the byte-count check and the synced-folder rename retry this hand-rolled
-    // copy of the dance was missing, and creates the cache dir on the way.
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     if (auto wrote = fs.WriteBinaryAtomic(outPath, png.value()); !wrote.ok()) return wrote.error();
     ++generated_;
     return {};
 }
-
 } // namespace bps::media

@@ -10,9 +10,7 @@
 #include <format>
 
 namespace bps::song {
-
 namespace {
-
 // Index adapter (docs/specs/25 §Search Integration): makes the Search Engine
 // content-aware for type "song".
 class SongIndexAdapter final : public search::IIndexAdapter {
@@ -57,7 +55,6 @@ constexpr double kDuplicateReportThreshold = 0.50;
 // Similarity is capped to the first kSimilarityChars characters per song so
 // duplicate detection stays fast on very large libraries.
 constexpr size_t kSimilarityChars = 400;
-
 } // namespace
 
 SongEngine& SongEngine::Instance() {
@@ -191,10 +188,6 @@ Result<std::string> SongEngine::Import(std::string_view source, std::string_view
     if (fmt.empty())
         return Error::Make(Err::Song_UnsupportedFormat, "SongEngine", "no format given");
 
-    // Collect every provider claiming this format — format-name matches first,
-    // then extension-only claims — and try each until one parses: several song
-    // formats share ".xml" (OpenSong, OpenLP, EasyWorship), so the first
-    // claimant must not have the last word.
     std::vector<std::shared_ptr<ISongProvider>> candidates;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -224,9 +217,6 @@ Result<std::string> SongEngine::Import(std::string_view source, std::string_view
     }
     if (!parsed.ok()) return parsed.error();
     Song song = std::move(parsed.value());
-    // Some interchange formats carry no title; a library entry still needs one
-    // (docs/specs/25 §Validation) — the engine supplies a neutral fallback and
-    // surfaces it as a warning instead of rejecting the import.
     if (song.metadata.title.empty()) song.metadata.title = "Untitled";
 
     auto warnings = Validate(song);
@@ -769,5 +759,4 @@ void SongEngine::UnwireEvents() {
 void SongEngine::OnConfigReload(const events::ConfigHotReload&) {
     (void)Reload();
 }
-
 } // namespace bps::song

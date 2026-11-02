@@ -2,18 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// The Routing… modal — the input's channel × bus matrix (reference:
-// the ProPresenter-style channel patcher: an Auto toggle, column labels
-// for destinations, row labels for channels, and bright cells you click
-// to patch). One modal serves Add and Edit: it never touches the models
-// itself — the consumer loads state into it before `open()` and receives
-// the whole patch back through `applied(auto, routes)`.
-//
-// routes is a JS object { channelIndex: [busIndex, ...] } — missing keys
-// read as unrouted. Buses come from BusListModel rows; `busRev` must be
-// bound to the consumer's modelsRev-style counter (Q_INVOKABLE rowCount()
-// reads are untracked by QML's binding system — the same honesty rule as
-// every revision bridge in the settings screens).
 ModalCard {
     id: root
 
@@ -44,11 +32,6 @@ ModalCard {
     // wherever its state lives (model row or Add-dialog buffer).
     signal applied(bool autoRoute, var routes)
 
-    // Unlike the screen's other dialogs, this modal isn't driven by a
-    // parent-owned `shown` property (it's opened imperatively via open() so
-    // it can be shared between the Add and Edit dialogs) — so it must close
-    // itself here, or Apply/Discard look completely dead even though Apply
-    // does correctly hand the patch back through applied().
     onAccepted: {
         root.applied(root.autoRoute, root.routes)
         root.close()
@@ -116,10 +99,6 @@ ModalCard {
         }
 
         // ---- The matrix ---------------------------------------------
-        // Column labels (buses) over a cell grid; row labels (channels)
-        // at the left. Auto lights every cell and ignores clicks.
-        // Horizontal scroll: 46 px gutter + 44 px per bus outgrows the card at ~9
-        // buses, and the bus list is unbounded.
         Flickable {
             id: matrixFlick
             width: parent.width
@@ -240,10 +219,6 @@ ModalCard {
         }
         }
 
-        // The matrix wrapper: an Item so the horizontal scrollbar can anchor
-        // to its edges (a Column forbids top/bottom/fill anchors on its own
-        // children — the first placement sat inside the Column and QML
-        // refused it at runtime).
         Item {
             width: parent.width
             height: matrixFlick.height + 10   // the bar's strip under the matrix

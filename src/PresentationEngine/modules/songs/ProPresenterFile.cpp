@@ -10,9 +10,7 @@
 #include <vector>
 
 namespace bps::song {
-
 namespace {
-
 constexpr const char* kModule = "SongProvider";
 
 // ---------------------------------------------------------------------------
@@ -40,10 +38,6 @@ bool ReadVarint(std::string_view buffer, size_t& position, uint64_t& out) {
     return false;
 }
 
-// Hands every field of one message to `visit`. A truncated or unreadable tail
-// ends the walk instead of rejecting what came before it: a presentation whose
-// last slide is damaged still imports its songs, and a byte range that is not a
-// protobuf at all simply yields the fields it could read (usually none).
 template <typename Visit>
 void ForEachField(std::string_view message, Visit&& visit) {
     size_t position = 0;
@@ -118,12 +112,6 @@ bool LooksLikeRtf(std::string_view bytes) {
 }
 
 // ---------------------------------------------------------------------------
-// RTF -> plain text.
-//
-// ProPresenter stores a text element as macOS-flavoured RTF: font/colour tables
-// first, then the runs. Only the visible text matters here, so destination
-// groups are skipped wholesale, control words are dropped, and the few that
-// carry meaning (\par, \tab, \u<N>) are translated.
 // ---------------------------------------------------------------------------
 bool IsSkippedDestination(std::string_view word) {
     static constexpr std::array<std::string_view, 21> kSkipped = {
@@ -238,9 +226,6 @@ std::string RtfToText(std::string_view rtf) {
                 continue;
             }
             if (next == '\n' || next == '\r') {
-                // A backslash before a raw newline is how Cocoa's RTF writer
-                // marks a line break inside a run (the slide shows those names
-                // on separate lines) — the newline ITSELF is otherwise ignored.
                 if (skipDepth == 0) out.push_back('\n');
                 i += 2;
                 continue;
@@ -293,13 +278,6 @@ std::string RtfToText(std::string_view rtf) {
 }
 
 // ---------------------------------------------------------------------------
-// Text runs of one cue.
-//
-// A slide's lyric is `Graphics.Text.rtf_data` (field 5). A slide's NOTES are
-// also RTF, but at field 1 of the notes message — importing those as lyrics
-// would put the operator's private speaking notes on screen, so field 1 is
-// dropped. The walk is field-number tolerant otherwise, so a ProPresenter
-// version that moves the text element still imports.
 // ---------------------------------------------------------------------------
 void CollectTextRuns(std::string_view message, std::vector<std::string_view>& out, int depth) {
     if (depth > 12) return;
@@ -314,18 +292,6 @@ void CollectTextRuns(std::string_view message, std::vector<std::string_view>& ou
 }
 
 // ---------------------------------------------------------------------------
-// The media a document references.
-//
-// ProPresenter keeps its files in `Media/Assets` and stores a `rv.data.URL` for
-// each one: the absolute path of the machine that made the deck (often a Mac
-// path that means nothing here) plus, in `local.path`, the path relative to the
-// presentation's own root ("Media/Assets/logo.png") — which is the one that
-// still resolves when the library moves. Both are collected; the caller picks
-// whichever exists.
-//
-// Other cues name their media by DISPLAY NAME only, with no URL at all (that is
-// how a lower third's PNG or a title card's MOV usually appears), so names are
-// collected too — see IsMediaName below.
 // ---------------------------------------------------------------------------
 bool IsMediaPath(std::string_view path) {
     if (path.size() < 5 || path.size() > 1024) return false;
@@ -362,14 +328,6 @@ std::string MediaPathOf(std::string_view message) {
     return IsMediaPath(path) ? path : std::string();
 }
 
-// A media NAME on its own — "Ryland animated Title.mov".
-//
-// A ProPresenter 7/8 document references a library item by name as often as by
-// URL, and the file really is in the library's Media/Assets (under that name,
-// or with the media id prefixed to it). Only path-shaped references used to be
-// collected, so a deck's own pictures were never even looked for: the import
-// brought the words and left a lower third's artwork behind. The name is kept
-// as written; ImportEngine resolves it against the library it now sits in.
 bool IsMediaName(std::string_view bytes) {
     if (bytes.size() < 5 || bytes.size() > 200) return false;
     if (!LooksLikeText(bytes)) return false;
@@ -412,10 +370,6 @@ std::string Trim(std::string_view text) {
     return std::string(text.substr(begin, end - begin));
 }
 
-// The slide's lyric: the LONGEST visible text run of the cue. A template's
-// extra boxes (a "Verse 1" label, a reference, the song title) are short next to
-// the words of the verse, and picking the longest keeps them out of the lyrics;
-// a cue whose only text is a title slide still imports that title.
 std::string CueText(std::string_view cue) {
     std::vector<std::string_view> runs;
     CollectTextRuns(cue, runs, 0);
@@ -474,7 +428,6 @@ struct CueGroup {
     std::string name;
     std::vector<std::string> cueIds;
 };
-
 } // namespace
 
 Result<Song> ParseProPresenterFile(std::string_view content) {
@@ -577,9 +530,6 @@ Result<Song> ParseProPresenterFile(std::string_view content) {
         song.sections.push_back(std::move(section));
     };
 
-    // The cue groups ARE the running order of the presentation (that is what the
-    // operator arranged), so they are walked first; a cue that belongs to no
-    // group still imports, in file order, after them.
     for (const CueGroup& group : groups) {
         for (const std::string& id : group.cueIds) {
             for (size_t i = 0; i < cues.size(); ++i) {
@@ -612,5 +562,4 @@ Result<Song> ParseProPresenterFile(std::string_view content) {
     song.createdMs = song.modifiedMs = NowMs();
     return song;
 }
-
 } // namespace bps::song

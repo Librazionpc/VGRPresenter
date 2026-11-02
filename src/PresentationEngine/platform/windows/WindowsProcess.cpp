@@ -6,7 +6,6 @@
 #include <sstream>
 
 namespace bps::platform {
-
 namespace {
 Error ProcError(std::string_view op) {
     return Error::Make(Err::IoError, "Process",
@@ -120,15 +119,8 @@ Result<std::string> WindowsProcess::Environment(std::string_view variable) const
 }
 
 Result<void> WindowsProcess::SetEnvironment(std::string_view variable, std::string_view value) {
-    // _putenv_s, not the raw Win32 SetEnvironmentVariableA: this MinGW
-    // runtime's std::getenv() (used by e.g. WindowsNetwork::Proxy()) reads
-    // the CRT's own environment copy, which SetEnvironmentVariableA doesn't
-    // touch — a variable set that way is invisible to getenv() in the same
-    // process even though it's genuinely set at the OS level. _putenv_s
-    // updates both.
     if (_putenv_s(std::string(variable).c_str(), std::string(value).c_str()) != 0)
         return ProcError("_putenv_s");
     return Ok();
 }
-
 } // namespace bps::platform

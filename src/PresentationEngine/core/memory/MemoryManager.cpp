@@ -6,7 +6,6 @@
 #include <format>
 
 namespace bps {
-
 // ---------------------------------------------------------------------------
 // PoolAllocator
 // ---------------------------------------------------------------------------
@@ -235,10 +234,6 @@ Result<void*> MemoryManager::Allocate(MemoryTag tag, size_t bytes, size_t alignm
             break;  // Auto/Heap/SmallObject/LargeObject -> tracked malloc path
     }
 
-    // The block carries no embedded header; `live_` records {tag, size, raw} for the
-    // user pointer, so `raw` can be recovered on release. (Writing a std::string into
-    // raw malloc'd memory via operator= without constructing it is UB, so we avoid
-    // an in-block header entirely.)
     const size_t total = bytes + alignment;
     void* raw = std::malloc(total);
     if (!raw)
@@ -357,5 +352,4 @@ Metrics MemoryManager::MetricsSnapshot() const {
     m.health = GetHealth().state;
     return m;
 }
-
 } // namespace bps

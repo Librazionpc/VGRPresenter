@@ -1,16 +1,11 @@
 #pragma once
 
-// Core rendering types (docs/specs/17). The renderer is fully backend-agnostic:
-// these POD types describe geometry/color in engine space; the IGraphicsBackend
-// decides how they become pixels.
-
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <string_view>
 
 namespace bps::rendering {
-
 // ---------------------------------------------------------------------------
 // Math primitives
 // ---------------------------------------------------------------------------
@@ -43,22 +38,6 @@ struct Rect {
     }
 };
 
-// SNAP A RECT'S EDGES, NEVER ITS SIZE. A design's blocks are authored in stage
-// units, so a shared edge (a table's code chip sitting exactly on its paragraph
-// band: both say y = 303.6428572) lands on a FRACTIONAL frame coordinate once
-// the block is mapped to 1080p. Rounding x and width independently — the
-// backends' old `static_cast<int>(rect.x)` / `static_cast<int>(rect.width)` — let
-// two abutting boxes each give up a fraction of that edge in opposite
-// directions, leaving a ONE-PIXEL hole of live video between them. Over a bright
-// camera feed that reads as a light seam around the item, exactly like an
-// unfilled border; the canvas (Qt, which snaps a Rectangle's four edges) has no
-// such seam, so it only ever showed on the outputs.
-//
-// Both edges are rounded here, and the size is derived from them: two rects that
-// share an edge in stage units therefore share the same pixel boundary, whatever
-// the fractional offset. Callers must use this for FILLED boxes (a shape, or a
-// text block's own background), not for blits whose size is also their source
-// sampling (a glyph cell, a 1:1 image) — those keep their exact geometry.
 inline Rect SnapRectToPixelEdges(const Rect& r) {
     const float x0 = std::round(r.x);
     const float y0 = std::round(r.y);
@@ -119,14 +98,6 @@ struct Color {
 // ---------------------------------------------------------------------------
 // Blending
 // ---------------------------------------------------------------------------
-// HOW A DRAW COMBINES WITH WHAT IS ALREADY ON THE FRAME.
-//
-// Alpha/Additive/Multiply are the engine's own three, and their VALUES are part
-// of the contract (DrawCommand::blend carries the int across the backend seam),
-// so the CSS-media modes the Edit screen's MEDIA tab offers are appended after
-// them, never inserted. The names match CSS/FreeShow's own list, which is what
-// makes "the dropdown says Overlay" mean the same picture in the app and on the
-// outputs; GraphicsBackends' BlendPixel implements the W3C formulas.
 enum class BlendMode : int {
     Alpha = 0,
     Additive,
@@ -148,12 +119,6 @@ enum class BlendMode : int {
 };
 
 // ---- blend modes travel as NAMES, render as numbers -------------------------
-//
-// The Edit screen's MEDIA tab stores FreeShow's own lower-case name
-// ("normal", "soft-light", "color-dodge" …), that name is what a saved show
-// carries, and only the rasterizer cares about the integer. Both directions
-// live next to the enum so a new mode is added in ONE place and the QML list,
-// the scene builder and the compositor cannot drift apart.
 inline const char* BlendModeName(BlendMode m) {
     switch (m) {
         case BlendMode::Additive: return "additive";
@@ -177,9 +142,6 @@ inline const char* BlendModeName(BlendMode m) {
     }
 }
 
-// Case/separator tolerant: "soft-light", "SoftLight", "soft light" and
-// "soft_light" all land on the same mode, so the name a stored show carries
-// never depends on how a writer spelled it.
 inline BlendMode ParseBlendMode(std::string_view name) {
     std::string k;
     k.reserve(name.size());
@@ -253,13 +215,7 @@ struct RenderStats {
     uint32_t shaderCount = 0;
     uint32_t frameDrops = 0;
     uint32_t renderQueueSize = 0;
-    // HOW MANY DRAW COMMANDS the last frame built and handed to the backend. The
-    // number that makes "a frame costs its viewport, not its passage" checkable
-    // (see RenderEngine::DrawTextObject's line cull and the
-    // rendering · reading-flow-draw-cost suite): a reading block must contribute the
-    // visible lines' glyphs, never the whole passage's.
     uint32_t commands = 0;
     uint64_t frames = 0;
 };
-
 } // namespace bps::rendering

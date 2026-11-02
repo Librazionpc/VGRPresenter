@@ -2,20 +2,6 @@ import QtQuick
 import VGRPresenterUI
 import "."
 
-// One labeled settings SELECT box — the sibling of SettingsField for
-// choices instead of free text (the reference dialogs' Resolution /
-// Refresh rate boxes). A value box that opens a shared DropdownPanel
-// underneath; the panel's items come from `options`
-// ([{ label, value }] — value optional, defaults to label).
-//
-// The label is a BINDING-FRIENDLY property, not fixed text: bind it to the
-// consumer's kind/selection so it can follow ("Device" ⇄ "Media") while
-// the options list stays whatever the consumer feeds it.
-//
-// Contract: controlled component — `value` is owned by the consumer, the
-// field reports via valuePicked(label). Options open under the box,
-// clamped to `bounds` (pass root.Window.contentItem), and the list scrolls
-// (DropdownPanel.maxHeight) when it would run past the cap.
 Item {
     id: root
 
@@ -51,11 +37,6 @@ Item {
 
         Rectangle {
             id: box
-            // Test hooks, the same convention ModalCard uses for its card: a field
-            // that carries an objectName exposes its clickable box (<name>_box) and
-            // its popup (<name>_menu), so the modal-fit sweep can click the field
-            // and then measure the menu that opened — the "clicked the Source field
-            // and nothing appeared" regression.
             objectName: root.objectName === "" ? "" : root.objectName + "_box"
             width: parent.width
             height: 36
@@ -114,9 +95,6 @@ Item {
             const list = []
             for (let i = 0; i < root.options.length; ++i) {
                 const o = root.options[i]
-                // `disabled` rides along (info-only rows — e.g. the NDI
-                // "not enabled yet" notice — render dimmed and refuse
-                // activation inside DropdownPanel).
                 const v = o.value !== undefined ? o.value : o.label
                 // The chosen entry is tinted + accent-coloured in the list (the same
                 // "current" cue the font picker uses), so the list shows where you are.
@@ -126,9 +104,6 @@ Item {
             return list
         }
         maxHeight: root.menuMaxHeight
-        // The list is the box's own width — the combobox convention the user asked
-        // for ("the dropdown width is too much": a fixed 480px slab opened under
-        // every field, however narrow).
         matchAnchorWidth: true
         onItemActivated: (label) => {
             // Resolve the option's value from its label (labels are unique
@@ -145,14 +120,6 @@ Item {
         }
     }
 
-    // Click/scroll contract: click-outside closes; scrolling does NOT —
-    // this is a field-attached combobox, so the page scrolls under the open
-    // menu and the menu rides along with its field (native combobox feel).
-    // closesOnWheel: false opts out of MenuCatcher's scroll-dismiss (which
-    // made the dropdown vanish on the first wheel tick — it reads as the
-    // dropdown "disappearing" the moment you scroll the settings page);
-    // wheelTarget forwards the scroll to the page Flickable the field sits
-    // in.
     MenuCatcher {
         menu: menu
         closesOnWheel: false

@@ -1,11 +1,5 @@
 #pragma once
 
-// SceneCompositionEngine (docs/specs/23): the Phase 11 facade. Owns the widget
-// registry, template library, theme library, layout library, and the Rule
-// Engine. Resolves content → rules → template → theme → widgets → layouts →
-// ComposedScene, which the Presentation Engine hands to the Rendering Engine.
-// Content, style, and layout are fully separated.
-
 #include "core/common/Common.hpp"
 #include "core/events/EventBus.hpp"
 #include "core/events/Events.hpp"
@@ -20,7 +14,6 @@
 #include <vector>
 
 namespace bps::scene {
-
 class SceneCompositionEngine final : public IService {
 public:
     static SceneCompositionEngine& Instance();
@@ -59,9 +52,6 @@ public:
     std::vector<SceneRule> Rules() const;
     void ClearRules();
 
-    // --- Resolution (docs/specs/23 §Dynamic layout resolution) ---
-    // content → apply rules → select template → apply theme → resolve widgets
-    // → per-output layouts. Emits scene.* events.
     Result<ComposedScene> Compose(std::string_view contentId, std::string_view contentType);
 
     // --- Live editing (docs/specs/23 §Live editing) ---
@@ -93,5 +83,4 @@ private:
     std::atomic<uint64_t> errorCount_{0};
     std::atomic<uint64_t> composeCount_{0};
 };
-
 } // namespace bps::scene

@@ -1,16 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// A read-out of the current choice with its actions at the end — the "Template: Table
-// [None] [Change]" / "Background: Transparent [Change]" row of the Styles dialog and any
-// form that picks something through a separate picker. Same inset surface, border and
-// height as SelectField's box, so a dropdown and a picker row sit in one rhythm.
-//
-//   ValueRow {
-//       text: qsTr("Transparent"); dim: true
-//       swatchColor: "transparent"            // leading 22px swatch (omit for none)
-//       PillButton { text: qsTr("Change"); onClicked: ... }   // the actions
-//   }
 Rectangle {
     id: root
 

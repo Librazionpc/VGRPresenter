@@ -1,10 +1,5 @@
 #pragma once
 
-// Resource contracts + feature registry (docs/specs/16 §8, §15, §18). Every
-// module/feature declares what it needs (ModuleContract); the FeatureManager
-// registers them and the runtime decides enable/disable/suspend/throttle.
-// This is the "every module describes itself" requirement.
-
 #include "core/common/Common.hpp"
 
 #include <map>
@@ -15,7 +10,6 @@
 #include <vector>
 
 namespace bps::adaptive {
-
 // What a module/feature declares about itself (docs/specs/16 §Resource
 // Contracts). All bytes; 0 = unknown/not applicable.
 struct ModuleContract {
@@ -78,5 +72,4 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, FeatureDef, std::less<>> features_;
 };
-
 } // namespace bps::adaptive

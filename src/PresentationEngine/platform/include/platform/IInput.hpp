@@ -1,17 +1,11 @@
 #pragma once
 
-// PAL input subsystem (Phase 2, DoD §11): enumerates the input devices the OS
-// reports. This is device discovery only — event delivery is a future
-// extension (raw input capture, gamepad state polling); feature modules
-// (remote app, presentation control) use this to know what input sources exist.
-
 #include "core/common/Common.hpp"
 
 #include <string>
 #include <vector>
 
 namespace bps::platform {
-
 enum class InputDeviceKind : int { Keyboard, Mouse, Touch, Pen, Gamepad, Other };
 
 inline const char* ToString(InputDeviceKind k) {
@@ -44,5 +38,4 @@ public:
     virtual bool HasKeyboard() const = 0;
     virtual bool HasPointer() const = 0;   // mouse, touch or pen
 };
-
 } // namespace bps::platform

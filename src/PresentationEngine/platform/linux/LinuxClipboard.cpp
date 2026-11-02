@@ -5,7 +5,6 @@
 #include <sstream>
 
 namespace bps::platform {
-
 namespace {
 bool HasTool(const char* tool) {
     std::string cmd = std::string("command -v ") + tool + " >/dev/null 2>&1";
@@ -26,9 +25,6 @@ const char* WriteCommand() {
     return nullptr;
 }
 
-// File-list (text/uri-list) read/write commands. xclip and wl-copy support a
-// dedicated target; xsel does not, so xsel-only hosts get Unsupported for
-// file lists.
 const char* ReadFilesCommand() {
     if (std::getenv("WAYLAND_DISPLAY") && HasTool("wl-paste"))
         return "wl-paste -n --type text/uri-list";
@@ -108,11 +104,6 @@ Result<void> LinuxClipboard::WriteText(std::string_view text) {
     return Ok();
 }
 
-// Bitmaps: the clipboard tools carry image/png, but DECODING PNG belongs to
-// the rendering module (modules/rendering/PngCodec) and the platform layer sits
-// below it. Reporting Unsupported is honest — a half-written codec here would
-// be a second, subtly different source of pixels. The screenshot case this
-// exists for is Windows (Win+Shift+S posts a DIB).
 Result<ClipboardImage> LinuxClipboard::ReadImage() const {
     return Error::Make(Err::Unsupported, "Clipboard",
                        "image clipboard is not supported on this platform");
@@ -164,5 +155,4 @@ Result<void> LinuxClipboard::SetFiles(const std::vector<std::string>& paths) {
     if (rc != 0) return Error::Make(Err::IoError, "Clipboard", "clipboard writer failed");
     return Ok();
 }
-
 } // namespace bps::platform

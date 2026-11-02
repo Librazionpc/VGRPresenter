@@ -1,6 +1,3 @@
-// Unit tests: CAMS / content / asset management (docs/specs/13).
-// Split from tests/unit/main.cpp so a single phase can run alone:
-//   ./bps_unit_tests cams
 #include "TestHarness.hpp"
 
 void TestCamsUuid() {

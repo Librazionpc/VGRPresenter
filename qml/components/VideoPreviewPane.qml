@@ -3,32 +3,12 @@ import QtQuick.Shapes
 import VGRPresenterUI
 import "."
 
-// The video dialogs' preview pane — ONE component for Add Source and Edit
-// Video Source (they used to carry byte-identical ~150-line copies of this
-// whole block, which drifted the moment NDI volume landed: two places to
-// remember). Owns the 16:9 pane, the per-kind glyph art, the MUTE/PAUSED
-// pill, the Resolution mode pill and the kind-specific hint. Controlled:
-// the consumer owns kind/muted/mode and reacts to mutedToggled()/modePicked.
-//
-// The pane is LIVE for camera, screen AND NDI rows: the consumer passes
-// previewLabel (the device's roster label / the NDI source's full name); the
-// pane starts the PAL's MF Source Reader tap (camera) / the monitor tap
-// (screen) / the engine's NDI receiver (NDI) and pumps
-// image://videopreview/<label>?<nonce> at ~15 fps — REAL frames under the
-// glyphs. Only media keeps the decorative glyph art (a file preview is not
-// a live tap).
-//
-// Column root, like ProAudioForm: positioners auto-size from content, so
-// consumers only set width and the pane + hint stack correctly.
 Column {
     id: root
 
     // "camera" | "screen" | "media" | "ndi" — selects the glyph and the
     // pill/hint wording.
     property string kind: "camera"
-    // The source device's roster label — camera name, monitor label, or the
-    // NDI source's full discovery name. non-empty + kind camera/screen/ndi
-    // turns the pane live (a real tap / engine receiver). Empty = decorative.
     property string previewLabel: ""
     property bool muted: false
     // Current capture-mode pick ("" = unset — the pill shows its fallback).
@@ -47,27 +27,10 @@ Column {
     signal modePicked(string mode)
 
     // ---- Live preview plumbing ------------------------------------------
-    // The nonce is the re-fetch trigger: QML's image cache keys the whole
-    // URL, so bumping ?n= forces a fresh drain of the PAL's newest JPEG.
-    // NOTE: never assign the same URL twice — QML dedupes identical sources
-    // and won't re-request (the nonce changes every tick, so this only
-    // matters if the pump stalls).
     property int previewNonce: 0
     readonly property bool live: (kind === "camera" || kind === "screen" || kind === "ndi")
                                  && previewLabel !== ""
-    // The tap registered for THIS pane, reconciled (never assumed): switching
-    // cameras changes previewLabel while live stays true, so a start wired to
-    // onLiveChanged alone left every re-pick tapless (the "no tap was started"
-    // storm) with the old camera still streaming. Reconcile STOPS the old
-    // label's tap and starts the new one — switching sources FREES the old
-    // device (user policy: no pooled keeps-alive; a paused/switched-away
-    // camera must release its hardware). Born-live panes (Edit dialog opens
-    // with a device already picked) get no change signal at all, so
-    // onCompleted reconciles too.
     property string activeTapLabel: ""
-    // The ACTIVE tap's kind — a re-pick can flip kind camera↔screen while
-    // switching labels, and the stop must address the OLD label's kind (the
-    // row-thumbnail reconcile tracks this too).
     property string activeTapKind: ""
     function syncTap() {
         const want = effectiveLive ? previewLabel : ""
@@ -96,19 +59,10 @@ Column {
             previewTimer.restart()
         }
     }
-    // PAUSE FREES THE DEVICE: kind camera/screen + empty previewLabel OR a
-    // paused pane drops the effective-live → false → reconcile stops the
-    // tap (the hardware releases; the camera light goes off). Restarting is
-    // a plain re-pick. NDI's MUTE pill is AUDIO-only (embedded-audio level),
-    // so a muted NDI pane stays live — the same rule the board row applies.
     readonly property bool effectiveLive: live && (kind === "ndi" || !muted)
     onEffectiveLiveChanged: syncTap()
     onPreviewLabelChanged: syncTap()
     Component.onCompleted: syncTap()
-    // Pause frees the device (see effectiveLive below); the frame pump and
-    // source follow the same state so a paused pane shows nothing.
-    // A Resolution re-pick re-locks the tap to the new size (cameras only —
-    // screens have no mode; the tap always follows the current resolution).
     onModeChanged: {
         if (effectiveLive && activeTapLabel === previewLabel && kind === "camera") {
             EngineBridge.startVideoPreview(previewLabel, mode, "dialog")
@@ -124,15 +78,9 @@ Column {
     }
     readonly property url frameSource: effectiveLive
         ? "image://videopreview/" + encodeURIComponent(previewLabel) + "?n=" + previewNonce : ""
-    // True once REAL frames are flowing — the warm-up test for the decorative
-    // glyphs (they belong to the seconds before the first frame, not on top
-    // of a live feed).
     readonly property bool frameReady: effectiveLive && frameImage.status === Image.Ready
                                        && frameImage.sourceSize.width > 1
 
-    // Audio-carrying kinds — the same rule the dialogs gate the Volume
-    // slider with (media files and NDI streams embed audio; camera/screen
-    // feeds are silent, so their pill reads PAUSED, not MUTE).
     readonly property bool kindHasAudio: kind === "media" || kind === "ndi"
 
     spacing: Theme.space2
@@ -156,9 +104,6 @@ Column {
         border.color: Theme.border
         clip: true
 
-        // LIVE FRAMES — the tap's newest JPEG, aspect-fit inside the pane,
-        // ABOVE the pane's background but BELOW the glyphs (which stay for
-        // the warm-up seconds before the first frame arrives).
         Image {
             id: frameImage
             // Self-test witness: the sweep logs status/size at grab time —
@@ -191,9 +136,6 @@ Column {
             }
         }
 
-        // NDI — broadcast ripples (center dot + two rings): a
-        // network feed, not a local device. Warm-up only — they retire
-        // once real frames flow (same rule as the camera lens).
         Item {
             anchors.centerIn: parent
             visible: root.kind === "ndi" && !root.frameReady
@@ -270,10 +212,6 @@ Column {
             onToggleRequested: root.mutedToggled()
         }
 
-        // The mode pill IS the Resolution control: click it and the
-        // capture-mode list drops from the pill (fallback text while
-        // nothing is picked), anything beyond the device's own max
-        // fps greyed. Media sources have no capture modes — no pill.
         ModePillButton {
             anchors.left: parent.left
             anchors.bottom: parent.bottom

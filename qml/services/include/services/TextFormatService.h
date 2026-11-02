@@ -8,9 +8,6 @@
 class QQmlEngine;
 class QJSEngine;
 
-// The UI's window onto the engine's TEXT FORMATTING (bps::presentation::TextFormat): what a text block's typed text looks like
-// once its list style is applied. The ENGINE owns the rules and the list of styles; this only hands them to QML, so the Edit
-// canvas, the library cards and the Text tab's picker all show the same markers and offer the same choices.
 class TextFormatService : public QObject
 {
     Q_OBJECT

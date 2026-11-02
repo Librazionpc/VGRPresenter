@@ -28,7 +28,6 @@
 namespace bp = bps::presentation;
 
 namespace {
-
 std::shared_ptr<bp::PresentationDocument> showDocument()
 {
     return bp::PresentationEngine::Instance().Document();
@@ -73,16 +72,12 @@ QVariantList entriesToVariant(const std::vector<bp::ShowEntry> &entries)
 }
 
 QString message(const bps::Error &e) { return QString::fromStdString(e.message); }
-
 } // namespace
 
 // ===========================================================================
 // The queued document jobs (see the header)
 // ===========================================================================
 
-// Which folder a saved path landed in — the test editShow has always made before
-// rescanning the library. Read from the JobContext so a job never touches the
-// library pointer (setLibraryPath may reset it while a job is in flight).
 bool ShowService::JobContext::inLibrary(const QString &path) const
 {
     if (libraryRoot.isEmpty())
@@ -92,9 +87,6 @@ bool ShowService::JobContext::inLibrary(const QString &path) const
 
 ShowService::JobContext ShowService::jobContext() const
 {
-    // Read HERE, and carried into the job by value: EngineWorker's rule is that a
-    // lambda captures what it needs, because neither the bridge's boot flag nor
-    // this service's own members belong to another thread.
     JobContext ctx;
     ctx.booted = EngineBridge::instance().booted();
     if (library_)
@@ -108,11 +100,6 @@ int ShowService::runDocumentJobOffThread(const QString &kind, JobDurability dura
     const int token = ++jobToken_;
     const bps::JobTicketPtr ticket = std::make_shared<bps::JobTicket>();
     jobs_.insert(token, LiveJob{ kind, durability, ticket });
-    // Posted WITH the ticket, so this job can be taken back while it is queued
-    // (the work never runs) or have its verdict withdrawn while it runs (the work
-    // finishes — a Durable write is still wanted — and nothing is reported).
-    // Begin() is asked by the worker itself before it comes here, which is why an
-    // abandoned job never reaches the engine call below.
     vgr::EngineWorker::instance().runOffThreadCancellable(ticket, [this, token, kind, ticket, work]() {
         // The engine's document call, on the worker. Its own lock and its own
         // revision check make this the supported way to use it (see the header).
@@ -122,12 +109,6 @@ int ShowService::runDocumentJobOffThread(const QString &kind, JobDurability dura
         vgr::EngineWorker::onInterfaceThread(this, [this, token, kind, ticket, r]() {
             jobs_.remove(token);
             if (!ticket->Deliver()) {
-                // The verdict was withdrawn while this ran, so nobody is waiting
-                // for it — but what the job DID still stands (a Durable write is a
-                // file on disk now), and the library list and the peek cache read
-                // that file. So the state is applied and only the REPLY is dropped:
-                // no toast, no documentJobFinished. The poster already heard
-                // documentJobCancelled when it cancelled.
                 if (ticket->Started())
                     applyJobState(r);
                 return;
@@ -152,16 +133,8 @@ bool ShowService::cancelDocumentJob(int token)
     else
         ticket->Abandon();           // a read nobody is waiting for: do not spend the disk
     if (!ticket->Started()) {
-        // Still queued: the worker will skip the work entirely and so will never
-        // report, which makes removing the entry this side's job. (A Durable job
-        // cancelled here still RUNS and still lands — its landing finds no entry,
-        // which is fine, and applies the file's consequences.)
         jobs_.remove(token);
     }
-    // Announced exactly once, here, whether the job had started or not: whoever
-    // holds this token stops waiting instead of hanging on a verdict that is not
-    // coming. A job that had already started applies its state silently when it
-    // lands (see the landing in runDocumentJobOffThread).
     emit documentJobCancelled(token, kind);
     return true;
 }
@@ -181,12 +154,6 @@ int ShowService::cancelDocumentJobs(const QStringList &kinds)
     return cancelled;
 }
 
-// The STATE a job that ran left behind. Applied by every landing, including the
-// one whose verdict was withdrawn: the file is on disk either way, and the
-// library list, the peek cache and the open-document signal all describe the
-// disk, not the answer. (The log line lives here rather than with the toast: it is
-// the record that the write happened, which is exactly what is worth keeping when
-// nobody was left to be told about it.)
 void ShowService::applyJobState(const JobResult &r)
 {
     if (!r.logLine.isEmpty())
@@ -201,9 +168,6 @@ void ShowService::applyJobState(const JobResult &r)
         refreshLibrary();
 }
 
-// Finishes one outcome ON THIS THREAD: the shared tail of the queued path and the
-// direct one, so a job's verdict and a synchronous call behave identically. The
-// reply is the toast; the state underneath it is applyJobState above.
 bool ShowService::finishHere(const JobResult &r)
 {
     if (!r.ok && !r.error.isEmpty())
@@ -223,9 +187,6 @@ void ShowService::finishDocumentJob(const QString &kind, const JobResult &r)
 }
 
 // ---- the published peek (peekShow) -----------------------------------------
-// The read a peek job runs: the OLD peekShow body, unchanged, off the interface
-// thread. `path` is already cleaned. The open show is read AS IT IS THERE
-// (unsaved edits included) rather than from the older copy on disk.
 QVariantMap ShowService::peekAnswer(const QString &path) const
 {
     if (!EngineBridge::instance().booted())
@@ -260,12 +221,6 @@ void ShowService::publishPeek(const QString &key, const QVariantMap &answer) con
 {
     peekInFlight_.remove(key);
     peekCache_.insert(key, answer);
-    // The revision really MOVES, it is not just a signal: the centre page binds to
-    // this property, and a binding that re-evaluates only because a signal fired
-    // while the value stayed the same is not a contract anyone should rely on.
-    // The const_cast is this .cpp's standing idiom for publishing from a const
-    // reader (see ScriptureService's publishMarks): the reader is const because it
-    // mutates nothing VISIBLE, not because the answer cannot be published.
     ++peekRevision_;
     emit const_cast<ShowService *>(this)->peekRevisionChanged();
 }
@@ -289,19 +244,12 @@ void ShowService::dropPeekForOpenPath() const
 ShowService::ShowService(QObject *parent)
     : QObject(parent)
 {
-    // Library root is chosen up front; the folder itself is only created once the
-    // engine is up and the library is first used. VGR_LIBRARY_DIR overrides it
-    // (tests, portable installs).
     const QString dirOverride = qEnvironmentVariable("VGR_LIBRARY_DIR");
     libraryPath_ = !dirOverride.isEmpty()
         ? dirOverride
         : QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
               + QStringLiteral("/VGR Presenter/Shows");
 
-    // The library can only be read once the engine's platform layer exists
-    // (see library()) — so the first refresh fires on engine boot. The Show
-    // screen's categories/shows bind to these properties and would otherwise
-    // stay empty until the user's first save.
     connect(&EngineBridge::instance(), &EngineBridge::bootedChanged,
             this, &ShowService::refreshLibrary);
     if (EngineBridge::instance().booted())   // boot already ran (tests, reload)
@@ -379,9 +327,6 @@ int ShowService::saveShowFile(const QVariantMap &show, const QString &path)
     const JobContext ctx = jobContext();
     return runDocumentJobOffThread(QStringLiteral("save"), JobDurability::Durable,
                                    [this, booted, ctx, show, path]() {
-        // The engine file path is worked out HERE, on the worker: vgrPath is pure
-        // string arithmetic (no file is touched), and there is no reason for even
-        // that to sit on the interface thread.
         const std::string target = vgrPath(path);
         JobResult r;
         r.title = QStringLiteral("Save show");
@@ -463,9 +408,6 @@ int ShowService::saveShowCopy(const QString &path)
                                    [this, booted, path]() {
         const std::string target = vgrPath(path);
         const QString cleanTarget = cleanPath(path);
-        // SILENT by contract (a background copy the operator did not ask for): a
-        // failure reports nothing to the interface, exactly as the synchronous
-        // version did. The verdict's `ok` is what the caller acts on.
         JobResult r;
         auto doc = showDocument();
         if (!doc || !booted || !doc->HasDocument() || target.empty())
@@ -510,9 +452,6 @@ QString ShowService::pickShowSavePath(const QString &defaultName)
 
 QVariantMap ShowService::peekShow(const QString &path) const
 {
-    // A LOOKUP into the published answer (see the header): asks the worker for what
-    // is missing and hands back what is known. `pending` is what tells a caller
-    // apart from "the file says there is no such show".
     const QString key = QDir::fromNativeSeparators(cleanPath(path));
     if (key.isEmpty())
         return { { QStringLiteral("ok"), false }, { QStringLiteral("error"), QStringLiteral("No show was named.") },
@@ -756,9 +695,6 @@ ShowService::JobResult ShowService::editShowOutcome(
         return r;
     }
     r.ok = true;
-    // The FILE changed (not the working document — this branch never touches it,
-    // which is why it has never announced showChanged): the centre page's peek of
-    // it is stale, and a path inside the library wants a rescan.
     r.touchedPath = cleanPath(path);
     r.libraryChanged = ctx.inLibrary(wanted);
     return r;
@@ -932,12 +868,6 @@ bool ShowService::updateSlide(const QString &id, const QVariantMap &patch)
             else merged.tags.front() = str("tag");
         }
         if (has("background")) merged.background = str("background");
-        // Slide-wide filters (the SLIDE tab's Filters card): one map of the
-        // seven values, read through the same converter a whole slide uses so
-        // the two doors can never disagree about a key's name or default. A key
-        // the patch leaves out keeps what the engine already had? No — the map
-        // IS the whole filter set (the panel always sends all seven), and the
-        // identity defaults make a partial map safe either way.
         if (has("filters"))
             ShowConverter::applyFilters(merged, patch.value(QStringLiteral("filters")).toMap());
         if (has("categoryId")) merged.categoryId = str("categoryId");
@@ -1147,13 +1077,6 @@ void ShowService::refreshLibrary()
     // Breadcrumb: this now walks the library on a worker, but the entry point
     // still runs on the GUI thread — a stall here names itself in the log.
     VGR_CALL_TRACE("ShowService.refreshLibrary");
-    // Create the library on the GUI thread first (library() lazily builds it and
-    // every other entry point calls it there), then hand the WALK to a worker.
-    // The filesystem pass (Refresh -> ScanUnlocked, one stat/read per show) used
-    // to run inline here, which stalled the UI on engine boot, when the Show
-    // screen opened, and after every import — the AppHangB1 class. The engine
-    // side is two halves now: the walk runs with the library lock released and
-    // only the published list is swapped under it.
     if (!library())
         return;
     if (refreshBusy_) {
@@ -1164,9 +1087,6 @@ void ShowService::refreshLibrary()
     std::shared_ptr<bp::ShowLibrary> keep = library_;   // alive past a path change
     QPointer<ShowService> guard(this);
     QThreadPool::globalInstance()->start([guard, keep]() {
-        // ShowLibrary is internally mutex-guarded, so the worker's walk is safe
-        // against the GUI's own reads; the GUI only blocks if IT asks while the
-        // scan holds the lock, and never for the walk it did not start.
         auto r = keep->Refresh();
         const QString failure = r.ok() ? QString() : QString::fromStdString(r.error().message);
         QMetaObject::invokeMethod(guard, [guard, failure]() {
@@ -1313,10 +1233,6 @@ int ShowService::rewriteShowFromText(const QString &path, const QString &text)
         if (!booted)
             return r;   // silent, as the synchronous entry point was
 
-        // A fresh, LOCAL document — never the shared "open document" the Edit
-        // screen/GO LIVE use, so an inline lyrics edit here can never collide
-        // with whatever that session has unsaved (the same isolation
-        // ImportService's own save sweep relies on).
         bp::PresentationDocument doc;
         if (auto opened = doc.Open(p); !opened.ok()) {
             r.error = message(opened.error());
@@ -1331,9 +1247,6 @@ int ShowService::rewriteShowFromText(const QString &path, const QString &text)
             return r;
         }
 
-        // The rebuilt slides look like whatever the show's own first slide
-        // already looked like (its own template blocks), not a fresh import's
-        // default layout — an edit should not restyle the show.
         bps::import::ShowBuildOptions options;
         if (!show.slides.empty()) {
             options.background = show.slides.front().background;
@@ -1353,10 +1266,6 @@ int ShowService::rewriteShowFromText(const QString &path, const QString &text)
             return r;
         }
         r.ok = true;
-        // The FILE changed under a show anyone may have on screen, and the
-        // library's own row for it (its slide count, its modified time) with it —
-        // the old code republished the library here, which is the same thing said
-        // on the interface thread (publishLibrary is this thread's state).
         r.libraryChanged = true;
         r.documentChanged = true;
         r.touchedPath = cleanPath(path);

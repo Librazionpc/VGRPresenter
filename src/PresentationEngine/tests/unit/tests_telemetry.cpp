@@ -1,8 +1,3 @@
-// Unit tests: the Telemetry module behind the Settings → General "Resource
-// profile" live meters — rendering (frame budget), encoding (busiest active
-// encoder), output (enabled-output presents per frame). The feed is the
-// engine's own events/counters, so the tests drive REAL engines:
-//   ./bps_unit_tests telemetry
 #include "TestHarness.hpp"
 
 #include "core/events/EventBus.hpp"
@@ -16,7 +11,6 @@
 #include <thread>
 
 namespace {
-
 namespace pr = bps::production;
 namespace r = bps::rendering;
 namespace rk = bps::recording;
@@ -47,7 +41,6 @@ public:
 private:
     std::string name_;
 };
-
 } // namespace
 
 void TestTelemetry() {
@@ -69,10 +62,6 @@ void TestTelemetry() {
     CHECK(tel.Snapshot().rendering == 100);         // over budget clamps
     (void)EventBus::Instance().Publish(events::RenderFrameDropped{"s", 8.33, kBudgetMs});
     CHECK(tel.Snapshot().rendering == 50);          // drops feed the same meter
-
-    // --- Output: presents vs the 60Hz target over the window ---------------
-    // Each case fills the whole 128-frame window, so the reading is over
-    // exactly that case's frames.
 
     // One enabled output presenting every frame = 100%.
     for (uint64_t i = 0; i < st::Telemetry::kWindow; ++i) {
@@ -97,15 +86,6 @@ void TestTelemetry() {
         (void)EventBus::Instance().Publish(events::RenderFrameRendered{"s", i, 8.33, 1});
     CHECK(tel.Snapshot().output == 0);
 
-    // --- The LIVE LOOP: rate, cost and the curve -----------------------------
-    // The three meters above are percentages of the 60Hz target, which is the
-    // wrong shape for a live show: a loop composing one frame a second reads as
-    // ~2% next to a preview repainting at 60Hz, so "it gets slower as the
-    // service goes on" had no number and had to be mined out of the log. The
-    // loop reports each iteration as COMPOSED (a raster) or REPRESENTED (the
-    // last composed frame copied to the outputs because nothing changed), and
-    // this section pins both, the per-second sample they close out, and the
-    // stop that clears the session.
     {
         tel.OnLiveStopped();                      // start from a known session
         tel.OnLiveFrame(120.0, true);             // a composed frame, and what it cost
@@ -125,12 +105,6 @@ void TestTelemetry() {
         tel.OnLiveSharedCopies(3);
         CHECK(tel.LiveSnapshot().sharedCopies == 3);
 
-        // WHICH ELEMENT MADE THE FRAME EXPENSIVE: the composed frame's own cost
-        // profile (RenderEngine's — the pixel work each layer/element asked for)
-        // is published beside the iteration, published on the snapshot for the
-        // caption, and CARRIED into each whole-second sample rather than counted
-        // — a hotspot is a property of the scene, so a second with no raster of
-        // its own (a copy) still names what the frame it copied was made of.
         tel.OnLiveCost("Images · Announcement video", "Images", "Announcement video", 71.0, 85.2,
                        41.0);
         s = tel.LiveSnapshot();
@@ -143,10 +117,6 @@ void TestTelemetry() {
         // a content share is not read as the whole picture.
         CHECK(s.costBackgroundPct == 41.0);
 
-        // The CURVE: one sample per whole second of loop, closed out by the
-        // first iteration after that second ends. The clock is the loop's own
-        // (see OnLiveFrame) — a loop held off while the machine was busy must
-        // not read as a slow loop — so the test waits real time for it.
         std::this_thread::sleep_for(std::chrono::milliseconds(1100));
         tel.OnLiveFrame(9.0, false);              // closes the second that just ended
         auto history = tel.LiveHistory();

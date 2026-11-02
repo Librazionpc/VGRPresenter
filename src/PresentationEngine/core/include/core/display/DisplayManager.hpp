@@ -11,10 +11,6 @@
 #include <vector>
 
 namespace bps {
-
-// Display/output registry (core/display/). Manages IDisplay backends and the
-// current output map. Which physical outputs are live is decided here; actual
-// pixel work is the RendererManager's job.
 class DisplayManager final : public IService {
 public:
     static DisplayManager& Instance();
@@ -40,5 +36,4 @@ private:
     std::map<std::string, std::vector<bool>> outputMap_;      // guarded by mutex_
     std::atomic<bool> initialized_{false};
 };
-
 } // namespace bps

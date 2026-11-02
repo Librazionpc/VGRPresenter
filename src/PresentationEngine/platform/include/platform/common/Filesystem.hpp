@@ -1,9 +1,5 @@
 #pragma once
 
-// Common (OS-agnostic) PAL backend for the filesystem subsystem. Built on
-// std::filesystem per the PAL design rule — OS-specific behavior is layered
-// over this in platform/windows and platform/macos where needed.
-
 #include "../IFilesystem.hpp"
 
 #include <atomic>
@@ -12,7 +8,6 @@
 #include <unordered_map>
 
 namespace bps::platform {
-
 class FilesystemImpl final : public IFilesystem {
 public:
     FilesystemImpl() = default;
@@ -78,5 +73,4 @@ private:
     std::thread pollThread_;
     bool pollThreadStarted_ = false;
 };
-
 } // namespace bps::platform

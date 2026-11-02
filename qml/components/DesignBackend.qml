@@ -1,17 +1,6 @@
 import QtQuick
 import VGRPresenterUI
 
-// The engine seam of the Edit screen while it edits a DESIGN - one overlay or template from a library - instead of
-// the open show. ShowSession makes the same calls on its `backend` whichever it is:
-//
-//   a SHOW      -> ShowService (slides with blocks in a .vgr document)
-//   a DESIGN    -> this object: the design is shown as a show with ONE slide whose blocks are the design's blocks, and
-//                  every call is handed to the library service (bps::library::DesignLibrary in the engine), which
-//                  applies ShowEditor's block rules and saves. A design has no save button: an edit that settles is
-//                  written straight away, like FreeShow's overlay editor.
-//
-// So the Edit screen edits a design with exactly the code it edits a slide with - canvas, undo, inspector, text panel -
-// and only this file knows the difference. The engine issues every block id; the UI never invents one.
 QtObject {
     id: backend
 

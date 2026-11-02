@@ -1,16 +1,10 @@
 #pragma once
 
-// PAL environment subsystem (Phase 2 DoD §14): a single read-only description
-// of the runtime environment — OS, hardware, user and locale identity. The
-// Kernel aggregates this into BuildInfo/RuntimeInfo; feature modules never
-// probe the OS themselves.
-
 #include "core/common/Common.hpp"
 
 #include <string>
 
 namespace bps::platform {
-
 struct EnvironmentInfo {
     std::string osName;      // "Ubuntu 24.04 LTS", "Windows 11", ...
     std::string osVersion;   // kernel / build release
@@ -31,5 +25,4 @@ public:
     virtual ~IEnvironment() = default;
     virtual EnvironmentInfo Current() const = 0;
 };
-
 } // namespace bps::platform

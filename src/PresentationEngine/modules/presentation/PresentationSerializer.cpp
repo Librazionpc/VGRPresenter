@@ -6,9 +6,7 @@
 #include <format>
 
 namespace bps::presentation {
-
 namespace {
-
 namespace js = bps::json;
 
 constexpr const char* kModule = "PresentationSerializer";
@@ -136,9 +134,6 @@ js::Value SlideToJson(const Slide& s) {
     o["transitionMs"] = js::Value::Number(s.transitionMs);
     o["durationMs"] = js::Value::Number(s.durationMs);
     o["background"] = Str(s.background);
-    // Slide-wide filters — written only when actually dialled in, so a show that
-    // never used them keeps producing exactly the slide JSON it always did
-    // (and older builds read the file unchanged).
     if (!s.filters.IsIdentity()) {
         js::Value::Object f;
         f["hueRotate"] = js::Value::Number(s.filters.hueRotateDeg);
@@ -306,7 +301,6 @@ Result<std::vector<T>> ReadObjects(const js::Value& root, std::string_view key, 
     }
     return out;
 }
-
 } // namespace
 
 Result<std::string> PresentationSerializer::SerializeTemplate(const SlideTemplate& t) const {
@@ -414,5 +408,4 @@ Result<Presentation> PresentationSerializer::Deserialize(std::string_view json) 
     p.overlays = std::move(overlays.value());
     return p;
 }
-
 } // namespace bps::presentation

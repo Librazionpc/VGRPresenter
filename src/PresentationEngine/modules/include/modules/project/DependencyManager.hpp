@@ -1,11 +1,5 @@
 #pragma once
 
-// DependencyManager (docs/specs/15 §Dependency Manager): tracks the graph
-// Project → Presentation → Slides → Images/Videos/Fonts/Audio and detects
-// missing or broken dependencies. Validation reports which referenced assets
-// are no longer present in CAMS, so the UI can warn instantly when a file
-// disappears (also consumed by the ReferenceManager for cleanup).
-
 #include "interfaces/IService.hpp"
 
 #include <map>
@@ -14,7 +8,6 @@
 #include <vector>
 
 namespace bps::project {
-
 // One edge in the dependency graph: `parent` (e.g. a presentation uuid) needs
 // `child` (e.g. an image uuid) of `kind`.
 struct DependencyEdge {
@@ -60,5 +53,4 @@ private:
     mutable std::mutex mutex_;
     std::vector<DependencyEdge> edges_;
 };
-
 } // namespace bps::project

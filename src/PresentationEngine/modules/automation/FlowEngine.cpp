@@ -10,9 +10,7 @@
 #include <format>
 
 namespace bps::automation {
-
 namespace {
-
 std::string ToLower(std::string_view s) {
     std::string out;
     out.reserve(s.size());
@@ -153,7 +151,6 @@ public:
     const char* Type() const noexcept override { return "time"; }
     std::string WaitsFor(std::string_view) const override { return {}; }
 };
-
 } // namespace
 
 // ===========================================================================
@@ -224,9 +221,6 @@ Result<void> FlowEngine::Initialize() {
     if (initialized_.load()) return Ok();
     initialized_.store(true);
 
-    // Built-in actions (docs/specs/26 §Actions). Domain actions (song, bible,
-    // media, scene...) are registered by consumers/plugins through the same
-    // registry — the engine core stays decoupled.
     actions_["noop"] = []() -> std::shared_ptr<IAction> { return std::make_shared<NoopAction>(); };
     actions_["send_event"] = []() -> std::shared_ptr<IAction> {
         return std::make_shared<SendEventAction>();
@@ -408,7 +402,6 @@ std::vector<std::string> FlowEngine::TriggerNames() const {
 // Flow serialization (docs/specs/26 §.vgr, §Flow Model)
 // ===========================================================================
 namespace {
-
 std::string KindStr(NodeKind k) {
     switch (k) {
         case NodeKind::Action: return "action";
@@ -567,7 +560,6 @@ Flow FlowFromJson(const json::Value& v) {
     }
     return flow;
 }
-
 } // namespace
 
 Result<std::string> FlowEngine::Load(std::string_view source, std::string_view format,
@@ -842,9 +834,6 @@ Result<std::string> FlowEngine::Start(
     }   // mutex_ released here
     if (waitsForTrigger) return execId;
 
-    // Published with mutex_ released (a subscriber may re-enter the engine) and
-    // before the first nodes run, so the start event still leads the node events
-    // it triggers.
     (void)EventBus::Instance().Publish(events::FlowStarted{std::string(flowId), execId, flowName});
     {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
@@ -1065,9 +1054,6 @@ Result<void> FlowEngine::EmergencyStop() {
 Result<std::string> FlowEngine::ExecuteAction(
     std::string_view actionType, std::string_view payload,
     const std::map<std::string, std::string, std::less<>>& vars) {
-    // Resolve the factory under the lock, then run the action with NO lock
-    // held: a registered action drives live services (media, recording, live
-    // output) and must not stall every other FlowEngine operation.
     ActionFactory factory;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1096,10 +1082,6 @@ Result<std::string> FlowEngine::ExecuteAction(
 // ===========================================================================
 // Unlocked action/condition execution
 // ===========================================================================
-// Registered actions drive other engines (media, recording, live output) and
-// may block. They therefore run with the engine lock RELEASED; the action gets
-// a private copy of the execution variables, and any changes it makes are
-// merged back (without clobbering values written concurrently meanwhile).
 Result<ActionOutcome> FlowEngine::RunActionUnlocked(std::unique_lock<std::recursive_mutex>& lk,
                                                     Execution& exec, const FlowNode& node,
                                                     const ActionFactory& factory) {
@@ -1445,9 +1427,6 @@ Result<size_t> FlowEngine::Notify(std::string_view eventTopic, std::string_view 
         exec.waitingFor.clear();
         exec.lastEventMs = NowMs();
         if (exec.waitNodeId.empty()) {
-            // Start-trigger wait resolved -> the flow officially starts. The
-            // event is published with mutex_ released (below): a subscriber may
-            // re-enter the engine.
             auto fit = flows_.find(exec.flowId);
             starts.push_back(events::FlowStarted{
                 exec.flowId, id, fit != flows_.end() ? fit->second.name : ""});
@@ -1690,5 +1669,4 @@ FlowEngine& FlowEngine::Instance() {
     static FlowEngine instance;
     return instance;
 }
-
 } // namespace bps::automation
