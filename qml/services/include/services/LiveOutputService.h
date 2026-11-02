@@ -288,6 +288,8 @@ public:
     Q_INVOKABLE QVariantList readingWindowLineStarts(const QString &styleId) const;
     // The font size (stage px) the current window is fitted to in that style's text area.
     Q_INVOKABLE qreal readingWindowSizeFor(const QString &styleId) const;
+    // Whole lines the style's text area holds at its column size (0 = not measured yet).
+    Q_INVOKABLE int readingVisibleLinesFor(const QString &styleId) const;
     qreal readingWindowSizeForText(const QString &styleId, const QString &windowText) const;
     void setReadingWordBudget(int words);
     bool scrollMode() const { return scrollMode_; }

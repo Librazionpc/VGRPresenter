@@ -564,9 +564,21 @@ Item {
                     y: LiveOutputService.readingBudgetFitActive
                        ? (el.style.padding ?? 0) : el.pageTop
                     width: el.width
-                    height: LiveOutputService.readingBudgetFitActive
-                            ? Math.max(0, el.height - 2 * (el.style.padding ?? 0))
-                            : fitMeasure.contentHeight
+                    // A BOOK PAGE SHOWS WHOLE LINES: in Scroll the column fills its text area down to the last
+                    // line that fits entirely (the engine's outputs do the same), so a tall box does not show
+                    // the next paragraph's first line half-cut while a shorter one does not.
+                    // (The line count is the service's — the rule the font solver and NDI/HDMI use — not a
+                    // count from this surface's own pitch, which is a hair larger and lost a line.)
+                    height: {
+                        if (!LiveOutputService.readingBudgetFitActive)
+                            return fitMeasure.contentHeight
+                        const inner = Math.max(0, el.height - 2 * (el.style.padding ?? 0))
+                        // (el.fitAnswer: re-evaluate once the column has been solved)
+                        const lines = el.fitAnswer > 0
+                            ? LiveOutputService.readingVisibleLinesFor(String(root.readingStyleId)) : 0
+                        return lines > 0 && el.linePitch > 0
+                               ? Math.min(inner, lines * el.linePitch) : inner
+                    }
                     clip: true
 
                     // The passage starts at the top of the window and travels UP by

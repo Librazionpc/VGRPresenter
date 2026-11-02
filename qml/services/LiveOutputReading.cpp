@@ -1314,6 +1314,26 @@ qreal LiveOutputService::readingWindowSizeForText(const QString &styleId, const 
     return size;
 }
 
+int LiveOutputService::readingVisibleLinesFor(const QString &styleId) const
+{
+    const auto *model = OutputListModel::instance();
+    const QString key = styleId.isEmpty() ? (model ? model->activeStyleId() : QString()) : styleId;
+    const auto column = scrollColumns_.constFind(key);
+    if (column == scrollColumns_.constEnd() || column->size <= 0.0)
+        return 0;
+    // HOW MANY WHOLE LINES THE TEXT AREA HOLDS — by the very rule the font solver fits the budget with
+    // and the engine's outputs clip by: the line pitch of the (whole-pixel) column size against the box's
+    // inner height. The monitors used their own measured pitch, a hair larger, so a box that held three
+    // lines on NDI read as two on the monitor tile.
+    const QVariantMap meta = column->block.value(QStringLiteral("meta")).toMap();
+    const QFont font = blockFontAt(column->block, column->size);
+    const double step = bps::presentation::template_text_metrics::linePitch(
+        QFontMetricsF(font).height(), metaLineFactor(meta), metaLineGap(meta));
+    const double height = column->block.value(QStringLiteral("height"), 40.0).toDouble()
+                          - blockPadding(column->block) * 2.0;
+    return step > 0.0 ? qMax(1, static_cast<int>(std::floor(height / step + 0.02))) : 0;
+}
+
 qreal LiveOutputService::readingWindowSizeFor(const QString &styleId) const
 {
     return readingWindowSizeForText(styleId, readingWindowText());

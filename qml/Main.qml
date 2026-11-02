@@ -1301,7 +1301,7 @@ ApplicationWindow {
                 const pane = window.twPane()
                 if (pane) {
                     EngineBridge.log("info", "TWGRAB", "phase=pick3")
-                    pane.stageOutputPart(3, 0)
+                    pane.stageSubpart(3, 0)      // select it, then stage it: a row's double-click
                     twAfterPick.restart()
                     return
                 }
@@ -1313,6 +1313,7 @@ ApplicationWindow {
         id: twAfterPick
         interval: 9000
         onTriggered: {
+            window.twGrab("afterpick")      // the tiles, right after the pick has settled
             EngineBridge.log("info", "TWGRAB", "phase=pick3done")
             selfTestTableWalkPress.restart()
         }

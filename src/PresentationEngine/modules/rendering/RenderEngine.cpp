@@ -668,8 +668,14 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     const Rect bounds = obj->Bounds();
 
     const bool flowing = obj->HasReadingFlow();
+    // A BOOK PAGE SHOWS WHOLE LINES. Scroll's column fills its text area, but only down to the last line
+    // that fits entirely: the next line peeking in half-cut at the bottom made a tall box (Main Output)
+    // show the next paragraph's first words while a shorter one (the Lower Third) did not.
+    const float wholeLinesHeight = lineHeight > 0.0f
+        ? std::max(lineHeight, std::floor(bounds.height / lineHeight + 0.02f) * lineHeight)
+        : bounds.height;
     const float alignHeight = flowing
-        ? (obj->FlowFillsBox() ? bounds.height
+        ? (obj->FlowFillsBox() ? wholeLinesHeight
                                : static_cast<float>(obj->FlowPageLines()) * lineHeight)
         : result.totalHeight;
     // The scroll itself, in the text's OWN line heights — the same advance the
