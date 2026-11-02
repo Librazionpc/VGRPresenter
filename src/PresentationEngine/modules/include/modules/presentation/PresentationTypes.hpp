@@ -247,6 +247,11 @@ struct OutputStyleSpec {
     std::string backgroundImage;
     std::string mediaFit;
     float readingFontPx = 0.0f;
+    // The reading column's line breaks for THIS output's style, cut once at the stage's own size
+    // (UTF-16 offsets into the passage window) and the hash of the text they were cut from. The
+    // scene draws exactly these lines (rendering::ForcedLineBreaks); empty = wrap normally.
+    std::vector<int> readingLineStarts;
+    uint64_t readingLineTextHash = 0;
     int videoBus = 0;
     bool gateVideoBuses = false;
     std::vector<int> allowedVideoBuses;   // bus NUMBERS (CompositorState's key)

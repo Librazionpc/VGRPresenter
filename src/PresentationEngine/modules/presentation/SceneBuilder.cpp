@@ -132,6 +132,8 @@ std::string SceneBuilder::StyledSceneIdFor(const Presentation& p, const Slide& s
         id += std::format("@size:{}x{}", sw, sh);
     if (style.readingFontPx > 0.0f)
         id += std::format("@rf:{:.2f}", static_cast<double>(style.readingFontPx));
+    if (!style.readingLineStarts.empty())
+        id += std::format("@lt:{:016x}_{}", style.readingLineTextHash, style.readingLineStarts.size());
     if (presentation::CompositorState::Instance().HasMediaFrame())
         id += "@m:on";
     if (style.gateVideoBuses) {

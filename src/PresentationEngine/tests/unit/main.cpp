@@ -112,6 +112,7 @@ static const Suite kSuites[] = {
     {"rendering", "reading-flow-draw-cost", TestReadingFlowDrawCost},
     {"rendering", "reading-flow-window-refresh", TestReadingFlowWindowRefresh},
     {"rendering", "flow-scroll-math", TestFlowScrollMath},
+    {"rendering", "forced-line-breaks", TestForcedLineBreaks},
     {"rendering", "reading-page-keeps-pick", TestReadingPageKeepsPick},
     {"rendering", "rtypes", TestRenderTypes},
     {"rendering", "rbackends", TestRenderBackends},

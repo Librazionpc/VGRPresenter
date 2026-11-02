@@ -270,6 +270,12 @@ public:
     int readingWordBudget() const { return readingWordBudget_; }
     bool readingBudgetFitActive() const { return readingBudgetFitActive_; }
     qreal readingColumnPxFor(const QString &styleId) const;
+    // The line breaks of THIS style's reading column for the passage window now on the slide, cut
+    // once at the stage's size (the table the monitors scroll through) and the hash of the text they
+    // were cut from — handed to the engine so its outputs draw exactly these lines. False while the
+    // table is not ready (it is measured off-thread; the style is pushed again when it lands).
+    bool readingLineTableFor(const QString &styleId, std::vector<int> &starts,
+                             uint64_t &textHash) const;
     void setReadingWordBudget(int words);
     bool scrollMode() const { return scrollMode_; }
     void setScrollMode(bool on);

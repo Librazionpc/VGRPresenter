@@ -31,9 +31,54 @@ Item {
     // The signature of the last ReadingDrawn line this surface wrote — see
     // noteReadingDrawn: the log is change-driven, not lineCount-driven.
     property string readingDrawnLogged: ""
+    // ---- DO THIS SURFACE'S OWN LINE BREAKS MATCH THE SHARED TABLE? -------------
+    // The engine's outputs draw the service's line table exactly (ForcedLineBreaks); this surface
+    // lets Qt Text wrap (only a wrapped line can be justified, and the line bands read this
+    // layout). So the agreement is CHECKED: the lines Text drew against the table's. One log
+    // line per distinct answer.
+    property var breakCheckFlow: null
+    property var breakCheckBlock: null
+    property string breakCheckLogged: ""
+    function queueBreakCheck(flow, block) {
+        if (!block.readingBlock || !root.animateLineSteps)
+            return
+        root.breakCheckFlow = flow
+        root.breakCheckBlock = block
+        breakCheckTimer.restart()
+    }
+    Timer {
+        id: breakCheckTimer
+        interval: 500        // the table is measured off-thread; check once it has settled
+        repeat: false
+        onTriggered: root.verifyBreaks()
+    }
+    function verifyBreaks() {
+        const flow = root.breakCheckFlow, block = root.breakCheckBlock
+        if (!flow || !block || typeof EngineBridge === "undefined" || !root.animateLineSteps)
+            return
+        if (String((block.meta ?? {}).list ?? "") !== "" || flow.lineCount < 1)
+            return           // list formatting rewrites the text: its offsets are not the table's
+        const style = String(root.readingStyleId)
+        let starts = []
+        try { starts = LiveOutputService.readingRunLineStarts(style) } catch (e) { return }
+        if (!starts || starts.length === 0)
+            return           // table not measured yet
+        const label = (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
+        // (QML Text cannot say where it broke a line — positionAt exists only on TextEdit — so
+        // the check is the line COUNT: one differently-placed break nearly always moves it.)
+        const verdict = flow.lineCount !== starts.length
+            ? "DIFFERS in line count: text=" + flow.lineCount + " table=" + starts.length
+            : "agrees lines=" + starts.length
+        const sig = label + "|" + verdict + "|" + flow.text.length
+        if (root.breakCheckLogged === sig)
+            return
+        root.breakCheckLogged = sig
+        EngineBridge.log("info", "ReadingBreaks", "surface=" + label + " " + verdict)
+    }
     function noteReadingDrawn(flow, block) {
         if (!block.readingBlock)
             return
+        root.queueBreakCheck(flow, block)
         readingDrawnLines = flow.lineCount
         readingDrawnBoxW = block.width
         readingDrawnBoxH = block.height
@@ -552,6 +597,7 @@ Item {
                             lineHeight: fitText.lineHeight
                             lineHeightMode: fitText.lineHeightMode
                             onLineCountChanged: root.noteReadingDrawn(flowText, el)
+                            onTextChanged: root.queueBreakCheck(flowText, el)
                             Component.onCompleted: root.noteReadingDrawn(flowText, el)
                             Connections {
                                 target: root

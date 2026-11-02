@@ -78,7 +78,9 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    const rendering::Size& size, std::string_view tag,
                    std::string_view layer,
                    const std::string& flowText,
-                   float readingFontPx) {
+                   float readingFontPx,
+                   const std::vector<int>* readingLineStarts,
+                   uint64_t readingLineTextHash) {
     constexpr double kBlockStageW = bps::library::kStageWidth, kBlockStageH = bps::library::kStageHeight;
     constexpr double kDefaultTextFontSize = 16.0;
     constexpr double kNaturalLineHeight = template_text_metrics::kNaturalLineHeight;
@@ -165,6 +167,18 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 const float whole = static_cast<float>(rendering::FontManager::QtPixelSize(exact));
                 styleComp->style.size = whole;
                 flowWrapScale = whole / exact;
+                // THE PERMANENT PART: when the service handed this output's style the line
+                // breaks it cut for THIS passage, draw those lines — no wrapping here at all.
+                // The wrap width is then only the justify target, so it is the box itself (a
+                // line cut at the stage's size is never wider than the box once scaled).
+                if (readingLineStarts && !readingLineStarts->empty()
+                        && rendering::TextLayout::TextHash(flowText) == readingLineTextHash) {
+                    auto forced = std::make_shared<rendering::ForcedLineBreaks>();
+                    forced->starts = *readingLineStarts;
+                    forced->textHash = readingLineTextHash;
+                    styleComp->style.forcedBreaks = std::move(forced);
+                    flowWrapScale = 1.0f;
+                }
             }
             styleComp->style.color = StyleBuilder::ParseColor(
                 MetaString(block.metaJson, "color").empty()

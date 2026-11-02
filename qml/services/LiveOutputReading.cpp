@@ -21,6 +21,7 @@
 #include "modules/presentation/TemplateTextMetrics.hpp"
 #include "modules/presentation/SlideRules.hpp"
 #include "modules/rendering/FlowScrollMath.hpp"
+#include "modules/rendering/TextEngine.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
@@ -977,6 +978,11 @@ void LiveOutputService::QueueScrollColumnMeasure(const QString &columnKey, const
                         }
                         emit self->readingScrollChanged();
                         QTimer::singleShot(0, self, &LiveOutputService::drainPendingReadingSteps);
+                        // The table the engine's outputs draw is ready: hand it over.
+                        QTimer::singleShot(0, self, []() {
+                            if (auto *outputs = OutputListModel::instance())
+                                outputs->repushEngineStyles();
+                        });
                     }
                 }, Qt::QueuedConnection);
         });
@@ -1224,6 +1230,21 @@ qreal LiveOutputService::readingColumnPxFor(const QString &styleId) const
     // monitor sets 31.88 as 31 — and an engine scene at the exact 31.88 is 3% larger, wraps a few
     // characters earlier and puts different words on each line ("the words are not the same").
     return it == scrollColumns_.constEnd() ? 0.0 : std::floor(it->size);
+}
+
+bool LiveOutputService::readingLineTableFor(const QString &styleId, std::vector<int> &starts,
+                                            uint64_t &textHash) const
+{
+    starts.clear();
+    textHash = 0;
+    if (!scrollMode_ || !readingBudgetFitActive_ || readingFlowText_.isEmpty() || styleId.isEmpty())
+        return false;
+    const QVector<int> table = styleRunLines(styleId).charStarts;   // none while still measuring
+    if (table.isEmpty())
+        return false;
+    starts.assign(table.constBegin(), table.constEnd());
+    textHash = bps::rendering::TextLayout::TextHash(readingFlowText_.toUtf8().toStdString());
+    return true;
 }
 
 qreal LiveOutputService::readingRunSizeForStyle(const QString &styleId) const

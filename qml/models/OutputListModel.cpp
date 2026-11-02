@@ -1170,9 +1170,12 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
     spec.allowedVideoBuses.clear();
     // ...and Scroll's solved type size for the active style (0 outside Scroll), so the program
     // frame the unstyled outputs mirror is drawn at the same size the surfaces use.
-    if (!styleId.isEmpty())
+    if (!styleId.isEmpty()) {
         spec.readingFontPx = static_cast<float>(
             LiveOutputService::instance().readingColumnPxFor(styleId));
+        LiveOutputService::instance().readingLineTableFor(styleId, spec.readingLineStarts,
+                                                          spec.readingLineTextHash);
+    }
     const int activeRow = activeIndex();
     if (activeRow >= 0 && activeRow < m_outputs.size()) {
         spec.showOverlay = spec.showOverlay && m_outputs.at(activeRow).showOverlay;
@@ -1193,9 +1196,13 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
             : bps::presentation::OutputStyleSpec{};
         // SCROLL'S TYPE SIZE FOR THIS ROW'S STYLE (0 outside Scroll): the engine's own scene for
         // this output wraps and sizes the passage exactly as the monitor surface does.
-        if (styleRow >= 0)
+        if (styleRow >= 0) {
             outSpec.readingFontPx = static_cast<float>(
                 LiveOutputService::instance().readingColumnPxFor(item.styleId));
+            // ...and the line breaks cut for it, so that scene draws the monitor's own lines.
+            LiveOutputService::instance().readingLineTableFor(item.styleId, outSpec.readingLineStarts,
+                                                              outSpec.readingLineTextHash);
+        }
         // Per-output routing must not replace or filter the on-air program.
         // Match the monitor's program pass: explicit bus blocks on the slide
         // remain governed by the active program style.

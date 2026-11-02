@@ -3410,6 +3410,51 @@ void TestShippedConfig() {
     CHECK(db.Open("").ok());   // leave the shared store in-memory for the next suite
 }
 
+void TestForcedLineBreaks() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+    const r::FontManager& fonts = engine.Fonts();
+
+    const std::string text = "one two three four five six\nseven eight";
+    //                        0       8          19         28
+    auto forced = std::make_shared<r::ForcedLineBreaks>();
+    forced->starts = {0, 8, 19, 28};
+    forced->textHash = r::TextLayout::TextHash(text);
+
+    r::TextStyle style;
+    style.fontId = "Segoe UI";
+    style.size = 40.0f;
+    style.wrap = true;
+    style.wrapWidth = 2000.0f;          // wide: normal wrapping would keep each paragraph on one line
+    style.forcedBreaks = forced;
+
+    // The table IS the character map when the text is the one it was cut from.
+    CHECK(r::TextLayout::FlowCharacterStarts(text, style, fonts) == forced->starts);
+
+    const auto layout = r::TextLayout::Measure(text, style, fonts);
+    if (fonts.HasSystemFont(fonts.SubstituteFamily(style.fontId))) {
+        // Exactly the lines the table names, whatever the wrap width says.
+        CHECK(layout.lines.size() == 4);
+        if (layout.lines.size() == 4) {
+            CHECK(layout.lines[0].text == "one two");
+            CHECK(layout.lines[1].text == "three four");
+            CHECK(layout.lines[2].text == "five six");
+            CHECK(layout.lines[3].text == "seven eight");
+            CHECK(!layout.lines[0].paragraphEnd);    // a soft break: justified
+            CHECK(!layout.lines[1].paragraphEnd);
+            CHECK(layout.lines[2].paragraphEnd);     // ends at the paragraph's newline
+            CHECK(layout.lines[3].paragraphEnd);     // the text's last line
+        }
+    }
+
+    // Different text: the table is not applied, the text wraps on its own.
+    r::TextStyle other = style;
+    other.wrapWidth = 2000.0f;
+    const auto ownWrap = r::TextLayout::Measure(text + " more", other, fonts);
+    CHECK(ownWrap.lines.size() == 2);   // two paragraphs, nothing forced
+}
+
 void TestFlowScrollMath() {
     namespace fs = bps::rendering::flowscroll;
     const std::vector<int> reference{0, 40, 80, 125, 160};   // a wide wrap

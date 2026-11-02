@@ -232,6 +232,7 @@ void TestLineSpacingAndLineBands();
 // existing reading block (SceneBuilder::RefreshReadingFlow), not rebuilt.
 void TestReadingFlowWindowRefresh();
 void TestFlowScrollMath();
+void TestForcedLineBreaks();
 // A page commit inside one passage is an OFFSET update on the pick already on
 // air (LiveOutputController::UpdateReadingSlide), not a content replacement.
 void TestReadingPageKeepsPick();

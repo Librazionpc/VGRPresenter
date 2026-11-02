@@ -590,6 +590,48 @@ bool MeasureWithQtLayout(const std::string& source, const TextStyle& style,
     const float lineHeight = step > 0.0f ? step : style.size;
     result.lineStep = lineHeight;
     result.lineBox = metrics.inkHeight;
+    // THE SHARED BREAKS, when this text is the one they were cut from: no wrapping here at
+    // all. Each line is the span between two of the table's starts; a line that ends at a
+    // paragraph break (or the text's end) is a paragraph's last line and is not justified.
+    if (style.forcedBreaks && !style.forcedBreaks->starts.empty()
+            && style.forcedBreaks->textHash == TextLayout::TextHash(source)) {
+        const QString whole = QString::fromUtf8(source.data(),
+                                                static_cast<qsizetype>(source.size()));
+        const std::vector<int>& starts = style.forcedBreaks->starts;
+        bool consistent = true;
+        for (size_t i = 0; i < starts.size() && consistent; ++i) {
+            const int from = starts[i];
+            const int to = i + 1 < starts.size() ? starts[i + 1] : static_cast<int>(whole.size());
+            consistent = from >= 0 && from <= to && to <= whole.size();
+        }
+        if (consistent) {
+            const QFontMetricsF fontMetrics(font);
+            const auto foldedLine = [](const QString& text) {
+                return FoldToAtlasAscii(text.toUtf8().toStdString());
+            };
+            for (size_t i = 0; i < starts.size(); ++i) {
+                const int from = starts[i];
+                const int to = i + 1 < starts.size() ? starts[i + 1]
+                                                     : static_cast<int>(whole.size());
+                QString line = whole.mid(from, to - from);
+                bool paragraphEnd = (i + 1 == starts.size());
+                if (line.endsWith(QLatin1Char('\n'))) {
+                    line.chop(1);
+                    paragraphEnd = true;
+                }
+                while (line.endsWith(QLatin1Char(' ')))
+                    line.chop(1);   // the break's own space is not part of the line's ink
+                const float width = static_cast<float>(fontMetrics.horizontalAdvance(line));
+                result.lines.push_back({foldedLine(line), width, paragraphEnd});
+                result.totalWidth = std::max(result.totalWidth, width);
+                result.totalHeight += lineHeight;
+            }
+            if (!result.lines.empty())
+                result.totalHeight += result.lineBox - lineHeight;
+            return true;
+        }
+    }
+
     QStringList paragraphs = QString::fromUtf8(source.data(),
                                                static_cast<qsizetype>(source.size()))
                                  .split(QLatin1Char('\n'), Qt::KeepEmptyParts);
@@ -769,9 +811,22 @@ TextLayoutResult TextLayout::Measure(const std::string& text, const TextStyle& s
     return result;
 }
 
+uint64_t TextLayout::TextHash(const std::string& text) {
+    uint64_t hash = 14695981039346656037ull;   // FNV-1a, 64 bit
+    for (unsigned char byte : text) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
 std::vector<int> TextLayout::FlowCharacterStarts(const std::string& text,
                                                  const TextStyle& style,
                                                  const FontManager& fonts) {
+    // The shared table IS the answer when this text is the one it was cut from.
+    if (style.forcedBreaks && !style.forcedBreaks->starts.empty()
+            && style.forcedBreaks->textHash == TextHash(text))
+        return style.forcedBreaks->starts;
     const TextLayoutResult layout = Measure(text, style, fonts);
     const std::string foldedText = FoldToAtlasAscii(text);
     // The engine lays out folded bytes, while the shared scroll position is in

@@ -19,8 +19,20 @@ namespace bps::rendering {
 enum class TextAlign : int { Left = 0, Center, Right, Justify };
 enum class TextVAlign : int { Top = 0, Middle, Bottom };
 
+// LINE BREAKS DECIDED ELSEWHERE. The reading column's breaks are cut once, at the stage's
+// own size, by the service that also steps the walk (the table every monitor surface
+// scrolls through). A surface that is handed them draws exactly those lines, scaled to
+// its output, instead of wrapping the text again at a size and width of its own — which is
+// what let two screens put different words on a line. `textHash` ties the table to the text
+// it was cut from (TextLayout::TextHash); text that does not match it is wrapped normally.
+struct ForcedLineBreaks {
+    std::vector<int> starts;      // UTF-16 offset of each line's first character
+    uint64_t textHash = 0;
+};
+
 struct TextStyle {
     std::string fontId = "builtin";   // font family id
+    std::shared_ptr<const ForcedLineBreaks> forcedBreaks;   // null = wrap by wrapWidth
     float size = 24.0f;               // cell size (px) for the bitmap font
     Color color{1, 1, 1, 1};
     TextAlign align = TextAlign::Left;
@@ -181,6 +193,9 @@ public:
                              const FontManager& fonts);
     // Splits text into visual lines honoring RTL ordering.
     static std::vector<std::string> SplitLines(const std::string& text, bool rtl);
+    // The identity ForcedLineBreaks is tied to: FNV-1a over the text's UTF-8 bytes. The
+    // service hashes the same bytes with this same function.
+    static uint64_t TextHash(const std::string& text);
 };
 
 // Convenience: attach a style to a text object.

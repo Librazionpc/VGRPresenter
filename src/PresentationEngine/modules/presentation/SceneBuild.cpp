@@ -86,10 +86,19 @@ void ApplyReadingFlow(rendering::RenderEngine& engine, const std::string& sceneI
         static std::mutex flowLogMutex;
         static std::set<std::string> flowLogged;
         std::lock_guard<std::mutex> lock(flowLogMutex);
-        if (flowLogged.insert(sceneId).second)
+        if (flowLogged.insert(sceneId).second) {
             Logger::Instance().Debug(std::format(
                 "reading flow attached: page {} line(s), passage {} char(s), resting at char {:.2f}",
                 pageLines, slide.flowText.size(), slide.flowChar), "SceneBuilder");
+            const bool shared = style.forcedBreaks && !style.forcedBreaks->starts.empty()
+                && style.forcedBreaks->textHash == rendering::TextLayout::TextHash(slide.flowText);
+            Logger::Instance().Info(std::format(
+                "reading column lines: {} ({} line(s), box {:.0f}px wide at {:.0f}px)",
+                shared ? "SHARED stage table" : "own wrap (no table for this passage yet)",
+                shared ? style.forcedBreaks->starts.size()
+                       : rendering::TextLayout::Measure(slide.flowText, style, engine.Fonts()).lines.size(),
+                style.wrapWidth, style.size), "SceneBuilder");
+        }
     }
 }
 
@@ -437,14 +446,16 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         switch (comp.source) {
         case SlideComposition::Source::FamilyTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText,
-                                         style.readingFontPx);
+                                         style.readingFontPx, &style.readingLineStarts,
+                                         style.readingLineTextHash);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
                                                 sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
             return;
         }
         case SlideComposition::Source::StyleTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText,
-                                         style.readingFontPx);
+                                         style.readingFontPx, &style.readingLineStarts,
+                                         style.readingLineTextHash);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;
@@ -458,7 +469,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         }
         case SlideComposition::Source::SlideBlocks: {
             const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText,
-                                         style.readingFontPx);
+                                         style.readingFontPx, &style.readingLineStarts,
+                                         style.readingLineTextHash);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;
