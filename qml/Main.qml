@@ -1293,7 +1293,29 @@ ApplicationWindow {
     Timer {
         id: twResume
         interval: 14000
-        onTriggered: selfTestTableWalkPress.restart()
+        onTriggered: {
+            // ON AIR (a "live:" query): do what a double-click on paragraph/verse 3 does, and let the
+            // walk stay still while the output settles — the report was that NDI kept showing the
+            // OLD start until the first step. TWGRAB phase=pick3 marks it in engine.log.
+            if (window.twGoLive) {
+                const pane = window.twPane()
+                if (pane) {
+                    EngineBridge.log("info", "TWGRAB", "phase=pick3")
+                    pane.stageOutputPart(3, 0)
+                    twAfterPick.restart()
+                    return
+                }
+            }
+            selfTestTableWalkPress.restart()
+        }
+    }
+    Timer {
+        id: twAfterPick
+        interval: 9000
+        onTriggered: {
+            EngineBridge.log("info", "TWGRAB", "phase=pick3done")
+            selfTestTableWalkPress.restart()
+        }
     }
     function twGrab(phase) {
         // (engine.log marker: an outside tool photographs the NDI output at this same moment)

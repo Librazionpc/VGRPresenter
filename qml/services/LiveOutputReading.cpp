@@ -783,6 +783,14 @@ bool LiveOutputService::refreshReadingTextWindow(int passageChar)
 
 qreal LiveOutputService::readingFlowCharForScroll(qreal lines) const
 {
+    // A FRESH PICK RESTS WHERE IT WAS MADE. The line numbers come from the reference style's table, which
+    // is measured off-thread for a new passage and takes a moment; until it lands `lines` is just 0, and
+    // the engine was told "resting at the passage's start" — NDI showed verse 1 after a double-click on
+    // verse 3 until the first step. The pick knows the exact character it wants (the same one the table
+    // will resolve to a line), so that is what the outputs are told in the meantime.
+    if (lineSourceTextOnly_ && readingLayoutTargetChar_ >= 0)
+        return qBound(0.0, static_cast<qreal>(readingLayoutTargetChar_ - readingTextWindowCharStart_),
+                      static_cast<qreal>(readingFlowText_.size()));
     return qBound(0.0, readingCharForScroll(lines), static_cast<qreal>(readingFlowText_.size()));
 }
 
