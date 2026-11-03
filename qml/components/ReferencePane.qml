@@ -2070,9 +2070,12 @@ Item {
     // Scripture alike) goes out through here: ONE commit that carries the passage,
     // never a slide with the passage following. False where there is no passage to
     // read (Scroll off, or content that has none): the caller sends the plain slide.
+    property int lastPassageMs: 0
     function sendScrollPick(ownerRef, slides, slideIndex, rememberOutput, rememberIndex, number, part) {
+        const tPassage0 = Date.now()
         const passage = LiveOutputService.scrollMode
             ? root.scrollPassageFor(Number(number), Number(part)) : null
+        root.lastPassageMs = Date.now() - tPassage0
         if (!passage)
             return false
         LiveOutputService.stagePassagePick(ownerRef, slides, slideIndex,
@@ -2246,7 +2249,9 @@ Item {
         // ...and the pane already shows this piece: the follow must not take the
         // list back to the paragraph's head row (see followLiveStep).
         root.operatorPiece = { number: Number(number), part: part }
+        const tBuilt0 = Date.now()
         const picked = root.buildSlides()
+        const buildMs = Date.now() - tBuilt0
         let pickedSlide = null
         for (const slide of picked) {
             if ((slide.parts || []).some((p) => Number(p.number) === Number(number)
@@ -2261,15 +2266,20 @@ Item {
         if (!pickedSlide)
             return false
         // Scroll is already decided: the pick goes out once, carrying its passage.
+        const tSend0 = Date.now()
+        root.lastPassageMs = 0
         if (!root.sendScrollPick(root.lineStepOwnerRef, [pickedSlide], 0, null, 0, number, part)) {
             LiveOutputService.stageSlideSet(root.lineStepOwnerRef, [pickedSlide], 0)
             root.rememberPick(null, 0, number, part)
         }
+        const sendMs = Date.now() - tSend0
+        const tFollow0 = Date.now()
         root.refreshLiveFlowSlide()
         const pickMs = Date.now() - pickT0
-        if (pickMs >= 80)
-            console.log("[PICKCOST] " + kind + " " + number + " staged in " + pickMs
-                        + " ms" + (LiveOutputService.scrollMode ? " (scroll)" : " (slide)"))
+        // Where a double-click's time goes (the engine.log line is what the selftests and a report read).
+        EngineBridge.log("info", "PickCost", kind + " " + number + " total=" + pickMs + "ms build=" + buildMs
+                         + "ms send=" + sendMs + "ms (passageJs=" + root.lastPassageMs + "ms) follow="
+                         + (Date.now() - tFollow0) + "ms mode=" + (LiveOutputService.scrollMode ? "scroll" : "slide"))
         return true
     }
 

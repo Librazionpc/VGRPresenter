@@ -1315,6 +1315,32 @@ ApplicationWindow {
         onTriggered: {
             window.twGrab("afterpick")      // the tiles, right after the pick has settled
             EngineBridge.log("info", "TWGRAB", "phase=pick3done")
+            // The same double-click in SLIDE mode, for the timing breakdown (PickCost lines in engine.log).
+            if (window.setReadingScrollMode(false, "tablewalk-slide")) {
+                twSlidePick.restart()
+                return
+            }
+            selfTestTableWalkPress.restart()
+        }
+    }
+    Timer {
+        id: twSlidePick
+        interval: 3000
+        onTriggered: {
+            const pane = window.twPane()
+            if (pane) {
+                EngineBridge.log("info", "TWGRAB", "phase=slidepick")
+                pane.stageSubpart(5, 0)
+            }
+            twSlideDone.restart()
+        }
+    }
+    Timer {
+        id: twSlideDone
+        interval: 4000
+        onTriggered: {
+            EngineBridge.log("info", "TWGRAB", "phase=slidepickdone")
+            window.setReadingScrollMode(true, "tablewalk")
             selfTestTableWalkPress.restart()
         }
     }

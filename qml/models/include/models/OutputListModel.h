@@ -8,6 +8,10 @@
 #include <QVariantMap>
 #include <QVariantList>
 #include <qqml.h>
+#include <string>
+#include <utility>
+#include <vector>
+#include "modules/presentation/PresentationTypes.hpp"
 
 // Fully defined, not forward-declared: adoptStyleRoster takes it by pointer and
 // moc needs the complete type to build the metatype for that slot.
@@ -263,6 +267,15 @@ private:
     static QPointer<StyleListModel> s_adoptedStyleRoster;
     QMetaObject::Connection styleRosterConn_;
     bool styleRosterConnected_ = false;
+    // The last style push, so an identical one is skipped, and a flag so a burst of "refresh the engine
+    // styles" calls (column seats, roster changes, route changes) costs ONE rebuild on the next turn.
+    bool m_pushQueued = false;
+    bool m_hasPushed = false;
+    bool m_lastBooted = false;
+    bps::presentation::OutputStyleSpec m_lastActiveSpec;
+    std::vector<bps::presentation::OutputStyleSpec> m_lastSpecs;
+    std::vector<std::string> m_lastBuffers;
+    std::vector<std::pair<int, int>> m_lastSizes;
     bool templateLibraryConnected_ = false;
     bool engineBootConnected_ = false;
     // See rosterReady(): set by the first hydrate that ran with the engine up.

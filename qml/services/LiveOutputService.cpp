@@ -41,6 +41,9 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <QDir>
 #include <QMetaObject>
 #include <QPointer>
@@ -198,6 +201,7 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
 {
     VGR_CALL_TRACE("LiveOutputService.goLiveWithSlides");
     readingEngineFlowText_.clear();   // a new commit: the engine's passage is whatever these slides carry
+    lastRepublishSig_.clear();
     bps::presentation::Presentation content;
     content.name = name.toStdString();
     for (const QVariant &v : slides) {
@@ -992,19 +996,32 @@ void LiveOutputService::pollTick()
     connectReadingBasis();   // once, on the first tick that finds the model
     auto &ctrl = bps::live::LiveOutputController::Instance();
 
+    // ONE frame revision per tick, however many counters moved: every tile's image URL embeds it, so
+    // each bump is a new image request per tile.
+    bool frameMoved = false;
     if (ctrl.PreviewFrames() != previewFrames_) {
         previewFrames_ = ctrl.PreviewFrames();
+        frameMoved = true;
+    }
+    const auto bumpFrameRev = [this, &frameMoved]() {
+        if (!frameMoved)
+            return;
+        frameMoved = false;
         ++frameRev_;
         emit frameRevChanged();
-    }
+    };
 
-    if (!live_)
+    if (!live_) {
+        bumpFrameRev();
         return;
+    }
 
     pollTickRecheckNdi();
 
-    if (ctrl.IsLiveContentReplacementPending())
+    if (ctrl.IsLiveContentReplacementPending()) {
+        bumpFrameRev();
         return;
+    }
 
     sampleFeedHealth();
 
@@ -1013,9 +1030,9 @@ void LiveOutputService::pollTick()
     const qulonglong sent = ctrl.FramesSent();
     if (sent != framesSent_) {
         framesSent_ = sent;
-        ++frameRev_;
-        emit frameRevChanged();
+        frameMoved = true;
     }
+    bumpFrameRev();
 
     // ---- NDI program sender ------------------------------------------------
     checkNdiFeedRate();
@@ -1072,15 +1089,33 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
         if (auto *fb = dynamic_cast<pr::FrameBufferOutput *>(o.value().get())) {
             const auto frame = fb->LastFrameSnapshot();
             if (frame && !frame->empty()) {
-                QImage ref(reinterpret_cast<const uchar *>(frame->pixels.data()),
-                           frame->width, frame->height,
-                           frame->width * 4, QImage::Format_RGBA8888);
-                out = ref.copy();
+                // ZERO COPY: the image VIEWS the engine's immutable snapshot (the cleanup hands the
+                // shared snapshot back when the consumer is done), not an 8 MB copy per tile per frame.
+                auto *holder = new std::shared_ptr<const pr::Frame>(frame);
+                out = QImage(reinterpret_cast<const uchar *>(frame->pixels.data()),
+                             frame->width, frame->height, frame->width * 4,
+                             QImage::Format_RGBA8888,
+                             [](void *p) { delete static_cast<std::shared_ptr<const pr::Frame> *>(p); },
+                             holder);
             }
         }
     }
 
+    // THE SANITY LINE IS A ONCE-A-SECOND PROBE, not a per-request scan: every tile asks for a frame every
+    // revision, and the 16x16 luma sweep plus two std::format strings ran for each of those requests.
+    static std::mutex scanMutex;
+    static std::unordered_map<std::string, qint64> lastScanMs;
+    bool scanNow = false;
     {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        std::lock_guard<std::mutex> lock(scanMutex);
+        qint64 &last = lastScanMs[bufferName];
+        if (nowMs - last >= 1000) {
+            last = nowMs;
+            scanNow = true;
+        }
+    }
+    if (scanNow) {
         // The preview is re-requested every frame, so this line is gated on the frame's
         // SHAPE (size, black or not). Mean luma moves by a rounding step on a still
         // picture and made it a per-frame writer; the numbers still print on a change.
@@ -1123,7 +1158,11 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
         out.fill(Qt::transparent);
     }
 
-    if (requestedSize.width() > 0 && requestedSize.height() > 0)
+    // Downscale only, and only to what the tile asked for (QML passes the tile's size as sourceSize): a
+    // full 1920x1080 ARGB per tile was uploaded to the GPU for a 240-pixel preview. This runs on the image
+    // loader thread now (the tiles' Images are asynchronous), not the interface thread.
+    if (requestedSize.width() > 0 && requestedSize.height() > 0
+        && (requestedSize.width() < out.width() || requestedSize.height() < out.height()))
         out = out.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     if (size)
         *size = out.size();

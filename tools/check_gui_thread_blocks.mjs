@@ -490,6 +490,47 @@ function qmlSyncFindings(qmlFiles, pairs) {
   return out;
 }
 
+// ---- The third sweep: a SYNCHRONOUS image-provider load -----------------------
+// The two sweeps above only see what QML CALLS (an invokable, a getter). A QQuickImageProvider is not
+// called by anything the C++ scan walks: QML hands it a URL, and with `asynchronous: false` Qt runs
+// requestImage() ON THE INTERFACE THREAD. The live-preview tiles did exactly that — a full-frame copy, a
+// scan and a scale per tile per revision — and the guard reported "0 new HARD" the whole time. So: any
+// `Image { asynchronous: false }` whose source is an `image://` URL (written inline, or held in a property
+// that builds one) is a finding. Fix: load it asynchronously (LiveFrameImage keeps a live frame from blanking),
+// or waive the block with `// gui-ok: <why this provider is cheap or interface-thread-owned>`.
+function qmlSyncImageFindings(qmlFiles) {
+  const out = [];
+  for (const file of qmlFiles) {
+    const lines = readFileSync(file, "utf8").split(/\r?\n/);
+    const imageProps = new Set();   // properties whose definition builds an image:// URL
+    lines.forEach((line, i) => {
+      if (!/image:\/\//.test(line)) return;
+      for (let j = i; j >= Math.max(0, i - 10); --j) {
+        const m = /property\s+\w+\s+(\w+)\s*:/.exec(lines[j]);
+        if (m) { imageProps.add(m[1]); break; }
+      }
+    });
+    for (let i = 0; i < lines.length; ++i) {
+      if (!/^\s*Image\s*\{/.test(lines[i])) continue;
+      let depth = 0, end = i;
+      for (let j = i; j < lines.length; ++j) {
+        for (const ch of strip(lines[j])) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+        if (depth <= 0) { end = j; break; }
+      }
+      const block = lines.slice(i, end + 1).join("\n");
+      if (!/asynchronous\s*:\s*false/.test(block)) continue;
+      const src = lines.slice(i, end + 1).find((l) => /^\s*source\s*:/.test(l)) || "";
+      const viaProvider = /image:\/\//.test(src)
+        || [...imageProps].some((p) => new RegExp(`\\b${p}\\b`).test(src));
+      if (!viaProvider) continue;
+      const waiver = /gui-ok:(.*)$/m.exec(block);
+      if (waiver && waiver[1].trim().length > 0) continue;
+      out.push({ file, line: i + 1, text: src.trim(), bare: !!waiver });
+    }
+  }
+  return out;
+}
+
 const argv = process.argv.slice(2);
 const listMode = argv.includes("--list");
 const qmlMode = argv.includes("--qml");
@@ -761,6 +802,7 @@ for (const root of ["qml"]) {
 }
 const pairs = asyncPairs(files);
 const qmlFindings = qmlFiles.length ? qmlSyncFindings(qmlFiles, pairs) : [];
+const imageFindings = qmlFiles.length ? qmlSyncImageFindings(qmlFiles) : [];
 
 // ---- Report -----------------------------------------------------------------
 const rel = (p) => relative(ROOT, p).split(sep).join("/");
@@ -814,6 +856,12 @@ if (verdictMode) {
     console.log(`         newest-request-wins contract already exist), or waive the line with`);
     console.log(`         "// sync-ok: <what makes this call cheap>" — a stale waiver fails too.`);
   }
+  for (const f of imageFindings) {
+    console.log(`SYNC-IMAGE ${rel(f.file)}:${f.line} an Image with asynchronous: false loads an image:// provider ON the interface thread`);
+    console.log(`    ${f.text}`);
+    console.log(`    fix: load it asynchronously (LiveFrameImage double-buffers a live frame so it never blanks),`);
+    console.log(`         or waive the block with "// gui-ok: <why this provider is cheap or interface-thread-owned>".`);
+  }
   if (qmlMode) for (const f of qmlFindings) console.log(`SYNC ${rel(f.file)}:${f.line} ${f.key}`);
 }
 
@@ -825,6 +873,7 @@ const bareWaivers = findings.filter((f) => f.labels.includes("gui-ok without a r
 const summary =
   `check_gui_thread_blocks: ${hardFresh.length} new HARD (unbounded-wait) entry point(s), ` +
   `${qmlFresh.length} sync-where-async-exists QML call site(s), ` +
+  `${imageFindings.length} sync image-provider load(s), ` +
   `${known.length} known (baselined), ${softList.length} soft (lock/singleton inventory), ` +
   `${waivers} waived, ${stale.length} stale waiver(s), ${bareWaivers.length} bare waiver(s), ` +
   `${exempted} already off-thread.`;
@@ -833,4 +882,4 @@ console.log(summary);
 // and `--all` prints it. The QML sync sweep gates too: it names a call site
 // whose async twin already exists, so leaving one is a decision, not an
 // oversight, and it costs nothing to state it.
-process.exit(hardFresh.length || stale.length || qmlFresh.length || bareWaivers.length ? 1 : 0);
+process.exit(hardFresh.length || stale.length || qmlFresh.length || imageFindings.length || bareWaivers.length ? 1 : 0);

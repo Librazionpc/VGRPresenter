@@ -296,7 +296,7 @@ void LiveOutputService::EnsureMediaPlayer()
         connect(mediaSink_, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &f) {
             if (!f.isValid())
                 return;
-            lastMediaFrame_ = f.toImage();
+            setLastMediaFrame(f.toImage());
             if (!lastMediaFrame_.isNull()) {
                 if (!mediaAlphaDecided_) {
                     mediaAlphaDecided_ = true;
@@ -325,7 +325,7 @@ void LiveOutputService::ArmMediaTake(const MediaPreflight &pre)
     mediaHasAlpha_ = !pre.isVideo && !pre.isAudio && pre.hasAlpha;
     g_mediaHasAlphaOnAir = mediaHasAlpha_;
     mediaAlphaDecided_ = !pre.isVideo;
-    lastMediaFrame_ = QImage();
+    setLastMediaFrame(QImage());
     pushMediaFrameToCompositor(lastMediaFrame_);
     mediaOnAir_ = true;
 }
@@ -339,7 +339,7 @@ void LiveOutputService::StartMediaPlayback(const MediaPreflight &pre)
         mediaPlayer_->play();
         return;
     }
-    lastMediaFrame_ = pre.image;
+    setLastMediaFrame(pre.image);
     if (!lastMediaFrame_.isNull())
         mediaRev_++;
     pushMediaFrameToCompositor(lastMediaFrame_);
@@ -406,7 +406,7 @@ void LiveOutputService::clearMedia()
     mediaState_ = QStringLiteral("stopped");
     mediaPosition_ = 0;
     mediaDuration_ = 0;
-    lastMediaFrame_ = QImage();
+    setLastMediaFrame(QImage());
     pl::CompositorState::Instance().ClearMedia();
     EngineBridge::instance().stopStreamMeter(kMediaMeterLabel);
     qInfo("LiveOutputService: media taken off air");
@@ -452,7 +452,11 @@ QImage LiveMediaFrameProvider::requestImage(const QString &id, QSize *size,
 {
     Q_UNUSED(id)
     Q_UNUSED(requestedSize)
-    const QImage &frame = LiveOutputService::instance().lastMediaFrame();
+    // Read the PUBLISHED frame (this may run on the image loader thread): the interface thread's own
+    // member is replaced under us.
+    const std::shared_ptr<const QImage> published = LiveOutputService::instance().mediaFrameShared();
+    static const QImage none;
+    const QImage &frame = published ? *published : none;
     if (frame.isNull()) {
         static const QImage empty = [] {
             QImage e(1, 1, QImage::Format_ARGB32);

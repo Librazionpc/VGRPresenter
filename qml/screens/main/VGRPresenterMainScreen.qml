@@ -78,6 +78,9 @@ Rectangle {
     signal actionRunRequested(string actionId)
     // What the centre page shows (FreeShow's activeShow): a project item, or a show clicked in the Shows table. null = the splash.
     property var centerItem: null
+    // The two reference panes load asynchronously (see their Loaders): null until loaded, then the pane itself.
+    readonly property var scripturePane: scriptureLoader.item
+    readonly property var tablePane: tableLoader.item
     // ---- the Shows table's arrow keys (from the Hotkeys map) ---------------
     readonly property bool typingInField: {
         const w = Window.window
@@ -121,6 +124,7 @@ Rectangle {
         const t0 = Date.now()
         showInLibrary("table", "")          // the tab + a cleared query
         const t1 = Date.now()
+        if (!tablePane) return              // (still loading: the tab is switched, there is no pane to point yet)
         tablePane.clearCitationMatches()    // (a stale filter list must not cover the sermon)
         tablePane.goTo({ bookId: bookId, chapter: chapter, verseStart: verse, verseEnd: verse,
                          matchText: matchText || "" })
@@ -131,6 +135,7 @@ Rectangle {
     }
     function openVerseAt(r) {
         showInLibrary("scripture", "")      // the tab + a cleared query
+        if (!scripturePane) return
         scripturePane.clearCitationMatches()
         if (r.bookId !== undefined && r.bookId !== "") {
             const bible = r.bibleId !== undefined && r.bibleId !== "" ? r.bibleId : scripturePane.sourceId
@@ -663,17 +668,17 @@ Rectangle {
                         height: 39
                         onSuggestionPicked: (paneKey, ref) => {
                             if (paneKey === "scripture")
-                                scripturePane.applySuggestion(ref)
+                                scripturePane?.applySuggestion(ref)
                             else if (paneKey === "table")
-                                tablePane.applySuggestion(ref)
+                                tablePane?.applySuggestion(ref)
                         }
                         // Hovering a suggestion row previews its content in the pane's
                         // verses column until the pointer leaves (peekSuggestion(-1)).
                         onSuggestionHovered: (paneKey, index, hovering) => {
                             if (paneKey === "scripture")
-                                scripturePane.peekSuggestion(hovering ? index : -1)
+                                scripturePane?.peekSuggestion(hovering ? index : -1)
                             else if (paneKey === "table")
-                                tablePane.peekSuggestion(hovering ? index : -1)
+                                tablePane?.peekSuggestion(hovering ? index : -1)
                         }
                     }
                 }
@@ -693,6 +698,11 @@ Rectangle {
                     color: "transparent"
 
                     // ---- Per-tab panes ---- Shows keeps the original table
+                    Loader {
+                        id: scriptureLoader
+                        asynchronous: true
+                        width: parent.width; height: parent.height
+                        sourceComponent: Component {
                     ScripturePane {
                         id: scripturePane
                         objectName: "selfTestScripturePane"
@@ -718,6 +728,15 @@ Rectangle {
                             }
                         }
                     }
+                        }
+                    }
+                    // Loaded ASYNCHRONOUSLY: the pane is a ~4500-line component and the one the user is NOT looking at
+                    // is instantiated in idle slices after the window is up, not inside the blocking first load.
+                    Loader {
+                        id: tableLoader
+                        asynchronous: true
+                        width: parent.width; height: parent.height
+                        sourceComponent: Component {
                     TheTablePane {
                         id: tablePane
                         objectName: "selfTestTablePane"
@@ -747,6 +766,8 @@ Rectangle {
                         onConvertToShowRequested: (name, slides) => vGRPresenter_Main_Screen.scriptureShowRequested(name, slides)
                         // The template card's edit pencil opens it in the Edit screen.
                         onTemplateEditRequested: (id) => vGRPresenter_Main_Screen.designEditRequested("template", id)
+                    }
+                        }
                     }
                     MediaLibraryPane {
                         id: mediaPane

@@ -155,9 +155,6 @@ struct Slide {
     // cut once at the stage's own size by the service. They travel WITH the text they were cut from,
     // so a scene never draws one passage with another's lines. Absent = the output wraps by itself.
     std::map<std::string, std::vector<int>> flowBreaks;
-    // ...and the font size (stage px) each output style fits THIS window to, so the page fills its text
-    // area (see LiveOutputService::readingWindowSizeFor). Absent = the output's solved column size.
-    std::map<std::string, float> flowSizes;
     std::string notes;
     std::vector<std::string> tags;
     std::vector<std::string> sections;
@@ -292,11 +289,14 @@ struct OutputStyleSpec {
         std::string templateKey;
         bool overrideEnabled = false;
         std::vector<ContentBlock> blocks;
+        bool operator==(const ShowCategoryTemplate&) const = default;
     };
     std::vector<ShowCategoryTemplate> showCategoryTemplates;
     // Shows-only category label (diagnostic display for now).
     std::string category;
     std::vector<ContentBlock> templateBlocks;
+    // So an identical push to the engine can be recognised and skipped.
+    bool operator==(const OutputStyleSpec&) const = default;
 };
 
 // --- Validation issues (docs/specs/19 §Validator) -----------------------------

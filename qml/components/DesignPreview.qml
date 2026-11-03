@@ -59,20 +59,18 @@ Item {
         if (String((block.meta ?? {}).list ?? "") !== "" || flow.lineCount < 1)
             return           // list formatting rewrites the text: its offsets are not the table's
         const style = String(root.readingStyleId)
-        let starts = []
-        try {
-            starts = LiveOutputService.readingWindowActive
-                ? LiveOutputService.readingWindowLineStarts(style)
-                : LiveOutputService.readingRunLineStarts(style)
-        } catch (e) { return }
-        if (!starts || starts.length === 0)
+        let tableLines = 0
+        try { tableLines = LiveOutputService.readingRunLineCount(style) } catch (e) { return }
+        if (tableLines <= 0)
             return           // table not measured yet
         const label = (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
         // (QML Text cannot say where it broke a line — positionAt exists only on TextEdit — so
         // the check is the line COUNT: one differently-placed break nearly always moves it.)
-        const verdict = flow.lineCount !== starts.length
-            ? "DIFFERS in line count: text=" + flow.lineCount + " table=" + starts.length
-            : "agrees lines=" + starts.length
+        // (a slice carries only its own lines: the table's lines in that range, not all of them)
+        const expected = flow.sliced === true ? root.sliceLines : tableLines
+        const verdict = flow.lineCount !== expected
+            ? "DIFFERS in line count: text=" + flow.lineCount + " table=" + expected
+            : "agrees lines=" + expected
         const sig = label + "|" + verdict + "|" + flow.text.length
         if (root.breakCheckLogged === sig)
             return
@@ -91,7 +89,7 @@ Item {
         const style = String(root.readingStyleId)
         let table = -1
         let svcSize = -1
-        try { table = LiveOutputService.readingRunLineStarts(style).length } catch (e) { table = -2 }
+        try { table = LiveOutputService.readingRunLineCount(style) } catch (e) { table = -2 }
         try { svcSize = LiveOutputService.readingRunSizeForStyle(style) } catch (e) { svcSize = -2 }
         const drawnSig = style + "|" + flow.lineCount + "|" + table + "|" + block.width
             + "x" + block.height + "|" + Number(flow.font.pixelSize).toFixed(2)
@@ -109,57 +107,47 @@ Item {
             + " pitch=" + Number(block.linePitch).toFixed(2)
             + " chars=" + flow.text.length)
     }
-    // ---- WHAT THIS PREVIEW IS SHOWING, AND WHAT IT SHOWED BEFORE (diagnostic) ----
-    property int shownHighWater: -1
-    property int shownRepeatWords: 0
-    property int shownSerial: -1
-    property int shownLastLine: -999
-    function noteReadingShown(flow, block) {
-        if (typeof EngineBridge === "undefined" || !root.animateLineSteps)
+    // ---- THE PASSAGE SLICE THIS SURFACE LAYS OUT ---------------------------------------------------
+    // The service hands every surface the lines it can show (plus a margin) instead of the whole 3-6k
+    // characters: laying the full passage out in a justified Text, once per surface on every pick, was the
+    // bulk of a double-click's cost. The slice starts at a line start of THIS style's table, so its breaks
+    // are the full text's own (see LiveOutputService.readingFlowSliceFor).
+    property bool sliceWhole: true
+    property int sliceFirst: 0
+    property int sliceLines: 0
+    property string sliceText: ""
+    property string sliceKey: ""
+    property bool sliceAtEnd: false
+    function refreshSlice() {
+        if (!root.animateLineSteps || LiveOutputService.readingBudgetFitActive !== true) {
+            root.sliceWhole = true
             return
-        const line = Math.floor(root.stepLine)
-        if (line === root.shownLastLine)
-            return                       // a glide frame inside one line
-        root.shownLastLine = line
-        const serial = Number(LiveOutputService.readingJumpSerial ?? 0)
-        if (serial !== root.shownSerial) {
-            root.shownSerial = serial
-            root.shownHighWater = -1
-            root.shownRepeatWords = 0
         }
         const style = String(root.readingStyleId)
-        let starts = []
-        try { starts = LiveOutputService.readingRunLineStarts(style) } catch (e) { starts = [] }
-        const passage = LiveOutputService.readingPassageChar()
-        const local = LiveOutputService.readingCharOffset()
-        if (!starts || line < 0 || line >= starts.length || passage < 0 || local < 0)
-            return
-        const base = passage - local + (LiveOutputService.readingBudgetFitActive
-            ? LiveOutputService.readingFlowCharStart() : 0)
-        const pitch = Number(block.linePitch) > 0 ? Number(block.linePitch) : 1
-        const visible = Math.max(1, Math.floor(Number(block.height) / pitch))
-        const topLocal = Number(starts[line])
-        const endLine = Math.min(starts.length, line + visible)
-        const endLocal = endLine < starts.length ? Number(starts[endLine]) : flow.text.length
-        const topPassage = base + topLocal
-        let repeated = 0
-        if (root.shownHighWater >= 0 && topPassage < root.shownHighWater) {
-            const again = flow.text.slice(topLocal, Math.min(endLocal, topLocal + (root.shownHighWater - topPassage)))
-            repeated = (again.match(/\S+/g) || []).length
-            root.shownRepeatWords += repeated
-        }
-        root.shownHighWater = Math.max(root.shownHighWater, topPassage)
-        const clip = (s) => String(s).replace(/\s+/g, " ").trim()
-        EngineBridge.log("trace", "PreviewShows",
-            (repeated > 0 ? "REPEAT " : "")
-            + "surface=" + (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
-            + " style=" + (style === "" ? "(ref)" : style.slice(0, 8))
-            + " line=" + line + "/" + starts.length
-            + " passage=[" + topPassage + ".." + (base + endLocal) + "]"
-            + " highWater=" + root.shownHighWater
-            + " repeatedNow=" + repeated + " repeatedTotal=" + root.shownRepeatWords
-            + " top=\"" + clip(flow.text.slice(topLocal, topLocal + 40)) + "\""
-            + " bottom=\"" + clip(flow.text.slice(Math.max(topLocal, endLocal - 30), endLocal)) + "\"")
+        const visible = Math.max(3, LiveOutputService.readingVisibleLinesFor(style))
+        const first = Math.max(0, Math.floor(root.stepLine))
+        const flow = String(LiveOutputService.readingFlowText ?? "")
+        const key = LiveOutputService.readingStageSerial + "|" + flow.length + "|" + flow.slice(0, 24)
+                    + "|" + style + "|" + visible
+        const roomBelow = root.sliceFirst + root.sliceLines - (first + visible)
+        if (!root.sliceWhole && key === root.sliceKey && first >= root.sliceFirst
+                && (roomBelow >= 2 || root.sliceAtEnd))
+            return                      // still comfortably inside the slice
+        const slice = LiveOutputService.readingFlowSliceFor(style, Math.max(0, first - visible), visible * 3)
+        root.sliceKey = key
+        root.sliceFirst = slice.first
+        root.sliceLines = slice.lines
+        root.sliceWhole = slice.whole === true
+        root.sliceAtEnd = slice.atEnd === true
+        root.sliceText = String(slice.text ?? "")
+    }
+    onStepLineChanged: root.refreshSlice()
+    onReadingStyleIdChanged: root.refreshSlice()
+    onAnimateLineStepsChanged: root.refreshSlice()
+    Connections {
+        target: LiveOutputService
+        function onReadingStageChanged() { root.refreshSlice() }
+        function onReadingScrollChanged() { root.refreshSlice() }
     }
     property string readingFitKey: ""
     property real readingFitSize: 0
@@ -334,9 +322,6 @@ Item {
                         }
                         parts.push(String(Number((LiveOutputService.readingJumpSerial
                                                   ?? LiveOutputService.readingStageSerial) ?? 0)))
-                        // The window the page shows: its size is fitted to the text area per window.
-                        if (budgetFit && LiveOutputService.readingWindowActive === true)
-                            parts.push(String(LiveOutputService.readingWindowText ?? ""))
                     }
                     parts.push(el.width, el.height, el.style.padding ?? 0,
                                el.meta.fontFamily ?? "",
@@ -422,14 +407,9 @@ Item {
                             const columnSize = Number(LiveOutputService.scrollColumnSize(
                                                           root.readingStyleId, el.modelData))
                             if (columnSize > 0) {
-                                // THE PAGE FILLS THE TEXT AREA: in window mode the size is this
-                                // window's own fit (the service's), else the column's solved size.
-                                const windowSize = LiveOutputService.readingWindowActive === true
-                                    ? Number(LiveOutputService.readingWindowSizeFor(root.readingStyleId)) : 0
-                                const pageSize = windowSize > 0 ? windowSize : columnSize
                                 root.readingFitKey = el.readingFitKey
-                                root.readingFitSize = pageSize
-                                fitAnswer = pageSize
+                                root.readingFitSize = columnSize
+                                fitAnswer = columnSize
                                 el.scrollColumnPending = false
                             } else {
                                 fitAnswer = el.meta.fontSize ?? 16
@@ -585,9 +565,8 @@ Item {
                     // the offset, one measured line at a time.
                     Item {
                         id: flowBox
-                        // In window mode the text IS the window (exactly the max words from the
-                        // current word), drawn from the top: there is no scroll offset to apply.
-                        y: LiveOutputService.readingWindowActive ? 0 : -root.stepLine * el.linePitch
+                        // (a slice starts at line `sliceFirst` of the passage, so the offset is relative to it)
+                        y: -(root.stepLine - (flowText.sliced ? root.sliceFirst : 0)) * el.linePitch
                         width: parent.width
                         height: flowText.implicitHeight
 
@@ -603,10 +582,12 @@ Item {
                         Text {
                             id: flowText
                             width: parent.width
+                            // Only the lines this surface can show (a list format rewrites the text, so its
+                            // offsets are no longer the table's: that case lays out the whole passage).
+                            readonly property bool sliced: !root.sliceWhole && String(el.meta.list ?? "") === ""
                             text: TextFormatService.applyList(
-                                      String(LiveOutputService.readingWindowActive
-                                             ? LiveOutputService.readingWindowText
-                                             : LiveOutputService.readingFlowText ?? ""),
+                                      flowText.sliced ? root.sliceText
+                                                      : String(LiveOutputService.readingFlowText ?? ""),
                                       el.meta.list ?? "")
                             font: fitText.font
                             fontSizeMode: Text.FixedSize
@@ -627,10 +608,6 @@ Item {
                             onLineCountChanged: root.noteReadingDrawn(flowText, el)
                             onTextChanged: root.queueBreakCheck(flowText, el)
                             Component.onCompleted: root.noteReadingDrawn(flowText, el)
-                            Connections {
-                                target: root
-                                function onStepLineChanged() { root.noteReadingShown(flowText, el) }
-                            }
                         }
                     }
                 }

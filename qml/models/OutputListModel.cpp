@@ -1180,8 +1180,6 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
         spec.showOverlay = spec.showOverlay && m_outputs.at(activeRow).showOverlay;
         spec.showMedia = spec.showMedia && m_outputs.at(activeRow).showMedia;
     }
-    if (SettingsService *settings = SettingsService::instancePtr())
-        settings->setActiveOutputStyle(spec);
     std::vector<bps::presentation::OutputStyleSpec> specs;
     std::vector<std::string> buffers;
     std::vector<std::pair<int, int>> sizes;
@@ -1212,8 +1210,23 @@ void OutputListModel::pushEngineStyle(const QString &styleId, const QString &sli
         buffers.push_back(QStringLiteral("__out_%1__").arg(qHash(item.name)).toStdString());
         sizes.push_back(parseResolution(item.res));
     }
+    // THE SAME PICTURE AGAIN IS NOT A PUSH: the engine rebuilds scenes on a style change, so an identical
+    // spec set (the common case in a burst) must not reach it. (1153 pushes in one session, mostly repeats.)
+    const bool bootedNow = EngineBridge::instance().booted();
+    if (m_hasPushed && bootedNow == m_lastBooted && spec == m_lastActiveSpec && specs == m_lastSpecs
+            && buffers == m_lastBuffers
+            && sizes == m_lastSizes)
+        return;
+    if (SettingsService *settings = SettingsService::instancePtr())
+        settings->setActiveOutputStyle(spec);
     if (SettingsService *settings2 = SettingsService::instancePtr())
         settings2->setLiveOutputStyles(specs, buffers, sizes);
+    m_hasPushed = true;
+    m_lastBooted = bootedNow;
+    m_lastActiveSpec = spec;
+    m_lastSpecs = specs;
+    m_lastBuffers = buffers;
+    m_lastSizes = sizes;
     qInfo("OutputListModel: pushed engine output styles specs=%d buffers=%d activeStyle='%s' booted=%d",
           static_cast<int>(specs.size()), static_cast<int>(buffers.size()),
           qUtf8Printable(styleId), EngineBridge::instance().booted() ? 1 : 0);
@@ -1223,7 +1236,15 @@ void OutputListModel::pushActiveEngineStyle()
 {
     if (!styleRosterConnected_)
         return;
-    pushEngineStyle(activeStyleId());
+    // A burst of refreshes (a column seat per tile, roster and route changes) is ONE push, next turn.
+    if (m_pushQueued)
+        return;
+    m_pushQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_pushQueued = false;
+        if (styleRosterConnected_)
+            pushEngineStyle(activeStyleId());
+    });
 }
 
 QString OutputListModel::frameBufferFor(int row) const

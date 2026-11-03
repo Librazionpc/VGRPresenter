@@ -181,17 +181,17 @@ Window {
         source: root.inputSource
         fillMode: Image.PreserveAspectCrop
         cache: false
+        // gui-ok: the camera/NDI tap map the provider reads is interface-thread state (only while an input is taken)
         asynchronous: false
     }
 
-    // Taken media file on air — same convention as the input layer above.
-    Image {
+    // Taken media file on air — same convention as the input layer above, but loaded off the interface thread.
+    LiveFrameImage {
         anchors.fill: parent
         visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
         source: root.mediaSource
         fillMode: root.effectiveFillMode   // the file's own fill, else this output's
-        cache: false
-        asynchronous: false
+        sizeToItem: false                  // the provider stretches to a requested size; keep the file's aspect
     }
 
     // Overlays, UNDER-SLIDE group.
@@ -217,15 +217,13 @@ Window {
                     ? "transparent" : (root.onAirSlide.background ?? "transparent")
     }
 
-    Image {
+    LiveFrameImage {
         anchors.fill: parent
         visible: !root.blacked && root.hasFrame
                  && (root.framePriority && !root.mediaOnAir && !root.inputTaken
                      || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
         source: root.frameSource
         fillMode: Image.Stretch
-        asynchronous: true
-        cache: false
     }
 
     // Overlays, OVER-SLIDE group — above everything, including the slide's

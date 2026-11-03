@@ -262,9 +262,6 @@ bp::Slide ShowConverter::slideFromVariant(const QVariantMap &s)
                 starts.push_back(start.toInt());
             slide.flowBreaks[utf8(it.key())] = std::move(starts);
         }
-        const QVariantMap sizes = s.value(QStringLiteral("flowSizes")).toMap();
-        for (auto it = sizes.constBegin(); it != sizes.constEnd(); ++it)
-            slide.flowSizes[utf8(it.key())] = static_cast<float>(it.value().toDouble());
     }
     slide.background = utf8(s.value(QStringLiteral("background"), QStringLiteral("transparent")).toString());
     // Slide-wide filters (see applyFilters — the same door the Edit panel's live

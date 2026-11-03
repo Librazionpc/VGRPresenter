@@ -34,16 +34,6 @@ static const std::vector<int>* ReadingBreaksFor(const Slide& slide, const Output
     return it == slide.flowBreaks.end() ? nullptr : &it->second;
 }
 
-// The font size (stage px) this output draws the slide's passage at: the size the service fitted THIS
-// window to (so the page fills the text area), else the output's solved column size.
-static float ReadingFontFor(const Slide& slide, const OutputStyleSpec& style) {
-    if (!style.readingStyleKey.empty()) {
-        const auto it = slide.flowSizes.find(style.readingStyleKey);
-        if (it != slide.flowSizes.end() && it->second > 0.0f)
-            return it->second;
-    }
-    return style.readingFontPx;
-}
 
 static std::vector<int> FlowCharStartsFor(const std::string& flowText,
                                           const rendering::TextStyle& style,
@@ -465,7 +455,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         switch (comp.source) {
         case SlideComposition::Source::FamilyTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText,
-                                         ReadingFontFor(slide, style), ReadingBreaksFor(slide, style),
+                                         style.readingFontPx, ReadingBreaksFor(slide, style),
                                          rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
                                                 sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
@@ -473,7 +463,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         }
         case SlideComposition::Source::StyleTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText,
-                                         ReadingFontFor(slide, style), ReadingBreaksFor(slide, style),
+                                         style.readingFontPx, ReadingBreaksFor(slide, style),
                                          rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
@@ -488,7 +478,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         }
         case SlideComposition::Source::SlideBlocks: {
             const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText,
-                                         ReadingFontFor(slide, style), ReadingBreaksFor(slide, style),
+                                         style.readingFontPx, ReadingBreaksFor(slide, style),
                                          rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");

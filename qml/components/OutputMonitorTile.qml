@@ -228,17 +228,18 @@ Rectangle {
             source: root.inputSource
             fillMode: Image.PreserveAspectCrop
             cache: false   // every rev IS a new frame
+            // gui-ok: the camera/NDI tap map the provider reads is interface-thread state (only while an input is taken)
             asynchronous: false
         }
 
-        Image {
+        LiveFrameImage {
             objectName: "selfTestTileMediaFrame"
             anchors.fill: parent
             visible: root.mediaOnAir && !LiveOutputService.live && !root.inputTaken
             source: root.mediaOnAir ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
             fillMode: root.effectiveFillMode
-            cache: false          // every mediaRev IS a new frame
-            asynchronous: false   // a sync load cannot blank the tile between revs
+            sizeToItem: false     // the provider stretches to a requested size; the file's own aspect must survive
+            // (every mediaRev IS a new frame; the double buffer is what keeps it from blanking between revs)
         }
 
         // Warm-up placeholder while an input is taken but no frame has
@@ -413,7 +414,7 @@ Rectangle {
                         ? "transparent" : (root.onAirSlide.background ?? "transparent")
         }
 
-        Image {
+        LiveFrameImage {
             id: frameImage
             objectName: "selfTestTileFrame"
             anchors.fill: parent
@@ -423,10 +424,8 @@ Rectangle {
                      && !(root.mediaOnAir && !LiveOutputService.live)
             source: root.frameSource
             fillMode: Image.Stretch
-            asynchronous: false
-            cache: false
-            // The provider hands back an ARGB32 of the exact requested size;
-            // stretch keeps the mapping 1:1 with the pane.
+            // Loaded off the interface thread and double buffered (LiveFrameImage); the provider hands back
+            // the frame already scaled to this tile's size, so stretch keeps the mapping 1:1 with the pane.
         }
 
         OverlayLayer {
@@ -509,7 +508,9 @@ Rectangle {
 
         Timer {
             interval: 33
-            running: bar.visible
+            // ONLY WHILE THERE IS SOMETHING TO ANIMATE: a silent bar at rest ran this 30x a second per tile
+            // for nothing. It restarts the moment the level rises, and stops once the decay has settled.
+            running: bar.visible && (bar.rawLevel > Db.floorLinear || bar.smoothed > 0 || bar.peakValue > 0)
             repeat: true
             onTriggered: {
                 if (bar.rawLevel <= Db.floorLinear) {

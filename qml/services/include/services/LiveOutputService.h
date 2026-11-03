@@ -270,27 +270,15 @@ public:
     int readingWordBudget() const { return readingWordBudget_; }
     bool readingBudgetFitActive() const { return readingBudgetFitActive_; }
     qreal readingColumnPxFor(const QString &styleId) const;
-    // ---- THE EXACT WORD WINDOW (Scroll) ------------------------------------------------
-    // Every screen shows the SAME words: from the word the reading position is on, for exactly the
-    // max-words budget — each in its own size and wrap. True once the reference table is measured.
-    bool readingWindowMode() const;
-    // The words [position, position + budget) as text, for the reading position `lines` (the walk's
-    // own unit; fractional while it glides, floored here: the window moves a whole line at a time).
-    QString readingWindowTextFor(qreal lines) const;
-    // Where each output style breaks that text into lines, cut once at the stage's own size.
-    QVariantMap readingWindowBreaksFor(const QString &windowText, bool fitToWindow) const;
-    // The passage text and position a slide carries to the screens: the exact window and 0 in
-    // window mode, else the whole passage and the char the walk is at.
+    // What the screens are handed of the passage: the passage and the char the walk is at, with the line
+    // breaks each output style cuts it into (cut once at the stage's own size; see readingBreaksFor).
     void attachReadingFlow(QVariantMap &slide, qreal lines) const;
-    QString readingWindowText() const { return readingWindowTextFor(readingScroll_); }
-    Q_PROPERTY(QString readingWindowText READ readingWindowText NOTIFY readingScrollChanged)
-    Q_PROPERTY(bool readingWindowActive READ readingWindowMode NOTIFY readingScrollChanged)
-    Q_INVOKABLE QVariantList readingWindowLineStarts(const QString &styleId) const;
-    // The font size (stage px) the current window is fitted to in that style's text area.
-    Q_INVOKABLE qreal readingWindowSizeFor(const QString &styleId) const;
+    QVariantMap readingBreaksFor(const QString &text) const;
     // Whole lines the style's text area holds at its column size (0 = not measured yet).
     Q_INVOKABLE int readingVisibleLinesFor(const QString &styleId) const;
-    qreal readingWindowSizeForText(const QString &styleId, const QString &windowText) const;
+    // The part of the passage a surface lays out: lines [firstLine, firstLine + lineCount) of THAT style's
+    // table, as {text, first, lines, whole}. Starts at a line start, so it breaks as the whole text does.
+    Q_INVOKABLE QVariantMap readingFlowSliceFor(const QString &styleId, int firstLine, int lineCount) const;
     void setReadingWordBudget(int words);
     bool scrollMode() const { return scrollMode_; }
     void setScrollMode(bool on);
@@ -342,6 +330,8 @@ public:
     // The character starts of that style's run lines — the table the two functions
     // above read. Exposed for the walk's own diagnostic (and cheap: cached).
     Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
+    // Just the count (the diagnostics asked for the whole table to read its length).
+    Q_INVOKABLE int readingRunLineCount(const QString &styleId) const;
     Q_INVOKABLE int readingFlowCharStart() const { return readingTextWindowCharStart_; }
     Q_INVOKABLE qreal readingRunSizeForStyle(const QString &styleId) const;
     Q_INVOKABLE int readingCharOffset() const;
@@ -353,6 +343,9 @@ public:
     // The taken media's last decoded frame (the mediaplay provider reads it;
     // empty when nothing is on air / not yet decoded).
     const QImage &lastMediaFrame() const { return lastMediaFrame_; }
+    // The newest media frame, safe to read from the image loader thread: a published immutable copy
+    // (QImage is implicitly shared, so publishing costs a refcount, not a pixel copy).
+    std::shared_ptr<const QImage> mediaFrameShared() const { return std::atomic_load(&mediaFrameShared_); }
 
 signals:
     void liveChanged();
@@ -495,8 +488,13 @@ private:
     QString readingEngineFlowText_;
     // stagePassagePick: the picked slide is held here instead of being committed, and
     // the passage publish sends it (carrying the flow) as the one engine commit.
-    mutable QHash<QString, qreal> readingWindowSizes_;   // (style, column, window text) -> fitted size
+    mutable QHash<QString, QVariantList> readingBreaksCache_;   // (column, size, text) -> its line starts
+    QTimer *republishTimer_ = nullptr;
+    QString lastRepublishSig_;
     bool holdingPassagePick_ = false;
+    // While a pick stages its INTERMEDIATE state (the single slide, before its passage is attached) nobody
+    // is told: the monitors would re-compose and re-lay-out everything for a state replaced a moment later.
+    bool quietStage_ = false;
     bool heldPickSent_ = false;
     QVariantMap heldPickSlide_;
     int readingTextWindowCharStart_ = 0;
@@ -538,6 +536,8 @@ private:
     // RE-ATTACH the reading passage to the on-air slide after Slide mode took it
     // off (see setScrollMode). The engine no-ops when the slide already has it.
     void republishReadingFlow();
+    // Coalesced: column seats and table measures land in bursts, one hand-off covers them all.
+    void scheduleReadingRepublish();
     void drainPendingReadingSteps();
     void animateReadingScroll(qreal from, qreal to);
     void commitPendingRebase();
@@ -577,6 +577,7 @@ private:
     };
     QHash<QString, ScrollColumn> scrollColumns_;
     QHash<QString, qreal> scrollSizeBySig_;   // block + pick + budget -> solved size
+    QSet<QString> scrollSizePending_;          // sigs being solved on a worker (QML retries on readingScrollChanged)
     mutable QHash<QString, double> readingRunSizeForStyle_;
     struct ReadingFit {
         double size = 0.0;
@@ -592,7 +593,7 @@ private:
     int readingCharSpan(int from, int to) const;
     // The character starts of one style's run lines — the table readingLineForStyle
     // maps through. Shared with readingRunLineStarts (the QML side of it).
-    QVector<int> readingRunCharStarts(const QString &styleId) const
+    const QVector<int> &readingRunCharStarts(const QString &styleId) const
     {
         return styleRunLines(styleId).charStarts;
     }
@@ -862,6 +863,12 @@ private:
     QAudioOutput *mediaAudio_ = nullptr;
     QVideoSink *mediaSink_ = nullptr;
     QImage lastMediaFrame_;
+    std::shared_ptr<const QImage> mediaFrameShared_;
+    void setLastMediaFrame(const QImage &frame)
+    {
+        lastMediaFrame_ = frame;
+        std::atomic_store(&mediaFrameShared_, std::make_shared<const QImage>(frame));
+    }
     std::atomic<quint64> mediaTakeToken_{0};
 
     // ---- NDI program sender (see the properties above) --------------------
