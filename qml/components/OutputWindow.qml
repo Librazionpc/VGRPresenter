@@ -114,14 +114,36 @@ Window {
         root.onAirSlideBusy = true
         do {
             root.onAirSlidePending = false
-            const stagedRaw = LiveOutputService.stagedSlideRaw
-            const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
-                ? stagedRaw : LiveOutputService.onAirSlideRaw
-            root.onAirSlide = LiveOutputService.previewWithStyle(
-                (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
+            root.refreshOnAirSlideOnce()
         } while (root.onAirSlidePending)
         root.onAirSlideBusy = false
     }
+    // Same memo as the monitor tile (OutputMonitorTile.qml): decide from scalars, and only
+    // read the slide for a picture this window has not composed yet.
+    function refreshOnAirSlideOnce() {
+        const walking = LiveOutputService.stagedHasFlow || LiveOutputService.onAirHasFlow
+        const key = walking
+            ? "walk|" + root.outputStyleId + "|rev:" + LiveOutputService.stagedRev
+              + "|" + LiveOutputService.readingStageSerial + "|" + LiveOutputService.readingPage
+              + "|" + LiveOutputService.live
+              + "|" + LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaRev
+              + "|" + LiveOutputService.inputLabel
+            : ""
+        const memo = root.slideMemo
+        if (key !== "" && key === memo.key) {
+            root.onAirSlide = memo.value
+            return
+        }
+        const stagedRaw = LiveOutputService.stagedSlideRaw
+        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+            ? stagedRaw : LiveOutputService.onAirSlideRaw
+        const composed = LiveOutputService.previewWithStyle(
+            (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
+        memo.key = key
+        memo.value = composed
+        root.onAirSlide = composed
+    }
+    readonly property var slideMemo: ({ key: "", value: {} })
     onStylePulseChanged: root.refreshOnAirSlide()
     onOutputStyleIdChanged: root.refreshOnAirSlide()
     Connections {

@@ -201,6 +201,16 @@ Result<void> Logger::Initialize() {
     return Ok();
 }
 
+Logger::~Logger() {
+    // A process that exits WITHOUT an explicit shutdown — a test phase that only ever
+    // initializes the kernel, a fast fail — reaches this with the pump still joinable, and
+    // std::thread's destructor calls std::terminate for that (measured: the settings phase
+    // aborted with 0xc0000409 after a clean 717 checks). Joining here makes the destructor
+    // safe to reach from any exit path; an explicit Shutdown() has already joined, so this
+    // is a no-op on the normal one.
+    if (thread_.joinable()) (void)Shutdown();
+}
+
 Result<void> Logger::Shutdown() {
     shutdownRequested_.store(true);
     cv_.notify_all();

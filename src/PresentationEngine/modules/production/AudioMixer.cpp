@@ -442,6 +442,15 @@ void AudioMixer::RemoveMixTap(uint64_t id)
                    mixTaps_.end());
 }
 
+std::set<std::string> AudioMixer::TapTargets() const
+{
+    std::lock_guard<std::mutex> lock(tapMutex_);
+    std::set<std::string> targets;
+    for (const auto &entry : mixTaps_)
+        targets.insert(entry.nodeId.empty() ? std::string(kSpeakersOutputId) : entry.nodeId);
+    return targets;
+}
+
 void AudioMixer::NotifyTaps(const GraphSnapshot *snap, uint32_t frames, uint32_t channels,
                             uint32_t rateHz, uint64_t startFrame)
 {

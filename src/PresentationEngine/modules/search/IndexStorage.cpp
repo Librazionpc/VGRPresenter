@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <numeric>
 #include <sstream>
+#include <thread>
 
 namespace bps::search {
 namespace {
@@ -62,19 +64,47 @@ Result<void> IndexStorage::Initialize() {
 }
 
 Result<void> IndexStorage::Shutdown() {
-    std::unique_lock lock(mutex_);
-    index_.clear();
-    documents_.clear();
-    initialized_ = false;
+    // THE INDEX IS LET GO ON A THREAD OF ITS OWN. It is a map of maps with one Posting per word and
+    // document (each holding its own copy of the document id) plus every document twice over; with the
+    // whole show library and the Table indexed that is gigabytes in millions of small blocks, and
+    // clear() freed them one by one ON THE INTERFACE THREAD while the app was quitting: the window
+    // froze for tens of seconds after "quit". Nothing reads the index once it is shut down, so the
+    // containers are handed off whole (a move is instant) and freed in the background; when the process
+    // is exiting the OS reclaims them and nothing waits.
+    std::shared_ptr<decltype(index_)> oldIndex;
+    std::shared_ptr<decltype(documents_)> oldDocuments;
+    {
+        std::unique_lock lock(mutex_);
+        oldIndex = std::make_shared<decltype(index_)>(std::move(index_));
+        oldDocuments = std::make_shared<decltype(documents_)>(std::move(documents_));
+        index_.clear();        // (a moved-from container is valid but unspecified: make it empty)
+        documents_.clear();
+        totalTokens_ = 0;
+        initialized_ = false;
+    }
+    std::thread([oldIndex, oldDocuments]() mutable {
+        oldIndex.reset();
+        oldDocuments.reset();
+    }).detach();
     return Ok();
 }
 
-size_t IndexStorage::Upsert(const SearchDocument& doc) {
-    std::unique_lock lock(mutex_);
+void IndexStorage::ErasePostingsOf(const SearchDocument& doc) {
+    const std::string_view id = doc.id;
+    for (const auto& field : AllFields(doc)) {
+        for (const auto& tok : Tokenize(field)) {
+            const auto it = index_.find(tok);
+            if (it != index_.end())
+                it->second.erase(id);
+        }
+    }
+}
+
+size_t IndexStorage::UpsertLocked(const SearchDocument& doc) {
     // Remove old postings for this doc first (incremental re-index).
-    if (documents_.count(doc.id)) {
-        for (auto& [term, postings] : index_) postings.erase(doc.id);
-        totalTokens_ -= documents_.at(doc.id).tokenCount;
+    if (const auto old = documents_.find(doc.id); old != documents_.end()) {
+        ErasePostingsOf(old->second.doc);
+        totalTokens_ -= old->second.tokenCount;
     }
     // Precompute the query-time views ONCE (was: every candidate lowercased its
     // whole content on every query — the megabytes-per-keystroke churn).
@@ -93,24 +123,29 @@ size_t IndexStorage::Upsert(const SearchDocument& doc) {
         : std::accumulate(freqs.begin(), freqs.end(), size_t{0},
                           [](size_t a, const auto& kv) { return a + kv.second; });
     totalTokens_ += rec.tokenCount;
-    documents_[doc.id] = std::move(rec);
-    for (const auto& [term, freq] : freqs) {
-        Posting p;
-        p.docId = doc.id;
-        p.frequency = freq;
-        index_[term][doc.id] = p;
-    }
+    // The postings view the KEY of this entry (an unordered_map node: it never moves).
+    auto entry = documents_.try_emplace(doc.id).first;
+    entry->second = std::move(rec);
+    const std::string_view stableId = entry->first;
+    for (const auto& [term, freq] : freqs)
+        index_[term][stableId] = PostingData{freq, 0};
     return freqs.size();
+}
+
+size_t IndexStorage::Upsert(const SearchDocument& doc) {
+    std::unique_lock lock(mutex_);
+    return UpsertLocked(doc);
 }
 
 Result<void> IndexStorage::Remove(std::string_view docId) {
     std::unique_lock lock(mutex_);
-    if (!documents_.count(std::string(docId)))
+    const auto it = documents_.find(std::string(docId));
+    if (it == documents_.end())
         return Error::Make(Err::Search_DocumentNotFound, "IndexStorage",
                            "document '" + std::string(docId) + "' not found");
-    for (auto& [term, postings] : index_) postings.erase(std::string(docId));
-    totalTokens_ -= documents_.at(std::string(docId)).tokenCount;
-    documents_.erase(std::string(docId));
+    ErasePostingsOf(it->second.doc);   // BEFORE the document: the postings view its id
+    totalTokens_ -= it->second.tokenCount;
+    documents_.erase(it);
     return Ok();
 }
 
@@ -121,7 +156,7 @@ std::vector<Posting> IndexStorage::Lookup(std::string_view term) const {
     if (it == index_.end()) return {};
     std::vector<Posting> out;
     out.reserve(it->second.size());
-    for (const auto& [_, p] : it->second) out.push_back(p);
+    for (const auto& [id, p] : it->second) out.push_back(Posting{std::string(id), p.frequency, p.positions});
     return out;
 }
 
@@ -132,7 +167,7 @@ std::vector<std::string> IndexStorage::LookupDocIds(std::string_view term) const
     if (it == index_.end()) return {};
     std::vector<std::string> out;
     out.reserve(it->second.size());
-    for (const auto& [_, p] : it->second) out.push_back(p.docId);
+    for (const auto& [id, _] : it->second) out.emplace_back(id);
     return out;
 }
 
@@ -144,7 +179,7 @@ std::vector<IndexStorage::TermTf> IndexStorage::LookupTf(std::string_view term) 
     if (it == index_.end()) return {};
     std::vector<TermTf> out;
     out.reserve(it->second.size());
-    for (const auto& [_, p] : it->second) out.push_back({p.docId, p.frequency});
+    for (const auto& [id, p] : it->second) out.push_back({std::string(id), p.frequency});
     return out;
 }
 
@@ -290,6 +325,7 @@ Result<size_t> IndexStorage::Restore(std::string_view json) {
     std::unique_lock lock(mutex_);
     index_.clear();
     documents_.clear();
+    totalTokens_ = 0;
     size_t terms = 0;
     for (const auto& v : *arr) {
         SearchDocument doc;
@@ -314,26 +350,7 @@ Result<size_t> IndexStorage::Restore(std::string_view json) {
             for (const auto& [k, val] : *meta)
                 doc.metadata[std::string(k)] = std::string(val.asString());
         if (doc.id.empty()) continue;
-        DocRecord rec;
-        rec.doc = doc;
-        rec.lowerTitle = Lower(doc.title);
-        rec.lowerContent = Lower(doc.content);
-        std::map<std::string, size_t, std::less<>> freqs;
-        for (const auto& field : AllFields(doc)) {
-            for (auto& tok : Tokenize(field)) ++freqs[tok];
-        }
-        rec.tokenCount = std::accumulate(
-            freqs.begin(), freqs.end(), size_t{0},
-            [](size_t a, const auto& kv) { return a + kv.second; });
-        totalTokens_ += rec.tokenCount;
-        documents_[doc.id] = std::move(rec);
-        for (const auto& [term, freq] : freqs) {
-            Posting p;
-            p.docId = doc.id;
-            p.frequency = freq;
-            index_[term][doc.id] = p;
-            ++terms;
-        }
+        terms += UpsertLocked(doc);
     }
     return terms;
 }

@@ -563,9 +563,239 @@ other's store. Without them a second instance exits within ~30 s and the runner 
 crash handler (writes no record for the same reason), and provider lifetime (the NDI plan
 holds `shared_ptr`s, so a stale plan cannot dangle).
 
+## 12. Why a Bible step feels slower than a Table page — measured, and the two changes
+
+**Report:** *"the bible scroll and slide are too slow; the table slide is fast but scroll is
+slow — trace the table to see why the slide is fast and fix the Bible scroll."*
+
+Both paths were already instrumented for the *pick* (`PickCost` / `PickCostSvc`), which is
+where the asymmetry first shows. Same build, same session, from `build/logs/engine.log`:
+
+| pick | total | send (stage → on air) | of it: `stagedChanged` (QML handlers, GUI thread) |
+|---|---|---|---|
+| Scripture (`Genesis 3:1`) | 923 ms | 856 ms | 531 ms |
+| The Table (`47-1100X`) | 566 ms | 561 ms | 192 ms |
+
+The Bible pick costs ~1.6× the table's, and most of both is **one `stagedChanged` emit** —
+Qt runs every direct connection inside the `emit`, so a pick is 5 tiles × 10–29 ms of
+re-composition plus the panes. That is the "bible is slower" half: it is the same storm,
+bigger, because a Bible pick carries a 3 497-character passage against the table page's
+2 476.
+
+The *step* (‹ › in Scroll mode) has no such emit — the walk's `ReadRestage` lines read
+`commitPage=no` and never publish — so the press cost there is the renderer:
+
+```
+02:19:52.928  LineStep offset=16        ← press
+02:19:53.164  render dispatch 1920x1080 software  (main scene)
+02:19:53.530  render dispatch 1920x1080 software  (the second output's style)
+02:19:53.617  render dispatch 1920x1080 software  (main scene, settle frame)
+02:19:53.702  LineStep offset=17        ← next press, 774 ms later
+```
+
+Three full software rasters per press, 236–290 ms each, and the presses land exactly on
+that cadence: **the step is paced by the raster, not by the reading run.** `ReadRestage`
+reports 0 ms of rebuild for these steps, so the line table is not the cost either.
+
+That is also why the Table's page step feels fast: in Slide mode it is one commit and the
+loop is idle afterwards, while Scroll mode keeps `scrollMoving` true and asks for a compose
+every tick — with a **fixed 50 ms** budget against a **~250 ms** frame, the gate never
+rejects, so the render thread rasterises back to back for the whole walk and the interface
+thread has no core left to answer the next press on.
+
+**Two changes:**
+
+* **The scroll's frame budget is measured, not fixed.** `RenderOnce` times a frame of a move
+  (compose + every per-output pass, `scrollFrameMs_`) and allows the next one only after that
+  long, stamped from the END of the frame. At ~250 ms a frame the loop spends half its time
+  rasterising instead of all of it; the settle frame is unbudgeted, so the final position
+  still lands within `kFlowCharSettleMs` (60 ms) of the glide ending. Same picture, half the
+  CPU, and the press arrives on a thread that can answer.
+* **The glide tells the surfaces 30 times a second, not 60.** `applyReadingScroll` emitted
+  `readingScrollChanged` per animation tick, and every `DesignPreview` answers by rebuilding
+  its slice and line table *on the interface thread* — ~11 times a press, per surface. The
+  engine still gets every position (`SetFlowChar`, two atomic stores); the surfaces get one
+  at 30 Hz. The settle tick is not throttled (the animation has stopped by then), so nobody
+  is left on an intermediate offset.
+
+**And the press is now measured on both paths**, so the next walk can be compared press for
+press instead of argued about: `services/StepCost.hpp` is one scoped probe, used by both
+`lineStep` (`path=scroll`) and `stepPassage` (`path=slide`). It times the whole call,
+handlers included, and writes one line per press that costs ≥ 40 ms:
+
+```
+StepCost path=scroll dir=1 total=731ms
+StepCost path=slide  dir=1 total=212ms
+```
+
+Run either walk with `VGR_LOG_LEVEL=trace` off (the default) and grep `StepCost`; if
+`path=slide` and `path=scroll` read the same, the reading run is exonerated and the
+remaining cost is the renderer, as above. What is deliberately NOT changed: the software
+raster itself (three 1080p frames a press is the back end's rate, not a bug). The
+`stagedChanged` storm on a pick is §13's memo — it landed after this measurement.
+
+### 13. The step's own 731 ms — one restage, one silent start, one tell per position
+
+The first StepCost comparison came back with exactly the split it was built to find:
+
+```
+StepCost path=scroll dir=1 total=731ms
+StepCost path=slide  dir=1 total=212ms
+```
+
+Both numbers are dominated by what the call runs *inside* itself (Qt calls a direct
+connection on the calling thread, inside the `emit`), and the log puts that boundary
+precisely: `LineStep` and the `ReadRestage` it triggers carry the same millisecond, so the
+restage — rebuild, derive, window, prewarm, publish — is not the cost. Everything after it
+is. Four things were paying there, one per line below.
+
+* **A within-page step re-staged the run for nothing.** `MoveLineStepWithinPage` called
+  `applyReadingRestage` — rebuild the run, derive the scroll from it, log, prewarm, check
+  the publish — to change one integer. The passage, its line table, the pick and the staged
+  picture are all the same picture on that path. The step now moves the offset and lets
+  `applyReadingScroll` move the text window when the walk nears an edge (it already did).
+  Slide-mode text (`!lineSourceTextOnly_`) keeps the restage.
+* **The glide's first frame told every surface to lay out a position the picture was
+  already at.** `animateReadingScroll` pre-positions with `applyReadingScroll(from)`, which
+  emitted. That emit is now silent (`notify = false`); the first tell comes from a tick.
+* **The tell's budget is the tell's own price.** A fixed 33 ms window against a layout that
+  costs hundreds of milliseconds is not a throttle — it queues work the interface thread
+  cannot drain. `applyReadingScroll` now times its own `emit` and waits out twice that
+  before the next one; the glide's landing frame is forced (`finished`), so the walk still
+  ends on the line it says it is on. One line per expensive tell, in the same log:
+
+  ```
+  StepCost notify readingScrollChanged=286ms gap=572ms scroll=17.00
+  ```
+* **A tell that says the same number is not a tell.** `readingScrollNotified_` is recorded
+  by `AnnounceReadingScroll()` — the one path every announce now goes through — so a
+  repeated position (a clamp at the page edge, a settle after a page jump) costs nothing.
+
+**And the pick's `stagedChanged` storm is memoised**, which is the same disease on the
+other path. `LiveOutputService.stagedRev` bumps exactly once per staged change (all eleven
+`emit stagedChanged()` sites go through `BumpStaged()`), and a surface decides "have I
+already composed this pick?" from scalars only — `stagedRev`, its own style, `live`,
+`mediaOnAir`, `mediaRev`, `inputLabel`, `readingPage`. Two new cheap getters exist for that
+decision (`stagedHasFlow`, `onAirHasFlow`; `stagedValid` for the wall), because the old key
+read `stagedSlideRaw` first — a JS conversion of the whole 3 497-character passage, once
+per connected handler, just to compare it with the memo. The tile has seven such handlers.
+`OutputWindow` had no memo at all and now carries the tile's key.
+
+**The permanent fix is the fifth item, and it is the one that matters**: a surface's
+*passage text* was bound to the walk's position. `flowText.text` read
+`LiveOutputService.readingFlowText` directly whenever the passage was not sliced, so every
+tell re-evaluated the binding — and a justified layout of 3 497 characters, per surface, per
+tell, is exactly the hundreds of milliseconds the emit measured. The text now reads
+`sliceText` only (`sliceFor`, with the list-formatted case keeping the whole passage
+because its line starts are not the table's), and `refreshSlice` assigns it *only when the
+window actually changes*. A tell can therefore move the picture — `flowBox.y`, a
+translation — and nothing else. The slice memo also covers the whole-passage case now, and
+the per-tick `maybeResolveScroll` is gone: the fit belongs to the page, not to the tick.
+
+What is still deliberately open: the software raster's own rate (three 1080p frames a
+press) and the `StepCost notify` line, which measures whatever is left of a tell.
+
+### 14. The confirmation walk — 2026-11-03: a step that could not move, and the repair
+
+`tools/selftest/run_table_walk_test.sh` on the build that carries §13 (cache
+`DesignPreview_qml.cpp` 09:33:24, binary 09:37:28) produced **no cost number at all, and no
+movement**: 121 presses on the real passage `47-1100X` in Scroll mode, every one of them
+`moved=true` with `abs=0.00 page=0`, and `[LineStep] … lines=0` on all 121. The cost probe
+never fired because a press that answers "owed" and returns does no work — the walk was
+dead, not fast.
+
+**What the log shows, in order:**
+
+```
+10:05:32.789  ReadRunShape window=[0..11] runChars=2476 tableLines=69 stepLines=69 …
+10:05:32.790  ReadRunShape window=[0..0]  runChars=2476 tableLines=0  stepLines=0  pageLines=[0]
+10:05:33.579  LineStep dir=-1 … offset=0 lines=0        ← the rewind, on a run with no table
+…            LineStep … lines=0  (×121, to 10:07:19)
+```
+
+Two restages in the same millisecond: the first derives the run for the page set it had (69
+lines across 12 pages), the second for the pick's single-page set — and that second one asks
+`styleRunLinesForText` for the reference style while the style's scroll column is *still
+being solved* (the `ScrollColumn … solved once` lines land half a second later). The
+budget-fit branch answers "none" for an unsolved column, so the line table it stores is
+**empty**, and `rebuildReadingRun` short-circuits on an unchanged window — nothing ever
+re-derives it. The column solve only emits `readingScrollChanged`, which re-asks the
+*surfaces*; the service's own table stays empty.
+
+From there the step is stuck by construction: `LineStepOwnLines()` is 0, so
+`OwedLineStepAnswer` answers 1 ("held, I'll answer later") for every press — and the only
+thing that drained those owed steps was a glide, which a press that never moves never
+starts. The old per-press `applyReadingRestage` in `MoveLineStepWithinPage` was the
+accidental repair for this exact state; §13 removed it to stop the 731 ms press, which took
+the repair with it.
+
+**The cause is one `return none`.** In the text-only budget-fit branch of
+`styleRunLinesForText`, an unseated column (or one whose measurement is in flight) answered
+**an empty line table** — and that is what the run stored. Nothing queues a measure without
+a seat either, so the empty table was permanent: the run never re-derived, because
+`rebuildReadingRun` short-circuits on an unchanged window and the only other rebuilds were
+§12's `noteReadingFit` (gated on the budget-fit state it was already in) and
+`republishReadingFlow` (**gated on `live_`**, which a preview is not).
+
+**The fix, at that source:** the branch now *falls through* to the reading block's own grid
+instead of answering "none" — the provisional table the surfaces already draw, replaced by
+the seated column's measured table when the worker posts it. A text-only run can no longer
+be born empty, so the step always has a table to move through, whatever order the fit, the
+seat and the first press arrive in.
+
+**Two belts on top, for any state the ordering above still leaves table-less:**
+`RepairReadingRunWithoutLines()` re-derives a text-only run that has no table, with the
+restage **forced** (a plain one short-circuits — that is why the empty table survived). It
+runs from the seat's own deferred block (the moment the reference column arrives, which is
+what the run was waiting for) and from `lineStep` before the owed decision. It self-guards:
+Slide-mode text, empty runs and healthy tables cost one cached lookup and return.
+
+**The walk on the build that carries all three (11:34, app 11:34:54).** 121 presses of the
+real passage `47-1100X`, two outputs on two styles:
+
+| | value |
+|---|---|
+| presses that moved the picture | **71** (every one exactly +1.0; the passage then ended) |
+| `StepCost path=scroll` lines | **0** — every press is under the 40 ms floor (was **731 ms**) |
+| skipped glide frames (`glideSkips`, `glideWorst`) | **0**, `0.000` over all 121 presses |
+| wall tiles stale / off the passage | **0 / 0** of 605 tile reads |
+| pane paragraph | advanced 1 → 2 with the wall on it |
+| `StepCost notify` (what is left of a tell) | 31–72 ms, one per expensive tell (`gap` 33–68 ms) |
+
+The press stopped being the cost. What is left is the surface tell — 31–72 ms of layout on
+the interface thread, already budgeted by §13's gap rule — and the software raster behind it.
+
+Two of the runner's gates had to be re-pointed before they could judge anything here, and
+neither changes the numbers above (they come from the press lines, the tile's
+`stale`/`flow` flags and the cost probes):
+
+* **the grid gate compared a viewport with a passage.** `drawn` is the lines in the tile's
+  *visible slice* (21), `glines` the style's **whole-passage** table (72) — equal only when
+  the passage fits the box, so it failed 605 of 605 tile reads on a real pick. It now compares
+  `drawn` with the slice's own `expected` count, and `glines` stays in the line as context.
+* **the glide sampler could not tell a stall from a jump.** Its 16 ms timer flagged
+  `|d| > 1.0` as a skipped frame, but when one tell costs 137 ms two samples straddle the whole
+  190 ms glide and the difference is a full line either way (measured at press 1 of the 11:47
+  walk: `StepCost notify readingScrollChanged=137ms` in the same instant). Samples that arrive
+  more than three intervals late are now counted as `glideLate` — reported per press on both
+  scenarios, so the starvation stays visible instead of being silently forgiven.
+
+**Two consecutive walks on the corrected gates** (12:05 and 12:19): 121 presses, 72 moves each
+exactly +1.0 line, **605 tile reads with 0 slice mismatches**, `glideSkips=0` on every press,
+worst on-time move **0.363** lines, and the pane crossing a paragraph with the wall on it. The
+`glideLate` count is the honest remainder: **159** of ~1 450 samples arrived more than 48 ms
+late — the interface thread is still parked by the tells (§13's 31–72 ms), it just no longer
+records that as a dropped frame.
+* **`gchar`/`gpchar` are still uninformative** — `LiveOutputService.readingChar` is
+  window-relative, so both map the same character on every press (0 in this run). The
+  two-output comparison therefore rests on `glines`/`gspan`, which do differ (72 vs 35 lines).
+
 ---
 
-Measured 2026-11-01 on this checkout, software renderer, two enabled outputs. The
+Measured 2026-11-01 on this checkout, software renderer, two enabled outputs; §14 is the
+2026-11-03 confirmation walk on the build that carries the §13 binding fix, and it found a
+dead step rather than a slow one — its cost number comes from the build that carries the
+repair. The
 composed-frame figures in §3 are the app's own `Telemetry` hotspot samples from a
 46-press walk; §7's command counts and log volumes are from the same build after the
 fixes. The under-load walk described in §9 is still the missing measurement — the

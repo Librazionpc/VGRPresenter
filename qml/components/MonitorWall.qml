@@ -16,7 +16,9 @@ Item {
     readonly property int frameRev: LiveOutputService.frameRev
     readonly property bool live: LiveOutputService.live
     readonly property bool inputTaken: LiveOutputService.inputLabel !== ""
-    readonly property bool staged: LiveOutputService.stagedSlide.valid === true
+    // Cheap on purpose: reading `stagedSlide` here converts the whole staged slide into JS
+    // on every staged change, on the interface thread, just to look at one flag.
+    readonly property bool staged: LiveOutputService.stagedValid
     readonly property bool hasRealOnAirContent: !!(LiveOutputService.onAirSlide.blocks
         && LiveOutputService.onAirSlide.blocks.length > 0)
     readonly property bool anythingOnAir: root.live || root.inputTaken || root.staged
@@ -40,11 +42,25 @@ Item {
         const t = String(LiveOutputService.wallStepperId || "")
         return (t === "scripture" ? "scripture" : t === "show" ? "shows" : "table") + ".scrollWalk"
     }
+    property string _lastModeKey: ""
     function adoptMode() {
-        const stored = String(SettingsService.values[root.modeKey] ?? "")
-        if (stored !== "scroll" && stored !== "slide")
-            return
-        LiveOutputService.scrollMode = stored === "scroll"
+        const key = root.modeKey
+        const stored = String(SettingsService.values[key] ?? "")
+        const before = LiveOutputService.scrollMode
+        const known = (stored === "scroll" || stored === "slide")
+        if (known)
+            LiveOutputService.scrollMode = stored === "scroll"
+        // THE MODE HAS TO BE TRACEABLE. This function is the one writer of the
+        // mode that runs on its own (no click, no scenario), so when a wall
+        // switched itself back it left no evidence anywhere — three writers and
+        // one silent one. One line per adoption names the key it read and what it
+        // did to the live mode.
+        EngineBridge.log("info", "WallMode",
+                         "adopt key=" + key + " stored=" + (known ? stored : "unset")
+                         + " live=" + (before ? "scroll" : "slide")
+                         + " -> " + (LiveOutputService.scrollMode ? "scroll" : "slide")
+                         + " prevKey=" + (root._lastModeKey === "" ? "none" : root._lastModeKey))
+        root._lastModeKey = key
     }
     onModeKeyChanged: root.adoptMode()
     Component.onCompleted: root.adoptMode()

@@ -591,8 +591,20 @@ Result<void> ProductionGraph::AssignOutputBuses(std::string_view outputId,
                                "no audio bus: " + std::string(audioBusId));
         nextAudioBus = std::string(audioBusId);
     }
+    const std::string previousAudio = oit->second.audioBusId;
     oit->second.videoBusId = std::move(nextVideoBus);
     oit->second.audioBusId = std::move(nextAudioBus);
+    // THE ASSIGNMENT IS A WIRE. For audio it is the only wire there is: the mixer builds its
+    // planes from the snapshot's edge map (`AudioMixer::MixInto`), never from this config, so
+    // a bus assigned to an output here was drawn on the routing screen and silent in the mix
+    // — "the wire that used to be drawn and silent". An output is a signal-agnostic sink, so
+    // an audio bus can carry into a video output (that is how a display plays locally).
+    if (previousAudio != oit->second.audioBusId) {
+        if (!previousAudio.empty())
+            (void)Disconnect(previousAudio, std::string(outputId));
+        if (!oit->second.audioBusId.empty())
+            (void)Connect(oit->second.audioBusId, std::string(outputId), SignalType::Audio);
+    }
     QueuePersist();
     return Ok();
 }
@@ -614,7 +626,11 @@ Result<void> ProductionGraph::ClearOutputBusAssignment(std::string_view outputId
     }
     if (bus->empty())
         return Ok();
+    const std::string cleared = *bus;
     bus->clear();
+    // The wire drawn with the assignment (see AssignOutputBuses) goes with it.
+    if (type == SignalType::Audio)
+        (void)Disconnect(cleared, std::string(outputId));
     QueuePersist();
     return Ok();
 }

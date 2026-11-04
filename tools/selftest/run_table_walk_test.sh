@@ -12,7 +12,8 @@
 #
 # WHAT IT DOES
 #   1. launches with VGR_SELFTEST=1 + VGR_TABLEWALK_TEST=1
-#      (and VGR_TABLEWALK_QUERY=<passage>, default "47-1100X")
+#      (and VGR_TABLEWALK_QUERY=<passage>, default "47-1100X"; prefix with
+#      "bible:" to require and open a Scripture result, and "live:" to put it on air)
 #      stdout+stderr -> build/table_walk_test.log
 #   2. the scenario opens the app-wide search, takes the first result (the real
 #      "search a citation, open it" path), stages the passage through the pane's
@@ -57,14 +58,10 @@
 #          showing while the right has finished" report, measured instead of
 #          eyeballed.
 #
-#        * THE COLUMN AND THE TABLE ARE ONE GRID: each tile reports the line count
-#          of the passage column it really laid out (`drawn`) beside the line count
-#          of the table LiveOutputService converts the reading position through
-#          (`glines`). They must be equal — the step moves an index into that
-#          table while the words are drawn in lines of their own. Measured before
-#          this check existed, on the reported book: a tile drew 75 lines while the
-#          table held 45, so each press moved the words 0.6 of a line and the last
-#          30 lines never came into view.
+#        * EACH TILE'S SLICE MATCHES THE SHARED GRID: `drawn` is the lines in the
+#          visible text slice, not the whole passage. Compare it with `expected`
+#          (the corresponding slice's line count), while `glines` records the
+#          whole-passage grid used by the step.
 #
 # The walk REWINDS to the pick's first line before pressing (lineStep(-1) until it
 # refuses), so the boundary sequence does not depend on which paragraph this
@@ -100,10 +97,18 @@ fi
 # same block in run_line_step_test.sh: killing by name takes the operator's own
 # app down with it, and a survivor appends its own walk to this run's file.
 BUILD_WIN="$(cygpath -w "$BUILD" 2>/dev/null || printf '%s' "$BUILD")"
+# INTO A FILE, NOT A PIPE. Called from $(app_pids) this used to hang the runner for
+# ever after a good walk: PowerShell allocates a console, its conhost inherits the
+# command-substitution pipe, and it outlives PowerShell — so the read never sees EOF
+# (measured: flat CPU, no child processes, 25 minutes after the walk had finished).
 app_pids() {
+    local out
+    out="$(mktemp)"
     powershell -NoProfile -Command \
         "Get-Process appVGRPresenterUI -ErrorAction SilentlyContinue | Where-Object { \$_.Path -and \$_.Path.StartsWith('$BUILD_WIN') } | ForEach-Object { \$_.Id }" \
-        2>/dev/null | tr -d '\r'
+        > "$out" 2>/dev/null
+    tr -d '\r' < "$out"
+    rm -f "$out"
 }
 echo "== stopping this build's instances ($BUILD_WIN) =="
 for _pid in $(app_pids); do
@@ -186,6 +191,44 @@ TILES="$(mktemp)"
 PANE="$(mktemp)"
 grep -a "\[SELFTEST-TABLEWALK\] press=.* tile=" "$LOG" 2>/dev/null > "$TILES"
 grep -a "\[SELFTEST-TABLEWALK\] press=.* pane=" "$LOG" 2>/dev/null > "$PANE"
+
+# ---- FIELD EXTRACTION WITHOUT FORKING --------------------------------------
+# This block used to be `printf | sed` per field AND a `grep` per press, inside a
+# loop over every tile of every press: 605 tile lines x ~10 forks = ~6 000 process
+# creations, and on this machine (MSYS tools under Windows) each one costs ~10ms,
+# so the JUDGING alone took longer than the walk. Measured: 45 s of `bash -x` got
+# as far as press 6 of 121 — it read as a hang ("the runner wedges after the walk")
+# and the verdict never printed. The same numbers are now read in-process: one
+# regex per field, and the per-press lookups are indexed once up front.
+#
+# field <name> <line> -> sets FIELD to the value of `name=<value>` on that line
+# (a value runs to the next space, which is what every judged field is: numbers,
+# booleans, or an enum like `s2`).
+FIELD=""
+field() {
+    FIELD=""
+    [[ $2 =~ (^|[[:space:]])$1=([^[:space:]]*) ]] && FIELD="${BASH_REMATCH[2]}"
+    return 0
+}
+# press=<n> -> the tile lines / the pane line logged for that press, gathered in
+# one pass each instead of one grep per press.
+declare -A TILES_BY_PRESS=() PANE_BY_PRESS=()
+index_by_press() {   # file, assoc-array name
+    local file="$1" l key
+    while IFS= read -r l; do
+        [ -n "$l" ] || continue
+        key=""
+        [[ $l =~ press=([0-9]+) ]] && key="${BASH_REMATCH[1]}"
+        [ -n "$key" ] || continue
+        if [ "$2" = "TILES_BY_PRESS" ]; then
+            TILES_BY_PRESS["$key"]="${TILES_BY_PRESS[$key]:-}${l}"$'\n'
+        else
+            PANE_BY_PRESS["$key"]="${PANE_BY_PRESS[$key]:-}${l}"$'\n'
+        fi
+    done < "$file"
+}
+index_by_press "$TILES" TILES_BY_PRESS
+index_by_press "$PANE" PANE_BY_PRESS
 if [ -z "$LINES" ]; then
     echo "(no SELFTEST-TABLEWALK press lines — see $(basename "$LOG"))"
     grep -a "\[SELFTEST-TABLEWALK\]" "$LOG" 2>/dev/null | head -5
@@ -278,13 +321,14 @@ gchar_check() {   # idx now prev press
 # it (the words would jump by a page).
 RUN_REBASE_MOVES=0
 while IFS= read -r line; do
-    get() { printf '%s\n' "$line" | sed -n "s/.* $1=\([^ ]*\).*/\1/p"; }
-    moved="$(get moved)"
-    absv="$(get abs)"
-    page="$(get page)"
-    press="$(get press)"
-    skips="$(get glideSkips)"
-    mode="$(get mode)"
+    # no forks here — see the FIELD EXTRACTION note above; the per-press timings
+    # are only this script's own `date` deltas, nothing to resolve.
+    field press      "$line"; press="$FIELD"
+    field moved      "$line"; moved="$FIELD"
+    field abs        "$line"; absv="$FIELD"
+    field page       "$line"; page="$FIELD"
+    field glideSkips "$line"; skips="$FIELD"
+    field mode       "$line"; mode="$FIELD"
     # THE WALK ITSELF MUST STAY IN SCROLL MODE. A press that reads mode=slide is a
     # slide change reported as a reading step — the mode switched under the walk
     # (the pane adopts a per-tab value), so the sequence is not one walk any more.
@@ -301,13 +345,13 @@ while IFS= read -r line; do
         FAILS=$((FAILS + 1))
     fi
     # the pane's own reference paragraph (the value the report says never moved)
-    pane="$(grep -a "press=$press pane=" "$PANE" | head -1)"
-    if [ -z "$pane" ] || printf '%s\n' "$pane" | grep -qa "pane=missing"; then
+    pane="${PANE_BY_PRESS[$press]:-}"
+    if [ -z "$pane" ] || [[ $pane == *pane=missing* ]]; then
         echo "  FAIL press=$press: no pane to read (selfTestTablePane not found)"
         dump_ctx "$press" "pane-missing"
         FAILS=$((FAILS + 1))
     else
-        para="$(printf '%s\n' "$pane" | sed -n 's/.* para=\([^ ]*\).*/\1/p')"
+        field para "$pane"; para="$FIELD"
         PARA_NOW="$para"
         if [ -n "$PREV_PARA" ] && [ "$para" != "-1" ] && [ "$PREV_PARA" != "-1" ]; then
             if [ "$para" -lt "$PREV_PARA" ]; then
@@ -321,8 +365,8 @@ while IFS= read -r line; do
         PREV_PARA="$para"
     fi
     # the wall: every tile's own composition against one composed now
-    tiles="$(grep -a "press=$press tile=" "$TILES")"
-    if [ -z "$tiles" ] || printf '%s\n' "$tiles" | grep -qa "wall=missing"; then
+    tiles="${TILES_BY_PRESS[$press]:-}"
+    if [ -z "$tiles" ] || [[ $tiles == *wall=missing* ]]; then
         echo "  FAIL press=$press: no wall tiles read (selfTestMonitorWall not found)"
         dump_ctx "$press" "wall-missing"
         FAILS=$((FAILS + 1))
@@ -330,9 +374,13 @@ while IFS= read -r line; do
         while IFS= read -r tl; do
             [ -n "$tl" ] || continue
             TILE_READS=$((TILE_READS + 1))
-            TILE_TEXT="$(printf '%s\n' "$tl" | sed -n 's/.* tileText="\([^"]*\)".*/\1/p')"
-            stale="$(printf '%s\n' "$tl" | sed -n 's/.* stale=\([^ ]*\).*/\1/p')"
-            flow="$(printf '%s\n' "$tl" | sed -n 's/.* flow=\([^ ]*\).*/\1/p')"
+            # the one field with spaces in it: cut between its own quotes
+            TILE_TEXT=""
+            case "$tl" in
+                *tileText=\"*\"*) _rest="${tl#*tileText=\"}"; TILE_TEXT="${_rest%%\"*}" ;;
+            esac
+            field stale "$tl"; stale="$FIELD"
+            field flow  "$tl"; flow="$FIELD"
             if [ "$stale" != "false" ]; then
                 echo "  FAIL press=$press: a wall tile is STALE — $tl"
                 dump_ctx "$press" "stale-tile $tl"
@@ -343,26 +391,22 @@ while IFS= read -r line; do
                 dump_ctx "$press" "tile-off-passage $tl"
                 FAILS=$((FAILS + 1))
             fi
-            tidx="$(printf '%s\n' "$tl" | sed -n 's/.* tile=\([0-9]*\) .*/\1/p')"
+            field tile "$tl"; tidx="$FIELD"
             [ -n "$tidx" ] || continue
-            GTILE_CHAR[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* gpchar=\(-\?[0-9]*\) .*/\1/p')"
-            GTILE_LOCAL[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* gchar=\(-\?[0-9]*\) .*/\1/p')"
-            GTILE_SPAN[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* gspan=\([0-9]*\) .*/\1/p')"
-            GTILE_LINES[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* glines=\([0-9]*\) .*/\1/p')"
-            GTILE_STYLE[$tidx]="$(printf '%s\n' "$tl" | sed -n 's/.* style=\([^ ]*\).*/\1/p')"
-            # THE COLUMN AND THE TABLE ARE ONE GRID — or the words cannot follow the
-            # keys at all. `drawn` is the passage column's own line count as THIS
-            # tile laid it out; `glines` is the table LiveOutputService converts the
-            # position through. Measured before this check existed, on the reported
-            # book: a tile drew 75 lines while the step's table had 45, so each press
-            # moved the words 0.6 of a line and the last 30 lines never came into
-            # view ("the first output is slower than the second", "it stops scrolling
-            # as if finished but some lines are not shown").
-            drawn="$(printf '%s\n' "$tl" | sed -n 's/.* drawn=\(-\?[0-9]*\) .*/\1/p')"
-            glines="${GTILE_LINES[$tidx]:-}"
-            if [ -n "$drawn" ] && [ "$drawn" -gt 0 ] && [ -n "$glines" ] && [ "$drawn" -ne "$glines" ]; then
-                echo "  FAIL press=$press: output $tidx draws $drawn line(s) while the step's table holds $glines — the column and the table are different grids"
-                dump_ctx "$press" "grid-mismatch tile=$tidx drawn=$drawn table=$glines"
+            field gpchar "$tl"; GTILE_CHAR[$tidx]="$FIELD"
+            field gchar  "$tl"; GTILE_LOCAL[$tidx]="$FIELD"
+            field gspan  "$tl"; GTILE_SPAN[$tidx]="$FIELD"
+            field glines "$tl"; GTILE_LINES[$tidx]="$FIELD"
+            field style  "$tl"; GTILE_STYLE[$tidx]="$FIELD"
+            # A tile lays out only its visible slice; compare it with that slice's
+            # expected line count. `glines` is the whole-passage table, so comparing
+            # these directly confuses a viewport slice with the full passage.
+            field drawn    "$tl"; drawn="$FIELD"
+            field expected "$tl"; expected="$FIELD"
+            if [ -n "$drawn" ] && [ "$drawn" -gt 0 ] && [ -n "$expected" ] \
+                    && [ "$expected" -gt 0 ] && [ "$drawn" -ne "$expected" ]; then
+                echo "  FAIL press=$press: output $tidx draws $drawn line(s) in its slice; expected $expected"
+                dump_ctx "$press" "slice-grid-mismatch tile=$tidx drawn=$drawn expected=$expected"
                 GRID_MISMATCH=$((GRID_MISMATCH + 1))
                 FAILS=$((FAILS + 1))
             fi
@@ -508,7 +552,7 @@ echo "  ${GRID_PROOF:-no press read both outputs}"
 echo "  presses with both outputs read: $TWO_STYLE_PRESSES, furthest apart: $MAX_SPREAD char(s) (press ${SPREAD_AT:-none}) — one wrap is allowed, more is drift"
 echo "  run-window slides crossed: $RUN_REBASE_MOVES (the run-relative offset drops there by design; the pick-wide one above must not)"
 rm -f "$TILES" "$PANE"
-echo "== moved presses: $MOVED, wall tile reads: $TILE_READS, wall text changes: $TILE_TEXT_MOVES, pane paragraph advances: $PARA_MOVES, drawn-vs-table grid mismatches: $GRID_MISMATCH, findings: $FAILS =="
+echo "== moved presses: $MOVED, wall tile reads: $TILE_READS, wall text changes: $TILE_TEXT_MOVES, pane paragraph advances: $PARA_MOVES, drawn-vs-slice grid mismatches: $GRID_MISMATCH, findings: $FAILS =="
 if [ "$MOVED" -lt 15 ]; then
     echo "TABLE_WALK: FAIL too-few-moves ($MOVED) — the walk stopped early"
     exit 1

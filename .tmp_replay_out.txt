@@ -1,0 +1,256 @@
+== REPLAY: judging the existing log ==
+== presses ==
+12:17:05.005 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=0 moved=true mode=scroll abs=0.00 absFrom=0.00 page=0 glideSkips=0 glideLate=14 glideWorst=0.000
+12:17:05.942 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=1 moved=true mode=scroll abs=1.00 absFrom=1.00 page=1 glideSkips=0 glideLate=18 glideWorst=0.000
+12:17:06.646 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=2 moved=true mode=scroll abs=2.00 absFrom=2.00 page=1 glideSkips=0 glideLate=20 glideWorst=0.309
+12:17:07.377 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=3 moved=true mode=scroll abs=3.00 absFrom=3.00 page=1 glideSkips=0 glideLate=22 glideWorst=0.361
+12:17:08.105 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=4 moved=true mode=scroll abs=4.00 absFrom=4.00 page=1 glideSkips=0 glideLate=22 glideWorst=0.361
+12:17:08.837 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=5 moved=true mode=scroll abs=5.00 absFrom=5.00 page=1 glideSkips=0 glideLate=23 glideWorst=0.361
+12:17:09.586 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=6 moved=true mode=scroll abs=6.00 absFrom=6.00 page=1 glideSkips=0 glideLate=24 glideWorst=0.361
+12:17:10.421 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=7 moved=true mode=scroll abs=7.00 absFrom=7.00 page=1 glideSkips=0 glideLate=28 glideWorst=0.241
+12:17:11.233 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=8 moved=true mode=scroll abs=8.00 absFrom=8.00 page=2 glideSkips=0 glideLate=31 glideWorst=0.241
+12:17:12.045 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=9 moved=true mode=scroll abs=9.00 absFrom=9.00 page=2 glideSkips=0 glideLate=34 glideWorst=0.361
+12:17:12.776 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=10 moved=true mode=scroll abs=10.00 absFrom=10.00 page=2 glideSkips=0 glideLate=35 glideWorst=0.361
+12:17:13.673 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=11 moved=true mode=scroll abs=11.00 absFrom=11.00 page=2 glideSkips=0 glideLate=39 glideWorst=0.361
+12:17:14.465 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=12 moved=true mode=scroll abs=12.00 absFrom=12.00 page=2 glideSkips=0 glideLate=41 glideWorst=0.241
+12:17:15.677 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=13 moved=true mode=scroll abs=13.00 absFrom=13.00 page=3 glideSkips=0 glideLate=45 glideWorst=0.363
+12:17:16.445 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=14 moved=true mode=scroll abs=14.00 absFrom=14.00 page=3 glideSkips=0 glideLate=47 glideWorst=0.347
+12:17:17.196 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=15 moved=true mode=scroll abs=15.00 absFrom=15.00 page=3 glideSkips=0 glideLate=49 glideWorst=0.347
+12:17:18.033 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=16 moved=true mode=scroll abs=16.00 absFrom=16.00 page=3 glideSkips=0 glideLate=51 glideWorst=0.241
+12:17:18.779 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=17 moved=true mode=scroll abs=17.00 absFrom=17.00 page=3 glideSkips=0 glideLate=53 glideWorst=0.347
+12:17:19.536 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=18 moved=true mode=scroll abs=18.00 absFrom=18.00 page=3 glideSkips=0 glideLate=54 glideWorst=0.347
+12:17:20.389 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=19 moved=true mode=scroll abs=19.00 absFrom=19.00 page=3 glideSkips=0 glideLate=57 glideWorst=0.347
+12:17:21.533 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=20 moved=true mode=scroll abs=20.00 absFrom=20.00 page=4 glideSkips=0 glideLate=61 glideWorst=0.195
+12:17:22.387 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=21 moved=true mode=scroll abs=21.00 absFrom=21.00 page=4 glideSkips=0 glideLate=64 glideWorst=0.347
+12:17:23.224 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=22 moved=true mode=scroll abs=22.00 absFrom=22.00 page=4 glideSkips=0 glideLate=66 glideWorst=0.361
+12:17:24.055 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=23 moved=true mode=scroll abs=23.00 absFrom=23.00 page=4 glideSkips=0 glideLate=69 glideWorst=0.347
+12:17:24.824 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=24 moved=true mode=scroll abs=24.00 absFrom=24.00 page=4 glideSkips=0 glideLate=71 glideWorst=0.361
+12:17:25.803 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=25 moved=true mode=scroll abs=25.00 absFrom=25.00 page=4 glideSkips=0 glideLate=77 glideWorst=0.347
+12:17:26.744 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=26 moved=true mode=scroll abs=26.00 absFrom=26.00 page=5 glideSkips=0 glideLate=81 glideWorst=0.195
+12:17:27.535 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=27 moved=true mode=scroll abs=27.00 absFrom=27.00 page=5 glideSkips=0 glideLate=83 glideWorst=0.361
+12:17:28.410 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=28 moved=true mode=scroll abs=28.00 absFrom=28.00 page=5 glideSkips=0 glideLate=85 glideWorst=0.361
+12:17:29.170 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=29 moved=true mode=scroll abs=29.00 absFrom=29.00 page=5 glideSkips=0 glideLate=88 glideWorst=0.361
+12:17:29.953 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=30 moved=true mode=scroll abs=30.00 absFrom=30.00 page=5 glideSkips=0 glideLate=90 glideWorst=0.241
+12:17:46.671 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=31 moved=true mode=scroll abs=31.00 absFrom=31.00 page=5 glideSkips=0 glideLate=95 glideWorst=0.361
+12:17:47.691 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=32 moved=true mode=scroll abs=32.00 absFrom=32.00 page=6 glideSkips=0 glideLate=98 glideWorst=0.363
+12:17:48.424 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=33 moved=true mode=scroll abs=33.00 absFrom=33.00 page=6 glideSkips=0 glideLate=99 glideWorst=0.363
+12:17:49.170 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=34 moved=true mode=scroll abs=34.00 absFrom=34.00 page=6 glideSkips=0 glideLate=100 glideWorst=0.363
+12:17:49.965 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=35 moved=true mode=scroll abs=35.00 absFrom=35.00 page=6 glideSkips=0 glideLate=103 glideWorst=0.225
+12:17:50.755 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=36 moved=true mode=scroll abs=36.00 absFrom=36.00 page=6 glideSkips=0 glideLate=105 glideWorst=0.363
+12:17:51.552 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=37 moved=true mode=scroll abs=37.00 absFrom=37.00 page=6 glideSkips=0 glideLate=108 glideWorst=0.363
+12:17:52.276 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=38 moved=true mode=scroll abs=38.00 absFrom=38.00 page=6 glideSkips=0 glideLate=109 glideWorst=0.363
+12:17:53.151 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=39 moved=true mode=scroll abs=39.00 absFrom=39.00 page=7 glideSkips=0 glideLate=112 glideWorst=0.363
+12:17:53.882 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=40 moved=true mode=scroll abs=40.00 absFrom=40.00 page=7 glideSkips=0 glideLate=113 glideWorst=0.363
+12:17:54.737 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=41 moved=true mode=scroll abs=41.00 absFrom=41.00 page=7 glideSkips=0 glideLate=115 glideWorst=0.363
+12:17:55.488 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=42 moved=true mode=scroll abs=42.00 absFrom=42.00 page=7 glideSkips=0 glideLate=117 glideWorst=0.363
+12:17:56.300 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=43 moved=true mode=scroll abs=43.00 absFrom=43.00 page=7 glideSkips=0 glideLate=120 glideWorst=0.363
+12:17:57.061 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=44 moved=true mode=scroll abs=44.00 absFrom=44.00 page=7 glideSkips=0 glideLate=121 glideWorst=0.363
+12:17:57.802 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=45 moved=true mode=scroll abs=45.00 absFrom=45.00 page=7 glideSkips=0 glideLate=122 glideWorst=0.347
+12:17:58.781 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=46 moved=true mode=scroll abs=46.00 absFrom=46.00 page=8 glideSkips=0 glideLate=126 glideWorst=0.241
+12:17:59.616 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=47 moved=true mode=scroll abs=47.00 absFrom=47.00 page=8 glideSkips=0 glideLate=128 glideWorst=0.347
+12:18:00.515 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=48 moved=true mode=scroll abs=48.00 absFrom=48.00 page=8 glideSkips=0 glideLate=130 glideWorst=0.347
+12:18:01.347 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=49 moved=true mode=scroll abs=49.00 absFrom=49.00 page=8 glideSkips=0 glideLate=133 glideWorst=0.347
+12:18:02.135 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=50 moved=true mode=scroll abs=50.00 absFrom=50.00 page=8 glideSkips=0 glideLate=134 glideWorst=0.347
+12:18:02.928 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=51 moved=true mode=scroll abs=51.00 absFrom=51.00 page=8 glideSkips=0 glideLate=136 glideWorst=0.347
+12:18:03.824 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=52 moved=true mode=scroll abs=52.00 absFrom=52.00 page=9 glideSkips=0 glideLate=139 glideWorst=0.241
+12:18:04.595 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=53 moved=true mode=scroll abs=53.00 absFrom=53.00 page=9 glideSkips=0 glideLate=141 glideWorst=0.347
+12:18:05.283 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=54 moved=true mode=scroll abs=54.00 absFrom=54.00 page=9 glideSkips=0 glideLate=142 glideWorst=0.361
+12:18:05.992 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=55 moved=true mode=scroll abs=55.00 absFrom=55.00 page=9 glideSkips=0 glideLate=142 glideWorst=0.347
+12:18:06.722 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=56 moved=true mode=scroll abs=56.00 absFrom=56.00 page=9 glideSkips=0 glideLate=143 glideWorst=0.361
+12:18:07.472 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=57 moved=true mode=scroll abs=57.00 absFrom=57.00 page=9 glideSkips=0 glideLate=144 glideWorst=0.347
+12:18:08.557 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=58 moved=true mode=scroll abs=58.00 absFrom=58.00 page=10 glideSkips=0 glideLate=148 glideWorst=0.195
+12:18:09.473 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=59 moved=true mode=scroll abs=59.00 absFrom=59.00 page=10 glideSkips=0 glideLate=151 glideWorst=0.361
+12:18:10.181 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=60 moved=true mode=scroll abs=60.00 absFrom=60.00 page=10 glideSkips=0 glideLate=151 glideWorst=0.361
+12:18:10.870 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=61 moved=true mode=scroll abs=61.00 absFrom=61.00 page=10 glideSkips=0 glideLate=151 glideWorst=0.361
+12:18:11.620 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=62 moved=true mode=scroll abs=62.00 absFrom=62.00 page=10 glideSkips=0 glideLate=152 glideWorst=0.361
+12:18:12.308 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=63 moved=true mode=scroll abs=63.00 absFrom=63.00 page=10 glideSkips=0 glideLate=152 glideWorst=0.361
+12:18:13.020 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=64 moved=true mode=scroll abs=64.00 absFrom=64.00 page=10 glideSkips=0 glideLate=152 glideWorst=0.361
+12:18:13.917 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=65 moved=true mode=scroll abs=65.00 absFrom=65.00 page=11 glideSkips=0 glideLate=155 glideWorst=0.361
+12:18:14.792 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=66 moved=true mode=scroll abs=66.00 absFrom=66.00 page=11 glideSkips=0 glideLate=158 glideWorst=0.361
+12:18:15.501 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=67 moved=true mode=scroll abs=67.00 absFrom=67.00 page=11 glideSkips=0 glideLate=158 glideWorst=0.361
+12:18:16.187 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=68 moved=true mode=scroll abs=68.00 absFrom=68.00 page=11 glideSkips=0 glideLate=158 glideWorst=0.361
+12:18:16.935 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=69 moved=true mode=scroll abs=69.00 absFrom=69.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.361
+12:18:17.623 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=70 moved=true mode=scroll abs=70.00 absFrom=70.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.361
+12:18:18.332 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=71 moved=true mode=scroll abs=71.00 absFrom=71.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.361
+12:18:19.041 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=72 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.361
+12:18:19.728 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=73 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:20.437 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=74 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:21.125 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=75 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:21.834 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=76 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:22.542 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=77 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:23.251 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=78 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:23.960 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=79 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:24.669 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=80 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:25.398 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=81 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:26.086 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=82 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:26.794 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=83 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:27.485 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=84 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:28.213 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=85 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:28.921 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=86 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:29.609 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=87 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:30.326 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=88 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:31.026 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=89 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:31.735 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=90 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:32.422 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=91 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:33.131 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=92 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:33.840 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=93 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:34.529 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=94 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:35.257 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=95 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:35.945 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=96 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:36.654 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=97 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:37.342 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=98 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:38.051 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=99 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:38.759 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=100 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:39.447 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=101 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:40.156 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=102 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:40.844 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=103 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:41.552 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=104 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:42.240 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=105 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:42.949 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=106 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:43.658 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=107 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:44.366 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=108 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:45.075 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=109 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:45.766 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=110 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:46.472 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=111 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:47.160 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=112 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:47.868 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=113 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:48.577 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=114 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:49.265 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=115 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:49.974 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=116 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:50.662 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=117 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:51.371 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=118 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:52.058 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=119 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+12:18:52.769 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=120 moved=false mode=scroll abs=72.00 absFrom=72.00 page=11 glideSkips=0 glideLate=159 glideWorst=0.000
+  FAIL the switch never reported both modes (slide='' scroll='12:19:13.801 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] mode=scroll step=3 slideFlow=2476 readingFlow=2476')
+== walk state ==
+12:17:05.085 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=0 pane=yes page=0 char=0 refTop="1 At this time we’re going to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:06.010 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=1 pane=yes page=1 char=37 refTop="1 At this time we’re going to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:06.704 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=2 pane=yes page=1 char=69 refTop="1 At this time we’re going to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:07.423 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=3 pane=yes page=1 char=101 refTop="1 At this time we’re going to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:08.162 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=4 pane=yes page=1 char=135 refTop="[Brother Bosworth gives a solo" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:08.920 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=5 pane=yes page=1 char=171 refTop="[Brother Bosworth gives a solo" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:09.652 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=6 pane=yes page=1 char=202 refTop="[Brother Bosworth gives a solo" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:10.472 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=7 pane=yes page=1 char=234 refTop="And I wonder, while you’re kin" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:11.302 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=8 pane=yes page=2 char=272 refTop="And I wonder, while you’re kin" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:12.118 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=9 pane=yes page=2 char=308 refTop="And I wonder, while you’re kin" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:12.870 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=10 pane=yes page=2 char=344 refTop="kind of a favorite to me. I wo" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:13.760 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=11 pane=yes page=2 char=382 refTop="kind of a favorite to me. I wo" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:14.552 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=12 pane=yes page=2 char=420 refTop="kind of a favorite to me. I wo" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:15.770 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=13 pane=yes page=3 char=453 refTop="“Down At The Cross.”—Ed.] My, " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:16.523 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=14 pane=yes page=3 char=490 refTop="“Down At The Cross.”—Ed.] My, " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:17.269 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=15 pane=yes page=3 char=526 refTop="“Down At The Cross.”—Ed.] My, " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:18.081 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=16 pane=yes page=3 char=561 refTop="ourself here in this little vi" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:18.831 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=17 pane=yes page=3 char=597 refTop="ourself here in this little vi" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:19.614 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=18 pane=yes page=3 char=626 refTop="ourself here in this little vi" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:20.462 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=19 pane=yes page=3 char=664 refTop="ourself here in this little vi" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:21.623 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=20 pane=yes page=4 char=701 refTop="got a word you’d just like to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:22.471 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=21 pane=yes page=4 char=733 refTop="got a word you’d just like to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:23.328 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=22 pane=yes page=4 char=765 refTop="got a word you’d just like to " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:24.151 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=23 pane=yes page=4 char=797 refTop="Yes, sir. Brother Mc Anally is" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:24.896 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=24 pane=yes page=4 char=835 refTop="Yes, sir. Brother Mc Anally is" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:25.867 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=25 pane=yes page=4 char=870 refTop="Yes, sir. Brother Mc Anally is" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:26.833 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=26 pane=yes page=5 char=908 refTop="want to have a word from the w" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:27.625 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=27 pane=yes page=5 char=944 refTop="want to have a word from the w" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:28.485 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=28 pane=yes page=5 char=982 refTop="want to have a word from the w" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:29.255 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=29 pane=yes page=5 char=1016 refTop="“I’m certainly glad for the pr" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:30.063 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=30 pane=yes page=5 char=1055 refTop="“I’m certainly glad for the pr" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:46.754 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=31 pane=yes page=5 char=1094 refTop="“I’m certainly glad for the pr" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:47.758 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=32 pane=yes page=6 char=1130 refTop="like Brother and Sister Mc Ana" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:48.495 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=33 pane=yes page=6 char=1166 refTop="like Brother and Sister Mc Ana" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:49.236 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=34 pane=yes page=6 char=1200 refTop="like Brother and Sister Mc Ana" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:50.050 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=35 pane=yes page=6 char=1231 refTop="here? [Brother Bosworth says a" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:50.824 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=36 pane=yes page=6 char=1265 refTop="here? [Brother Bosworth says a" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:51.612 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=37 pane=yes page=6 char=1299 refTop="here? [Brother Bosworth says a" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:52.324 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=38 pane=yes page=6 char=1328 refTop="Bosworth gives another solo. B" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:53.226 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=39 pane=yes page=7 char=1363 refTop="Bosworth gives another solo. B" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:53.946 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=40 pane=yes page=7 char=1394 refTop="Bosworth gives another solo. B" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:54.819 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=41 pane=yes page=7 char=1426 refTop="Bosworth gives another solo. B" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:55.552 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=42 pane=yes page=7 char=1458 refTop="been down here on this trip. A" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:56.362 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=43 pane=yes page=7 char=1497 refTop="been down here on this trip. A" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:57.129 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=44 pane=yes page=7 char=1530 refTop="been down here on this trip. A" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:57.885 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=45 pane=yes page=7 char=1566 refTop="bless you, brother. I’ve alway" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:58.829 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=46 pane=yes page=8 char=1600 refTop="bless you, brother. I’ve alway" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:17:59.706 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=47 pane=yes page=8 char=1634 refTop="bless you, brother. I’ve alway" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:00.629 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=48 pane=yes page=8 char=1669 refTop="when you play this, think of m" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:01.427 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=49 pane=yes page=8 char=1706 refTop="when you play this, think of m" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:02.225 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=50 pane=yes page=8 char=1739 refTop="when you play this, think of m" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:02.995 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=51 pane=yes page=8 char=1774 refTop="That was very, very fine. Oh, " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:03.884 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=52 pane=yes page=9 char=1815 refTop="That was very, very fine. Oh, " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:04.626 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=53 pane=yes page=9 char=1848 refTop="That was very, very fine. Oh, " ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:05.321 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=54 pane=yes page=9 char=1882 refTop="another one on that old trumpe" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:06.058 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=55 pane=yes page=9 char=1914 refTop="another one on that old trumpe" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:06.795 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=56 pane=yes page=9 char=1951 refTop="another one on that old trumpe" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:07.546 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=57 pane=yes page=9 char=1983 refTop="another one on that old trumpe" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:08.623 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=58 pane=yes page=10 char=2017 refTop="God bless you, brother. All ri" ref="47-1100X - Fellowship 1" para=1 selected=[1] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:09.496 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=59 pane=yes page=10 char=2042 refTop="2 THE SPOKEN WORD [Brother Bos" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:10.216 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=60 pane=yes page=10 char=2069 refTop="2 THE SPOKEN WORD [Brother Bos" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:10.924 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=61 pane=yes page=10 char=2102 refTop="2 THE SPOKEN WORD [Brother Bos" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:11.642 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=62 pane=yes page=10 char=2135 refTop="2 THE SPOKEN WORD [Brother Bos" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:12.337 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=63 pane=yes page=10 char=2170 refTop="Brother Hooper, you got anothe" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:13.089 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=64 pane=yes page=10 char=2207 refTop="Brother Hooper, you got anothe" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:14.017 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=65 pane=yes page=11 char=2235 refTop="Brother Hooper, you got anothe" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:14.826 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=66 pane=yes page=11 char=2267 refTop="quick over this microphone, wi" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:15.535 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=67 pane=yes page=11 char=2301 refTop="quick over this microphone, wi" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:16.255 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=68 pane=yes page=11 char=2336 refTop="quick over this microphone, wi" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:16.954 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=69 pane=yes page=11 char=2372 refTop="You want a word to say, Brothe" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:17.647 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=70 pane=yes page=11 char=2407 refTop="You want a word to say, Brothe" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:18.359 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=71 pane=yes page=11 char=2441 refTop="You want a word to say, Brothe" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:19.077 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=72 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:19.749 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=73 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:20.467 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=74 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:21.154 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=75 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:21.882 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=76 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:22.575 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=77 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:23.274 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=78 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:24.003 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=79 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:24.708 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=80 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:25.423 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=81 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:26.120 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=82 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:26.827 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=83 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:27.527 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=84 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:28.247 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=85 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:28.951 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=86 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:29.647 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=87 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:30.360 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=88 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:31.064 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=89 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:31.767 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=90 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:32.449 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=91 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:33.157 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=92 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:33.865 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=93 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:34.569 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=94 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:35.294 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=95 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:35.983 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=96 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:36.689 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=97 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:37.379 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=98 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:38.090 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=99 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:38.797 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=100 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:39.476 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=101 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:40.188 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=102 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:40.879 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=103 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:41.585 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=104 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:42.265 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=105 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:42.980 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=106 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:43.697 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=107 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:44.389 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=108 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:45.104 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=109 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:45.795 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=110 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:46.495 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=111 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:47.188 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=112 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:47.894 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=113 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:48.603 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=114 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:49.292 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=115 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:50.006 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=116 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:50.685 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=117 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:51.403 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=118 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:52.090 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=119 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+12:18:52.797 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] press=120 pane=yes page=11 char=2475 refTop="half—Ed.]" ref="47-1100X - Fellowship 2" para=2 selected=[2] previewIndex=0 ownerRef="47-1100X - Fellowship 1"
+== the mode switch ==
+  12:17:02.203 [DEBUG][UI][Thread-1][QML] [SELFTEST-READING] scenario=tablewalk mode=scroll by=already now=scroll
+  slide : missing
+  scroll: 12:19:13.801 [DEBUG][UI][Thread-1][QML] [SELFTEST-TABLEWALK] mode=scroll step=3 slideFlow=2476 readingFlow=2476
+== the two outputs, side by side ==
+  styles s1/s2 make 64/24 lines of the passage (longest 47/118 chars)
+  presses with both outputs read: 121, furthest apart: 73 char(s) (press 15) — one wrap is allowed, more is drift
+  run-window slides crossed: 0 (the run-relative offset drops there by design; the pick-wide one above must not)
+== moved presses: 72, wall tile reads: 605, wall text changes: 0, pane paragraph advances: 1, drawn-vs-slice grid mismatches: 0, findings: 1 ==
+TABLE_WALK: FAIL findings=1

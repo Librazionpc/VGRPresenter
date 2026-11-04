@@ -477,9 +477,15 @@ rendering::RgbaImage BusPlaceholder(const rendering::Rect& rect) {
 
 rendering::Rect BusFitRect(const rendering::RgbaImage& img, const rendering::Rect& box,
                            const std::string& fit) {
-    if (fit == "fill")
-        return box;
-    return ContainRectIn(img.width, img.height, box);
+    // A BUS WINDOW IS NOT A PICTURE ON THE SLIDE. The designed block rectangle IS the
+    // plane — that is the whole point of a window block — so the feed is scaled into it
+    // instead of being letterboxed inside it (bars the design never asked for, and a plane
+    // that no longer sits where the block says it does). "cover" has already cropped the
+    // source to the window's aspect, so it lands on the box either way; only an explicit
+    // "contain" still letterboxes.
+    if (fit == "contain")
+        return ContainRectIn(img.width, img.height, box);
+    return box;
 }
 
 void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneId) {

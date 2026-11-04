@@ -43,6 +43,7 @@ Item {
     property int bookIndex: 0
     property int chapterNumber: 1
     property var chapterVerses: []       // [{ number, text }]
+    property var chapterPassageIndex: null
     property int chapterToken: 0
     property bool chapterLoading: false
     property bool chapterSelectFirst: false
@@ -206,6 +207,27 @@ Item {
             if (Number(part.number) === number && Number(part.partIndex ?? 0) === partIndex)
                 return true
         return false
+    }
+
+    function selfTestListState() {
+        return "contentY=" + versesFlick.contentY.toFixed(0) + " of " + versesFlick.contentHeight.toFixed(0)
+            + " viewH=" + versesFlick.height.toFixed(0) + " selected=" + JSON.stringify(root.selected)
+    }
+    // HARNESS: a real row double-click — the click (activated), then the double-click (opened).
+    function selfTestDoubleClickRow(index) {
+        if (index === 0) {
+            versesFlick.positionViewAtBeginning()   // the first row on screen, as the operator sees it
+            versesFlick.forceLayout()
+        }
+        const row = versesFlick.itemAtIndex(index)
+        EngineBridge.log("info", "ListMove", "harness double-click row index=" + index
+                         + " found=" + (row !== null && row !== undefined)
+                         + " contentY=" + versesFlick.contentY.toFixed(0))
+        if (!row)
+            return false
+        row.rowSource.activated(0)
+        row.rowSource.opened()
+        return true
     }
 
     function revealRow(index) {
@@ -1817,17 +1839,20 @@ Item {
         return String(verse.number ?? "") + " " + body
     }
 
-    function readingPagesFromChapter(number, partIndex) {
-        // (No pre-check on the list here: the passage is built first and the pick is
-        // matched against the items it actually contains, below.)
-        const row = root.mainRows.find((r) => Number(r.number) === Number(number)
-                                              && Number(r.partIndex ?? 0) === Number(partIndex ?? 0))
-        // EVERY ITEM STARTS ON A NEW LINE, Table paragraph and Bible verse alike. Joined by a space, a
-        // verse began part-way along a line, and each screen (its own width and wrap) started the picked
-        // verse at a DIFFERENT word — whichever line it fell on. A hard break makes the pick's first word
-        // the first word of a line on every screen, as a Table paragraph already is. (One character either
-        // way, so every offset below and pieceAtChapterOffset's joining arithmetic are unchanged.)
-        const paragraphBreak = "\n"
+    function chapterPassage() {
+        const numbersOn = root.options[root.adapter.optionsPrefix + ".verseNumbers"] === true
+        const cached = root.chapterPassageIndex
+        if (cached && cached.verses === root.chapterVerses && cached.numbersOn === numbersOn)
+            return cached
+
+        const rowsByNumber = new Map()
+        for (const row of root.mainRows) {
+            const key = String(row.number)
+            if (!rowsByNumber.has(key))
+                rowsByNumber.set(key, [])
+            rowsByNumber.get(key).push(row)
+        }
+
         let text = ""
         const items = []
         for (const verse of root.chapterVerses) {
@@ -1835,15 +1860,40 @@ Item {
                 || String(verse.number ?? "").indexOf("-") >= 0
             if (continuation)
                 continue
-            if (text !== "")
-                text += paragraphBreak
-            const verseText = root.chapterItemText(verse)
-            items.push({ number: Number(verse.number),
-                         partIndex: Number(verse.partIndex ?? 0),
-                         start: text.length,
-                         end: text.length + verseText.length })
-            text += verseText
+            if (items.length > 0)
+                text += "\n"
+            const itemText = root.chapterItemText(verse)
+            const start = text.length
+            const rowStarts = []
+            for (const row of rowsByNumber.get(String(verse.number)) || []) {
+                const found = itemText.indexOf(String(row.text ?? ""))
+                if (found >= 0)
+                    rowStarts.push({ start: found, partIndex: Number(row.partIndex ?? 0) })
+            }
+            rowStarts.sort((a, b) => a.start - b.start)
+            items.push({
+                number: Number(verse.number),
+                partIndex: Number(verse.partIndex ?? 0),
+                start: start,
+                end: start + itemText.length,
+                text: itemText,
+                rowStarts: rowStarts
+            })
+            text += itemText
         }
+        const index = { verses: root.chapterVerses, numbersOn: numbersOn, text: text, items: items }
+        root.chapterPassageIndex = index
+        return index
+    }
+
+    function readingPagesFromChapter(number, partIndex) {
+        // (No pre-check on the list here: the passage is built first and the pick is
+        // matched against the items it actually contains, below.)
+        const row = root.mainRows.find((r) => Number(r.number) === Number(number)
+                                              && Number(r.partIndex ?? 0) === Number(partIndex ?? 0))
+        const passage = root.chapterPassage()
+        const text = passage.text
+        const items = passage.items
         const picked = items.find((it) => it.number === Number(number)
                                           && it.partIndex === Number(partIndex ?? 0))
                        || items.find((it) => it.number === Number(number))
@@ -1905,40 +1955,34 @@ Item {
     }
 
     function pieceAtChapterOffset(charOffset) {
-        if (root.chapterVerses.length === 0)
+        const items = root.chapterPassage().items
+        if (items.length === 0)
             return null
-        let at = 0
-        let lastKept = null
-        for (const verse of root.chapterVerses) {
-            const continuation = Number(verse.partIndex ?? 0) > 0
-                || String(verse.number ?? "").indexOf("-") >= 0
-            if (continuation)
-                continue
-            if (at > 0)
-                at += 1                       // the joining space between items
-            const text = root.chapterItemText(verse)
-            lastKept = verse
-            if (charOffset > at + text.length) {
-                at += text.length
-                continue
-            }
-            let part = Number(verse.partIndex ?? 0)
-            let best = -1
-            for (const row of root.mainRows) {
-                if (Number(row.number) !== Number(verse.number))
-                    continue
-                const found = text.indexOf(String(row.text ?? ""))
-                if (found < 0 || found > charOffset - at)
-                    continue
-                if (found >= best) {
-                    best = found
-                    part = Number(row.partIndex ?? 0)
-                }
-            }
-            return { number: Number(verse.number), partIndex: part }
+
+        let low = 0
+        let high = items.length
+        while (low < high) {
+            const middle = Math.floor((low + high) / 2)
+            if (items[middle].end < charOffset)
+                low = middle + 1
+            else
+                high = middle
         }
-        return lastKept ? { number: Number(lastKept.number),
-                            partIndex: Number(lastKept.partIndex ?? 0) } : null
+        const item = items[Math.min(low, items.length - 1)]
+        let rowLow = 0
+        let rowHigh = item.rowStarts.length
+        const localOffset = charOffset - item.start
+        while (rowLow < rowHigh) {
+            const middle = Math.floor((rowLow + rowHigh) / 2)
+            if (item.rowStarts[middle].start <= localOffset)
+                rowLow = middle + 1
+            else
+                rowHigh = middle
+        }
+        const partIndex = rowLow > 0
+            ? item.rowStarts[rowLow - 1].partIndex
+            : item.partIndex
+        return { number: item.number, partIndex: partIndex }
     }
 
     function playPicked() {
@@ -2677,6 +2721,19 @@ Item {
             boundsBehavior: Flickable.StopAtBounds
             // The row at the top of the list is part of the remembered place.
             onMovementEnded: root.touchReading()
+            // A reported bug (double-clicking the first row threw the list to the end of the book
+            // while the selector stayed on row 1) could not be reproduced. Any single jump over
+            // a screen and a half is logged with the JS stack of whatever caused it, so the next
+            // occurrence names its own culprit (grep ListMove in engine.log).
+            property real lastLoggedY: 0
+            onContentYChanged: {
+                if (Math.abs(contentY - lastLoggedY) > 1.5 * height && !dragging && !moving)
+                    EngineBridge.log("warn", "ListMove", "contentY " + lastLoggedY.toFixed(0) + " -> "
+                                     + contentY.toFixed(0) + " of " + contentHeight.toFixed(0)
+                                     + " selected=" + JSON.stringify(root.selected)
+                                     + " stack=" + String(new Error().stack).replace(/\n/g, " | "))
+                lastLoggedY = contentY
+            }
             header: Item { height: 4 }
             footer: Item { height: 60 }
             delegate: Item {
@@ -2696,6 +2753,7 @@ Item {
                 readonly property string oneLine: { root.probeEvals.verse++; return verseRow.modelData.text.replace(/\s*\n+\s*/g, " ") }   // (scroll-cost probe: the row's text binding)
                 readonly property bool marked: modelData.marked === true
                 readonly property bool hasNote: modelData.hasNote === true
+                property alias rowSource: verseSource   // (the harness fires the real click signals)
                 // The open note editor stretches this one row to make room for itself.
                 width: versesFlick.width - 8
                 height: continuation ? 34 : (root.noteVerse === verseNumber ? 122 : 38)

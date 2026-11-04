@@ -2643,88 +2643,20 @@ Rectangle {
                     Rectangle {
                         id: mediaPictureBody
                         readonly property var mmeta: canvasItemObject.modelData.meta
-                        readonly property string src: mediaPictureBody.mmeta ? (mediaPictureBody.mmeta.src ?? "") : ""
-                        readonly property var mmedia: mediaPictureBody.mmeta && mediaPictureBody.mmeta.media
-                                                     ? mediaPictureBody.mmeta.media : ({})
-                        readonly property var mcrop: mediaPictureBody.mmedia.crop
-                                                     || ({ top: 0, right: 0, bottom: 0, left: 0 })
-                        readonly property var mfilter: mediaPictureBody.mmedia.filter || ({})
-                        readonly property bool flipH: mediaPictureBody.mmedia.flipH === true
-                        readonly property bool flipV: mediaPictureBody.mmedia.flipV === true
-                        readonly property real cropSum: (mediaPictureBody.mcrop.top ?? 0)
-                            + (mediaPictureBody.mcrop.right ?? 0) + (mediaPictureBody.mcrop.bottom ?? 0)
-                            + (mediaPictureBody.mcrop.left ?? 0)
-                        readonly property bool cropActive: mediaPictureBody.cropSum > 0
-                        readonly property bool filterActive: {
-                            const f = mediaPictureBody.mfilter
-                            return (f.hueRotate ?? 0) !== 0 || (f.invert ?? 0) !== 0 || (f.blur ?? 0) !== 0
-                                || (f.grayscale ?? 0) !== 0 || (f.sepia ?? 0) !== 0
-                                || (f.brightness ?? 1) !== 1 || (f.contrast ?? 1) !== 1
-                                || (f.saturate ?? 1) !== 1 || (f.opacity ?? 1) !== 1
-                        }
                         readonly property string fit: canvasItemObject.style ? canvasItemObject.style.mediaFit : "contain"
-                        readonly property bool canShader: GraphicsInfo.api !== GraphicsInfo.Software
                         visible: canvasItemObject.modelData.kind === "image" || canvasItemObject.modelData.kind === "video"
                         anchors.fill: parent
                         color: "transparent"
                         clip: true
 
-                        Image {
+                        // The picture itself: the ONE component the preview draws it with (MediaPictureLayer) — its
+                        // opacity, crop, flip, filters and fit are read in one place for the canvas, the Show Center,
+                        // the monitor tiles and the output.
+                        MediaPictureLayer {
+                            id: mediaPicture
                             anchors.fill: parent
-                            visible: mediaPictureBody.fit === "blur" && mediaPicture.status === Image.Ready
-                            asynchronous: true
-                            cache: false
-                            fillMode: Image.PreserveAspectCrop
-                            source: root.mediaPictureUrl(mediaPictureBody.src)
-                            layer.enabled: visible && mediaPictureBody.canShader
-                            layer.effect: SlideFilterEffect {
-                                filters: ({ blur: 24, brightness: 0.85 })
-                                stageWidth: StageGrid.w
-                                stageHeight: StageGrid.h
-                            }
-                        }
-
-                        Item {
-                            id: mediaPictureLayer
-                            anchors.fill: parent
-                            opacity: mediaPictureBody.mfilter.opacity ?? 1
-                            layer.enabled: mediaPictureBody.filterActive && mediaPictureBody.canShader
-                            layer.effect: SlideFilterEffect {
-                                filters: mediaPictureBody.mfilter
-                                stageWidth: StageGrid.w
-                                stageHeight: StageGrid.h
-                            }
-
-                            Image {
-                                id: mediaPicture
-                                anchors.fill: parent
-                                asynchronous: true
-                                cache: false
-                                fillMode: mediaPictureBody.fit === "cover" ? Image.PreserveAspectCrop
-                                        : mediaPictureBody.fit === "fill" ? Image.Stretch
-                                        : Image.PreserveAspectFit
-                                sourceClipRect: {
-                                    if (!mediaPictureBody.cropActive || mediaPicture.sourceSize.width <= 1)
-                                        return Qt.rect(0, 0, 0, 0)
-                                    const c = mediaPictureBody.mcrop
-                                    const w = mediaPicture.sourceSize.width
-                                    const h = mediaPicture.sourceSize.height
-                                    const l = (c.left ?? 0) / 100
-                                    const r = (c.right ?? 0) / 100
-                                    const t = (c.top ?? 0) / 100
-                                    const b = (c.bottom ?? 0) / 100
-                                    return Qt.rect(w * l, h * t, w * (1 - l - r), h * (1 - t - b))
-                                }
-                                mirror: mediaPictureBody.flipH
-                                transform: Scale {
-                                    origin.x: mediaPicture.width / 2
-                                    origin.y: mediaPicture.height / 2
-                                    xScale: 1
-                                    yScale: mediaPictureBody.flipV ? -1 : 1
-                                }
-                                source: root.mediaPictureUrl(mediaPictureBody.src)
-                                visible: status === Image.Ready && sourceSize.width > 1
-                            }
+                            meta: mediaPictureBody.mmeta
+                            fit: mediaPictureBody.fit
                         }
 
                         Rectangle {

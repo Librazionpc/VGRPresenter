@@ -185,7 +185,7 @@ public:
 
 private:
     Logger() = default;
-    ~Logger() override = default;
+    ~Logger() override;
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 

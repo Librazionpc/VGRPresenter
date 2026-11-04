@@ -74,6 +74,7 @@ RoutingService *RoutingService::create(QQmlEngine *, QJSEngine *)
 {
     // The QML engine builds the singleton itself; this is the C++ door to the
     // SAME object (see the header's note on the two-object trap).
+    // engine-owned: instance() `new`s it (never a static), so the engine deleting it at teardown is correct; s_instance is a QPointer.
     return instance();
 }
 

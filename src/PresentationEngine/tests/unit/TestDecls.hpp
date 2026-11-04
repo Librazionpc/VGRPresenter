@@ -152,6 +152,7 @@ void TestTheTableRealPdfs();
 void TestDocumentEdit();
 void TestShowLibraryCrud();
 void TestSearchIndexing();
+void TestIndexStoragePostings();
 void TestSearchRanking();
 void TestSearchFuzzyResolution();
 void TestTypingTailResolution();
@@ -233,6 +234,7 @@ void TestLineSpacingAndLineBands();
 void TestReadingFlowWindowRefresh();
 void TestFlowScrollMath();
 void TestForcedLineBreaks();
+void TestShowCategoryOverrideWins();
 // A page commit inside one passage is an OFFSET update on the pick already on
 // air (LiveOutputController::UpdateReadingSlide), not a content replacement.
 void TestReadingPageKeepsPick();

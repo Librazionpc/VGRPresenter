@@ -158,6 +158,10 @@ private:
 
     std::chrono::steady_clock::time_point scrollComposedAt_{};
     static constexpr int kScrollComposeMs = 50;
+    // What one frame of a moving scroll cost last time (compose + per-output passes).
+    // The gate paces off it instead of a fixed 50 ms: at ~250 ms a frame, a fixed budget
+    // let the loop rasterise back to back for the whole walk.
+    double scrollFrameMs_ = 0.0;
     float lastComposedFlowChars_ = 0.0f;
     bool hasComposedFlow_ = false;
 

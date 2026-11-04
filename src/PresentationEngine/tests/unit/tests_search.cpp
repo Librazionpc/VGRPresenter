@@ -1,11 +1,70 @@
 #include "TestHarness.hpp"
 
+#include "modules/search/IndexStorage.hpp"
 #include "modules/search/TextMatching.hpp"
 
 #include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
+
+// The index stores a posting as (term -> document id view -> numbers): the id lives ONCE, in the document
+// table, and a document is taken out of only the terms it posted to. Updating, removing and restoring
+// must leave no posting behind and none dangling.
+void TestIndexStoragePostings() {
+    namespace sx = bps::search;
+    sx::IndexStorage index;
+    CHECK(index.Initialize().ok());
+    sx::SearchDocument a;
+    a.id = "C:/Shows/Quiet Time/25-0308.vgr";            // a long id: not a small-string
+    a.title = "Alpha";
+    a.content = "alpha beta beta";
+    sx::SearchDocument b;
+    b.id = "C:/Shows/Quiet Time/25-0309.vgr";
+    b.title = "Beta";
+    b.content = "beta gamma";
+    CHECK(index.Upsert(a) > 0);
+    CHECK(index.Upsert(b) > 0);
+    CHECK(index.DocumentCount() == 2);
+    CHECK(index.DfOf("beta") == 2);
+    CHECK(index.LookupDocIds("alpha").size() == 1 && index.LookupDocIds("alpha")[0] == a.id);
+    {
+        const auto tf = index.LookupTf("beta");
+        size_t forA = 0;
+        for (const auto& t : tf) if (t.docId == a.id) forA = t.tf;
+        CHECK(forA == 2);                                // "beta" twice in A's content
+    }
+
+    // Re-index A with different words: the old terms lose A, the new ones gain it, B is untouched.
+    sx::SearchDocument a2 = a;
+    a2.content = "delta";
+    a2.title = "Delta";
+    CHECK(index.Upsert(a2) > 0);
+    CHECK(index.DocumentCount() == 2);
+    CHECK(index.DfOf("alpha") == 0);
+    CHECK(index.DfOf("delta") == 1);
+    CHECK(index.DfOf("beta") == 1);                      // only B now
+    CHECK(index.LookupDocIds("beta")[0] == b.id);
+
+    // Remove B: nothing of it is left, and a lookup of its terms is empty.
+    CHECK(index.Remove(b.id).ok());
+    CHECK(index.DocumentCount() == 1);
+    CHECK(index.DfOf("beta") == 0 && index.DfOf("gamma") == 0);
+    CHECK(!index.Remove(b.id).ok());                     // gone: refused, not a crash
+
+    // A snapshot restores to the same postings.
+    const std::string snapshot = index.Snapshot();
+    sx::IndexStorage again;
+    CHECK(again.Initialize().ok());
+    CHECK(again.Restore(snapshot).ok());
+    CHECK(again.DocumentCount() == 1);
+    CHECK(again.DfOf("delta") == 1);
+    CHECK(again.LookupDocIds("delta")[0] == a.id);
+
+    // Shutdown lets everything go without touching a freed id (the release runs on its own thread).
+    CHECK(index.Shutdown().ok());
+    CHECK(again.Shutdown().ok());
+}
 
 void TestSearchIndexing() {
     auto& eng = s::SearchEngine::Instance();

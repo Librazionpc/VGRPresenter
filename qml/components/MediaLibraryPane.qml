@@ -171,6 +171,9 @@ Item {
     }
     // ---- AUDIO card state windows: the live level meter ------------------------
     property var meteredLabels: []
+    // What is selected here is what the output meters animate for on GO LIVE (see
+    // LiveOutputService.monitoredAudio) — nothing another page metered.
+    onMeteredLabelsChanged: LiveOutputService.setMonitoredAudio(root.meteredLabels)
     // ---- the bus monitor's own bookkeeping: ONE VIDEO, ONE AUDIO --------------
     property int busMonitorVideoBus: -1
     property string busMonitorVideoLabel: ""
@@ -250,6 +253,7 @@ Item {
         // leave a WASAPI tap or a decoder running behind a card nobody sees.
         root.stopBusMonitorVideo()
         root.stopBusMonitorAudio()
+        LiveOutputService.setMonitoredAudio([])   // the selection goes with the pane
     }
     function stopBusMonitorVideo() {
         if (root.busMonitorVideoBus < 0)

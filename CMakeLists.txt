@@ -966,3 +966,42 @@ if(BPS_ENABLE_SETTINGS_KEYS_CHECK)
         LABELS "settings-keys"
         TIMEOUT 120)
 endif()
+
+# =============================================================================
+# Singleton-ownership guard (tools/check_singleton_ownership.mjs) — default build
+# =============================================================================
+# A QML_SINGLETON's create() result is deleted by the QML engine when it is destroyed. Returning
+# a function-local static without QJSEngine::CppOwnership frees non-heap memory: the app died on
+# every exit with STATUS_HEAP_CORRUPTION (FontService did, ~130 Windows crash reports and nothing in
+# the app's own log). This gate fails the build on a create() that returns without setting ownership.
+option(BPS_ENABLE_SINGLETON_OWNERSHIP_CHECK
+    "Fail the build when a QML singleton's create() hands the engine an object it will delete" ON)
+if(BPS_ENABLE_SINGLETON_OWNERSHIP_CHECK)
+    if(NOT BPS_NODE_EXE)
+        find_program(BPS_NODE_EXE
+            NAMES node node.exe
+            HINTS ENV NODE_BIN
+            DOC "node runtime used by the build guards")
+    endif()
+    if(NOT BPS_NODE_EXE)
+        message(FATAL_ERROR
+            "check_singleton_ownership needs node, which was not found on PATH. Install node, "
+            "pass -DBPS_NODE_EXE=/path/to/node (or set NODE_BIN), or build once without the "
+            "guard: -DBPS_ENABLE_SINGLETON_OWNERSHIP_CHECK=OFF")
+    endif()
+
+    add_custom_target(singleton_ownership_check ALL
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_singleton_ownership.mjs"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "check_singleton_ownership: QML singletons the engine would delete"
+        VERBATIM)
+    add_dependencies(appVGRPresenterUI singleton_ownership_check)
+    add_dependencies(bps_unit_tests singleton_ownership_check)
+
+    add_test(NAME singleton_ownership
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_singleton_ownership.mjs"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(singleton_ownership PROPERTIES
+        LABELS "singleton-ownership"
+        TIMEOUT 120)
+endif()

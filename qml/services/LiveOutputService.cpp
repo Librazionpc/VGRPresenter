@@ -1,5 +1,6 @@
 #include "services/CallTrace.h"
 #include "services/LiveOutputService.h"
+#include "services/StepCost.hpp"
 
 #include "services/FontService.h"
 #include "services/ShowConverter.h"
@@ -256,8 +257,9 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     }
     armNdiSenderForSession();
     pressTimelineStep("armNdiSenderForSession");
-    setProgramPlayout(true);
-    pressTimelineStep("setProgramPlayout(true)");
+    // (GO LIVE puts out what the Monitor Preview shows and plays — nothing else. It used to start
+    // the program's audio playout here, which opened the speakers and the microphone with
+    // nothing playing; the audio engine now follows the Routing screen alone.)
     if (!content.slides.front().clearStage) {
         blackoutActive_ = false;
         blackoutRestoreTitle_.clear();
@@ -272,7 +274,7 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         stagedName_.clear();
         stagedSlidesRaw_.clear();
         stagedSlide_ = QVariantMap{};
-        emit stagedChanged();
+        BumpStaged();
     }
     if (!replacingLiveContent) {
         refreshOnAirSlide();
@@ -291,6 +293,14 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         g_pressTimeline.report("press done");
         g_pressTimeline.close();
     }
+}
+
+// The one way a staged change is announced. The revision is what a surface memoises on:
+// "is this the pick I already composed?" must not cost a read of the slide itself.
+void LiveOutputService::BumpStaged()
+{
+    ++stagedRev_;
+    emit stagedChanged();
 }
 
 void LiveOutputService::stageSlides(const QString &name, const QVariantList &slides)
@@ -367,7 +377,7 @@ void LiveOutputService::restoreCleared()
         stagedName_ = snap.contentTitle;
         stagedSlidesRaw_ = snap.contentSlidesRaw;
         stagedSlide_ = snap.contentStyled;
-        emit stagedChanged();
+        BumpStaged();
     }
 }
 
@@ -378,7 +388,7 @@ void LiveOutputService::clearStaged()
     stagedName_.clear();
     stagedSlidesRaw_.clear();
     stagedSlide_ = QVariantMap{};
-    emit stagedChanged();
+    BumpStaged();
 }
 
 // ---------------------------------------------------------------------------
@@ -425,19 +435,6 @@ bool LiveOutputService::overlayIsOnAir(const QString &id) const
     return false;
 }
 
-void LiveOutputService::setProgramPlayout(bool onAir)
-{
-    vgr::EngineWorker::instance().runOffThread([onAir] {
-        if (!bps::platform::PlatformAccessor::Installed())
-            return;   // platform torn down (shutdown): nothing left to open or close
-        auto &engine = bps::audio::AudioEngine::Instance();
-        auto r = onAir ? engine.Start() : engine.Stop();
-        if (!r.ok())
-            qWarning("LiveOutputService: program playout %s refused: %s",
-                     onAir ? "start" : "stop", r.error().message.c_str());
-    });
-}
-
 void LiveOutputService::stop()
 {
     g_pressTimeline.arm();
@@ -448,8 +445,6 @@ void LiveOutputService::stop()
           static_cast<int>(activeOverlays_.size()), ndiSending_ ? 1 : 0,
           qUtf8Printable(ndiSendingOutput_));
     const bool wasLive = live_;
-    setProgramPlayout(false);
-    pressTimelineStep("setProgramPlayout(false)");
     bps::live::LiveOutputController::Instance().StopLiveAsync();
     pressTimelineStep("StopLiveAsync (the join is on a reaper thread)");
     if (live_) {
@@ -461,7 +456,7 @@ void LiveOutputService::stop()
         stagedName_ = blackoutRestoreTitle_;
         stagedSlidesRaw_ = blackoutRestoreSlides_;
         stagedSlide_ = previewWithActiveStyle(blackoutRestoreSlides_.first().toMap());
-        emit stagedChanged();
+        BumpStaged();
         blackoutActive_ = false;
         blackoutRestoreTitle_.clear();
         blackoutRestoreSlides_.clear();
@@ -469,7 +464,7 @@ void LiveOutputService::stop()
         stagedName_ = onAirTitle_;
         stagedSlidesRaw_ = QVariantList{ onAirSlideRaw_ };
         stagedSlide_ = onAirSlide_;
-        emit stagedChanged();
+        BumpStaged();
     }
     onAirSlide_ = QVariantMap{};
     onAirSlideRaw_ = QVariantMap{};
@@ -571,6 +566,9 @@ bool LiveOutputService::previous()
 
 void LiveOutputService::stepPassage(int direction)
 {
+    // The slide path's half of the press measurement (see StepCost.hpp): lineStep carries
+    // the scroll half, and the two lines are what the two paths cost side by side.
+    services::diagnostics::StepCost stepCost("slide", direction);
     if (!live_) {
         if (!stagedSlidesRaw_.isEmpty())
             emit passageStepRequested(direction);
@@ -701,6 +699,18 @@ void LiveOutputService::refreshOnAirSlide()
         if (OutputListModel *outputs = OutputListModel::instance())
             outputs->repushActiveStyleForTag(tag);
     }
+}
+
+bool LiveOutputService::stagedHasFlow() const
+{
+    const QVariantMap slide = stagedSlidesRaw_.isEmpty() ? stagedSlide_
+                                                        : stagedSlidesRaw_.first().toMap();
+    return !slide.value(QStringLiteral("flowText")).toString().isEmpty();
+}
+
+bool LiveOutputService::onAirHasFlow() const
+{
+    return !onAirSlideRaw_.value(QStringLiteral("flowText")).toString().isEmpty();
 }
 
 QVariantMap LiveOutputService::previewWithActiveStyle(const QVariantMap &slide) const

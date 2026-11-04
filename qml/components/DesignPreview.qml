@@ -26,6 +26,7 @@ Item {
     }
     // ---- WHAT THIS SURFACE REALLY LAID OUT (diagnostic, one line per wrap) ---
     property int readingDrawnLines: -1
+    property int readingExpectedLines: -1
     property real readingDrawnBoxW: 0
     property real readingDrawnBoxH: 0
     // The signature of the last ReadingDrawn line this surface wrote — see
@@ -91,6 +92,7 @@ Item {
         let svcSize = -1
         try { table = LiveOutputService.readingRunLineCount(style) } catch (e) { table = -2 }
         try { svcSize = LiveOutputService.readingRunSizeForStyle(style) } catch (e) { svcSize = -2 }
+        readingExpectedLines = flow.sliced === true ? root.sliceLines : table
         const drawnSig = style + "|" + flow.lineCount + "|" + table + "|" + block.width
             + "x" + block.height + "|" + Number(flow.font.pixelSize).toFixed(2)
         if (root.readingDrawnLogged === drawnSig)
@@ -118,20 +120,39 @@ Item {
     property string sliceText: ""
     property string sliceKey: ""
     property bool sliceAtEnd: false
+    // A list format rewrites the text, so the table's line starts are not its line starts:
+    // that one block keeps the whole passage (it is the case `sliced` already excludes).
+    function sliceFor(block) {
+        const list = String(block.meta !== undefined && block.meta !== null ? (block.meta.list ?? "") : "")
+        if (list !== "")
+            return TextFormatService.applyList(String(LiveOutputService.readingFlowText ?? ""), list)
+        return TextFormatService.applyList(root.sliceText, "")
+    }
+    // THE ONE THING A TELL MAY TOUCH IS THE WINDOW, NEVER THE GLYPHS. `sliceText` is the
+    // surface's passage text; a scroll tick that stays inside the current window leaves it
+    // alone, so the justified Text is not laid out again (which is what a tell used to cost).
     function refreshSlice() {
+        const flow = String(LiveOutputService.readingFlowText ?? "")
         if (!root.animateLineSteps || LiveOutputService.readingBudgetFitActive !== true) {
             root.sliceWhole = true
+            root.sliceFirst = 0
+            root.sliceLines = 0
+            root.sliceKey = ""
+            root.sliceAtEnd = true
+            if (root.sliceText !== flow)
+                root.sliceText = flow
             return
         }
         const style = String(root.readingStyleId)
         const visible = Math.max(3, LiveOutputService.readingVisibleLinesFor(style))
         const first = Math.max(0, Math.floor(root.stepLine))
-        const flow = String(LiveOutputService.readingFlowText ?? "")
         const key = LiveOutputService.readingStageSerial + "|" + flow.length + "|" + flow.slice(0, 24)
                     + "|" + style + "|" + visible
         const roomBelow = root.sliceFirst + root.sliceLines - (first + visible)
-        if (!root.sliceWhole && key === root.sliceKey && first >= root.sliceFirst
-                && (roomBelow >= 2 || root.sliceAtEnd))
+        // (a whole-passage surface answers from the memo too: re-slicing it every tick
+        // bought the same text back)
+        if (key === root.sliceKey && first >= root.sliceFirst
+                && (root.sliceWhole || roomBelow >= 2 || root.sliceAtEnd))
             return                      // still comfortably inside the slice
         const slice = LiveOutputService.readingFlowSliceFor(style, Math.max(0, first - visible), visible * 3)
         root.sliceKey = key
@@ -139,7 +160,9 @@ Item {
         root.sliceLines = slice.lines
         root.sliceWhole = slice.whole === true
         root.sliceAtEnd = slice.atEnd === true
-        root.sliceText = String(slice.text ?? "")
+        const text = String(slice.text ?? "")
+        if (root.sliceText !== text)
+            root.sliceText = text
     }
     onStepLineChanged: root.refreshSlice()
     onReadingStyleIdChanged: root.refreshSlice()
@@ -147,8 +170,12 @@ Item {
     Connections {
         target: LiveOutputService
         function onReadingStageChanged() { root.refreshSlice() }
+        // ...and a tell, because a LIVE pick hands the surface its passage without staging
+        // anything. This is now a key comparison: `sliceText` only changes when the window
+        // does, and only a change of THAT re-lays the text out.
         function onReadingScrollChanged() { root.refreshSlice() }
     }
+    Component.onCompleted: root.refreshSlice()
     property string readingFitKey: ""
     property real readingFitSize: 0
     readonly property int stepTextLength: {
@@ -361,7 +388,8 @@ Item {
                 property bool scrollColumnPending: false
                 Connections {
                     target: LiveOutputService
-                    function onReadingScrollChanged() { el.maybeResolveScroll() }
+                    // (not on readingScrollChanged: the fit belongs to the PAGE the walk is
+                    // on, which moves with readingStageChanged, not with every tick)
                     function onReadingStageChanged() { el.maybeResolveScroll() }
                 }
                 function maybeResolveScroll() {
@@ -585,10 +613,10 @@ Item {
                             // Only the lines this surface can show (a list format rewrites the text, so its
                             // offsets are no longer the table's: that case lays out the whole passage).
                             readonly property bool sliced: !root.sliceWhole && String(el.meta.list ?? "") === ""
-                            text: TextFormatService.applyList(
-                                      flowText.sliced ? root.sliceText
-                                                      : String(LiveOutputService.readingFlowText ?? ""),
-                                      el.meta.list ?? "")
+                            // The SLICE, always — never the walk's own passage: a binding that
+                            // reads readingFlowText re-evaluates on every tell of every glide,
+                            // and each re-evaluation is a full justified layout of the passage.
+                            text: root.sliceFor(el)
                             font: fitText.font
                             fontSizeMode: Text.FixedSize
                             color: fitText.color
@@ -790,23 +818,16 @@ Item {
                     }
                 }
 
-                Image {
+                // The picture is drawn by the ONE component the template editor draws it with, so its
+                // opacity, crop, flip, filters and fit read the same here as on the canvas and on the output.
+                MediaPictureLayer {
                     id: picturePreview
                     readonly property bool isPicture: el.kind === "image" || el.kind === "video"
-                    visible: isPicture && !root.paintOnly && status === Image.Ready && sourceSize.width > 1
+                    visible: isPicture && !root.paintOnly && ready
                     anchors.fill: parent
-                    asynchronous: true
-                    cache: false
-                    // Same Contain/Cover/Fill mapping EditScreen's own
-                    // mediaPicture uses, read from the same style field.
-                    fillMode: {
-                        const fit = el.style.mediaFit !== undefined ? el.style.mediaFit : "contain"
-                        return fit === "cover" ? Image.PreserveAspectCrop
-                             : fit === "fill" ? Image.Stretch
-                             : Image.PreserveAspectFit
-                    }
-                    source: isPicture && (el.meta.src ?? "") !== ""
-                            ? "image://mediathumb/500/-1/" + encodeURIComponent(el.meta.src) : ""
+                    meta: picturePreview.isPicture ? el.meta : ({})
+                    fit: el.style.mediaFit !== undefined ? el.style.mediaFit
+                         : ((el.meta && el.meta.media && el.meta.media.fit) ? el.meta.media.fit : "contain")
                 }
 
                 Rectangle {

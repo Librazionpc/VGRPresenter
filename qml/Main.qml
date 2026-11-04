@@ -942,6 +942,12 @@ ApplicationWindow {
     property real selfTestLsGlideWorst: 0
     property int selfTestLsGlideSkips: 0
     property string selfTestLsGlideSkipAt: ""
+    // A sample that arrives LATE says the interface thread was busy, not that the glide
+    // jumped a line: with 137 ms spent inside one tell, two 16 ms samples straddle the
+    // whole 190 ms glide and the difference is a full line either way. Those are counted
+    // as late, and only an on-time sample can report a skipped frame.
+    property real selfTestLsPrevAt: 0
+    property int selfTestLsGlideLate: 0
     function lsCompText(comp) {
         const bs = (comp && comp.blocks) ? comp.blocks : []
         let best = ""
@@ -1035,13 +1041,18 @@ ApplicationWindow {
         interval: 16
         repeat: true
         onTriggered: {
+            const now = Date.now()
             const abs = Number(LiveOutputService.readingAbsoluteLine)
             if (selfTestLsPrevAbs >= 0) {
                 const d = abs - selfTestLsPrevAbs
                 const backward = d * selfTestLineStepDir < -0.001
-                if (Math.abs(d) > selfTestLsGlideWorst)
+                // Three timer intervals: up to two missed ticks is still an on-time sample.
+                const late = selfTestLsPrevAt > 0 && (now - selfTestLsPrevAt) > 48
+                if (late)
+                    ++selfTestLsGlideLate
+                else if (Math.abs(d) > selfTestLsGlideWorst)
                     selfTestLsGlideWorst = Math.abs(d)
-                if (backward || Math.abs(d) > 1.0) {
+                if (!late && (backward || Math.abs(d) > 1.0)) {
                     ++selfTestLsGlideSkips
                     if (selfTestLsGlideSkipAt === "")
                         selfTestLsGlideSkipAt = "frame " + selfTestLineStepPress
@@ -1049,6 +1060,7 @@ ApplicationWindow {
                 }
             }
             selfTestLsPrevAbs = abs
+            selfTestLsPrevAt = now
         }
     }
     Timer {
@@ -1086,6 +1098,7 @@ ApplicationWindow {
                         + " blocks=" + blocks
                         + " glideWorst=" + selfTestLsGlideWorst.toFixed(3)
                         + " glideSkips=" + selfTestLsGlideSkips
+                        + " glideLate=" + selfTestLsGlideLate
                         + (selfTestLsGlideSkipAt !== "" ? " glideSkipAt=" + JSON.stringify(selfTestLsGlideSkipAt) : ""))
             const wall = window.lsWallLines(selfTestLineStepPress)
             for (let w = 0; w < wall.length; ++w)
@@ -1116,18 +1129,23 @@ ApplicationWindow {
     }
 
     // ---- REAL-PASSAGE reading walk (VGR_TABLEWALK_TEST=1 only) ---------------
-    // A query that starts with "live:" also puts the pick ON AIR (so the engine's outputs, NDI
-    // included, can be photographed beside the tiles); the rest is the search text.
+    // "live:" puts the pick on air; "bible:" selects a Scripture result instead of an
+    // earlier Table match. The prefixes can be combined for the real-output Bible walk.
     readonly property string twQueryRaw: (typeof SelfTestTableWalkQuery !== "undefined")
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
     readonly property bool twGoLive: window.twQueryRaw.indexOf("live:") === 0
-    readonly property string twQuery: window.twGoLive ? window.twQueryRaw.slice(5) : window.twQueryRaw
+    readonly property string twSearchQuery: window.twGoLive ? window.twQueryRaw.slice(5) : window.twQueryRaw
+    readonly property bool twExpectBible: window.twSearchQuery.indexOf("bible:") === 0
+    readonly property string twQuery: window.twExpectBible
+                                    ? window.twSearchQuery.slice(6) : window.twSearchQuery
     property int twTries: 0
     property int twPress: 0
     property int twJump: 0
     // The rewind's own counter (see selfTestTableWalkRewind), declared for the same
     // reason: an undeclared property on the root throws on every write.
     property int twRewound: 0
+    property var twExpectedBibleRef: null
+    property int twBibleSettleTries: 0
     function twRefPara(text) {
         // The Table's reference carries the paragraph it is showing ("47-1100X -
         // Fellowship 2"): the trailing number IS the value the report was about.
@@ -1138,6 +1156,8 @@ ApplicationWindow {
     // else The Table (the walk is the same for both).
     function twPane() {
         const bible = SelfTest.findItem("selfTestScripturePane")
+        if (window.twExpectBible)
+            return bible
         if (bible && bible.visible && bible.book)
             return bible
         return SelfTest.findItem("selfTestTablePane")
@@ -1176,8 +1196,10 @@ ApplicationWindow {
                 quickSearch.refresh()
             }
             ++window.twTries
-            if (quickSearch.results.length > 0) {
-                const r = quickSearch.results[0]
+            const r = window.twExpectBible
+                ? quickSearch.results.find((result) => result.kind === "bible")
+                : (quickSearch.results.length > 0 ? quickSearch.results[0] : null)
+            if (r) {
                 selfTestTableWalkQuery.stop()
                 console.log("[SELFTEST-TABLEWALK] picking kind=" + r.kind + " verse=" + r.verse
                             + " title=" + JSON.stringify(String(r.title)))
@@ -1186,8 +1208,11 @@ ApplicationWindow {
             } else if (window.twTries >= 25) {
                 selfTestTableWalkQuery.stop()
                 console.log("[SELFTEST-TABLEWALK] FAIL no-results after " + window.twTries
+                            + " expectedKind=" + (window.twExpectBible ? "bible" : "any")
                             + " tries token=" + quickSearch.searchToken
                             + " pending=" + quickSearch.searchPending
+                            + " kinds=" + JSON.stringify(quickSearch.results.slice(0, 5)
+                                                         .map((result) => result.kind))
                             + " dialogVisible=" + quickSearch.visible)
                 SelfTest.quit()
             }
@@ -1200,6 +1225,39 @@ ApplicationWindow {
         interval: 3000
         onTriggered: {
             const pane = window.twPane()
+            if (window.twExpectBible && pane) {
+                const ref = pane.adapter.resolve(window.twQuery, pane.sourceId)
+                if (!ref.bookId) {
+                    if (++window.twBibleSettleTries < 20) {
+                        selfTestTableWalkSettle.restart()
+                        return
+                    }
+                    console.log("[SELFTEST-TABLEWALK] FAIL bible-reference-not-resolved query="
+                                + JSON.stringify(window.twQuery))
+                    SelfTest.quit()
+                    return
+                }
+                if (window.twExpectedBibleRef === null) {
+                    window.twExpectedBibleRef = ref
+                    pane.goTo(ref)
+                    selfTestTableWalkSettle.restart()
+                    return
+                }
+                if (!pane.book || pane.book.id !== ref.bookId
+                        || pane.chapterNumber !== Number(ref.chapter)
+                        || pane.chapterLoading || pane.selected.length === 0) {
+                    if (++window.twBibleSettleTries < 20) {
+                        selfTestTableWalkSettle.restart()
+                        return
+                    }
+                    console.log("[SELFTEST-TABLEWALK] FAIL bible-reference-not-open query="
+                                + JSON.stringify(window.twQuery)
+                                + " book=" + (pane.book ? pane.book.id : "-")
+                                + " chapter=" + pane.chapterNumber)
+                    SelfTest.quit()
+                    return
+                }
+            }
             if (!pane || !pane.book || pane.selected.length === 0) {
                 console.log("[SELFTEST-TABLEWALK] FAIL no-pick pane=" + (pane ? "yes" : "no")
                             + " book=" + (pane && pane.book ? pane.book.id : "-")
@@ -1258,6 +1316,7 @@ ApplicationWindow {
                             + " absFrom=" + absFrom.toFixed(2)
                             + " page=" + page
                             + " glideSkips=" + window.selfTestLsGlideSkips
+                            + " glideLate=" + window.selfTestLsGlideLate
                             + " glideWorst=" + window.selfTestLsGlideWorst.toFixed(3))
                 const wall = window.twTileLines(press)
                 for (let w = 0; w < wall.length; ++w)
@@ -1301,7 +1360,8 @@ ApplicationWindow {
                 const pane = window.twPane()
                 if (pane) {
                     EngineBridge.log("info", "TWGRAB", "phase=pick3")
-                    pane.stageSubpart(3, 0)      // select it, then stage it: a row's double-click
+                    if (!pane.selfTestDoubleClickRow(0))   // a row's real click + double-click
+                        pane.stageSubpart(1, 0)
                     twAfterPick.restart()
                     return
                 }
@@ -1314,6 +1374,9 @@ ApplicationWindow {
         interval: 9000
         onTriggered: {
             window.twGrab("afterpick")      // the tiles, right after the pick has settled
+            const listPane = window.twPane()
+            if (listPane)
+                EngineBridge.log("info", "TWGRAB", "list afterpick " + listPane.selfTestListState())
             EngineBridge.log("info", "TWGRAB", "phase=pick3done")
             // The same double-click in SLIDE mode, for the timing breakdown (PickCost lines in engine.log).
             if (window.setReadingScrollMode(false, "tablewalk-slide")) {
@@ -1481,6 +1544,7 @@ ApplicationWindow {
                      + " style=" + String(tile.styleId).slice(0, 8)
                      + " glines=" + view.lines
                      + " drawn=" + Number(tile.readingDrawnLines) + " at=" + String(tile.readingDrawnAt)
+                     + " expected=" + Number(tile.readingExpectedLines)
                      + " gline=" + Number(view.line).toFixed(2)
                      + " gchar=" + view.char
                      + " gpchar=" + view.pchar

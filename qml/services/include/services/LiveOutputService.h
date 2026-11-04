@@ -47,6 +47,16 @@ class LiveOutputService : public QObject {
     // Unstyled source for per-output local monitor previews. `stagedSlide`
     // remains the active-output preview used by the main preview pane.
     Q_PROPERTY(QVariantMap stagedSlideRaw READ stagedSlideRaw NOTIFY stagedChanged)
+    // Bumped once per staged change. A monitor tile memoises its own composition on this
+    // (plus its style) instead of on the slide itself: deciding "same picture" must not
+    // cost a read of the slide, which is a JS conversion of the whole passage per handler.
+    Q_PROPERTY(int stagedRev READ stagedRev NOTIFY stagedChanged)
+    // Is there a reading passage in the staged (or on-air) picture? A monitor tile needs
+    // that answer to pick its memo key, and must not convert the slide to find it.
+    Q_PROPERTY(bool stagedHasFlow READ stagedHasFlow NOTIFY stagedChanged)
+    // ...and is there a staged slide at all (`stagedSlide.valid` without the read).
+    Q_PROPERTY(bool stagedValid READ stagedValid NOTIFY stagedChanged)
+    Q_PROPERTY(bool onAirHasFlow READ onAirHasFlow NOTIFY onAirChanged)
     Q_PROPERTY(bool canRestoreCleared READ canRestoreCleared NOTIFY clearedChanged)
     Q_PROPERTY(bool blackedOut READ blackedOut NOTIFY onAirChanged)
     // ---- Feed health (the header's stall pill + the automatic blackout) ----
@@ -80,6 +90,10 @@ class LiveOutputService : public QObject {
     Q_PROPERTY(QString inputKind READ inputKind NOTIFY inputChanged)
     Q_PROPERTY(qulonglong inputRev READ inputRev NOTIFY inputChanged)
     Q_PROPERTY(QVariantList cardPreviews READ cardPreviewsList NOTIFY inputChanged)
+    // The audio inputs the operator SELECTED in the Media tab (a metered card, or the audio of a
+    // monitored bus). It is the only audio the output meters animate for: a microphone that
+    // some other page happens to have open (Audio & Video's level bar) is not on air for that.
+    Q_PROPERTY(QStringList monitoredAudio READ monitoredAudio NOTIFY monitoredAudioChanged)
     // True while a taken input's tap is producing (warm-up honest: false
     // until the provider's first frame decodes).
     Q_PROPERTY(bool inputLive READ inputLive NOTIFY inputChanged)
@@ -138,6 +152,10 @@ public:
     int onAirTotal() const { return onAirTotal_; }
     QVariantMap onAirSlide() const { return onAirSlide_; }
     QVariantMap onAirSlideRaw() const { return onAirSlideRaw_; }
+    int stagedRev() const { return stagedRev_; }
+    bool stagedHasFlow() const;
+    bool stagedValid() const { return stagedSlide_.value(QStringLiteral("valid")).toBool(); }
+    bool onAirHasFlow() const;
     QVariantMap stagedSlide() const { return stagedSlide_; }
     QVariantMap stagedSlideRaw() const {
         return stagedSlidesRaw_.isEmpty() ? QVariantMap{} : stagedSlidesRaw_.first().toMap();
@@ -146,6 +164,14 @@ public:
     QString inputLabel() const { return inputLabel_; }
     QString inputKind() const { return inputKind_; }
     qulonglong inputRev() const { return inputRev_; }
+    QStringList monitoredAudio() const { return monitoredAudio_; }
+    Q_INVOKABLE void setMonitoredAudio(const QStringList &labels)
+    {
+        if (labels == monitoredAudio_)
+            return;
+        monitoredAudio_ = labels;
+        emit monitoredAudioChanged();
+    }
     bool inputLive() const { return inputLive_; }
     QVariantList activeOverlays() const { return activeOverlays_; }
     bool mediaOnAir() const { return mediaOnAir_; }
@@ -345,7 +371,7 @@ public:
     const QImage &lastMediaFrame() const { return lastMediaFrame_; }
     // The newest media frame, safe to read from the image loader thread: a published immutable copy
     // (QImage is implicitly shared, so publishing costs a refcount, not a pixel copy).
-    std::shared_ptr<const QImage> mediaFrameShared() const { return std::atomic_load(&mediaFrameShared_); }
+    std::shared_ptr<const QImage> mediaFrameShared() const { return mediaFrameShared_.load(); }
 
 signals:
     void liveChanged();
@@ -370,6 +396,7 @@ signals:
     // that owns the pick can hand the walk its own passage first (synchronous).
     void lineStepPending(int direction);
     void inputChanged();
+    void monitoredAudioChanged();
     void overlaysChanged();
     // clearAll() took a snapshot / restoreCleared() consumed it.
     void clearedChanged();
@@ -455,6 +482,10 @@ private:
     QVariantList stagedSlidesRaw_;
     mutable QString lastStagedIsOursLine_;
     QVariantMap stagedSlide_;
+    // The revision a surface memoises on (see Q_PROPERTY stagedRev) and the ONE
+    // place a staged change is announced from.
+    void BumpStaged();
+    int stagedRev_ = 0;
 
     // ---- the line stepper (see stageSlideSet/lineStep) --------------------
     QString lineSetName_;
@@ -503,6 +534,13 @@ private:
     int readingLayoutTargetChar_ = -1;
     int pendingReadingSteps_ = 0;
     qreal readingScroll_ = 0.0;
+    // When the surfaces were last told the scroll moved, and what that tell cost
+    // (see applyReadingScroll: the next one waits out the last one's price).
+    mutable QElapsedTimer readingScrollNotifyClock_;
+    qint64 readingScrollNotifyCostMs_ = 0;
+    // The position the surfaces were last told (-1e9 = never). A tell that says the
+    // same number is a full surface re-layout bought for nothing.
+    qreal readingScrollNotified_ = -1e9;
     int readingRunFirst_ = -1;             // first slide in the run, -1 = none
     int readingRunLast_ = -1;              // last slide in the run
     QString readingRunText_;               // the run, joined by page breaks
@@ -531,7 +569,10 @@ private:
     qreal readingWindowOffset(qreal absolute) const;
     void announceReadingPage();
     int readingPageAnnounced_ = -1;
-    void applyReadingScroll(qreal lines);
+    void applyReadingScroll(qreal lines, bool notify = true);
+    // Tell the surfaces where the walk is — the one place that also remembers the number
+    // it told them, so the same position is never laid out twice.
+    void AnnounceReadingScroll();
     bool updateReadingPick(const QString &name, const QVariantMap &shown);
     // RE-ATTACH the reading passage to the on-air slide after Slide mode took it
     // off (see setScrollMode). The engine no-ops when the slide already has it.
@@ -639,6 +680,7 @@ private:
     void LogLineStepRequest(int direction);
     int LineStepOwnLines() const;
     int OwedLineStepAnswer(int direction, int ownLines);
+    void RepairReadingRunWithoutLines();
     void MoveLineStepWithinPage(int offset, qreal absolute, qreal absoluteFrom);
     void MoveLineStepToNextPage(int page, int ownLines, qreal absolute, qreal absoluteFrom);
     void MoveLineStepBackPage(int page, int offset, qreal absoluteFrom);
@@ -790,9 +832,6 @@ private:
     void armNdiSenderForSession();
     QString ndiArmedName_;
 
-    // ---- THE PROGRAM'S PLAYOUT (AudioEngine) ---------------------------------
-    void setProgramPlayout(bool onAir);
-
     // ---- bus video windows (see clearBusFeeds above) ----
     struct BusFeed {
         QString label;      // the roster caption the tap is keyed by
@@ -826,6 +865,7 @@ private:
     void CheckMeterProbe(const QString &audioLabel);
 
     // ---- taken-input state ----
+    QStringList monitoredAudio_;
     QString inputLabel_;
     QString inputKind_;
     QString inputMode_;
@@ -863,11 +903,11 @@ private:
     QAudioOutput *mediaAudio_ = nullptr;
     QVideoSink *mediaSink_ = nullptr;
     QImage lastMediaFrame_;
-    std::shared_ptr<const QImage> mediaFrameShared_;
+    std::atomic<std::shared_ptr<const QImage>> mediaFrameShared_;
     void setLastMediaFrame(const QImage &frame)
     {
         lastMediaFrame_ = frame;
-        std::atomic_store(&mediaFrameShared_, std::make_shared<const QImage>(frame));
+        mediaFrameShared_.store(std::make_shared<const QImage>(frame));
     }
     std::atomic<quint64> mediaTakeToken_{0};
 

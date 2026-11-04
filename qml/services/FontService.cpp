@@ -4,6 +4,7 @@
 #include "modules/rendering/TextEngine.hpp"
 
 #include <QFontDatabase>
+#include <QJSEngine>
 #include <QString>
 
 namespace {
@@ -23,8 +24,13 @@ FontService &FontService::instance()
 
 FontService *FontService::create(QQmlEngine *, QJSEngine *)
 {
-    // QML owns the singleton's lifetime through this pointer; the object is the
-    // process-wide one so C++ callers and every QML surface see one cache.
+    // The object is the process-wide one, so C++ callers and every QML surface see one cache.
+    // It is a function-local STATIC: QML must never own it. A singleton returned from create()
+    // is owned by the engine and `delete`d when the engine is destroyed — here that freed a
+    // static as if it were heap memory, and ntdll killed the app with STATUS_HEAP_CORRUPTION
+    // (0xC0000374) on every exit (~130 Windows crash reports). Every other singleton in the app
+    // sets C++ ownership the same way.
+    QJSEngine::setObjectOwnership(&instance(), QJSEngine::CppOwnership);
     return &instance();
 }
 

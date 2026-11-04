@@ -137,6 +137,20 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
     composed.insert(QStringLiteral("fill"),
                     ShowConverter::fillFromMeta(ShowConverter::metaOf(*slide)));
     composed.insert(QStringLiteral("clearStage"), slide->clearStage);
+    // WHAT A LATER COMPOSITION NEEDS TO PICK THE SAME DESIGN. This map is the on-air slide the monitor
+    // tiles compose AGAIN, each with its own style (previewWithStyle). Without the category the
+    // slide belongs to, a tile cannot find the style's override for it and falls back to the style's
+    // default Shows template: a Quiet Time slide looked right on the monitor, and the moment GO LIVE
+    // put it on air the tiles redrew it as "Big Bold" / "Lower Third White". The staged slide kept
+    // these fields; the on-air copy lost them. (The engine's own outputs read them from the slide
+    // itself and were never wrong.)
+    {
+        const QVariantMap meta = ShowConverter::metaOf(*slide);
+        composed.insert(QStringLiteral("showCategory"), meta.value(QStringLiteral("showCategory")).toString());
+        composed.insert(QStringLiteral("templateOverride"), meta.value(QStringLiteral("templateOverride")).toBool());
+        if (!slide->tags.empty())
+            composed.insert(QStringLiteral("tag"), QString::fromStdString(slide->tags.front()));
+    }
     return composed;
 }
 

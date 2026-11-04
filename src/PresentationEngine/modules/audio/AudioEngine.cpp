@@ -98,24 +98,33 @@ Result<void> AudioEngine::Start()
     EnsureSpeakersOutput();
     mixer_.Attach(&production::ProductionEngine::Instance().Graph());
     mixer_.AttachTaps(&audio);
-    auto started = audio.StartRender(
-        [this](float *frames, uint32_t count, uint32_t channels, uint32_t rateHz) {
-            return mixer_.Render(frames, count, channels, rateHz);
-        });
-    if (!started.ok()) {
-        // No output device: the mix still runs, on a software clock that keeps real
-        // time, so a recording of the program still gets its audio. The reason is logged.
-        Logger::Instance().Warning("no output device (" + started.error().message +
-                                       "); the mix runs on a software clock", kModule);
-        softClockOn_.store(true);
-    } else {
-        Logger::Instance().Info("playout started on the default output device", kModule);
+    bool deviceOpen = false;
+    const bool speakersOn = SpeakersAudible();
+    {
+        const std::lock_guard<std::mutex> device(deviceMutex_);
+        if (speakersOn) {
+            auto started = OpenSpeakerDevice();   // lock-ok: deviceMutex_ only orders this open/close against the software clock; taken by the engine's own threads (control, Start/Stop), never the interface thread
+            if (started.ok()) {
+                Logger::Instance().Info("playout started on the default output device", kModule);
+                deviceOpen = true;
+            } else {
+                // No output device: the mix still runs, on a software clock that keeps real
+                // time, so a recording of the program still gets its audio. The reason is logged.
+                Logger::Instance().Warning("no output device (" + started.error().message +
+                                               "); the mix runs on a software clock", kModule);
+            }
+        } else {
+            Logger::Instance().Info("the Speakers output is off: no playback device is opened; "
+                                    "the mix runs on a software clock", kModule);
+        }
+        running_.store(true);
+        programPlaying_.store(true);
+        if (!deviceOpen) {
+            softClockOn_.store(true);
+            softClockStop_.store(false);
+            softClock_ = std::thread([this] { SoftClockLoop(); });
+        }
     }
-
-    running_.store(true);
-    programPlaying_.store(true);
-    if (!started.ok())
-        softClock_ = std::thread([this] { SoftClockLoop(); });
     {
         const std::lock_guard<std::mutex> lock(lifecycleMutex_);
         if (!control_.joinable()) {
@@ -146,9 +155,12 @@ Result<void> AudioEngine::Stop()
     wake_.notify_all();
 
     // 1. THE PROGRAM COMES OFF THE AIR. Its render thread joins inside
-    if (softClock_.joinable())
-        softClock_.join();
-    (void)platform::PlatformAccessor::Get().Audio().StopRender();
+    {
+        const std::lock_guard<std::mutex> device(deviceMutex_);
+        if (softClock_.joinable())
+            softClock_.join();
+        (void)platform::PlatformAccessor::Get().Audio().StopRender();   // lock-ok: deviceMutex_ only orders this close against the control thread's open/close (engine threads only)
+    }
 
     // 2. IS ANYTHING ELSE STILL PLAYING? An output with an endpoint of its own is
     bool outputsPlaying = false;
@@ -201,15 +213,9 @@ void AudioEngine::EnsureSpeakersOutput()
                                    kModule);
         return;
     }
-    // Created once: every audio bus plays through the speakers, as it always did.
-    // Buses added later are wired like any other output, so they stay silent until routed.
-    for (const auto &id : graph.NodeIds()) {
-        const auto node = graph.GetNode(id);
-        if (!node.ok() || node.value().kind != production::NodeKind::Bus ||
-            node.value().signalType != production::SignalType::Audio)
-            continue;
-        (void)graph.Connect(id, production::kSpeakersOutputId, production::SignalType::Audio);
-    }
+    // Created UNWIRED. It used to patch every existing audio bus into the speakers, so a mic
+    // bus the user had only made was already playing (and capturing) the moment the app
+    // started. A bus reaches the speakers only when the user connects it in Routing.
 }
 
 void AudioEngine::SetSourceDevice(const std::string &sourceId, const std::string &deviceName)
@@ -231,7 +237,7 @@ void AudioEngine::SoftClockLoop()
     std::vector<float> chunk(static_cast<size_t>(kChunk) * kChannels);
     const auto origin = std::chrono::steady_clock::now();
     uint64_t rendered = 0;
-    while (programPlaying_.load()) {
+    while (programPlaying_.load() && !softClockStop_.load()) {
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - origin).count();
         const auto due = static_cast<uint64_t>(elapsed * kRate);
         while (rendered + kChunk <= due) {
@@ -239,9 +245,65 @@ void AudioEngine::SoftClockLoop()
             rendered += kChunk;
         }
         std::unique_lock<std::mutex> lock(wakeMutex_);
-        wake_.wait_for(lock, std::chrono::milliseconds(5), [this] { return !programPlaying_.load(); });
+        wake_.wait_for(lock, std::chrono::milliseconds(5),
+                       [this] { return !programPlaying_.load() || softClockStop_.load(); });
     }
     softClockOn_.store(false);
+}
+
+bool AudioEngine::SpeakersAudible() const
+{
+    const auto snap = production::ProductionEngine::Instance().Graph().PublishedSnapshot();
+    if (!snap)
+        return false;
+    const auto speakers = snap->nodes.find(production::kSpeakersOutputId);
+    return speakers != snap->nodes.end() && speakers->second.enabled;
+}
+
+Result<void> AudioEngine::OpenSpeakerDevice()
+{
+    return platform::PlatformAccessor::Get().Audio().StartRender(
+        [this](float *frames, uint32_t count, uint32_t channels, uint32_t rateHz) {
+            return mixer_.Render(frames, count, channels, rateHz);
+        });
+}
+
+void AudioEngine::SyncSpeakerDevice()
+{
+    if (!programPlaying_.load())
+        return;
+    const bool want = SpeakersAudible();
+    const std::lock_guard<std::mutex> device(deviceMutex_);
+    if (!programPlaying_.load())
+        return;                          // Stop() took the program off the air first
+    const bool haveDevice = !softClockOn_.load();
+    if (want == haveDevice)
+        return;
+    if (want) {
+        // Speakers switched on: the software clock hands over to the playback device.
+        softClockStop_.store(true);
+        wake_.notify_all();
+        if (softClock_.joinable())
+            softClock_.join();
+        softClockStop_.store(false);
+        if (OpenSpeakerDevice().ok()) {   // lock-ok: deviceMutex_ only orders this open against Stop()'s close and the software clock (engine threads only)
+            Logger::Instance().Info("the Speakers output is on: playout moved to the default output device",
+                                    kModule);
+            return;
+        }
+        Logger::Instance().Warning("the Speakers output is on but no output device opened; "
+                                   "the mix stays on its software clock", kModule);
+        softClockOn_.store(true);
+        softClock_ = std::thread([this] { SoftClockLoop(); });
+        return;
+    }
+    // Speakers switched off: give the playback device back and keep the mix on its own clock.
+    (void)platform::PlatformAccessor::Get().Audio().StopRender();   // lock-ok: deviceMutex_ only orders this close against Stop()'s (engine threads only)
+    softClockOn_.store(true);
+    softClockStop_.store(false);
+    softClock_ = std::thread([this] { SoftClockLoop(); });
+    Logger::Instance().Info("the Speakers output is off: the playback device was released; "
+                            "the mix runs on a software clock", kModule);
 }
 
 Result<void> AudioEngine::Shutdown()
@@ -257,10 +319,13 @@ Result<void> AudioEngine::Shutdown()
     }
     running_.store(false);
     wake_.notify_all();
-    if (softClock_.joinable())
-        softClock_.join();
     if (control_.joinable())
         control_.join();
+    {
+        const std::lock_guard<std::mutex> device(deviceMutex_);
+        if (softClock_.joinable())
+            softClock_.join();
+    }
     if (platform::PlatformAccessor::Installed())
         (void)platform::PlatformAccessor::Get().Audio().StopRender();
     StopAllOutputAudio();
@@ -424,12 +489,23 @@ void AudioEngine::Reconcile()
     if (!snap)
         return;
 
+    SyncSpeakerDevice();
+
+    // A SOURCE IS CAPTURED ONLY FOR A BUS THAT REACHES SOMETHING THAT IS ACTUALLY PLAYING OR
+    // LISTENED TO: an output on its own endpoint, a recording / NDI tap, or the Speakers while
+    // the program plays and the Speakers output is on. "The program is playing" used to open every
+    // routed source on its own, so the mic opened at launch and on GO LIVE with nothing audible.
     const bool programOn = programPlaying_.load();
-    std::set<std::string> endpoints;
-    if (!programOn) {
+    std::set<std::string> endpoints = mixer_.TapTargets();
+    {
         const std::lock_guard<std::mutex> lock(outputAudioMutex_);
         for (const auto &entry : outputStreams_)
             endpoints.insert(entry.first);
+    }
+    if (programOn) {
+        const auto speakers = snap->nodes.find(production::kSpeakersOutputId);
+        if (speakers != snap->nodes.end() && speakers->second.enabled)
+            endpoints.insert(production::kSpeakersOutputId);
     }
 
     // The sources that reach a bus somebody is playing, each with the device name
@@ -449,7 +525,7 @@ void AudioEngine::Reconcile()
                 && bus->second.kind == production::NodeKind::Bus
                 && bus->second.signalType == production::SignalType::Audio
                 && bus->second.enabled
-                && (programOn || BusPlaysOnAnEndpoint(*snap, to, endpoints))) {
+                && BusPlaysOnAnEndpoint(*snap, to, endpoints)) {
                 reachesBus = true;
                 break;
             }

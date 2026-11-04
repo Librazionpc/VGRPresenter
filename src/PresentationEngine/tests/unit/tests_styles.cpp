@@ -3410,6 +3410,54 @@ void TestShippedConfig() {
     CHECK(db.Open("").ok());   // leave the shared store in-memory for the next suite
 }
 
+// A show slide in a category the style OVERRIDES must be drawn with that category's template,
+// not the style's default Shows template: Quiet Time (cross picture, script font) went live as the
+// style's "Big Bold" (black, plain text) while the monitor showed the Quiet Time design.
+void TestShowCategoryOverrideWins() {
+    auto block = [](const char* id, const char* kind, const char* bind, const char* text) {
+        p::ContentBlock b;
+        b.id = id; b.kind = kind; b.bind = bind; b.text = text;
+        b.x = 0; b.y = 0; b.width = 754; b.height = 400;
+        return b;
+    };
+    p::Slide slide;
+    slide.id = "show-1";
+    slide.title = "Verse 1";
+    slide.text = "This, in the sanctuary here, is where the Lord dwells.";
+    slide.metaJson = R"({"line1":"This, in the sanctuary here, is where the Lord dwells.","ref":"63-1226 - Church Order Pr 150","showCategory":"Quiet Time","templateOverride":false})";
+    slide.blocks = { block("item-1", "text", "", "This, in the sanctuary here, is where the Lord dwells."),
+                     block("item-2", "text", "", "63-1226 - Church Order Pr 150") };
+
+    p::OutputStyleSpec style;
+    style.templateKey = "lowerThird";
+    style.SetFamilyGate(p::kFamilySlotShows, true);
+    style.familyTemplateKeys[p::kFamilySlotShows] = "tpl-big_bold";
+    style.familyTemplateBlocks[p::kFamilySlotShows] = { block("big", "text", "text", "") };
+
+    p::OutputStyleSpec::ShowCategoryTemplate quiet;
+    quiet.category = "Quiet Time";
+    quiet.templateKey = "tpl-5";
+    quiet.overrideEnabled = true;
+    quiet.blocks = { block("item-3", "image", "", "cross7"),
+                     block("item-1", "text", "title", "Title"),
+                     block("item-2", "text", "text", "Text") };
+    style.showCategoryTemplates.push_back(quiet);
+
+    const auto comp = p::SceneBuilder::ComposeSlide(slide, style, /*applyGates=*/true);
+    std::printf("[showcat] source=%d blocks=%zu first=%s\n", static_cast<int>(comp.source),
+                comp.blocks.size(), comp.blocks.empty() ? "-" : comp.blocks[0].kind.c_str());
+    CHECK(comp.source == p::SceneBuilder::SlideComposition::Source::FamilyTemplate);
+    CHECK(comp.blocks.size() == 3);                                // the category's three, not Big Bold's one
+    if (!comp.blocks.empty())
+        CHECK(comp.blocks[0].kind == "image");                      // the cross picture
+
+    // ...and without the override (or for another category) the style's default Shows template stands.
+    p::Slide other = slide;
+    other.metaJson = R"({"showCategory":"Sermons","templateOverride":false})";
+    const auto fallback = p::SceneBuilder::ComposeSlide(other, style, /*applyGates=*/true);
+    CHECK(fallback.blocks.size() == 1);
+}
+
 void TestForcedLineBreaks() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());

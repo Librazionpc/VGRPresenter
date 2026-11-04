@@ -66,6 +66,13 @@ private:
     void MaybeFinishStop();
     void EnsureSpeakersOutput();
     void Reconcile();
+    // THE SPEAKER DEVICE FOLLOWS THE SPEAKER OUTPUT. The program mix always has a clock
+    // (a recording or an NDI feed reads it), but the default playback device is opened only
+    // while the Speakers output is on in Routing; otherwise the software clock drives the mix
+    // and no device is touched. SyncSpeakerDevice re-reads that on the control thread.
+    bool SpeakersAudible() const;
+    Result<void> OpenSpeakerDevice();
+    void SyncSpeakerDevice();
     void Unbind(const std::string &sourceId);
     void ReleaseAll();
 
@@ -103,6 +110,8 @@ private:
     // The software clock: drives the mix in real time when no output device is open.
     std::thread softClock_;
     std::atomic<bool> softClockOn_{false};
+    std::atomic<bool> softClockStop_{false};   // ends the software clock while the program keeps playing
+    std::mutex deviceMutex_;                   // guards softClock_ and the program render stream's open/close
 
     mutable std::mutex outputAudioMutex_;
     std::map<std::string, uint64_t> outputStreams_;

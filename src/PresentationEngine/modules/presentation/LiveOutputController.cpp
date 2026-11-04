@@ -322,9 +322,6 @@ void LiveOutputController::ApplyPendingReadingSlide() {
         pending = std::move(*pendingReadingSlide_);
         pendingReadingSlide_.reset();
     }
-    // Hoisted before control_ (plain singleton getter — lock-scope guard).
-    auto& render = rendering::RenderEngine::Instance();
-
     // True while the commit turns out to need a REAL re-commit instead.
     bool commitWhole = true;
     {
@@ -741,10 +738,16 @@ Result<void> LiveOutputController::RenderOnce() {
                                     std::chrono::steady_clock::now().time_since_epoch()).count();
     const float scrollChars = flowChar_.load();
     const bool scrollMoving = FlowCharMoving(nowSteadyMs);
-    // 0.4 s a frame was never going to look like motion on either). The
+    // ---- THE SCROLL'S FRAME BUDGET ---------------------------------------
+    // Composing per tick measured 0.4 s a frame — never motion. The budget is not a
+    // fixed rate either: it is whatever one frame of this move actually cost, so the loop
+    // spends at most half its time rasterising and the press arrives on a thread with
+    // cores left.
     if (scrollMoving && scrollComposedAt_.time_since_epoch().count() != 0) {
         const auto since = std::chrono::steady_clock::now() - scrollComposedAt_;
-        if (since < std::chrono::milliseconds(kScrollComposeMs))
+        const auto budget = std::chrono::milliseconds(std::max<int64_t>(
+            kScrollComposeMs, static_cast<int64_t>(scrollFrameMs_)));
+        if (since < budget)
             return Ok();   // a frame of this move was already composed this budget
     }
     const bool freshScene = sceneId != lastRenderedScene_;
@@ -771,8 +774,6 @@ Result<void> LiveOutputController::RenderOnce() {
     }
 
     const auto composeStart = std::chrono::steady_clock::now();
-    if (scrollMoving)
-        scrollComposedAt_ = composeStart;
     rendering::RenderOptions opts;
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter
     opts.filters = activeFilters;   // slide-wide; applied to the composed frame
@@ -824,6 +825,15 @@ Result<void> LiveOutputController::RenderOnce() {
         }
     }
     RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+    // What THIS frame of the move cost — the compose plus every per-output pass — is the
+    // budget the next one is paced by (see the scroll gate above). Measured from the
+    // attempt, so a scene that keeps failing to rasterize paces too.
+    scrollFrameMs_ = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - composeStart).count();
+    // ...and it is stamped from the END of the frame, so the budget below is time the
+    // loop is free rather than time it is already busy rasterising.
+    if (scrollMoving)
+        scrollComposedAt_ = std::chrono::steady_clock::now();
 
     if (frame.ok()) {
         frames_.fetch_add(1);

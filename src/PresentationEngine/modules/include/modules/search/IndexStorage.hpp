@@ -8,6 +8,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -86,9 +87,26 @@ public:
 private:
     // MUST hold mutex_ (shared for reads, unique for writes).
     const DocRecord* FindRecordLocked(std::string_view docId) const;
+    // MUST hold mutex_ (unique): index one document, replacing any earlier copy of it.
+    size_t UpsertLocked(const SearchDocument& doc);
+    // MUST hold mutex_ (unique): take a document out of the postings of the terms IT posted to
+    // (the same tokenizer the index was built with) — not a sweep over every term in the index.
+    void ErasePostingsOf(const SearchDocument& doc);
+
+    // A posting's numbers. WHICH DOCUMENT it is for is the key of the list it sits in, and that key is
+    // a VIEW of the id string documents_ already owns (an unordered_map node: its key never moves). The
+    // index used to hold the id twice more for every posting — as the key and again inside the Posting —
+    // as full string copies of file paths, millions of times over: gigabytes of memory, and a window
+    // that froze for tens of seconds freeing them when the app quit.
+    struct PostingData {
+        size_t frequency = 0;
+        size_t positions = 0;
+    };
+    using PostingList = std::map<std::string_view, PostingData>;
 
     mutable std::shared_mutex mutex_;
-    std::map<std::string, std::map<std::string, Posting, std::less<>>, std::less<>> index_;
+    std::map<std::string, PostingList, std::less<>> index_;
+    // Owns the id strings the postings view: a document is erased only AFTER its postings are.
     std::unordered_map<std::string, DocRecord> documents_;
     size_t totalTokens_ = 0;   // Σ tokenCount over live documents (avgdl denominator)
     bool initialized_ = false;

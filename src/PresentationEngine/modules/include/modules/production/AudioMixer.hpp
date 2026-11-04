@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -50,6 +51,9 @@ public:
     uint64_t FramesRendered() const { return framesRendered_.load(std::memory_order_relaxed); }
     uint64_t AddMixTap(std::string outputNodeId, MixTap tap);
     void RemoveMixTap(uint64_t id);
+    // The graph output nodes somebody is listening to through a tap right now (the speaker
+    // node for a tap with no node of its own): what a recording or an NDI feed is asking for.
+    std::set<std::string> TapTargets() const;
 
     // The routing pump maps a graph source node to its capture device.
     // `waveinId` UINT32_MAX = unmapped (contributes nothing).
@@ -123,7 +127,7 @@ private:
     ProductionGraph *graph_ = nullptr;   // not owned
     bps::platform::IAudio *taps_ = nullptr;   // not owned; the sample source
     std::mutex mutex_;                   // guards deviceTable_ and dspState_
-    std::mutex tapMutex_;                // guards mixTaps_
+    mutable std::mutex tapMutex_;        // guards mixTaps_
     struct MixTapEntry {
         uint64_t id = 0;
         std::string nodeId;

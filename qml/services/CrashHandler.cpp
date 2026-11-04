@@ -260,6 +260,20 @@ LONG WINAPI HandleSEH(EXCEPTION_POINTERS *info)
     // process termination) would normally run still run.
     return EXCEPTION_CONTINUE_SEARCH;
 }
+
+// A BAD FREE ENDS THE PROCESS BEFORE THE FILTER ABOVE CAN RUN. ntdll raises STATUS_HEAP_CORRUPTION
+// (0xC0000374) when the heap finds a block that was written past its end, freed twice or freed
+// after something else reused it — and then terminates the process itself, so the unhandled-
+// exception filter never sees it and nothing was recorded: ~130 Windows crash reports and not one
+// line here. A vectored handler is called first, on the thread that found the damage; its stack
+// names what was being freed or allocated, which is the closest the heap can point to the culprit.
+LONG WINAPI HandleHeapCorruption(EXCEPTION_POINTERS *info)
+{
+    static std::atomic<bool> reported{false};
+    if (info->ExceptionRecord->ExceptionCode == 0xC0000374UL && !reported.exchange(true))
+        return HandleSEH(info);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 #else
 void HandleSignal(int sig)
 {
@@ -576,6 +590,7 @@ void InstallCrashHandler()
     ULONG guarantee = 64 * 1024;
     SetThreadStackGuarantee(&guarantee);
     SetUnhandledExceptionFilter(HandleSEH);
+    AddVectoredExceptionHandler(1, HandleHeapCorruption);
 #else
     std::signal(SIGSEGV, HandleSignal);
     std::signal(SIGFPE, HandleSignal);

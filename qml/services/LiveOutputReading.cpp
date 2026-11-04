@@ -1,5 +1,6 @@
 #include "services/CallTrace.h"
 #include "services/LiveOutputService.h"
+#include "services/StepCost.hpp"
 
 #include "services/FontService.h"
 #include "services/ShowConverter.h"
@@ -424,7 +425,7 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
     ResetReadingPick();
     rebuildReadingRun(0);
     readingFlowText_ = readingRunText_;
-    emit readingScrollChanged();
+    AnnounceReadingScroll();
     QVariantList pick = slides;
     if (!pick.isEmpty()) {
         QVariantMap first = pick.first().toMap();
@@ -436,7 +437,7 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
         stagedName_.clear();
         stagedSlidesRaw_.clear();
         stagedSlide_ = QVariantMap{};     // tiles must read the NEW onAirSlide,
-        emit stagedChanged();             // not a stale staged copy over it
+        BumpStaged();             // not a stale staged copy over it
         announceReadingPage();           // ...and only now is the page announced
         return;
     }
@@ -445,7 +446,7 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
     stagedSlide_ = pick.isEmpty() ? QVariantMap{}
                  : (!styledPreview.isEmpty() ? styledPreview
                                              : previewWithActiveStyle(pick.first().toMap()));
-    emit stagedChanged();
+    BumpStaged();
     announceReadingPage();
 }
 
@@ -856,15 +857,20 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     if (lineSourceTextOnly_ && readingBudgetFitActive_) {
         const QString columnKey = ScrollColumnKey(styleId);
         const auto column = scrollColumns_.constFind(columnKey);
-        if (column == scrollColumns_.constEnd() || column->size <= 0.0)
-            return none;
-        const QString columnCacheKey = QStringLiteral("c#") + columnKey + QLatin1Char('#')
-                                       + QString::number(qHash(text), 16);
-        if (const StyleRunLines *hit = CachedStyleRunLines(columnCacheKey))
-            return *hit;
-        QueueScrollColumnMeasure(columnKey, columnCacheKey, text,
-                                 column->size, column->block, column->sig);
-        return none;
+        if (column != scrollColumns_.constEnd() && column->size > 0.0) {
+            const QString columnCacheKey = QStringLiteral("c#") + columnKey + QLatin1Char('#')
+                                           + QString::number(qHash(text), 16);
+            if (const StyleRunLines *hit = CachedStyleRunLines(columnCacheKey))
+                return *hit;
+            QueueScrollColumnMeasure(columnKey, columnCacheKey, text,
+                                     column->size, column->block, column->sig);
+        }
+        // NEVER "none". This branch used to answer an empty table while the budget column was
+        // unseated or being measured, and that empty table is what the run stored — the step
+        // then had nothing to move through (`lines=0`, `abs` stuck: measured on a real passage,
+        // 121 presses, no movement) and no measure was even queued without a seat, so it was
+        // permanent. Fall through to the reading block's own grid instead: it is the layout the
+        // surfaces already draw, and the seated column's measured table replaces it when it lands.
     }
     if (readingBudgetFitActive_) {
         const QString columnKey = ScrollColumnKey(styleId);
@@ -1006,9 +1012,17 @@ void LiveOutputService::QueueScrollColumnMeasure(const QString &columnKey, const
                         return;
                     self->readingRunLinesPending_.remove(columnCacheKey);
                     const auto currentColumn = self->scrollColumns_.constFind(columnKey);
-                    if (currentColumn == self->scrollColumns_.constEnd()
-                            || currentColumn->sig != columnSig)
+                    if (currentColumn == self->scrollColumns_.constEnd())
                         return;
+                    if (currentColumn->sig != columnSig) {
+                        if (self->readingFlowText_ == workerText
+                                || self->readingRunText_ == workerText) {
+                            self->QueueScrollColumnMeasure(columnKey, columnCacheKey, workerText,
+                                                           currentColumn->size, currentColumn->block,
+                                                           currentColumn->sig);
+                        }
+                        return;
+                    }
                     StyleRunLines entry;
                     entry.lines.reserve(spans.size());
                     entry.charStarts.reserve(spans.size());
@@ -1277,6 +1291,12 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
                 outputs->repushEngineStyles();
             if (live_)
                 scheduleReadingRepublish();   // this column's line breaks join the slide's
+            // THE RUN THAT WAS DERIVED BEFORE THIS COLUMN EXISTED. Seating the column is what
+            // makes the reference style's line table derivable at all, and nothing else asked
+            // for it again — the run kept the empty table it stored while the column was still
+            // being solved. Deferred to this turn, so the rebuild never happens inside the
+            // binding that asked for the size.
+            RepairReadingRunWithoutLines();
         });
         const QString prefix = QStringLiteral("c#") + key + QLatin1Char('#');
         for (auto it = readingRunLinesCache_.begin(); it != readingRunLinesCache_.end(); ) {
@@ -1722,7 +1742,7 @@ void LiveOutputService::connectReadingBasis()
     }
 }
 
-void LiveOutputService::applyReadingScroll(qreal lines)
+void LiveOutputService::applyReadingScroll(qreal lines, bool notify)
 {
     readingScroll_ = lines;
     bool windowChanged = false;
@@ -1786,9 +1806,40 @@ void LiveOutputService::applyReadingScroll(qreal lines)
             attachReadingFlow(shown, lines);
             stagedSlidesRaw_ = QVariantList{shown};
             stagedSlide_ = readingStagedPreview(shown);
-            emit stagedChanged();
+            BumpStaged();
         }
     }
+    // A glide calls this 60 times a second, and every surface answers by rebuilding its
+    // slice and its line table on THIS thread (DesignPreview.onReadingScrollChanged). The
+    // engine gets every position regardless (SetFlowChar above); the surfaces get a new one
+    // only as fast as they can lay one out — the budget IS the last tell's price, so a
+    // 300 ms layout buys a 600 ms gap instead of a queue that never drains. The glide's own
+    // last frame is forced (see the animation's finished handler), so the picture still
+    // ends on the line the walk says it is on.
+    const bool gliding = readingScrollAnim_
+        && readingScrollAnim_->state() == QAbstractAnimation::Running;
+    const qint64 budget = qMax<qint64>(33, readingScrollNotifyCostMs_ * 2);
+    const bool moved = !qFuzzyCompare(readingScroll_ + 1.0, readingScrollNotified_ + 1.0);
+    if (notify && (moved || windowChanged)
+            && (!gliding || !readingScrollNotifyClock_.isValid()
+                || readingScrollNotifyClock_.hasExpired(budget))) {
+        QElapsedTimer cost;
+        cost.start();
+        emit readingScrollChanged();
+        readingScrollNotified_ = readingScroll_;
+        readingScrollNotifyCostMs_ = qBound<qint64>(qint64(0), cost.elapsed(), qint64(400));
+        readingScrollNotifyClock_.restart();
+        if (readingScrollNotifyCostMs_ >= 30)
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("StepCost"),
+                                QStringLiteral("notify readingScrollChanged=%1ms gap=%2ms scroll=%3")
+                                    .arg(readingScrollNotifyCostMs_).arg(budget)
+                                    .arg(readingScroll_, 0, 'f', 2));
+    }
+}
+
+void LiveOutputService::AnnounceReadingScroll()
+{
+    readingScrollNotified_ = readingScroll_;
     emit readingScrollChanged();
 }
 
@@ -1850,10 +1901,9 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
         connect(readingScrollAnim_, &QVariantAnimation::finished, this,
                 [this]() {
                     commitPendingRebase();
-                    if (readingWindowRefreshPending_) {
-                        readingWindowRefreshPending_ = false;
-                        applyReadingScroll(readingScroll_);
-                    }
+                    readingWindowRefreshPending_ = false;
+                    // The landing line, told whatever the budget decided mid-glide.
+                    applyReadingScroll(readingScroll_, true);
                     drainPendingReadingSteps();
                 });
     }
@@ -1864,7 +1914,7 @@ void LiveOutputService::animateReadingScroll(qreal from, qreal to)
                               .toString();
     readingScrollAnim_->stop();
     readingScrollPreparing_ = true;
-    applyReadingScroll(from);   // starts where the picture already is
+    applyReadingScroll(from, false);   // starts where the picture already is: nothing to tell
     readingScrollPreparing_ = false;
     {
         const QSignalBlocker quiet(readingScrollAnim_);
@@ -1931,7 +1981,7 @@ void LiveOutputService::applyReadingRestage(bool commitPage, bool forceRebuild,
     }
     if (live_ && !commitPage) {
         if (!readingStepGlide_ && (flowChanged || scrollChanged))
-            emit readingScrollChanged();
+            AnnounceReadingScroll();
         return;
     }
     if (live_)
@@ -2042,7 +2092,7 @@ void LiveOutputService::PublishReadingFlowOnly(bool flowChanged, bool scrollChan
         stagedSlidesRaw_ = QVariantList{shown};
         stagedSlide_ = readingStagedPreview(shown);
         const qint64 previewMs = stagedClock.elapsed() - attachMs;
-        emit stagedChanged();
+        BumpStaged();
         if (stagedClock.elapsed() >= 30)
             EngineBridge::write(QStringLiteral("info"), QStringLiteral("PickCostSvc"),
                                 QStringLiteral("staged publish attach=%1ms readingStagedPreview=%2ms stagedChanged=%3ms")
@@ -2051,7 +2101,7 @@ void LiveOutputService::PublishReadingFlowOnly(bool flowChanged, bool scrollChan
     if (pageChanged && !readingStepGlide_)
         emit readingPageChanged();
     if (!readingStepGlide_ && (flowChanged || scrollChanged))
-        emit readingScrollChanged();
+        AnnounceReadingScroll();
 }
 
 void LiveOutputService::CommitReadingPageOnAir(bool flowChanged, bool scrollChanged, bool pageChanged)
@@ -2067,11 +2117,11 @@ void LiveOutputService::CommitReadingPageOnAir(bool flowChanged, bool scrollChan
     stagedSlide_ = QVariantMap{};
     if (quietStage_)
         return;
-    emit stagedChanged();
+    BumpStaged();
     if (pageChanged)
         emit readingPageChanged();
     if (!readingStepGlide_ && (flowChanged || scrollChanged))
-        emit readingScrollChanged();
+        AnnounceReadingScroll();
 }
 
 void LiveOutputService::StageReadingPageOffAir(bool flowChanged, bool scrollChanged, bool pageChanged)
@@ -2087,15 +2137,18 @@ void LiveOutputService::StageReadingPageOffAir(bool flowChanged, bool scrollChan
     if (quietStage_)
         return;   // (the final state composes the preview and tells everyone, once)
     stagedSlide_ = readingStagedPreview(shown);
-    emit stagedChanged();
+    BumpStaged();
     if (pageChanged)
         emit readingPageChanged();
     if (!readingStepGlide_ && (flowChanged || scrollChanged))
-        emit readingScrollChanged();
+        AnnounceReadingScroll();
 }
 
 bool LiveOutputService::lineStep(int direction)
 {
+    // See StepCost.hpp: the same probe stepPassage carries, so a press on either path is
+    // one comparable line (`path=scroll` against `path=slide`).
+    services::diagnostics::StepCost stepCost("scroll", direction);
     if (direction != 0)
         emit lineStepPending(direction);
     LogLineStepRequest(direction);
@@ -2107,6 +2160,12 @@ bool LiveOutputService::lineStep(int direction)
         activatePendingTextSource();
 
     commitPendingRebase();
+
+    // A run derived before its column was solved holds no line table, and the solve only
+    // re-asks the surfaces — so every press would answer "owed" for ever and the walk could
+    // never move (measured: 121 presses on a real passage, none of them moved). The seat
+    // repairs it on its own now; this is the belt for any other ordering.
+    RepairReadingRunWithoutLines();
 
     const int setSize = static_cast<int>(lineSetRaw_.size());
     const int ownLines = LineStepOwnLines();
@@ -2175,13 +2234,34 @@ int LiveOutputService::OwedLineStepAnswer(int direction, int ownLines)
     return 1;
 }
 
+void LiveOutputService::RepairReadingRunWithoutLines()
+{
+    if (!lineSourceTextOnly_ || readingRunText_.isEmpty())
+        return;                       // Slide-mode text and a run with no words have no table
+    if (LineStepOwnLines() > 0)
+        return;                       // the table is there: a healthy run costs one cached lookup
+    const auto *model = OutputListModel::instance();
+    const QString ref = model ? model->activeStyleId() : QString();
+    if (styleRunLinesForText(ref, readingRunText_).lines.isEmpty())
+        return;                       // still being solved: there is no table to derive yet
+    // FORCED: the repair runs with an unchanged window, and rebuildReadingRun short-circuits
+    // on that — the plain restage is what leaves the empty table in place.
+    applyReadingRestage(false, /*forceRebuild=*/ true);
+}
+
 void LiveOutputService::MoveLineStepWithinPage(int offset, qreal absolute, qreal absoluteFrom)
 {
+    // A step inside the page moves ONE number. The passage, its line table, the pick and the
+    // staged picture are all the same picture — the restage that used to run here re-derived
+    // every one of them per press. The window still follows: applyReadingScroll moves it when
+    // the walk nears an edge.
     lineOffset_ = offset;
     readingScroll_ = absolute;
-    readingStepGlide_ = true;
-    applyReadingRestage(false);
-    readingStepGlide_ = false;
+    if (!lineSourceTextOnly_) {
+        readingStepGlide_ = true;
+        applyReadingRestage(false);
+        readingStepGlide_ = false;
+    }
     animateReadingScroll(readingWindowOffset(absoluteFrom), readingScroll_);
 }
 

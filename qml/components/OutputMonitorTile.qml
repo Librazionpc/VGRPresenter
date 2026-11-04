@@ -41,14 +41,14 @@ Rectangle {
         root.onAirSlideBusy = false
     }
     function refreshOnAirSlideOnce() {
-        const stagedRaw = LiveOutputService.stagedSlideRaw
-        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
-            ? stagedRaw : LiveOutputService.onAirSlideRaw
-        const walking = raw && typeof raw === "object"
-            && String(raw.flowText ?? "") !== ""
+        // The key first, and only from scalars: a hit must not touch the slide (reading it
+        // converts the whole passage into JS, once per handler, on the thread that draws).
+        // That is several handlers per pick — the tile's own Connections alone has seven.
+        const walking = LiveOutputService.stagedHasFlow || LiveOutputService.onAirHasFlow
         const key = walking
-            ? "walk|" + root.styleId + "|" + root.stylePulse + "|"
-              + LiveOutputService.readingSetName + "|" + LiveOutputService.readingStageSerial
+            ? "walk|" + root.styleId + "|" + root.stylePulse + "|rev:"
+              + LiveOutputService.stagedRev
+              + "|" + LiveOutputService.readingSetName + "|" + LiveOutputService.readingStageSerial
               + "|" + LiveOutputService.readingPage
               + "|" + LiveOutputService.live
               + "|" + LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaRev
@@ -59,6 +59,9 @@ Rectangle {
             root.onAirSlide = memo.value
             return
         }
+        const stagedRaw = LiveOutputService.stagedSlideRaw
+        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+            ? stagedRaw : LiveOutputService.onAirSlideRaw
         const composed = LiveOutputService.previewWithStyle(
             (raw && typeof raw === "object") ? raw : ({}), root.styleId)
         EngineBridge.log("trace", "RefreshOnAirSlide",
@@ -89,6 +92,7 @@ Rectangle {
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
     readonly property int readingDrawnLines: contentPreview.readingDrawnLines
+    readonly property int readingExpectedLines: contentPreview.readingExpectedLines
     readonly property string readingDrawnAt: String(root.objectName) + "@"
                                             + Number(contentPreview.readingDrawnBoxW).toFixed(0)
                                             + "x" + Number(contentPreview.readingDrawnBoxH).toFixed(0)
@@ -471,12 +475,18 @@ Rectangle {
             if (!LiveOutputService.live)
                 return bar.mediaLevel
             const list = EngineBridge.inputLevels
+            // ONLY WHAT THE OPERATOR SELECTED IN THE MEDIA TAB (a metered card, or a monitored
+            // bus's audio). Any microphone with an open tap used to animate the live output —
+            // including one that the Audio & Video page opened for its own level bar.
+            const selected = LiveOutputService.monitoredAudio
             let loudest = 0
             for (let i = 0; i < list.length; ++i) {
                 const snap = list[i]
                 if (!snap || snap.peaks === undefined || snap.peaks.length < 1)
                     continue
                 if (String(snap.label || "").trim() === "")
+                    continue
+                if (selected.indexOf(String(snap.label).trim()) < 0)
                     continue
                 const channelCount = Number(snap.channelCount) || snap.peaks.length
                 const sourceChannel = channelCount === 1 ? 0 : bar.channelIndex
