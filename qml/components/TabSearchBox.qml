@@ -17,11 +17,10 @@ Item {
     readonly property string emptyHint: seedLine !== "" ? seedLine : placeholder
 
     property var suggestions: null
-    // A tab whose matches live in the pane (The Table) sets this: the floating
-    // suggestion popup never opens, no matter what (rows empty + explicit gate).
-    property bool popupSuppressed: false
-    signal suggestionPicked(int index, var payload)
-    signal suggestionHovered(int index, bool hovering)
+    // A tab whose matches live in the pane (The Table) sets this: Up/Down walk those matches.
+    property bool matchesInPane: false
+    // Set by the host: (text) => the text with its missing verse filled in, or "".
+    property var finishText: null
     signal stepMatch(int delta)
     property bool listMode: false
     signal stepColumn(int delta)
@@ -31,75 +30,80 @@ Item {
     signal edited(string text)
     signal accepted(string text)
 
+    // True while the field has the keyboard: the box then OPENS UP (wider than its idle size,
+    // over the tabs beside it if it must) so the whole line is visible and the caret can travel
+    // along it, instead of showing the clipped tail of a long reference.
+    readonly property bool editing: input.activeFocus
+    readonly property int editMinWidth: 380
+
     readonly property int minWidth: 150
     // The seeded line asks for more room than a tab name does; capped so the tabs
     // keep their row on a narrow dock (the tab bar's own clamp is the harder one).
     readonly property int seedMaxWidth: 330
     implicitWidth: Math.max(minWidth, glass.x + glass.width + 12
                                       + Math.min(Math.max(hint.implicitWidth, input.contentWidth),
-                                                 seedLine !== "" ? seedMaxWidth - 38 : 1e9) + 26)
+                                                 (seedLine !== "" && !editing) ? seedMaxWidth - 38 : 1e9) + 26)
     implicitHeight: 31
 
-    function showSuggestions(items) {
-        if (sugPanel && items.length === 0) {
-            sugPanel.visible = false
-            return
-        }
-        if (items.length === 0)
-            return
-        if (root.popupSuppressed)
-            return
-        if (!sugPanel)
-            sugPanel = sugComp.createObject(root)
-        sugPanel.model = items
-        // Wider than the box: sermon titles must read in full ("Exhortation Of ...").
-        sugPanel.width = Math.max(root.width, 430)
-        sugPanel.maxHeight = Math.min(342, items.length * 34 + 16)
-        sugPanel.highlightedIndex = -1
-        root.sugOpenedAt = Date.now()
-        sugPanel.openAt(root, 0, root.height + 4, root.Window.contentItem)
-    }
-    // Re-asks the provider for the current text — the refresh everything calls.
+    // Re-asks the provider for the current text and applies its inline COMPLETION (a unique
+    // sermon title finishing itself). There is no dropdown: the box only finds a place, it
+    // never lists matches under itself.
     function refreshSuggestions() {
-        if (!root.suggestions || root.text === "") {
-            if (sugPanel)
-                sugPanel.visible = false
+        if (!root.suggestions || root.text === "")
+            return
+        const res = root.suggestions(root.text)
+        const completion = Array.isArray(res) ? "" : ((res && res.complete) || "")
+        // A CORRECTION: the provider names the proper spelling of what is typed ("1joh" ->
+        // "1 John "), and the box takes it as its text.
+        const correction = Array.isArray(res) ? "" : ((res && res.replace) || "")
+        if (correction !== "" && correction !== root.text && root.text !== "" &&
+                !root.lastEditShrank &&
+                input.selectionStart === input.text.length && input.selectionEnd === input.text.length) {
+            suppressing = true
+            const selectTail = Number((res && res.replaceSelect) || 0)
+            input.text = correction
+            input.cursorPosition = input.text.length
+            if (selectTail > 0)
+                input.select(input.text.length - selectTail, input.text.length)
+            suppressing = false
+            root.text = input.text
+            root.edited(input.text)
+            root.frozenText = input.text
+            root.frozenSelTail = selectTail
+            freezeTimer.restart()
             return
         }
-        const res = root.suggestions(root.text)
-        const items = Array.isArray(res) ? res : (res && res.rows) || []
-        const completion = Array.isArray(res) ? "" : ((res && res.complete) || "")
-        root.showSuggestions(items)
         if (completion !== "" && completion.trim() !== "" && root.text !== "" &&
                 !root.lastEditShrank &&
                 input.selectionStart === input.text.length && input.selectionEnd === input.text.length) {
- suppressing = true
+            suppressing = true
             input.text = root.text + completion
             input.cursorPosition = input.text.length
             suppressing = false
             root.text = input.text
             root.edited(input.text)
             root.frozenText = input.text
+            root.frozenSelTail = 0
             freezeTimer.restart()
-            // The committed text usually resolves — re-ask once so the popup closes
-            // (a resolved reference lists no rows) instead of lingering stale.
-            root.refreshSuggestions()
         }
     }
     // The freeze guard's state: the completed box content letters are frozen against
     // until a digit or backspace ("" = not frozen). FreeShow's 1.5s timeout applies.
     property string frozenText: ""
+    // How many trailing characters of frozenText are a SELECTED suggestion (the chapter digit of
+    // "1 John 1"): a letter typed over them is a keystroke for the word before, not a new chapter.
+    property int frozenSelTail: 0
     Timer {
         id: freezeTimer
         interval: 1500
-        onTriggered: root.frozenText = ""
+        onTriggered: { root.frozenText = ""; root.frozenSelTail = 0 }
     }
     property bool suppressing: false
     // The LAST textEdited was an erasure (Backspace/Delete): do not re-complete\r
     // the text the user is deleting.\r
     property bool lastEditShrank: false
     function resetText(value) {
-        closeSuggestions()
+        root.userCleared = false
         root.frozenText = ""
         root.lastEditShrank = false
         root.text = value
@@ -108,13 +112,13 @@ Item {
         if (value === "" && input.activeFocus)
             root.applySeed()
     }
-    function closeSuggestions() {
-        if (sugPanel)
-            sugPanel.visible = false
-    }
+    // The operator emptied the box themself (Backspace / the X / Esc): the passage line must
+    // NOT come back on its own when the pane next moves — that read as "Backspace does not
+    // clear it". It fills again when the box is clicked or focused afresh, or the tab changes.
+    property bool userCleared: false
     function applySeed() {
         const line = root.seedLine
-        if (line === "" || input.text !== "")
+        if (line === "" || input.text !== "" || root.userCleared)
             return false
         root.frozenText = ""
         root.lastEditShrank = false
@@ -150,7 +154,6 @@ Item {
             return
         }
         root.pointerInArea = AppCursor.hovered(root)
-            || (sugPanel !== null && sugPanel.visible && AppCursor.hovered(sugPanel))
     }
     Connections {
         target: AppCursor
@@ -159,39 +162,6 @@ Item {
     // Freshly shown under a stationary pointer (a tab switch back) must recompute
     // at once rather than wait for a move.
     onVisibleChanged: visible ? root.updatePointerInArea() : root.pointerInArea = false
-    property Item sugPanel: null
-    // The live popup carries the self-test name so the UI harness can grab it.
-    onSugPanelChanged: if (sugPanel) sugPanel.objectName = "selfTestSuggestPopup"
-    // When the outside-click catcher closed the popup (its press precedes this MouseArea's
-    // clicked), the toggle below must not instantly re-open it — remembered open time.
-    property real sugOpenedAt: 0
-    Component {
-        id: sugComp
-        DropdownPanel {
-            dismissOnOutsideClick: true
-            onItemHovered: (label, hovering, rowItem, index) => {
-                root.suggestionHovered(index, hovering)
-            }
-            onItemPicked: (index, payload) => {
-                visible = false
-                input.focus = true
-                if (payload && payload.cite &&
-                        root.text.trim().toLowerCase() !== payload.cite.toLowerCase()) {
-                    input.text = payload.cite
-                    input.cursorPosition = input.text.length
-                    root.text = input.text
-                    root.edited(input.text)
-                }
-                root.suggestionPicked(index, payload)
-            }
-            onItemActivated: (label) => {
-                // Clicked a row in menu mode (no payload consumers): keep behaving as before.
-                visible = false
-                input.focus = true
-            }
-        }
-    }
-
     Text {
         id: hint
         visible: false   // measurement only; the real hint is drawn inside `input`
@@ -231,6 +201,7 @@ Item {
         onTextEdited: {
             // The operator's own text now: the seed must never replace it.
             root.seededLine = ""
+            root.userCleared = (text === "")
             if (root.suppressing)
                 return   // the autofill's own programmatic write, not a user keystroke
             // Grew = a character was ADDED (typing); shrank = erased. root.text still
@@ -260,12 +231,22 @@ Item {
                 text = input.text
             }
             if (root.frozenText !== "") {
-                if (/\d$/.test(text) || text.length < root.frozenText.length) {
+                // A letter typed over the selected chapter digit ("1 John 1" + "n") is the next
+                // letter of the book, not a replacement chapter: it is dropped like any other
+                // letter typed against a fresh completion.
+                const tail = root.frozenSelTail
+                const base = root.frozenText.slice(0, root.frozenText.length - tail)
+                const extra = (tail > 0 && text.startsWith(base)) ? text.slice(base.length) : null
+                const letterOverTail = extra !== null && /^[A-Za-z]+$/.test(extra)
+                if (!letterOverTail && (/\d$/.test(text) || text.length < root.frozenText.length)) {
                     root.frozenText = ""
+                    root.frozenSelTail = 0
                 } else {
                     suppressing = true
                     input.text = root.frozenText
                     input.cursorPosition = input.text.length
+                    if (tail > 0)
+                        input.select(input.text.length - tail, input.text.length)
                     suppressing = false
                     return
                 }
@@ -275,55 +256,65 @@ Item {
             Qt.callLater(root.refreshSuggestions)
         }
         Keys.onUpPressed: (k) => {
-            if (sugPanel && sugPanel.visible) {
-                sugPanel.highlightedIndex = Math.max(0, sugPanel.highlightedIndex - 1)
-                k.accepted = true
-            } else if (root.popupSuppressed) {
+            if (root.matchesInPane) {
                 // (the walk lives in the pane; the caret must not jump to the ends)
                 k.accepted = true
                 root.stepMatch(-1)
             }
         }
         Keys.onDownPressed: (k) => {
-            if (sugPanel && sugPanel.visible) {
-                sugPanel.highlightedIndex = Math.min(sugPanel.model.length - 1, sugPanel.highlightedIndex + 1)
-                k.accepted = true
-            } else if (root.popupSuppressed) {
+            if (root.matchesInPane) {
                 k.accepted = true
                 root.stepMatch(1)
             }
         }
+        // The caret keys belong to the text. While the result list is up they hand over to
+        // its columns ONLY once the caret has nowhere left to go in that direction (empty
+        // box, or already at that end) — never while there is text to move through, which
+        // is what made the box feel frozen to the keyboard.
         Keys.onLeftPressed: (k) => {
-            if (root.listMode) {
+            if (root.listMode && input.selectionStart === input.selectionEnd
+                    && input.cursorPosition === 0) {
                 k.accepted = true
                 root.stepColumn(-1)
+            } else {
+                k.accepted = false   // the input moves the caret / collapses the selection
             }
         }
         Keys.onRightPressed: (k) => {
-            if (root.listMode) {
+            if (root.listMode && input.selectionStart === input.selectionEnd
+                    && input.cursorPosition === input.text.length) {
                 k.accepted = true
                 root.stepColumn(1)
+            } else {
+                k.accepted = false
             }
         }
         Keys.onReturnPressed: (k) => {
-            if (sugPanel && sugPanel.visible && sugPanel.highlightedIndex >= 0) {
-                k.accepted = true
-                sugPanel.itemPicked(sugPanel.highlightedIndex, sugPanel.model[sugPanel.highlightedIndex].payload)
+            k.accepted = true
+            // A chapter with no verse is finished first ("1 John 1" -> "1 John 1:1", and the pane
+            // lands on it); the next Enter is then the pick.
+            const filled = root.finishText ? root.finishText(root.text) : ""
+            if (filled !== "" && filled !== root.text) {
+                suppressing = true
+                input.text = filled
+                input.cursorPosition = input.text.length
+                suppressing = false
+                root.userCleared = false
+                root.text = input.text
+                root.frozenText = ""
+                root.frozenSelTail = 0
+                root.edited(input.text)
                 return
             }
             // Plain Enter: the box's own text is the pick (see `accepted`).
-            k.accepted = true
             root.accepted(root.text)
         }
         Keys.onEscapePressed: (k) => {
-            if (sugPanel && sugPanel.visible) {
-                sugPanel.visible = false
-                k.accepted = true
-                return
-            }
             k.accepted = true
             root.dismissed()
             input.clear()
+            root.userCleared = true
             root.frozenText = ""
             root.lastEditShrank = false
             root.text = ""
@@ -332,6 +323,7 @@ Item {
         onActiveFocusChanged: {
             if (!activeFocus)
                 return
+            root.userCleared = false   // a fresh focus fills the passage line as it always did
             root.applySeed()
             root.refreshSuggestions()
         }
@@ -359,14 +351,6 @@ Item {
         onClicked: {
             input.forceActiveFocus()
             root.applySeed()
-            if (root.suggestions && root.text !== "") {
-                if (sugPanel && sugPanel.visible) {
-                    sugPanel.visible = false   // catcher saw the press, popup already closing
-                } else if (Date.now() - root.sugOpenedAt > 350) {
-                    // (a catcher-closed popup lands here within milliseconds — stays closed)
-                    root.refreshSuggestions()
-                }
-            }
         }
         z: -1
     }
@@ -390,7 +374,7 @@ Item {
             id: clearArea
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: { input.clear(); root.frozenText = ""; root.lastEditShrank = false; root.text = ""; root.edited(""); input.forceActiveFocus() }
+            onClicked: { input.clear(); root.userCleared = true; root.frozenText = ""; root.lastEditShrank = false; root.text = ""; root.edited(""); input.forceActiveFocus() }
         }
     }
 

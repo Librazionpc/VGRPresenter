@@ -29,6 +29,18 @@ QString chain();
 QString guiChain();
 int guiChainRaw(const char **out);
 
+// "Am I the interface thread?" WITHOUT touching Qt's thread bookkeeping. QThread::currentThread()
+// is not a read: on a thread Qt did not start it creates and registers an "adopted" thread for the
+// caller, and when that thread later ends Qt's own cleanup faults (a null thread-data pointer, in
+// Qt6Core at one fixed offset). The loader reports that fault with its lock held, which freezes
+// EVERY thread of the process for ~20 s — the stall after going off air — and, when the report
+// escapes, is the Windows "stopped working" crash. Engine threads (the live render loop, the
+// log pump, the NDI feed) end constantly and must never be adopted, so no code that can run on
+// one may ask Qt which thread it is on: compare the native thread id with this one instead.
+// markGuiThread() is called once, on the interface thread, as soon as the application exists.
+void markGuiThread();
+bool onGuiThreadNow();
+
 // GUI-thread liveness, read by the watchdog. Cheap: one relaxed atomic store.
 void heartbeat();
 

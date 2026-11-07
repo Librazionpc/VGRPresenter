@@ -76,4 +76,25 @@ Result<void> WindowsThreading::SetThreadAffinity(std::thread& thread, unsigned c
                            "SetThreadAffinityMask failed: " + win::LastErrorString(GetLastError()));
     return Ok();
 }
+
+Result<void> WindowsThreading::SetThreadAffinityById(uint64_t nativeThreadId, unsigned cpu) {
+    if (cpu >= sizeof(DWORD_PTR) * 8)
+        return Error::Make(Err::InvalidArgument, "Threading",
+                           "cpu " + std::to_string(cpu) + " out of range for the affinity mask");
+    if (nativeThreadId == 0)
+        return Error::Make(Err::InvalidArgument, "Threading", "the thread has not started yet");
+    HANDLE h = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE,
+                          static_cast<DWORD>(nativeThreadId));
+    if (h == nullptr)
+        return Error::Make(Err::IoError, "Threading",
+                           "OpenThread failed: " + win::LastErrorString(GetLastError()));
+    const DWORD_PTR mask = DWORD_PTR(1) << cpu;
+    const bool ok = SetThreadAffinityMask(h, mask) != 0;
+    const DWORD err = ok ? 0 : GetLastError();
+    CloseHandle(h);
+    if (!ok)
+        return Error::Make(Err::IoError, "Threading",
+                           "SetThreadAffinityMask failed: " + win::LastErrorString(err));
+    return Ok();
+}
 } // namespace bps::platform

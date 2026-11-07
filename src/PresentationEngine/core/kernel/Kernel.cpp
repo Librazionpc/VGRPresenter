@@ -684,6 +684,19 @@ Result<void> Kernel::ShutdownSystems() {
     logger.Info(std::format("Kernel shutdown: tearing down {} systems", BootLog().size()),
                 "Kernel");
 
+    // Every step is named in the log BEFORE it runs and timed after: a teardown that stalls
+    // for tens of seconds or dies partway used to leave only "playout stopped" and then
+    // silence, with nothing saying which of ~30 engines it was inside.
+    auto step = [&logger](const char* name, const auto& fn) {
+        logger.Info(std::format("Kernel shutdown: {} ...", name), "Kernel");
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (ms >= 25)
+            logger.Info(std::format("Kernel shutdown: {} took {} ms", name, ms), "Kernel");
+    };
+
     // Modules (08) and plugins (09) first, in dependency-reverse order.
     auto& modules = ModuleManager::Instance();
     for (const auto& info : modules.Snapshot()) {
@@ -695,40 +708,40 @@ Result<void> Kernel::ShutdownSystems() {
     for (const auto& info : plugins.Snapshot())
         if (info.state != 0) (void)plugins.Unload(info.id);
 
-    (void)audio::AudioEngine::Instance().Shutdown();
-    (void)production::ProductionEngine::Instance().Shutdown();
+    step("audio::AudioEngine.Shutdown()", [&] { (void)audio::AudioEngine::Instance().Shutdown(); });
+    step("production::ProductionEngine.Shutdown()", [&] { (void)production::ProductionEngine::Instance().Shutdown(); });
     // Phase 14 (26) stops next: it was booted after the rest of the engines, so
     // it tears down before them.
-    (void)automation::FlowEngine::Instance().Shutdown();
+    step("automation::FlowEngine.Shutdown()", [&] { (void)automation::FlowEngine::Instance().Shutdown(); });
     // Phase 13 (25) and Phase 12 (24) stop before Scene (23): they were booted
     // after it, so they tear down in reverse order.
-    (void)song::SongEngine::Instance().Shutdown();
-    (void)bible::BibleEngine::Instance().Shutdown();
-    (void)scene::SceneCompositionEngine::Instance().Shutdown();
-    (void)media::MediaEngine::Instance().Shutdown();
-    (void)search::SearchEngine::Instance().Shutdown();
+    step("song::SongEngine.Shutdown()", [&] { (void)song::SongEngine::Instance().Shutdown(); });
+    step("bible::BibleEngine.Shutdown()", [&] { (void)bible::BibleEngine::Instance().Shutdown(); });
+    step("scene::SceneCompositionEngine.Shutdown()", [&] { (void)scene::SceneCompositionEngine::Instance().Shutdown(); });
+    step("media::MediaEngine.Shutdown()", [&] { (void)media::MediaEngine::Instance().Shutdown(); });
+    step("search::SearchEngine.Shutdown()", [&] { (void)search::SearchEngine::Instance().Shutdown(); });
     // The live render loop (19b) stops before the engines it renders through.
-    (void)live::LiveOutputController::Instance().Shutdown();
-    (void)presentation::PresentationEngine::Instance().Shutdown();
-    (void)display::DisplayEngine::Instance().Shutdown();
-    (void)rendering::RenderEngine::Instance().Shutdown();
+    step("live::LiveOutputController.Shutdown()", [&] { (void)live::LiveOutputController::Instance().Shutdown(); });
+    step("presentation::PresentationEngine.Shutdown()", [&] { (void)presentation::PresentationEngine::Instance().Shutdown(); });
+    step("display::DisplayEngine.Shutdown()", [&] { (void)display::DisplayEngine::Instance().Shutdown(); });
+    step("rendering::RenderEngine.Shutdown()", [&] { (void)rendering::RenderEngine::Instance().Shutdown(); });
     // Telemetry (16b) unsubscribes after the RenderEngine (17) stopped — no
     // more frames can arrive mid-unsubscribe.
-    (void)settings::Telemetry::Instance().Shutdown();
-    (void)adaptive::AdaptiveRuntime::Instance().Shutdown();
-    (void)project::DataManager::Instance().Shutdown();
-    (void)notification::NotificationService::Instance().Shutdown();
-    (void)RendererManager::Instance().Shutdown();
-    (void)DisplayManager::Instance().Shutdown();
-    (void)content::ContentManager::Instance().Shutdown();
-    (void)DatabaseManager::Instance().Shutdown();
-    (void)DriverManager::Instance().Shutdown();
-    (void)AssetManager::Instance().Shutdown();
+    step("settings::Telemetry.Shutdown()", [&] { (void)settings::Telemetry::Instance().Shutdown(); });
+    step("adaptive::AdaptiveRuntime.Shutdown()", [&] { (void)adaptive::AdaptiveRuntime::Instance().Shutdown(); });
+    step("project::DataManager.Shutdown()", [&] { (void)project::DataManager::Instance().Shutdown(); });
+    step("notification::NotificationService.Shutdown()", [&] { (void)notification::NotificationService::Instance().Shutdown(); });
+    step("RendererManager.Shutdown()", [&] { (void)RendererManager::Instance().Shutdown(); });
+    step("DisplayManager.Shutdown()", [&] { (void)DisplayManager::Instance().Shutdown(); });
+    step("content::ContentManager.Shutdown()", [&] { (void)content::ContentManager::Instance().Shutdown(); });
+    step("DatabaseManager.Shutdown()", [&] { (void)DatabaseManager::Instance().Shutdown(); });
+    step("DriverManager.Shutdown()", [&] { (void)DriverManager::Instance().Shutdown(); });
+    step("AssetManager.Shutdown()", [&] { (void)AssetManager::Instance().Shutdown(); });
 
     // Stop remote log streaming first (no broadcasts after the server is down),
     // then the IPC server itself (joins accept + connection threads).
     (void)Logger::Instance().RemoveSink("Remote");
-    (void)IpcServer::Instance().Shutdown();
+    step("IpcServer.Shutdown()", [&] { (void)IpcServer::Instance().Shutdown(); });
 
     // MemoryManager: verify no leaks attributed to core subsystems (11 §10).
     auto& mem = MemoryManager::Instance();
@@ -736,10 +749,10 @@ Result<void> Kernel::ShutdownSystems() {
         logger.Warning("MemoryManager: " + leaks.error().message, "Kernel");
 
     // Resource -> Scheduler -> Threads -> Bus -> Services -> Config -> Logs.
-    (void)ResourceManager::Instance().Shutdown();
-    (void)TaskScheduler::Instance().Shutdown();
-    (void)ThreadPool::Instance().Shutdown();
-    (void)ServiceManager::Instance().DestroyAll();
+    step("ResourceManager.Shutdown()", [&] { (void)ResourceManager::Instance().Shutdown(); });
+    step("TaskScheduler.Shutdown()", [&] { (void)TaskScheduler::Instance().Shutdown(); });
+    step("ThreadPool.Shutdown()", [&] { (void)ThreadPool::Instance().Shutdown(); });
+    step("ServiceManager.DestroyAll()", [&] { (void)ServiceManager::Instance().DestroyAll(); });
     logger.Info("Kernel shutdown complete", "Kernel");
     (void)Logger::Instance().Shutdown();
     return Ok();

@@ -1134,7 +1134,11 @@ ApplicationWindow {
     readonly property string twQueryRaw: (typeof SelfTestTableWalkQuery !== "undefined")
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
     readonly property bool twGoLive: window.twQueryRaw.indexOf("live:") === 0
-    readonly property string twSearchQuery: window.twGoLive ? window.twQueryRaw.slice(5) : window.twQueryRaw
+    // "live:swap:<table query>" = after the Table pick is on air, change to a Bible pick, show it, and
+    // go off air (the user's stall report), timing every step with a GUI-gap heartbeat.
+    readonly property string twAfterLive: window.twGoLive ? window.twQueryRaw.slice(5) : window.twQueryRaw
+    readonly property bool twSwap: window.twAfterLive.indexOf("swap:") === 0
+    readonly property string twSearchQuery: window.twSwap ? window.twAfterLive.slice(5) : window.twAfterLive
     readonly property bool twExpectBible: window.twSearchQuery.indexOf("bible:") === 0
     readonly property string twQuery: window.twExpectBible
                                     ? window.twSearchQuery.slice(6) : window.twSearchQuery
@@ -1378,12 +1382,93 @@ ApplicationWindow {
             if (listPane)
                 EngineBridge.log("info", "TWGRAB", "list afterpick " + listPane.selfTestListState())
             EngineBridge.log("info", "TWGRAB", "phase=pick3done")
+            if (window.twSwap) {
+                twSwapOpen.restart()
+                return
+            }
             // The same double-click in SLIDE mode, for the timing breakdown (PickCost lines in engine.log).
             if (window.setReadingScrollMode(false, "tablewalk-slide")) {
                 twSlidePick.restart()
                 return
             }
             selfTestTableWalkPress.restart()
+        }
+    }
+    // ---- swap scenario: Table live -> Bible live -> off air (VGR_TABLEWALK_QUERY="live:swap:...") ----
+    property double twSwapBeat: 0
+    property int twSwapTries: 0
+    Timer {
+        id: twSwapHeartbeat
+        interval: 250
+        repeat: true
+        running: window.twSwap
+        onTriggered: {
+            const now = Date.now()
+            if (window.twSwapBeat > 0 && now - window.twSwapBeat > 1500)
+                console.log("[SELFTEST-SWAP] GUI GAP " + (now - window.twSwapBeat) + " ms")
+            window.twSwapBeat = now
+        }
+    }
+    Timer {
+        id: twSwapOpen
+        interval: 2000
+        onTriggered: {
+            console.log("[SELFTEST-SWAP] table live settled; opening a Bible pick")
+            quickSearch.openSearch()
+            quickSearch.query = "Genesis 1:2"
+            quickSearch.refresh()
+            window.twSwapTries = 0
+            twSwapPick.restart()
+        }
+    }
+    Timer {
+        id: twSwapPick
+        interval: 2500
+        repeat: true
+        onTriggered: {
+            const r = quickSearch.results.find((result) => result.kind === "bible")
+            if (!r && ++window.twSwapTries < 10)
+                return
+            twSwapPick.stop()
+            if (!r) {
+                console.log("[SELFTEST-SWAP] FAIL no bible result")
+                SelfTest.quit()
+                return
+            }
+            console.log("[SELFTEST-SWAP] choosing bible result " + JSON.stringify(String(r.title)))
+            quickSearch.choose(r)
+            twSwapPlay.restart()
+        }
+    }
+    Timer {
+        id: twSwapPlay
+        interval: 6000
+        onTriggered: {
+            const pane = SelfTest.findItem("selfTestScripturePane")
+            console.log("[SELFTEST-SWAP] bible pane=" + (pane ? "yes" : "no")
+                        + " selected=" + (pane ? JSON.stringify(pane.selected) : "[]"))
+            if (pane)
+                pane.playPicked()
+            twSwapStop.restart()
+        }
+    }
+    Timer {
+        id: twSwapStop
+        interval: 6000
+        onTriggered: {
+            console.log("[SELFTEST-SWAP] bible on air; going off air now (live=" + LiveOutputService.live + ")")
+            const t0 = Date.now()
+            LiveOutputService.stop()
+            console.log("[SELFTEST-SWAP] stop() returned after " + (Date.now() - t0) + " ms")
+            twSwapDone.restart()
+        }
+    }
+    Timer {
+        id: twSwapDone
+        interval: 45000
+        onTriggered: {
+            console.log("[SELFTEST-SWAP] done")
+            SelfTest.quit()
         }
     }
     Timer {
@@ -5245,12 +5330,66 @@ ApplicationWindow {
                         + " verdict=" + (atNumber === 56 ? "moved" : "stayed"))
             SelfTest.grab("selfTestTablePane", "seed_after.png")
             SelfTest.grab("selfTestLibraryTabBar", "seed_box.png")
-            selfTestSeedClick.restart()
+            window.seedEditStep = 0
+            selfTestSeedEdit.restart()
         }
     }
     function seedStagedTitle() {
         const staged = LiveOutputService.stagedSlide
         return staged && staged.title !== undefined ? String(staged.title) : ""
+    }
+    // ---- editing the box with the keyboard: the caret keys and Backspace must act on the text ----
+    property int seedEditStep: 0
+    function seedEditLog(tag) {
+        const f = SelfTest.findItem("selfTestSearchInput")
+        const box = SelfTest.findItem("selfTestSearchBox")
+        console.log("[SELFTEST-SEEDEDIT] " + tag + " text='" + (f ? f.text : "-") + "' caret=" + (f ? f.cursorPosition : -1)
+                    + " sel='" + (f ? f.selectedText : "-") + "' len=" + (f ? f.text.length : -1) + " boxW=" + (box ? Math.round(box.width) : -1)
+                    + " focus=" + (f ? f.activeFocus : "-"))
+    }
+    Timer {
+        id: selfTestSeedEdit
+        interval: 900
+        onTriggered: {
+            const step = window.seedEditStep++
+            if (step === 0) {
+                window.seedEditLog("start")
+                SelfTest.type("←←←")
+            } else if (step === 1) {
+                window.seedEditLog("after-3-left")
+                SelfTest.type("")
+            } else if (step === 2) {
+                window.seedEditLog("after-backspace")
+            } else if (step === 3) {
+                window.seedEditLog("after-backspace+settle")
+                SelfTest.grab("selfTestLibraryTabBar", "seed_edit.png")
+                SelfTest.type("→→→→→→")
+            } else if (step === 4) {
+                window.seedEditLog("after-6-right")
+                const f = SelfTest.findItem("selfTestSearchInput")
+                let erase = ""
+                for (let i = 0; i < (f ? f.text.length : 0) + 2; ++i)
+                    erase += ""
+                SelfTest.type(erase)
+            } else if (step === 5) {
+                window.seedEditLog("after-erase-all")
+            } else if (step < 14) {
+                if (step === 6) showScreen.showInLibrary("scripture", "")
+                if (step === 7) { SelfTest.focusItem("selfTestSearchInput"); SelfTest.type(""); SelfTest.type("1joh") }
+                if (step === 9) SelfTest.type("
+")
+                if (step === 10) SelfTest.type("1joh")
+                if (step === 11) SelfTest.type("n")
+                if (step === 12) SelfTest.type("2")
+                window.seedEditLog("erased+" + ((step - 5) * 0.9).toFixed(1) + "s")
+            } else {
+                window.seedEditLog("final")
+                selfTestSeedEdit.stop()
+                selfTestSeedClick.restart()
+                return
+            }
+            selfTestSeedEdit.restart()
+        }
     }
     Timer {
         id: selfTestSeedClick
@@ -7206,6 +7345,154 @@ ApplicationWindow {
                 console.log("[SELFTEST-VIDEOPERF] done samples=" + window.vpSamples)
                 SelfTest.quit()
             }
+        }
+    }
+    // ---- VIDEO RATE TEST (VGR_VIDEOFPS_TEST=1, file = VGR_VIDEOFPS_FILE) -----------------------
+    // The integrated camera first, then the video file, each on air through the real path. Every two
+    // seconds: the SOURCE's frames per second (the camera tap / the decoder's own count) next to what
+    // the program loop composed, what the NDI feed sent and what each output received. The outputs
+    // must keep up with the source — under load too (the runner script burns the CPUs meanwhile).
+    property var vfGpuBefore: undefined
+    property string vfPhase: ""
+    property int vfSamples: 0
+    property var vfPrev: ({})
+    function vfSnapshot() {
+        const snap = { t: Date.now(), tile: Number(LiveOutputService.frameRev), cam: Number(LiveOutputService.inputRev),
+                       media: Number(LiveOutputService.mediaFramesDecoded()),
+                       loop: Number(LiveOutputService.framesSentNow()),
+                       ndi: Number(LiveOutputService.ndiFramesSent), out: ({}) }
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const o = OutputListModel.getOutput(i)
+            const name = String(o && o.name !== undefined ? o.name : ("out" + i))
+            const rt = LiveOutputService.outputRuntime[name] || null
+            snap.out[name] = rt ? (Number(rt.frames) || 0) : 0
+        }
+        return snap
+    }
+    // Interface-thread responsiveness while the video runs: a 16 ms timer's real gaps. The audio meters
+    // and every animation ride this thread, so a gap well above 16 ms IS the stutter.
+    property real vfLastGui: 0
+    property real vfGuiMax: 0
+    property real vfGuiSum: 0
+    property int vfGuiN: 0
+    Timer {
+        interval: 16
+        repeat: true
+        running: typeof SelfTestVideoFps !== "undefined" && SelfTestVideoFps
+        onTriggered: {
+            const t = Date.now()
+            if (window.vfLastGui > 0) {
+                const gap = t - window.vfLastGui
+                window.vfGuiSum += gap
+                window.vfGuiN += 1
+                if (gap > window.vfGuiMax) window.vfGuiMax = gap
+            }
+            window.vfLastGui = t
+        }
+    }
+    Timer {   // the baseline before anything is on air
+        interval: 2000
+        repeat: true
+        running: typeof SelfTestVideoFps !== "undefined" && SelfTestVideoFps && window.vfPhase === ""
+        onTriggered: {
+            console.log("[SELFTEST-VIDEOFPS] phase=idle gui=" + (window.vfGuiN > 0 ? (window.vfGuiSum / window.vfGuiN).toFixed(1) : "-")
+                        + "/" + window.vfGuiMax.toFixed(0) + "ms")
+            window.vfGuiSum = 0; window.vfGuiN = 0; window.vfGuiMax = 0
+        }
+    }
+    function vfReport() {
+        const guiLine = " gui=" + (window.vfGuiN > 0 ? (window.vfGuiSum / window.vfGuiN).toFixed(1) : "-")
+                        + "/" + window.vfGuiMax.toFixed(0) + "ms"
+        window.vfGuiSum = 0; window.vfGuiN = 0; window.vfGuiMax = 0
+        const now = window.vfSnapshot()
+        const prev = window.vfPrev
+        const dt = prev.t ? (now.t - prev.t) / 1000 : 0
+        if (dt > 0.2) {
+            const src = window.vfPhase === "camera" ? (now.cam - prev.cam) : (now.media - prev.media)
+            let line = "[SELFTEST-VIDEOFPS] phase=" + window.vfPhase + " dt=" + dt.toFixed(2)
+                       + " source=" + (src / dt).toFixed(1)
+                       + " loop=" + ((now.loop - prev.loop) / dt).toFixed(1)
+                       + " tile=" + ((now.tile - prev.tile) / dt).toFixed(1)
+                       + " ndi=" + ((now.ndi - prev.ndi) / dt).toFixed(1) + guiLine
+            for (const k in now.out)
+                line += " out[" + k + "]=" + ((now.out[k] - (prev.out[k] || 0)) / dt).toFixed(1)
+            console.log(line)
+        }
+        window.vfPrev = now
+    }
+    Timer {
+        id: selfTestVideoFpsStart
+        running: typeof SelfTestVideoFps !== "undefined" && SelfTestVideoFps
+        interval: 9000
+        onTriggered: {
+            // VGR_VIDEOFPS_GPU=1: measure the GPU renderer; the user's own choice is put back at the end.
+            if (typeof SelfTestVideoGpu !== "undefined" && SelfTestVideoGpu) {
+                window.vfGpuBefore = SettingsService.value("preferences.hardwareAcceleration")
+                SettingsService.setValue("preferences.hardwareAcceleration", true)
+                console.log("[SELFTEST-VIDEOFPS] GPU renderer requested (was " + window.vfGpuBefore + ")")
+            }
+            let label = ""
+            for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+                const row = VideoSourceListModel.getSource(i)
+                const l = String(row && row.sublabel ? row.sublabel : "").trim()
+                if (String(row.kind || "") === "camera" && l !== "") { label = l; break }
+            }
+            if (label !== "")
+                LiveOutputService.takeInput(label, "camera", "")
+            LiveOutputService.goLiveWithSlides("Video Rate Probe", [ {
+                valid: true, title: "Video Rate Probe", text: "video rate probe", background: "",
+                blocks: [ { kind: "text", text: "video rate probe", x: 60, y: 300, width: 630,
+                            height: 70, meta: { fontSize: 28 } } ] } ])
+            console.log("[SELFTEST-VIDEOFPS] camera=" + JSON.stringify(label) + " file="
+                        + JSON.stringify(String(SelfTestVideoFpsFile)))
+            window.vfPhase = "camera"
+            window.vfSamples = 0
+            window.vfPrev = ({})
+            selfTestVideoFpsWarm.restart()
+        }
+    }
+    Timer {
+        id: selfTestVideoFpsWarm
+        interval: 5000
+        onTriggered: {
+            window.vfPrev = window.vfSnapshot()
+            selfTestVideoFpsSample.restart()
+        }
+    }
+    Timer {
+        id: selfTestVideoFpsSample
+        interval: 2000
+        repeat: true
+        onTriggered: {
+            window.vfReport()
+            if (window.vfPhase === "file")
+                console.log("[SELFTEST-VIDEOFPS] file declares " + Number(LiveOutputService.mediaSourceFps()).toFixed(2)
+                            + " fps, state=" + LiveOutputService.mediaState)
+            if (window.vfSamples === 3) {   // LOOK at what the tiles show (build/vf_shot_*.png)
+                for (let t = 0; t < 2; ++t)
+                    SelfTest.grab("selfTestMonitorTile" + t, "vf_shot_" + window.vfPhase + "_" + t + ".png")
+            }
+            if (++window.vfSamples < 6)
+                return
+            selfTestVideoFpsSample.stop()
+            window.vfSamples = 0
+            if (window.vfPhase === "camera" && String(SelfTestVideoFpsFile) !== "") {
+                LiveOutputService.clearInput()
+                window.vfPhase = "file"
+                LiveOutputService.takeMedia(String(SelfTestVideoFpsFile), "video rate file")
+                if (LiveOutputService.mediaMuted === false)
+                    LiveOutputService.mediaToggleMuted()
+                window.vfPrev = ({})
+                selfTestVideoFpsWarm.restart()
+                return
+            }
+            if (typeof SelfTestVideoGpu !== "undefined" && SelfTestVideoGpu && window.vfGpuBefore !== undefined)
+                SettingsService.setValue("preferences.hardwareAcceleration", window.vfGpuBefore)
+            // Grab what an output tile shows, to LOOK at the frame (VGR_VIDEOFPS_SHOT=<prefix>).
+            console.log("[SELFTEST-VIDEOFPS] done")
+            LiveOutputService.clearMedia()
+            LiveOutputService.clearInput()
+            SelfTest.quit()
         }
     }
     // ---- Program-feed rate for a held camera (VGR_INPUTRATE_TEST=1) ----------

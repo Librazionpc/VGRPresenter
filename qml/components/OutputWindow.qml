@@ -149,11 +149,29 @@ Window {
     Connections {
         target: LiveOutputService
         function onMediaChanged() { root.refreshOnAirSlide() }
-        function onMediaTick() { root.refreshOnAirSlide() }
-        function onInputChanged() { root.refreshOnAirSlide() }
+        // Per decoded frame and position update: only a change of WHAT is on air recomposes the slide.
+        function onMediaTick() {
+            const key = LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaIsAudio
+                        + "|" + LiveOutputService.mediaName
+            if (key === root.lastMediaKey)
+                return
+            root.lastMediaKey = key
+            root.refreshOnAirSlide()
+        }
+        // See OutputMonitorTile: the picture changes every frame, the composition does not.
+        function onInputChanged() {
+            const key = LiveOutputService.inputLabel + "|" + LiveOutputService.inputKind
+                        + "|" + LiveOutputService.inputLive
+            if (key === root.lastInputKey)
+                return
+            root.lastInputKey = key
+            root.refreshOnAirSlide()
+        }
         function onStagedChanged() { root.refreshOnAirSlide() }
         function onOnAirChanged() { root.refreshOnAirSlide() }
     }
+    property string lastInputKey: ""
+    property string lastMediaKey: ""
     Component.onCompleted: root.refreshOnAirSlide()
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
@@ -161,13 +179,22 @@ Window {
 
     readonly property bool blacked: LiveOutputService.blackedOut
     readonly property bool inputTaken: !root.blacked && LiveOutputService.inputLabel !== ""
-    readonly property url inputSource: inputTaken
+    // The ENGINE already composes this output's picture — the video AND this output's slide, exactly
+    // what the NDI feed sends. While a video is on air and that frame is flowing, this window shows it
+    // instead of rebuilding it here: the raw video image (a JPEG decode on the interface thread for a
+    // camera, an image copy per frame for a file), the slide composed over it, and the overlays drawn a
+    // second time. Same pixels as NDI, and the interface thread does none of that work.
+    readonly property bool engineComposed: !root.blacked && root.hasFrame
+                                           && (root.inputTaken
+                                               || (LiveOutputService.mediaOnAir
+                                                   && !LiveOutputService.mediaIsAudio))
+    readonly property url inputSource: inputTaken && !engineComposed
         ? "image://videopreview/" + encodeURIComponent(LiveOutputService.inputLabel)
           + "?n=" + LiveOutputService.inputRev : ""
 
     readonly property bool mediaOnAir: !root.blacked && LiveOutputService.mediaOnAir
                                        && !root.inputTaken
-    readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio
+    readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio && !engineComposed
         ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
 
     readonly property string effectiveFit: root.onAirSlide.mediaFit || "contain"
@@ -199,7 +226,7 @@ Window {
 
     Image {
         anchors.fill: parent
-        visible: root.inputTaken
+        visible: root.inputTaken && !root.engineComposed
         source: root.inputSource
         fillMode: Image.PreserveAspectCrop
         cache: false
@@ -210,7 +237,7 @@ Window {
     // Taken media file on air — same convention as the input layer above, but loaded off the interface thread.
     LiveFrameImage {
         anchors.fill: parent
-        visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio
+        visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio && !root.engineComposed
         source: root.mediaSource
         fillMode: root.effectiveFillMode   // the file's own fill, else this output's
         sizeToItem: false                  // the provider stretches to a requested size; keep the file's aspect
@@ -220,11 +247,12 @@ Window {
     OverlayLayer {
         underSlide: true
         blacked: root.blacked
+        visible: !root.engineComposed   // the engine's frame already carries the overlays
     }
 
     DesignPreview {
         anchors.fill: parent
-        visible: !root.blacked && root.hasSlidePreview && !root.framePriority
+        visible: !root.blacked && root.hasSlidePreview && !root.framePriority && !root.engineComposed
         // Only Scroll mode draws the passage flow, matching the engine's
         // Slide::flowText contract. Slide mode renders the selected page whole.
         animateLineSteps: LiveOutputService.scrollMode
@@ -242,7 +270,8 @@ Window {
     LiveFrameImage {
         anchors.fill: parent
         visible: !root.blacked && root.hasFrame
-                 && (root.framePriority && !root.mediaOnAir && !root.inputTaken
+                 && (root.engineComposed
+                     || (root.framePriority && !root.mediaOnAir && !root.inputTaken)
                      || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
         source: root.frameSource
         fillMode: Image.Stretch
@@ -252,6 +281,7 @@ Window {
     // own text (FreeShow's own overlays-above-text order).
     OverlayLayer {
         blacked: root.blacked
+        visible: !root.engineComposed   // the engine's frame already carries the overlays
     }
 
     Item {

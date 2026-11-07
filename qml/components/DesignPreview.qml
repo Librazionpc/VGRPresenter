@@ -147,7 +147,7 @@ Item {
         const visible = Math.max(3, LiveOutputService.readingVisibleLinesFor(style))
         const first = Math.max(0, Math.floor(root.stepLine))
         const key = LiveOutputService.readingStageSerial + "|" + flow.length + "|" + flow.slice(0, 24)
-                    + "|" + style + "|" + visible
+                    + "|" + style + "|" + visible + "|" + LiveOutputService.readingAnchorSerial()
         const roomBelow = root.sliceFirst + root.sliceLines - (first + visible)
         // (a whole-passage surface answers from the memo too: re-slicing it every tick
         // bought the same text back)

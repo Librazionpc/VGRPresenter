@@ -10,6 +10,7 @@ public:
     std::string CurrentThreadName() const override;
     uint64_t CurrentThreadId() const override;
     Result<void> SetThreadAffinity(std::thread& thread, unsigned cpu) override;
+    Result<void> SetThreadAffinityById(uint64_t nativeThreadId, unsigned cpu) override;
     Result<void> SetCurrentThreadPriority(int priority) override;
 };
 } // namespace bps::platform

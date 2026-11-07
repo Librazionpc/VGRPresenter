@@ -72,10 +72,6 @@ Rectangle {
         const res = s.paneSuggestions(text)
         return Array.isArray(res) ? { rows: res, complete: "" } : res
     }
-    signal suggestionPicked(string pane, var ref)
-    // A suggestion row was hovered / un-hovered — relayed to the pane that offered
-    // the rows (the pane previews the row's content while the hover lasts).
-    signal suggestionHovered(string pane, int index, bool hovering)
 
     // ---- What the box STARTS with --------------------------------------------
     readonly property string searchSeed: {
@@ -94,7 +90,16 @@ Rectangle {
         anchors.right: parent.right
         anchors.top: parent.top
         height: parent.height
-        width: Math.max(100, Math.min(searchBox.implicitWidth, root.width - tabsRow.childrenRect.width - 16))
+        // At rest it keeps to the room the tabs leave; focused it opens up (see
+        // TabSearchBox.editing) to its full line, over the tabs if it has to.
+        z: searchBox.editing ? 10 : 0
+        width: {
+            const idle = Math.max(100, Math.min(searchBox.implicitWidth, root.width - tabsRow.childrenRect.width - 16))
+            if (!searchBox.editing)
+                return idle
+            return Math.max(idle, Math.min(Math.max(searchBox.implicitWidth, searchBox.editMinWidth), root.width - 16))
+        }
+        Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
         placeholder: qsTr("Search %1").arg(root.tabs[root.currentTab].label)
         // The passage the pane is on, ready to take a paragraph/verse number.
         seedText: root.searchSeed
@@ -102,6 +107,10 @@ Rectangle {
         // operator makes it their own query by typing in it.
         seedFollows: !root.searches[root.currentPane]
         function pushStored() {
+            // The box is the source of truth while an edit of it is still waiting for its beat to
+            // be stored: pushing the OLDER stored text back then wiped what had just been typed.
+            if (filterDebounce.running || root.pendingPane !== "")
+                return
             const want = root.searches[root.currentPane] !== undefined ? root.searches[root.currentPane] : ""
             if (searchBox.text !== want)
                 searchBox.resetText(want)
@@ -117,6 +126,7 @@ Rectangle {
             target: root
             function onCurrentPaneChanged() {
                 root.flushSearch()
+                searchBox.userCleared = false   // another tab: its passage line may fill again
                 searchBox.pushStored()
                 Qt.callLater(function () {
                     if (searchBox.text === "")
@@ -189,26 +199,15 @@ Rectangle {
             const s = root.suggesters[root.currentPane]
             return !!(s && s.searchMode)
         }
+        // Enter on a chapter with no verse fills the verse in (Scripture).
+        finishText: (text) => {
+            const s = root.suggesters[root.currentPane]
+            return (s && s.completeReference) ? String(s.completeReference(text) || "") : ""
+        }
         // The active tab's live reference suggestions (null on plain-filter tabs).
         suggestions: root.suggestions
-        // The Table's matches render IN THE PANE (matchesList) — the floating popup
-        // never opens there (user call: it covered the search box and the preview).
-        popupSuppressed: root.currentPane === "table"
-        onSuggestionPicked: (index, payload) => {
-            const s = root.suggesters[root.currentPane]
-            if (s && payload && payload.ref) {
-                root.suggestionPicked(root.currentPane, payload.ref)
-                if (s.searchReturn !== undefined && s.searchReturn !== null) {
-                    root.setSearchFor(root.currentPane, "")
-                    searchBox.resetText("")
-                }
-            }
-        }
-        onSuggestionHovered: (index, hovering) => {
-            const s = root.suggesters[root.currentPane]
-            if (s)
-                root.suggestionHovered(root.currentPane, index, hovering)
-        }
+        // The Table's matches render IN THE PANE (matchesList): Up/Down walk them.
+        matchesInPane: root.currentPane === "table"
     }
 
     Flow {

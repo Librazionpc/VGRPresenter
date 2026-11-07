@@ -69,7 +69,10 @@ Item {
         : (root.categoryTemplateOverrideId !== "" ? root.categoryTemplateOverrideId : root.outputStyleTemplateId)
     property int selectedSlide: -1
     property bool stageFirstPending: false
-    property string templatePromptedFor: ""
+    // The (show, template) pairs already warned about THIS SESSION. Once is enough: closing the notice
+    // is the answer, and opening the show again (or coming back to it) must not ask again. (It used to
+    // remember only the last one, so going A -> B -> A warned about A twice.)
+    property var templatePrompted: ({})
     onItemChanged: { selectedSlide = -1; root.refreshWallStepper() }
     onShowChanged: {
         if (stageFirstPending && show) {
@@ -196,10 +199,18 @@ Item {
             composed.bind = ""
             blocks.push(composed)
         }
+        // OMITTED = what the notice says it is: TEXT or MEDIA the template had no box for. A clock, a
+        // shape or any other non-content item is never "omitted text or media", and counting them made
+        // the notice come back for a show whose text had long been cleared.
+        const countsAsOmitted = (block) => {
+            const kind = root.blockKind(block)
+            return kind === "text" || ["image", "video", "audio", "media"].indexOf(kind) >= 0
+        }
         return {
             blocks: blocks,
             omitted: sources.filter((block, index) => !used[index]
-                && block._templateSynthetic !== true && root.sourceHasContent(block)).length
+                && block._templateSynthetic !== true && countsAsOmitted(block)
+                && root.sourceHasContent(block)).length
         }
     }
     function unmatchedItemCount(slide) {
@@ -220,8 +231,8 @@ Item {
             return
         const path = String(root.item?.ref ?? "")
         const promptKey = path + "|" + root.showTemplateId
-        if (path === "" || promptKey === root.templatePromptedFor) return
-        root.templatePromptedFor = promptKey
+        if (path === "" || root.templatePrompted[promptKey] === true) return
+        root.templatePrompted[promptKey] = true
         const actionId = "show.createTemplateFromMissingItems." + promptKey
         NotificationCenter.registerAction(actionId, function() {
             if (String(root.item?.ref ?? "") === path)

@@ -126,6 +126,8 @@ static const Suite kSuites[] = {
     {"rendering", "rgpu", TestRenderGpu},
     {"rendering", "routputs", TestRenderOutputs},
     {"rendering", "imgscale", TestImageScale},
+    {"rendering", "swfast", TestSoftwareFastPaths},
+    {"rendering", "svframes", TestSharedVideoFramesStayCorrect},
     {"rendering", "vframe", TestVideoLayerFrameRefresh},
     {"rendering", "seam", TestShapeEdgeSeams},
     {"rendering", "rengine", TestRenderEngine},

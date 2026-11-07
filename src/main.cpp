@@ -488,6 +488,7 @@ int main(int argc, char *argv[])
     qInstallMessageHandler(ForwardToEventBus);
 
     GuardedApplication app(argc, argv);
+    calltrace::markGuiThread();   // before anything can publish from another thread
     app.setApplicationName(QStringLiteral("VGRPresenter"));
     app.setOrganizationName(QStringLiteral("VGR"));
     const QString sourceSerifResource = QStringLiteral(":/fonts/SourceSerif4-VariableFont_opsz,wght.ttf");
@@ -538,6 +539,7 @@ int main(int argc, char *argv[])
         timeExitStep("SearchService.shutdown", [] { SearchService::instance().shutdown(); });
         timeExitStep("MediaLibraryService.shutdown", [] { MediaLibraryService::instance().shutdown(); });   // folder scans in progress
         timeExitStep("TheTableService.shutdownIndexing", [] { TheTableService::instance().shutdownIndexing(); });
+        timeExitStep("LiveOutputService.shutdownMedia", [] { LiveOutputService::instance().shutdownMedia(); });
         timeExitStep("LiveOutputService.shutdownNdiWorker", [] { LiveOutputService::instance().shutdownNdiWorker(); });
         timeExitStep("EngineWorker.shutdown", [] { vgr::EngineWorker::instance().shutdown(); });
         timeExitStep("TelemetryService.shutdownSampler", [] { TelemetryService::shutdownSampler(); });
@@ -922,6 +924,19 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestVideoPerf"),
         QVariant(qEnvironmentVariableIsSet("VGR_VIDEOPERF_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The video RATE test: the integrated camera, then a video file (VGR_VIDEOFPS_FILE), each measured
+    // against its own source rate, optionally while the machine is loaded (the runner script does that).
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestVideoFps"),
+        QVariant(qEnvironmentVariableIsSet("VGR_VIDEOFPS_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestVideoGpu"),
+        QVariant(qEnvironmentVariableIsSet("VGR_VIDEOFPS_GPU")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestVideoFpsFile"),
+        QVariant(qEnvironmentVariable("VGR_VIDEOFPS_FILE")));
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestBlackout"),
         QVariant(qEnvironmentVariableIsSet("VGR_BLACKOUT_TEST")

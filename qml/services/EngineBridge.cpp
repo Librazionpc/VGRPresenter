@@ -1975,6 +1975,14 @@ QImage EngineBridge::previewFrameFor(const QString &label)
     return devId.isEmpty() ? QImage{} : latestPreviewFrame(devId);
 }
 
+quint64 EngineBridge::previewFrameSeqFor(const QString &label)
+{
+    const QString devId = previewIds_.value(label.trimmed());
+    if (devId.isEmpty() || !bps::platform::PlatformAccessor::Installed())
+        return 0;
+    return bps::platform::PlatformAccessor::Get().Video().PreviewFrameSeq(devId.toStdString());
+}
+
 QImage EngineBridge::previewPixelsFor(const QString &label)
 {
     const QString devId = previewIds_.value(label.trimmed());

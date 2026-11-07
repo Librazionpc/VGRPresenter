@@ -1,3 +1,4 @@
+#include "core/common/StageTiming.hpp"
 #include "services/CallTrace.h"
 #include "services/LiveOutputService.h"
 #include "services/StepCost.hpp"
@@ -210,6 +211,11 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         setSlideReadingFlow(raw, scrollMode_,
                             raw.value(QStringLiteral("flowText")).toString(),
                             raw.value(QStringLiteral("flowChar"), 0.0).toDouble());
+        // The staged slide carries the line breaks cut when it was staged; the walk may have moved since, and
+        // every output's table is anchored at the word it has reached — what goes out is the CURRENT table.
+        if (scrollMode_ && lineSourceTextOnly_ && readingBudgetFitActive_ && !readingFlowText_.isEmpty()
+                && raw.value(QStringLiteral("flowText")).toString() == readingFlowText_)
+            raw.insert(QStringLiteral("flowBreaks"), readingBreaksFor(readingFlowText_));
         auto slide = ShowConverter::slideFromVariant(raw);
         qInfo("live slide: title='%s' rawHasBody=%d bodyChars=%d textChars=%d blocks=%d fill=%s "
               "flowChars=%d flowCharAt=%.2f",
@@ -767,10 +773,17 @@ QVariantMap LiveOutputService::readingStagedPreview(const QVariantMap &slide)
 QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
                                                  const QString &styleId) const
 {
+    // Interface-thread cost, counted: this is a whole slide converted and re-styled, and QML asks for it
+    // from many handlers. "previewWithStyle: N in 5 s" says how often; the figure beside it, how long.
+    static bps::timing::StageTiming timing("previewWithStyle", 5.0);
+    const auto started = std::chrono::steady_clock::now();
     const pl::Slide engineSlide = ShowConverter::slideFromVariant(slide);
-    return slideToVariantMap(&engineSlide,
-                             outputStyleForPreview(styleId,
-                                                   slide.value(QStringLiteral("tag")).toString()));
+    QVariantMap result = slideToVariantMap(&engineSlide,
+                                           outputStyleForPreview(styleId,
+                                                                 slide.value(QStringLiteral("tag")).toString()));
+    timing.Add("compose", bps::timing::MsSince(started));
+    timing.EndUnit();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -998,6 +1011,34 @@ void LiveOutputService::ensurePollTimer()
     poll_->setInterval(100);
     connect(poll_, &QTimer::timeout, this, &LiveOutputService::pollTick);
     poll_->start();
+
+    // THE MONITOR TILES' CLOCK. Every tile repaints when frameRev moves, and pollTick (100 ms, with all
+    // the slower bookkeeping) was the only thing moving it: a 30 fps video showed in the monitor at 10
+    // fps — it looked laggy whatever the engine did. This timer only compares two counters and bumps the
+    // revision, ~30 times a second, so the monitor follows the picture the engine actually composed.
+    auto *previewClock = new QTimer(this);
+    previewClock->setInterval(33);
+    previewClock->setTimerType(Qt::PreciseTimer);
+    connect(previewClock, &QTimer::timeout, this, [this]() {
+        auto &ctrl = bps::live::LiveOutputController::Instance();
+        bool moved = false;
+        if (ctrl.PreviewFrames() != previewFrames_) {
+            previewFrames_ = ctrl.PreviewFrames();
+            moved = true;
+        }
+        if (live_) {
+            const qulonglong sent = ctrl.FramesSent();
+            if (sent != framesSent_) {
+                framesSent_ = sent;
+                moved = true;
+            }
+        }
+        if (moved) {
+            ++frameRev_;
+            emit frameRevChanged();
+        }
+    });
+    previewClock->start();
 }
 
 void LiveOutputService::pollTick()
@@ -1083,6 +1124,76 @@ void LiveOutputService::pollTick()
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+QImage shrinkForPreview(const QImage &src, const QSize &target, Qt::AspectRatioMode mode)
+{
+    if (src.isNull() || target.width() < 1 || target.height() < 1)
+        return src;
+    const QSize dst = mode == Qt::IgnoreAspectRatio ? target : src.size().scaled(target, mode);
+    if (dst.width() < 1 || dst.height() < 1)
+        return src;
+    const int stepX = src.width() / dst.width();
+    const int stepY = src.height() / dst.height();
+    if ((stepX < 2 && stepY < 2) || (src.format() != QImage::Format_RGBA8888
+                                      && src.format() != QImage::Format_RGBA8888_Premultiplied
+                                      && src.format() != QImage::Format_ARGB32
+                                      && src.format() != QImage::Format_ARGB32_Premultiplied
+                                      && src.format() != QImage::Format_RGB32))
+        return src.scaled(target, mode, Qt::SmoothTransformation);
+    const bool rgbaOrder = src.format() == QImage::Format_RGBA8888
+                           || src.format() == QImage::Format_RGBA8888_Premultiplied;
+    const bool premult = src.format() == QImage::Format_RGBA8888_Premultiplied
+                         || src.format() == QImage::Format_ARGB32_Premultiplied;
+    constexpr int kGrid = 4;   // samples per axis inside each destination pixel's footprint
+    QImage out(dst, QImage::Format_RGBA8888);
+    const double fx = static_cast<double>(src.width()) / dst.width();
+    const double fy = static_cast<double>(src.height()) / dst.height();
+    // Source columns for one destination column, computed once for the whole image.
+    std::vector<int> cols(static_cast<size_t>(dst.width()) * kGrid);
+    for (int x = 0; x < dst.width(); ++x)
+        for (int k = 0; k < kGrid; ++k)
+            cols[static_cast<size_t>(x) * kGrid + k] =
+                std::min(src.width() - 1, static_cast<int>((x + (k + 0.5) / kGrid) * fx));
+    for (int y = 0; y < dst.height(); ++y) {
+        uchar *o = out.scanLine(y);
+        int rows[kGrid];
+        for (int k = 0; k < kGrid; ++k)
+            rows[k] = std::min(src.height() - 1, static_cast<int>((y + (k + 0.5) / kGrid) * fy));
+        for (int x = 0; x < dst.width(); ++x) {
+            unsigned sr = 0, sg = 0, sb = 0, sa = 0;
+            for (int ky = 0; ky < kGrid; ++ky) {
+                const uchar *row = src.constScanLine(rows[ky]);
+                for (int kx = 0; kx < kGrid; ++kx) {
+                    const uchar *p = row + cols[static_cast<size_t>(x) * kGrid + kx] * 4;
+                    // Bytes in memory: RGBA8888 -> R G B A; ARGB32/RGB32 (little endian) -> B G R A.
+                    const unsigned r = rgbaOrder ? p[0] : p[2];
+                    const unsigned g = p[1];
+                    const unsigned b = rgbaOrder ? p[2] : p[0];
+                    const unsigned a = src.format() == QImage::Format_RGB32 ? 255u : p[3];
+                    if (premult) { sr += r; sg += g; sb += b; }
+                    else { sr += r * a; sg += g * a; sb += b * a; }
+                    sa += a;
+                }
+            }
+            uchar *d = o + x * 4;
+            if (sa == 0) {
+                d[0] = d[1] = d[2] = d[3] = 0;
+            } else if (premult) {
+                // premultiplied sums -> straight: divide by the alpha average
+                d[0] = static_cast<uchar>(std::min<unsigned>(255, sr * 255 / sa));
+                d[1] = static_cast<uchar>(std::min<unsigned>(255, sg * 255 / sa));
+                d[2] = static_cast<uchar>(std::min<unsigned>(255, sb * 255 / sa));
+                d[3] = static_cast<uchar>(sa / (kGrid * kGrid));
+            } else {
+                d[0] = static_cast<uchar>(sr / sa);
+                d[1] = static_cast<uchar>(sg / sa);
+                d[2] = static_cast<uchar>(sb / sa);
+                d[3] = static_cast<uchar>(sa / (kGrid * kGrid));
+            }
+        }
+    }
+    return out;
+}
+
 QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
                                          const QSize &requestedSize)
 {
@@ -1173,7 +1284,7 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
     // loader thread now (the tiles' Images are asynchronous), not the interface thread.
     if (requestedSize.width() > 0 && requestedSize.height() > 0
         && (requestedSize.width() < out.width() || requestedSize.height() < out.height()))
-        out = out.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        out = shrinkForPreview(out, requestedSize, Qt::KeepAspectRatio);
     if (size)
         *size = out.size();
     return out;

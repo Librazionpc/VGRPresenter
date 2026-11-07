@@ -34,7 +34,7 @@ Result<void> ThreadPool::Initialize(size_t workerCount) {
 Result<void> ThreadPool::Shutdown() {
     if (!initialized_.load()) return Ok();
 
-    std::vector<std::thread> toJoin;
+    std::vector<QtThread> toJoin;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_.load()) return Ok();   // re-check: a concurrent Shutdown won
@@ -112,8 +112,8 @@ Result<void> ThreadPool::SetWorkerAffinity(size_t workerIndex, int cpu) {
     if (cpu < 0) return Error::Make(Err::InvalidArgument, "ThreadPool", "cpu must be >= 0");
     // Affinity control goes through the PAL (Phase 2): pthread_setaffinity_np
     // lives in platform/linux/LinuxThreading.cpp, never here.
-    auto r = platform::PlatformAccessor::Get().Threading().SetThreadAffinity(
-        workers_[workerIndex], static_cast<unsigned>(cpu));
+    auto r = platform::PlatformAccessor::Get().Threading().SetThreadAffinityById(
+        workers_[workerIndex].nativeId(), static_cast<unsigned>(cpu));
     if (!r.ok())
         return Error::Make(Err::Unsupported, "ThreadPool",
                            std::format("CPU affinity failed for cpu {}: {}", cpu,
@@ -176,9 +176,9 @@ void ThreadPool::WorkerLoop() {
             });
             // Cooperative shrink: exit if idle and above the desired count.
             if (queue_.empty() && workers_.size() > desiredWorkers_.load() && !shuttingDown_.load()) {
-                auto me = std::this_thread::get_id();
+                const auto me = static_cast<uint64_t>(reinterpret_cast<quintptr>(QThread::currentThreadId()));
                 for (auto it = workers_.begin(); it != workers_.end(); ++it) {
-                    if (it->get_id() == me) {
+                    if (it->nativeId() == me) {
                         it->detach();
                         workers_.erase(it);
                         break;

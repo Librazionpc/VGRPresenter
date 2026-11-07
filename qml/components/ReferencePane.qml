@@ -1264,7 +1264,11 @@ Item {
         const gold = String(Theme.highlightInk)
         return esc(source).replace(re, '<b><font color="' + gold + '">$1</font></b>')
     }
-    readonly property bool canHighlight: root.activeQuery.trim().length >= 2
+    // Words light up inside the verses ONLY for the pane's own words search (its pill). The tab
+    // box above is a search across the BOOKS (or sermons): what is typed there finds a book, it
+    // never runs against the words of the text, so it must not paint them either — "jo" lit up
+    // every "jo" in a chapter, and the seeded passage line lit up every "the" and "is".
+    readonly property bool canHighlight: root.searching && root.activeQuery.trim().length >= 2
 
     function citeRow(book, index, cite, paragraph) {
         let code = "", title = cite
@@ -1381,6 +1385,17 @@ Item {
             }
             return { rows: [], complete: "" }
         }
+        // AUTO-CORRECT: what is typed, ignoring spaces, case and punctuation ("1joh", "1 JOH"),
+        // is the start of exactly ONE book's name -> the box takes the book's own spelling plus
+        // chapter 1 ("1 John 1"), the chapter digit selected so the next number typed replaces
+        // it. Several books = no guess.
+        const squash = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, "")
+        const squashed = squash(needle)
+        if (squashed !== "" && !/^d+$/.test(squashed)) {
+            const named = root.books.filter((b) => squash(b.name).indexOf(squashed) === 0)
+            if (named.length === 1)
+                return { rows: [], complete: "", replace: named[0].name + " 1", replaceSelect: 1 }
+        }
         const starts = root.books.filter((b) => b.name.toLowerCase().indexOf(needle) === 0 ||
                                                 needle.indexOf(b.name.toLowerCase()) === 0)
         if (starts.length === 1) {
@@ -1400,20 +1415,8 @@ Item {
             // the popup list is a Flickable — it scrolls under its own maxHeight cap.
             return { rows: rows, complete: completion }
         }
-        const resolved = root.adapter.resolve(String(text), sourceId)
-        if (resolved.bookId !== undefined)
-            return { rows: [], complete: completion }
-        // Not resolved yet (an ambiguous prefix like "sa", or no book at all): the books
-        // whose NAME contains the text, as rows to pick from.
-        for (const b of root.books) {
-            if (b.name.toLowerCase().indexOf(needle) >= 0) {
-                const size = b.verseCounts && b.verseCounts.length === b.chapters.length
-                             ? b.verseCounts.reduce((a, c) => a + c, 0) : b.chapters.length
-                rows.push({ label: b.name, detail: b.verseCounts ? size + " verses" : size + " sermons",
-                            ref: { bookId: b.id, chapter: 0, verseStart: 0, verseEnd: 0 } })
-            }
-        }
-        return { rows: rows.slice(0, 8), complete: completion }
+        // Nothing to LIST: the tab box has no dropdown. Only the inline completion is offered.
+        return { rows: [], complete: completion }
     }
 
     property var resolvedWords: []
@@ -1595,10 +1598,23 @@ Item {
                 root.column = 2
             return { rows: [], complete: res.complete || "" }
         }
-        root.lastSuggestRows = res.rows || []
-        return { rows: (res.rows || []).map((row) => ({ label: row.label, trailing: row.trailing || row.detail || "",
-                                                        payload: row.cite !== undefined ? { ref: row.ref, cite: row.cite } : { ref: row.ref } })),
-                 complete: res.complete || "" }
+        root.lastSuggestRows = []
+        return { rows: [], complete: res.complete || "", replace: res.replace || "",
+                 replaceSelect: res.replaceSelect || 0 }
+    }
+    // Enter on a reference that names a chapter but no verse ("1 John 1"): the verse it means is
+    // the first, so the box is filled in as "1 John 1:1" (and the pane lands on it).
+    function completeReference(text) {
+        if (!root.adapter || root.isTablePane)
+            return ""
+        const typed = String(text).trim()
+        if (typed === "")
+            return ""
+        const ref = root.adapter.resolve(typed, root.sourceId)
+        if (ref.bookId === undefined || !(Number(ref.chapter) > 0) || Number(ref.verseStart) > 0)
+            return ""
+        const book = root.books.find((b) => b.id === ref.bookId)
+        return book ? String(book.name) + " " + Number(ref.chapter) + ":1" : ""
     }
     readonly property bool isTablePane: root.books.length > 0 && root.books[0].chapterTitles !== undefined
     function paneSearchSeed() {

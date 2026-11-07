@@ -725,7 +725,9 @@ void LiveOutputService::ensureNdiWorker()
               ndiSendTimer_ != nullptr);
         ndiWorker_->deleteLater();
     });
-    ndiThread_->start();
+    // The feed thread paces and sends every NDI frame: High, so a loaded machine delays other work
+    // before it makes the stream stutter.
+    ndiThread_->start(QThread::HighPriority);
 }
 
 void LiveOutputService::clearNdiPlan()

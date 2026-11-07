@@ -24,7 +24,7 @@ Result<void> TaskScheduler::Initialize() {
 #if defined(_WIN32)
     timeBeginPeriod(1);
 #endif
-    thread_ = std::thread(&TaskScheduler::TimerLoop, this);
+    thread_ = QtThread(&TaskScheduler::TimerLoop, this);
     return Ok();
 }
 

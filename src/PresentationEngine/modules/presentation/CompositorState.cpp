@@ -3,6 +3,7 @@
 #include "core/logging/Logger.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 #include <iterator>
 
@@ -39,6 +40,7 @@ void CompositorState::SetMediaFrame(MediaFrame frame) {
         flipped = mediaFrame_.empty() != incomingEmpty;
         mediaFrame_ = std::move(frame);
         ++mediaSeq_;
+        ++mediaPixelsGen_;
     }
     if (!flipped)
         return;   // same state as before — nothing new to report
@@ -69,6 +71,8 @@ void CompositorState::ClearMedia() {
         std::lock_guard<std::mutex> lock(mutex_);
         hadFrame = !mediaFrame_.empty();
         mediaFrame_ = MediaFrame{};
+        mediaImage_.reset();
+        ++mediaPixelsGen_;
     }
     if (hadFrame)
         Logger::Instance().Info("media hand-off: engine copy CLEARED — media layer will be blank", "Compositor");
@@ -77,6 +81,28 @@ void CompositorState::ClearMedia() {
 CompositorState::MediaFrame CompositorState::GetMediaFrame() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return mediaFrame_;
+}
+
+CompositorState::SharedMedia CompositorState::GetMediaShared() const {
+    SharedMedia out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (mediaFrame_.empty())
+        return out;
+    const size_t pixels = static_cast<size_t>(mediaFrame_.width) * mediaFrame_.height;
+    if (mediaFrame_.rgba.size() < pixels * 4)
+        return out;
+    if (!mediaImage_ || mediaImageGen_ != mediaPixelsGen_) {
+        auto img = std::make_shared<rendering::RgbaImage>();
+        img->width = static_cast<int>(mediaFrame_.width);
+        img->height = static_cast<int>(mediaFrame_.height);
+        img->pixels.resize(pixels);
+        std::memcpy(img->pixels.data(), mediaFrame_.rgba.data(), pixels * sizeof(uint32_t));
+        mediaImage_ = std::move(img);
+        mediaImageGen_ = mediaPixelsGen_;
+    }
+    out.image = mediaImage_;
+    out.fit = mediaFrame_.fit;
+    return out;
 }
 
 bool CompositorState::HasMediaFrame() const {

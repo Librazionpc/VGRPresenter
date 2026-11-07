@@ -2,17 +2,6 @@
 
 ## New in the upcoming update
 
-- **Build the output setup you need.** Create reusable presets for video recording, audio-only recording, and streaming, then assign them to outputs in Routing.
-- **More control over your recordings.** Choose video formats and quality, or save audio as WAV, M4A, or MP3.
-- **Start fresh when installing.** An optional clean install resets settings and libraries while keeping your recordings.
-- **A clearer workspace.** Routing and settings have been refreshed to make connections and choices easier to follow.
-- **Your setup comes with the installer.** Fresh installs can start with your current preferences, output routing, styles, templates, and content libraries.
-- **Smoother Scripture controls and previews.** Bible scroll buttons respond while passage layout loads, and selected slides appear sooner in monitor previews.
-- **FreeShow imports preserve slide layouts.** Text boxes stay separate, and supported background images come along with each slide.
-- **Choose Shows templates per category and output style.** In Settings · Styles, assign a template to each Shows category and turn on its Override pill to use that layout on outputs wearing that style. Each output keeps its own choice.
-- **Show templates use the slide's text items.** Template text boxes now receive the authored slide text instead of accidentally displaying labels such as “Verse 2.”
-- **NDI respects template text layout.** Text alignment, line spacing, and block padding now carry through to the Lower Third output.
-
 # VGRPresenter 0.1.2
 
 ## What's new
@@ -42,6 +31,8 @@
 - An NDI output added while live no longer holds its frames until the app is restarted.
 - A stalled output's recovery now resets that output's own sender correctly.
 - UI Fixes
+
+## Fixed in the upcoming update
 
 ## Windows downloads
 

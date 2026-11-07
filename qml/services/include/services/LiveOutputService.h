@@ -139,6 +139,10 @@ public:
     static LiveOutputService *create(QQmlEngine *engine, QJSEngine *jsEngine);
     static LiveOutputService &instance();
     Q_INVOKABLE void shutdownNdiWorker();
+    // Quit path: take the media-on-air player (Windows Media Foundation threads behind it) down
+    // while the event loop and the engine are still alive, rather than leaving it to the QML
+    // singleton's destructor after Qt's own thread bookkeeping is gone.
+    void shutdownMedia();
 
     bool live() const { return live_; }
     qulonglong frameRev() const { return frameRev_; }
@@ -147,6 +151,11 @@ public:
     qulonglong framesSent() const { return framesSent_; }
     Q_INVOKABLE qulonglong previewFramesNow() const;
     Q_INVOKABLE qulonglong framesSentNow() const;
+    // Frames the media decoder has delivered since the app started (counted on the decoder's thread,
+    // so it is the SOURCE's rate, whatever the interface thread managed to show), and the frame rate
+    // the file itself declares. The video-rate self-test compares the outputs against these.
+    Q_INVOKABLE qulonglong mediaFramesDecoded() const { return mediaFramesDecoded_.load(std::memory_order_relaxed); }
+    Q_INVOKABLE double mediaSourceFps() const;
     QString onAirTitle() const { return onAirTitle_; }
     int onAirIndex() const { return onAirIndex_; }
     int onAirTotal() const { return onAirTotal_; }
@@ -617,6 +626,27 @@ private:
         QString sig;
     };
     QHash<QString, ScrollColumn> scrollColumns_;
+    // EVERY SCREEN'S FIRST LINE STARTS ON THE SAME WORD. Each output wraps the passage at its own size, so a
+    // character that begins a line on one screen is mid-line on another, and that screen's top line began
+    // a few words earlier ("darkness was upon the face…" on the Lower Third where Main began "was upon…").
+    // The line table of every output is therefore ANCHORED at the character the walk is going to: the lines
+    // before it stay as they were (nothing on screen jumps), and from it on the passage is wrapped afresh at
+    // that output's own font and box — a small reflow below the top line, and the same word at the top
+    // of every screen. See anchorReadingTablesAt.
+    struct AnchoredLines {
+        QString baseKey;          // which (output, size, passage) this was derived for: another one, start over
+        int anchor = -1;          // the window-local character the table is anchored at
+        QVector<int> seams;       // anchors that cut the line before them short (a slice must break there too)
+        StyleRunLines table;
+    };
+    mutable QHash<QString, AnchoredLines> anchoredLines_;   // by output style
+    void anchorReadingTablesAt(int windowChar);
+    quint64 anchorSerial_ = 0;   // moves whenever any output's anchored table changed
+public:
+    // A surface keys its slice on this: the lines move when the anchor does, with the same passage and size.
+    Q_INVOKABLE qulonglong readingAnchorSerial() const { return anchorSerial_; }
+private:
+    const AnchoredLines *anchoredLinesFor(const QString &styleId, const QString &text) const;
     QHash<QString, qreal> scrollSizeBySig_;   // block + pick + budget -> solved size
     QSet<QString> scrollSizePending_;          // sigs being solved on a worker (QML retries on readingScrollChanged)
     mutable QHash<QString, double> readingRunSizeForStyle_;
@@ -876,6 +906,7 @@ private:
     // The taken input's last pushed frame (cacheKey), for the same reason
     // BusFeed::lastFrameKey exists — a stationary source costs nothing.
     qint64 inputFrameKey_ = 0;
+    quint64 inputFrameSeq_ = 0;   // the taken camera/screen tap's frame counter at the last pump tick
     QHash<QString, qint64> cardFrameKeys_;
     QVariantMap cardPreviews_;
     // Labels whose taps have decoded at least one frame (pump-maintained);
@@ -910,6 +941,11 @@ private:
         mediaFrameShared_.store(std::make_shared<const QImage>(frame));
     }
     std::atomic<quint64> mediaTakeToken_{0};
+    // A media frame's trip to the interface thread is ONE queued update at a time (the decoder thread
+    // sets this, the interface thread clears it): the compositor gets every frame, the interface only
+    // ever the newest.
+    std::atomic<bool> mediaGuiUpdatePending_{false};
+    std::atomic<quint64> mediaFramesDecoded_{0};
 
     // ---- NDI program sender (see the properties above) --------------------
     bool ndiSending_ = false;                    // GUI thread only
@@ -1002,6 +1038,13 @@ private:
     // interval at the published rate, and send at most one frame per period.
     void ndiWorkerTick();
 };
+
+// A picture shrunk for a small preview tile, quickly: each destination pixel averages a small grid of
+// source pixels (alpha-weighted, so a transparent area does not darken its edges). QImage::scaled with
+// SmoothTransformation took ~10 ms for a 1080p frame, per tile, per frame, on the one image-loader
+// thread every tile shares — the queue the interface thread then waited on. Enlarging or a mild
+// shrink (under 2x) falls back to Qt's own scaler.
+QImage shrinkForPreview(const QImage &src, const QSize &target, Qt::AspectRatioMode mode);
 
 // QQuickImageProvider over the engine preview output's last frame:
 //   image://livepreview?v=<frameRev>

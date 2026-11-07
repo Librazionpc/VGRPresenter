@@ -126,6 +126,24 @@ Result<void> FrameBufferOutput::Present(const Frame& frame) {
     return Ok();
 }
 
+Result<void> FrameBufferOutput::PresentShared(const std::shared_ptr<const Frame>& frame) {
+    if (!frame) return Ok();
+    // Needs scaling: the ordinary path makes this output its own scaled copy.
+    if (frame->width != static_cast<int>(target_.width) || frame->height != static_cast<int>(target_.height))
+        return Present(*frame);
+    if (!enabled_.load()) return Ok();
+    lastPresentMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count());
+    ReportPresentSanity(name_, frame->sceneId, frame->width, frame->height, frame->pixels);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastFrame_ = frame;   // shared and immutable: every holder of it reads, nobody writes
+    }
+    received_.fetch_add(1);
+    return Ok();
+}
+
 Frame FrameBufferOutput::LastFrame() const {
     const auto snapshot = LastFrameSnapshot();
     return snapshot ? *snapshot : Frame{};
@@ -190,6 +208,10 @@ std::vector<std::shared_ptr<IRenderOutput>> OutputManager::All() const {
 }
 
 void OutputManager::Distribute(const Frame& frame) {
+    Distribute(std::make_shared<const Frame>(frame));
+}
+
+void OutputManager::Distribute(const std::shared_ptr<const Frame>& frame) {
     std::vector<std::shared_ptr<IRenderOutput>> enabled;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -197,7 +219,7 @@ void OutputManager::Distribute(const Frame& frame) {
         for (const auto& o : outputs_)
             if (o->Enabled() && o->AcceptsDistributedFrames()) enabled.push_back(o);
     }
-    for (const auto& o : enabled) (void)o->Present(frame);
+    for (const auto& o : enabled) (void)o->PresentShared(frame);
 
     if (auto* t = bps::ServiceManager::Instance().Get<settings::Telemetry>(); t != nullptr)
         t->OnOutputPresented(static_cast<int>(enabled.size()));

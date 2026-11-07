@@ -137,12 +137,22 @@ void SelfTestDriver::type(const QString &text)
         // '\b' = a real backspace (Qt::Key_Backspace, no text) — the erase path
         // must be drivable, a Space here would poison the scenario.
         const bool isBackspace = ch == QLatin1Char('\b');
-        const int key = isBackspace ? Qt::Key_Backspace
+        // The arrow glyphs are the caret keys (no text): ← → ↑ ↓ — the caret/arrow paths
+        // must be drivable too.
+        int arrowKey = 0;
+        if (ch == QChar(0x2190)) arrowKey = Qt::Key_Left;
+        else if (ch == QChar(0x2192)) arrowKey = Qt::Key_Right;
+        else if (ch == QChar(0x2191)) arrowKey = Qt::Key_Up;
+        else if (ch == QLatin1Char('\n')) arrowKey = Qt::Key_Return;
+        else if (ch == QChar(0x2193)) arrowKey = Qt::Key_Down;
+        const bool noText = isBackspace || arrowKey != 0;
+        const int key = arrowKey != 0 ? arrowKey
+                      : isBackspace ? Qt::Key_Backspace
                                     : (ch.isLetterOrNumber() ? ch.toUpper().unicode()
                                                              : (ch.isPrint() ? ch.unicode() : Qt::Key_Space));
         QEvent::Type t = QEvent::KeyPress;
-        QKeyEvent press(t, key, Qt::NoModifier, isBackspace ? QString() : s);
-        QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier, isBackspace ? QString() : s);
+        QKeyEvent press(t, key, Qt::NoModifier, noText ? QString() : s);
+        QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier, noText ? QString() : s);
         QGuiApplication::sendEvent(m_window, &press);
         QGuiApplication::sendEvent(m_window, &release);
     }

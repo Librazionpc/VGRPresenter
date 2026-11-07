@@ -36,7 +36,8 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    float readingFontPx = 0.0f,
                    const std::vector<int>* readingLineStarts = nullptr,
                    uint64_t readingLineTextHash = 0,
-                   bool flowWindow = false);
+                   bool flowWindow = false,
+                   const std::string& readingStyleKey = {});
 
 // ---- compositor video layers (taken input, media on air) --------------------
 // Raw RGBA8 bytes (row-major, top-down) → RgbaImage. A straight copy is correct:

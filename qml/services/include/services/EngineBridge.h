@@ -463,6 +463,9 @@ public:
     // 15 fps ceiling the outputs inherited. The pull is gated on the tap's frame
     // counter, so an idle tick copies nothing and hands back the last frame.
     QImage previewPixelsFor(const QString &label);
+    // The tap's frame counter alone — "did a new frame arrive?" without copying the frame (0 = the
+    // tap stores no pixels, or has none yet).
+    quint64 previewFrameSeqFor(const QString &label);
     // WHY a held camera/screen tap will never produce a frame, in the platform's
     // own words ("device activation failed", "window closed", …), or "" while the
     // tap is fine — which includes merely warming up. This is the answer the UI

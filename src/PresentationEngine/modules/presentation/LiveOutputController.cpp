@@ -1,3 +1,4 @@
+#include "core/common/StageTiming.hpp"
 #include "modules/presentation/LiveOutputController.hpp"
 
 #include "core/logging/Logger.hpp"
@@ -8,7 +9,9 @@
 #include "modules/presentation/SceneBuilder.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderTypes.hpp"
-#include "modules/settings/Telemetry.hpp"   // the live rate/frame-cost curve
+#include "modules/settings/Telemetry.hpp"
+#include "platform/PlatformAccessor.hpp"
+#include "platform/IPlatform.hpp"   // the live rate/frame-cost curve
 
 #include <algorithm>
 #include <chrono>
@@ -24,7 +27,6 @@ namespace {
 // The 60Hz render target — the same budget the RenderEngine counts drops
 // against and the Telemetry module assumes.
 constexpr double kFrameSeconds = 1.0 / 60.0;
-// Slow re-sync with the open show's document (edits while live).
 constexpr double kSyncSeconds = 1.0;
 
 Result<void> RebindPausedRuntime(presentation::PresentationEngine& pres,
@@ -197,7 +199,7 @@ Result<void> LiveOutputController::StartFromOpenShow() {
     // Render loop — one worker thread at the frame target. Detached cleanly:
     // Stop() joins, Kernel shutdown calls Stop().
     running_.store(true);
-    worker_ = std::thread([this]() { Loop(); });
+    worker_ = QtThread([this]() { Loop(); });
 
     Logger::Instance().Info(
         std::format("live output started: show '{}' ({} slides)", liveContent_.name,
@@ -271,7 +273,7 @@ Result<void> LiveOutputController::StartFromSlides(std::string_view name,
         PublishOnAirSnapshot();
 
         running_.store(true);
-        worker_ = std::thread([this]() { Loop(); });
+        worker_ = QtThread([this]() { Loop(); });
         Logger::Instance().Info(
             std::format("live output started from content: '{}' ({} slides)", liveContent_.name,
                         liveContent_.slides.size()),
@@ -396,8 +398,8 @@ void LiveOutputController::StopLiveAsync() {
     }
     // Take the worker handle by moving it out under the gate — StopLive()'s
     // mop-up (or a later start) can then never see a joinable stale handle.
-    std::thread doomed = std::move(worker_);
-    worker_ = std::thread();
+    QtThread doomed = std::move(worker_);
+    worker_ = QtThread();
     std::thread reaper([this, doomed = std::move(doomed)]() mutable {
         if (doomed.joinable())
             doomed.join();
@@ -441,6 +443,10 @@ Result<void> LiveOutputController::StopLiveTail() {
 // The loop
 // ---------------------------------------------------------------------------
 void LiveOutputController::Loop() {
+    // The thread that composes what goes to air. Above normal, so a busy machine (a browser, a
+    // build, the interface itself) delays the interface's own work before it delays the picture.
+    if (platform::PlatformAccessor::Installed())
+        (void)platform::PlatformAccessor::Get().Threading().SetCurrentThreadPriority(4);
     auto& telemetry = settings::Telemetry::Instance();
     auto last = std::chrono::steady_clock::now();
     double syncAccum = 0.0;
@@ -703,6 +709,7 @@ bool LiveOutputController::FlowCharMoving(int64_t nowMs) {
 }
 
 Result<void> LiveOutputController::RenderOnce() {
+    static timing::StageTiming stageTiming("live loop");
     // Hoisted before control_ (plain singleton getter — lock-scope guard).
     auto& render = rendering::RenderEngine::Instance();
     ApplyPendingReadingSlide();
@@ -722,9 +729,11 @@ Result<void> LiveOutputController::RenderOnce() {
     if (readingFlowWindowMoved_ && slide && render.GetScene(sceneId).ok())
         (void)pres_->Builder().RefreshReadingFlow(render, sceneId, *slide);
 
+    const auto tBuild = std::chrono::steady_clock::now();
     if (slide)
         (void)pres_->Builder().BuildSlideScene(*active, *slide, pres_->ActiveOutputStyle(),
                                                render);
+    const double buildMs = timing::MsSince(tBuild);
 
     const auto& compositor = presentation::CompositorState::Instance();
     const bool hasLiveCompositorContent = !compositor.GetTakenInput().deviceId.empty()
@@ -776,12 +785,15 @@ Result<void> LiveOutputController::RenderOnce() {
     const auto composeStart = std::chrono::steady_clock::now();
     rendering::RenderOptions opts;
     opts.distribute = true;   // -> every enabled output -> Telemetry output meter
+    opts.keepFrame = false;   // the pixels go to the outputs as ONE shared frame; read back via LastDistributed()
     opts.filters = activeFilters;   // slide-wide; applied to the composed frame
     // The reading scroll for THIS frame: how far the reading block's flow sits
     // into its passage, in its own line heights. Nothing else in the scene moves.
     opts.contentScrollChars = scrollChars;
     opts.contentScrollFromScene = freshScene;
+    const auto tRender = std::chrono::steady_clock::now();
     auto frame = render.Render(sceneId, opts);
+    const double renderMs = timing::MsSince(tRender);
     if (frame.ok()) {
         lastRenderedScene_ = sceneId;
         lastStyleRevision_ = styleRev;
@@ -804,15 +816,11 @@ Result<void> LiveOutputController::RenderOnce() {
     if (frame.ok()) {
         previewFrames_.fetch_add(1);
         {
-            auto composed = std::make_shared<rendering::Frame>();
-            composed->sceneId = sceneId;
-            composed->frame = frames_.load();
-            composed->width = frame.value().width;
-            composed->height = frame.value().height;
-            composed->pixels = frame.value().pixels;   // the readback this pass already paid for
-            composed->timestampMs = std::chrono::duration<double, std::milli>(
-                                        std::chrono::system_clock::now().time_since_epoch()).count();
-            lastComposedFrame_ = std::move(composed);
+            // The engine holds the composed picture as ONE shared frame (it just handed that frame to
+            // every output): keep that very frame for re-presenting — no copy of 8 MB of our own.
+            const std::shared_ptr<const rendering::Frame> shared = render.LastDistributed();
+            if (shared && !shared->empty() && shared->sceneId == sceneId)
+                lastComposedFrame_ = shared;
         }
         const int64_t stamp = replaceStampMs_.exchange(0);
         if (stamp > 0) {
@@ -824,7 +832,12 @@ Result<void> LiveOutputController::RenderOnce() {
                 "LiveOutputController");
         }
     }
+    const auto tPasses = std::chrono::steady_clock::now();
     RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+    stageTiming.Add("build", buildMs);
+    stageTiming.Add("program", renderMs);
+    stageTiming.Add("outputs", timing::MsSince(tPasses));
+    stageTiming.EndUnit();
     // What THIS frame of the move cost — the compose plus every per-output pass — is the
     // budget the next one is paced by (see the scroll gate above). Measured from the
     // attempt, so a scene that keeps failing to rasterize paces too.
@@ -860,7 +873,7 @@ bool LiveOutputController::RepresentLastFrame(rendering::RenderEngine& render) {
     const std::shared_ptr<const rendering::Frame> frame = lastComposedFrame_;
     if (!frame || frame->empty())
         return false;
-    render.Distribute(*frame);
+    render.Distribute(frame);   // the shared frame itself: nothing is copied to re-present it
     return true;
 }
 
@@ -906,8 +919,11 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
 
         if (!active || !slide)
             continue;   // a program pass with nothing on air: nothing to compose
+        static timing::StageTiming passTiming("output pass");
+        const auto tPassBuild = std::chrono::steady_clock::now();
         auto sceneId = pres_->Builder().BuildGatedSlideScene(
             *active, *slide, specs[i], engine, sceneSize);
+        passTiming.Add("build scene", timing::MsSince(tPassBuild));
         if (!sceneId.ok()) {
             fb->SetAcceptsDistributedFrames(true);
             continue;
@@ -919,7 +935,7 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
             const bool ownedByItsOwnPass = !fb->AcceptsDistributedFrames();
             fb->SetAcceptsDistributedFrames(true);
             if (ownedByItsOwnPass && lastComposedFrame_ && !lastComposedFrame_->empty())
-                (void)fb->Present(*lastComposedFrame_);
+                (void)fb->PresentShared(lastComposedFrame_);
             sharedOutputCopies_.fetch_add(1);
             continue;
         }
@@ -930,15 +946,23 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
         passOpts.filters = slide->filters;
         passOpts.contentScrollChars = contentScrollChars;
         passOpts.contentScrollFromScene = false;
-        if (auto img = engine.Render(sceneId.value(), passOpts); img.ok() && !img.value().empty()) {
-            rendering::Frame f;
-            f.sceneId = sceneId.value();
-            f.width = img.value().width;
-            f.height = img.value().height;
-            f.pixels = std::move(img.value().pixels);
-            f.timestampMs = std::chrono::duration<double, std::milli>(
-                                std::chrono::system_clock::now().time_since_epoch()).count();
-            (void)fb->Present(f);
+        const auto tPassRender = std::chrono::steady_clock::now();
+        auto img = engine.Render(sceneId.value(), passOpts);
+        passTiming.Add("render", timing::MsSince(tPassRender));
+        passTiming.EndUnit();
+        if (img.ok() && !img.value().empty()) {
+            // The buffer returns to the pool when the last holder drops the frame (next render reuses it).
+            std::shared_ptr<rendering::Frame> f(new rendering::Frame(), [](rendering::Frame* fr) {
+                rendering::FramebufferPool::Instance().Give(std::move(fr->pixels));
+                delete fr;
+            });
+            f->sceneId = sceneId.value();
+            f->width = img.value().width;
+            f->height = img.value().height;
+            f->pixels = std::move(img.value().pixels);
+            f->timestampMs = std::chrono::duration<double, std::milli>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count();
+            (void)fb->PresentShared(std::shared_ptr<const rendering::Frame>(std::move(f)));   // held as is when the size matches
         }
     }
 }
@@ -955,7 +979,7 @@ Result<void> LiveOutputController::StartIdlePreview() {
     if (previewWorker_.joinable()) previewWorker_.join();
     presPreview_ = &presentation::PresentationEngine::Instance();
     previewRunning_.store(true);
-    previewWorker_ = std::thread([this]() { PreviewLoop(); });
+    previewWorker_ = QtThread([this]() { PreviewLoop(); });
     return Ok();
 }
 

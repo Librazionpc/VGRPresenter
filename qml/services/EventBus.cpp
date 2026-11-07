@@ -1,5 +1,7 @@
 #include "services/EventBus.h"
 
+#include "services/CallTrace.h"
+
 #include <QJSEngine>
 #include <QQmlEngine>
 #include <QThread>
@@ -29,7 +31,9 @@ void EventBus::publish(const QString &topic, const QVariantMap &payload)
 {
     // Producers include engine threads and Qt's message handler (any thread).
     // eventPosted feeds QML, so it must only ever fire on the GUI thread.
-    if (QThread::currentThread() != thread()) {
+    // NOT QThread::currentThread(): on an engine thread that registers the thread with Qt, and
+    // Qt then faults when the thread ends (see calltrace::markGuiThread).
+    if (!calltrace::onGuiThreadNow()) {
         QMetaObject::invokeMethod(this, [this, topic, payload] { emit eventPosted(topic, payload); },
                                   Qt::QueuedConnection);
         return;

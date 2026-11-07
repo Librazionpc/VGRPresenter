@@ -34,8 +34,11 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
 DIST="$ROOT/dist/VGRPresenter"
-# Same override as dev_cycle/make_portable: bps_cli needs the msys2 runtime on PATH.
+# Same overrides as dev_cycle/make_portable: bps_cli needs the msys2 runtime AND the Qt runtime on PATH
+# (it links the engine, which links Qt Gui). Without Qt there Windows shows a missing-DLL popup instead of
+# printing anything, so the seed step failed with no reason on a shell that did not already carry Qt.
 MINGW_BIN="${MINGW_BIN:-/c/msys64/ucrt64/bin}"
+QT_BIN="${QT_BIN:-/c/Qt/6.11.1/mingw_64/bin}"
 NODE_BIN="${NODE_BIN:-node}"
 
 ISCC=""
@@ -84,7 +87,7 @@ SEED_RUN="$ROOT/build/.seed-dump"
 rm -rf "$SEED_RUN"
 mkdir -p "$SEED_RUN"
 echo "== seeding catalogs from the engine (bps_cli --dump-catalogs) =="
-if ! ( cd "$SEED_RUN" && PATH="$MINGW_BIN:$PATH" "$CLI" \
+if ! ( cd "$SEED_RUN" && PATH="$MINGW_BIN:$QT_BIN:$PATH" "$CLI" \
         --data "$(cygpath -m "$SEED_RUN")/data" \
         --dump-catalogs "$(cygpath -m "$SEED_DIR/local")" ); then
     echo "catalog dump FAILED"

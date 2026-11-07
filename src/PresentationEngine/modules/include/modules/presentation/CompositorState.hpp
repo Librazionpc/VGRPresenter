@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "modules/presentation/PresentationTypes.hpp"
+#include "modules/rendering/IGraphicsBackend.hpp"
 
 namespace bps::presentation {
 class CompositorState {
@@ -36,6 +37,13 @@ public:
     void SetMediaFit(std::string fit);
     void ClearMedia();
     MediaFrame GetMediaFrame() const;
+    // The frame as an engine picture, converted ONCE per new frame and handed out by pointer: every
+    // output's scene shows the same allocation instead of each building its own 8 MB copy.
+    struct SharedMedia {
+        rendering::SharedRgbaImage image;   // null = no frame
+        std::string fit;
+    };
+    SharedMedia GetMediaShared() const;
     bool HasMediaFrame() const;
     bool MediaFrameIsTransparent() const;
 
@@ -85,6 +93,9 @@ private:
     mutable std::mutex mutex_;
     TakenInput takenInput_;
     MediaFrame mediaFrame_;
+    uint64_t mediaPixelsGen_ = 0;                  // bumped when the PIXELS change (not the fit)
+    mutable rendering::SharedRgbaImage mediaImage_;   // mediaFrame_ as an engine picture, built on first ask
+    mutable uint64_t mediaImageGen_ = ~0ull;
     std::vector<BusFeed> busFeeds_;
     std::map<int, MediaFrame> busFrames_;
     uint64_t mediaSeq_ = 0;

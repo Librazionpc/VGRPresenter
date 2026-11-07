@@ -666,20 +666,6 @@ Rectangle {
                         y: 0
                         width: parent.width
                         height: 39
-                        onSuggestionPicked: (paneKey, ref) => {
-                            if (paneKey === "scripture")
-                                scripturePane?.applySuggestion(ref)
-                            else if (paneKey === "table")
-                                tablePane?.applySuggestion(ref)
-                        }
-                        // Hovering a suggestion row previews its content in the pane's
-                        // verses column until the pointer leaves (peekSuggestion(-1)).
-                        onSuggestionHovered: (paneKey, index, hovering) => {
-                            if (paneKey === "scripture")
-                                scripturePane?.peekSuggestion(hovering ? index : -1)
-                            else if (paneKey === "table")
-                                tablePane?.peekSuggestion(hovering ? index : -1)
-                        }
                     }
                 }
                 Rectangle {

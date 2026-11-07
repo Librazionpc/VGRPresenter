@@ -874,6 +874,67 @@ void TestVideoLayerFrameRefresh() {
     }
     CHECK(engine.DestroyScene("vframe").ok());
 }
+// THE RIGHT FRAME, EVERY TIME. Two scenes (two outputs) hold a video object of the SAME name (the live
+// loop's "takeninput") that shows ONE shared frame pointer; the frame changes 40 times and the scenes
+// are rendered alternately, as the live loop does. Every render must show exactly the frame that was
+// pushed — through the shared texture, the cached scaled picture, the skipped overdrawn commands and
+// the cached overlay layer — never a stale or another scene's picture.
+void TestSharedVideoFramesStayCorrect() {
+    auto& engine = r::RenderEngine::Instance();
+    CHECK(engine.Initialize().ok());
+    CHECK(engine.SetBackend("software").ok());
+    constexpr int W = 64, H = 36;
+    const char* scenes[2] = {"svf-a", "svf-b"};
+    std::shared_ptr<r::VideoObject> videos[2];
+    for (int s = 0; s < 2; ++s) {
+        CHECK(engine.CreateScene(scenes[s], scenes[s], r::Size(W, H)).ok());
+        CHECK(engine.AddLayer(scenes[s], r::Layer("media", "Media", r::LayerKind::Video, 1)).ok());
+        videos[s] = std::make_shared<r::VideoObject>("takeninput", "takeninput");
+        videos[s]->SetBounds(r::Rect(0, 0, W, H));
+        CHECK(engine.AddObject(scenes[s], videos[s], "media").ok());
+    }
+    // A frame is identified by one colour; its left half and right half differ so a swap or flip shows.
+    const auto frameFor = [](int k) {
+        auto img = std::make_shared<r::RgbaImage>();
+        img->width = 32;   // scaled 2x to the scene
+        img->height = 18;
+        img->pixels.resize(32u * 18u);
+        for (int y = 0; y < 18; ++y)
+            for (int x = 0; x < 32; ++x)
+                img->pixels[static_cast<size_t>(y) * 32 + x] =
+                    r::Color(((k * 6) % 250) / 255.0f, (x < 16 ? 40 : 200) / 255.0f, 90 / 255.0f, 1.0f).Pack();
+        return std::shared_ptr<const r::RgbaImage>(img);
+    };
+    int wrong = 0, checked = 0;
+    for (int k = 0; k < 40; ++k) {
+        const auto frame = frameFor(k);
+        for (int s = 0; s < 2; ++s) {
+            // Scene A gets frame k, scene B gets frame k+100 (a different colour) — never mixed up.
+            const auto mine = s == 0 ? frame : frameFor(k + 100);
+            videos[s]->SetFrameShared(mine);
+        }
+        for (int s = 0; s < 2; ++s) {
+            auto out = engine.Render(scenes[s]);
+            CHECK(out.ok());
+            if (!out.ok() || out.value().pixels.size() != static_cast<size_t>(W) * H) continue;
+            const int expectK = s == 0 ? k : k + 100;
+            const int wantR = (expectK * 6) % 250;
+            for (int probe = 0; probe < 2; ++probe) {
+                const int x = probe == 0 ? 8 : 56;
+                const uint32_t px = out.value().pixels[static_cast<size_t>(18) * W + x];
+                const int gotR = static_cast<int>(px & 255u);
+                const int gotG = static_cast<int>((px >> 8) & 255u);
+                const int wantG = probe == 0 ? 40 : 200;
+                ++checked;
+                if (std::abs(gotR - wantR) > 2 || std::abs(gotG - wantG) > 2) ++wrong;
+            }
+        }
+    }
+    CHECK(checked == 160);
+    CHECK(wrong == 0);
+    for (int s = 0; s < 2; ++s) CHECK(engine.DestroyScene(scenes[s]).ok());
+}
+
 void TestRenderOutputs() {
     // FrameBufferOutput: present + scale to target.
     auto out = std::make_shared<r::FrameBufferOutput>(r::OutputKind::Preview, "preview",
@@ -1663,6 +1724,202 @@ void TestImageScale() {
 }
 
 // ---------------------------------------------------------------------------
+// The software rasteriser's speed paths must draw what the plain path draws: a 1:1 opaque copy, the
+// two-tap resample of a video frame, and the cached transparent overlay blended over a moving picture.
+void TestSoftwareFastPaths() {
+    constexpr int W = 96, H = 54;
+    const auto px = [](int red, int green, int blue, int alpha) {
+        return r::Color(red / 255.0f, green / 255.0f, blue / 255.0f, alpha / 255.0f).Pack();
+    };
+    // A "video frame" with a gradient so a wrong row/column shows; 64x36 (scaled up 1.5x to the frame).
+    const auto makeVideo = [&](int shift) {
+        r::RgbaImage v;
+        v.width = 64;
+        v.height = 36;
+        v.pixels.resize(64u * 36u);
+        for (int y = 0; y < 36; ++y)
+            for (int x = 0; x < 64; ++x)
+                v.pixels[static_cast<size_t>(y) * 64 + x] = px((x * 4 + shift) & 255, (y * 7) & 255, 128, 255);
+        return v;
+    };
+    // A translucent "text" bitmap: opaque white strokes on transparent, one half-transparent column.
+    r::RgbaImage ink;
+    ink.width = 20;
+    ink.height = 10;
+    ink.pixels.assign(200u, 0u);
+    for (int y = 2; y < 8; ++y)
+        for (int x = 2; x < 18; ++x)
+            ink.pixels[static_cast<size_t>(y) * 20 + x] = (x == 10) ? px(255, 255, 255, 120) : px(255, 255, 255, 255);
+
+    // Draws the same command list on a fresh backend: the reference (first time every path is cold).
+    const auto frameOf = [&](r::SoftwareGraphicsBackend& sw, r::TextureId video, r::TextureId inkTex) {
+        std::vector<r::DrawCommand> cmds;
+        r::DrawCommand blit;
+        blit.type = r::DrawCommand::Type::BlitImage;
+        blit.texture = video;
+        blit.rect = r::Rect(0, 0, W, H);
+        blit.srcRect = r::Rect(0, 0, 64, 36);
+        blit.color = r::Color::White();
+        cmds.push_back(blit);
+        for (int i = 0; i < 4; ++i) {
+            r::DrawCommand g;
+            g.type = r::DrawCommand::Type::DrawGlyph;
+            g.texture = inkTex;
+            g.rect = r::Rect(static_cast<float>(4 + i * 22), 20, 20, 10);
+            g.srcRect = r::Rect(0, 0, 20, 10);
+            g.color = r::Color(0.9f, 0.8f, 0.1f, 1.0f);
+            cmds.push_back(g);
+        }
+        r::DrawCommand plate;
+        plate.type = r::DrawCommand::Type::FillRect;
+        plate.rect = r::Rect(0, 40, W, 6);
+        plate.color = r::Color(0.0f, 0.0f, 0.0f, 0.5f);
+        cmds.push_back(plate);
+        if (!sw.BeginFrame(W, H).ok() || !sw.Submit(cmds).ok()) return r::RgbaImage{};
+        auto rb = sw.Readback();
+        return rb.ok() ? rb.value() : r::RgbaImage{};
+    };
+    const auto maxDiff = [](const r::RgbaImage& a, const r::RgbaImage& b) {
+        if (a.pixels.size() != b.pixels.size() || a.pixels.empty()) return 999;
+        int worst = 0;
+        for (size_t i = 0; i < a.pixels.size(); ++i)
+            for (int s = 0; s < 32; s += 8) {
+                const int d = static_cast<int>((a.pixels[i] >> s) & 255u) - static_cast<int>((b.pixels[i] >> s) & 255u);
+                worst = std::max(worst, d < 0 ? -d : d);
+            }
+        return worst;
+    };
+
+    // The reference for frame N (a new backend per frame: nothing cached).
+    std::vector<r::RgbaImage> reference;
+    for (int f = 0; f < 5; ++f) {
+        r::SoftwareGraphicsBackend cold;
+        auto v = cold.CreateTexture(makeVideo(f * 9));
+        auto t = cold.CreateTexture(ink);
+        CHECK(v.ok() && t.ok());
+        reference.push_back(frameOf(cold, v.value(), t.value()));
+    }
+    // One backend across frames: the video changes every frame, the text/plate run is the same, so from
+    // the third frame on the overlay comes from its cached layer.
+    r::SoftwareGraphicsBackend warm;
+    auto vt = warm.CreateTexture(makeVideo(0));
+    auto it = warm.CreateTexture(ink);
+    CHECK(vt.ok() && it.ok());
+    int worst = 0;
+    for (int f = 0; f < 5; ++f) {
+        CHECK(warm.UpdateTexture(vt.value(), makeVideo(f * 9)).ok());
+        const r::RgbaImage got = frameOf(warm, vt.value(), it.value());
+        worst = std::max(worst, maxDiff(got, reference[static_cast<size_t>(f)]));
+    }
+    CHECK(worst <= 2);   // rounding only: the cached layer is blended, not redrawn
+
+    // The picture is right, not just consistent: the 1.5x upscale keeps the gradient's ends.
+    const r::RgbaImage& f0 = reference[0];
+    if (f0.pixels.size() == static_cast<size_t>(W) * H) {
+        const r::Color first = r::Color::Unpack(f0.pixels[0]);
+        CHECK(first.r < 0.1f && first.b > 0.45f && first.b < 0.55f);
+        const r::Color mid = r::Color::Unpack(f0.pixels[static_cast<size_t>(10) * W + 48]);
+        CHECK(mid.r > 0.3f && mid.r < 0.8f);
+    }
+
+    // Every pixel of the fast resample (AVX2 or scalar) matches the general per-pixel filter (CombineTaps).
+    if (f0.pixels.size() == static_cast<size_t>(W) * H) {
+        const r::RgbaImage video0 = makeVideo(0);
+        r::RgbaImage videoOnly;   // the frame with no overlay: just the scaled video
+        {
+            r::SoftwareGraphicsBackend plain;
+            auto pv = plain.CreateTexture(video0);
+            r::DrawCommand b;
+            b.type = r::DrawCommand::Type::BlitImage;
+            b.texture = pv.value();
+            b.rect = r::Rect(0, 0, W, H);
+            b.srcRect = r::Rect(0, 0, 64, 36);
+            b.color = r::Color::White();
+            CHECK(plain.BeginFrame(W, H).ok());
+            CHECK(plain.Submit({b}).ok());
+            auto rb = plain.Readback();
+            if (rb.ok()) videoOnly = rb.value();
+        }
+        int resampleWorst = 0;
+        for (int y = 0; y < H && videoOnly.pixels.size() == static_cast<size_t>(W) * H; ++y)
+            for (int x = 0; x < W; ++x) {
+                r::ScaleTaps tx, ty;
+                r::BuildScaleTaps(x * (64.0 / W), 64.0 / W, 64, tx);
+                r::BuildScaleTaps(y * (36.0 / H), 36.0 / H, 36, ty);
+                const uint32_t want = r::CombineTaps(video0, tx, ty);
+                const uint32_t got = videoOnly.pixels[static_cast<size_t>(y) * W + x];
+                for (int s = 0; s < 24; s += 8) {
+                    const int d = static_cast<int>((want >> s) & 255u) - static_cast<int>((got >> s) & 255u);
+                    resampleWorst = std::max(resampleWorst, d < 0 ? -d : d);
+                }
+            }
+        CHECK(resampleWorst <= 2);
+    }
+
+    // An opaque frame at its own size is copied exactly (the cached scaled picture's path).
+    r::SoftwareGraphicsBackend same;
+    r::RgbaImage solid;
+    solid.width = W;
+    solid.height = H;
+    solid.pixels.assign(static_cast<size_t>(W) * H, px(10, 200, 30, 255));
+    auto st = same.CreateTexture(solid);
+    CHECK(st.ok());
+    r::DrawCommand copy;
+    copy.type = r::DrawCommand::Type::BlitImage;
+    copy.texture = st.value();
+    copy.rect = r::Rect(0, 0, W, H);
+    copy.srcRect = r::Rect(0, 0, W, H);
+    copy.color = r::Color::White();
+    CHECK(same.BeginFrame(W, H).ok());
+    CHECK(same.Submit({copy}).ok());
+    auto copied = same.Readback();
+    CHECK(copied.ok() && copied.value().pixels == solid.pixels);
+
+    // A RECYCLED frame buffer holds the last frame's pixels; the next frame must not show any of them.
+    // Frame 1 fills everything with white and is handed back to the pool; frame 2 draws one small plate
+    // and nothing else — every other pixel must be transparent black, whether or not the buffer was reused.
+    r::SoftwareGraphicsBackend recycler;
+    for (int round = 0; round < 3; ++round) {
+        CHECK(recycler.BeginFrame(W, H).ok());
+        r::DrawCommand fill;
+        fill.type = r::DrawCommand::Type::FillRect;
+        fill.rect = r::Rect(0, 0, W, H);
+        fill.color = r::Color::White();
+        CHECK(recycler.Submit({fill}).ok());
+        auto white = recycler.ReadbackMove();
+        CHECK(white.ok());
+        if (white.ok()) r::FramebufferPool::Instance().Give(std::move(white.value().pixels));
+
+        CHECK(recycler.BeginFrame(W, H).ok());
+        r::DrawCommand plateCmd;
+        plateCmd.type = r::DrawCommand::Type::FillRect;
+        plateCmd.rect = r::Rect(10, 10, 8, 8);
+        plateCmd.color = r::Color::Red();
+        CHECK(recycler.Submit({plateCmd}).ok());
+        auto second = recycler.ReadbackMove();
+        CHECK(second.ok());
+        if (second.ok() && second.value().pixels.size() == static_cast<size_t>(W) * H) {
+            size_t stray = 0;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const bool inside = x >= 10 && x < 18 && y >= 10 && y < 18;
+                    const uint32_t px = second.value().pixels[static_cast<size_t>(y) * W + x];
+                    if (!inside && px != 0u) ++stray;
+                }
+            CHECK(stray == 0);
+            CHECK(r::Color::Unpack(second.value().pixels[static_cast<size_t>(12) * W + 12]).r > 0.9f);
+            r::FramebufferPool::Instance().Give(std::move(second.value().pixels));
+        }
+    }
+    // BeginFrame with no Submit at all still reads back as a clear frame.
+    CHECK(recycler.BeginFrame(W, H).ok());
+    auto emptyFrame = recycler.Readback();
+    CHECK(emptyFrame.ok());
+    if (emptyFrame.ok())
+        CHECK(std::all_of(emptyFrame.value().pixels.begin(), emptyFrame.value().pixels.end(),
+                          [](uint32_t p) { return p == 0u; }));
+}
+
 void TestD3D11Backend() {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());

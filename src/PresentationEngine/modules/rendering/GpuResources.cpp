@@ -64,6 +64,38 @@ Result<TextureId> GPUResourceManager::UpdateTexture(std::string_view name,
     return id.value();
 }
 
+Result<TextureId> GPUResourceManager::UpdateTextureShared(std::string_view name,
+                                                          const SharedRgbaImage& image,
+                                                          uint64_t rev) {
+    if (!backend_) return Error::Make(Err::Render_BackendUnavailable, "GPU", "no backend");
+    if (!image) return Error::Make(Err::Render_TextureAllocFailed, "GPU", "no image");
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = textures_.find(name);
+    if (it != textures_.end()) {
+        if (it->second.rev == rev)
+            return it->second.id;   // already showing this revision — no re-upload
+        if (textureBudget_ > 0 && image->ByteSize() > textureBudget_)
+            return Error::Make(Err::Render_TextureAllocFailed, "GPU", "over texture budget");
+        if (auto up = backend_->UpdateTextureShared(it->second.id, image); !up.ok())
+            return Error::Make(Err::Render_TextureAllocFailed, "GPU", up.error().message);
+        it->second.bytes = image->ByteSize();
+        it->second.rev = rev;
+        return it->second.id;
+    }
+    if (textureBudget_ > 0 && image->ByteSize() > textureBudget_)
+        return Error::Make(Err::Render_TextureAllocFailed, "GPU", "over texture budget");
+    auto id = backend_->CreateTextureShared(image);
+    if (!id.ok())
+        return Error::Make(Err::Render_TextureAllocFailed, "GPU", id.error().message);
+    Entry e;
+    e.id = id.value();
+    e.name = std::string(name);
+    e.bytes = image->ByteSize();
+    e.rev = rev;
+    textures_[std::string(name)] = std::move(e);
+    return id.value();
+}
+
 Result<void> GPUResourceManager::ReleaseTexture(std::string_view name) {
     if (!backend_) return Error::Make(Err::Render_BackendUnavailable, "GPU", "no backend");
     std::lock_guard<std::mutex> lock(mutex_);

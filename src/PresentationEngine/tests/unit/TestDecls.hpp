@@ -85,6 +85,8 @@ void TestTemplateBusWindows();
 void TestTransparentBackground();
 void TestFrameRule();
 void TestImageScale();
+void TestSoftwareFastPaths();
+void TestSharedVideoFramesStayCorrect();
 void TestOutputStore();
 void TestShippedConfig();
 void TestProjectUndoRedo();

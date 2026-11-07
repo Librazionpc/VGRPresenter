@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/common/Common.hpp"
+#include "core/threading/QtThread.hpp"
 #include "interfaces/IService.hpp"
 
 #include <atomic>
@@ -105,7 +106,7 @@ private:
     std::condition_variable cv_;
     std::set<std::shared_ptr<Task>, TaskOrder> timeline_;     // guarded by mutex_
     std::unordered_map<TaskId, std::shared_ptr<Task>> byId_;  // guarded by mutex_
-    std::thread thread_;
+    QtThread thread_;   // a QThread (see QtThread.hpp): timer callbacks may reach Qt
     std::atomic<bool> running_{false};
     std::atomic<bool> shuttingDown_{false};
     std::atomic<uint64_t> nextId_{1};

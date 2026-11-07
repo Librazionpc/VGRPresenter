@@ -42,12 +42,15 @@ std::atomic<long long> g_heartbeatCount{0};
 constexpr long long kTicksBeforeWatchdogArms = 3;
 std::atomic<bool> g_watchdogStop{false};
 
+std::atomic<quintptr> g_guiThreadId{0};
+
 bool onGuiThread()
 {
-    const QCoreApplication *app = QCoreApplication::instance();
-    // No application yet (static init) → nobody is publishing to the GUI ring,
-    // which is correct: there is no GUI thread to blame.
-    return app != nullptr && QThread::currentThread() == app->thread();
+    // Not marked yet (static init) → nobody is publishing to the GUI ring, which is correct:
+    // there is no GUI thread to blame. QThread::currentThreadId() is the native id — it
+    // never registers the caller with Qt (see markGuiThread in the header for why that matters).
+    const quintptr gui = g_guiThreadId.load(std::memory_order_relaxed);
+    return gui != 0 && reinterpret_cast<quintptr>(QThread::currentThreadId()) == gui;
 }
 
 // Renders the live chain into `out`, truncating rather than overflowing.
@@ -148,6 +151,17 @@ int guiChainRaw(const char **out)
 // ---------------------------------------------------------------------------
 // Liveness + the hang watchdog
 // ---------------------------------------------------------------------------
+
+void markGuiThread()
+{
+    g_guiThreadId.store(reinterpret_cast<quintptr>(QThread::currentThreadId()),
+                        std::memory_order_relaxed);
+}
+
+bool onGuiThreadNow()
+{
+    return onGuiThread();
+}
 
 void heartbeat()
 {

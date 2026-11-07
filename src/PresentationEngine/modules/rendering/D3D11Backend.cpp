@@ -1,3 +1,4 @@
+#include "core/common/StageTiming.hpp"
 #include "modules/rendering/D3D11Backend.hpp"
 
 #include "core/logging/Logger.hpp"
@@ -511,21 +512,35 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!context_ || !rt_ || !staging)
             return Error::Make(Err::Render_BackendUnavailable, "D3D11", "no frame to read");
+        static timing::StageTiming stageTiming("d3d11 readback");
+        const auto tCopy = std::chrono::steady_clock::now();
         context_->CopyResource(staging.Get(), rt_.Get());
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
             return Error::Make(Err::Render_BackendUnavailable, "D3D11", "staging map failed");
+        stageTiming.Add("copy+map (waits for the GPU)", timing::MsSince(tCopy));
+        const auto tConvert = std::chrono::steady_clock::now();
         RgbaImage img;
         img.width = frameWidth_;
         img.height = frameHeight_;
         img.pixels.resize(static_cast<size_t>(frameWidth_) * static_cast<size_t>(frameHeight_));
+        // BULK-COPY the mapped rows first, convert in ordinary memory afterwards: reading the mapped
+        // staging memory pixel by pixel measured 75 ms for a 1080p frame (8 MB at ~100 MB/s); a row
+        // memcpy brings it to ~20 ms and the per-pixel conversion then runs on cached memory.
+        // (SSE4.1 streaming loads were tried and measured SLOWER here: the mapping is not uncached.)
         const auto* base = static_cast<const uint8_t*>(mapped.pData);
-        for (int y = 0; y < frameHeight_; ++y) {
-            const auto* row = reinterpret_cast<const uint32_t*>(base + mapped.RowPitch * y);
-            for (int x = 0; x < frameWidth_; ++x)
-                img.pixels[static_cast<size_t>(y) * frameWidth_ + x] = Unpremultiply(row[x]);
+        const size_t rowBytes = static_cast<size_t>(frameWidth_) * sizeof(uint32_t);
+        for (int y = 0; y < frameHeight_; ++y)
+            std::memcpy(reinterpret_cast<uint8_t*>(img.pixels.data()) + static_cast<size_t>(y) * rowBytes,
+                        base + static_cast<size_t>(mapped.RowPitch) * y, rowBytes);
+        context_->Unmap(staging.Get(), 0);   // the GPU's copy is free again before the CPU work below
+        for (uint32_t& px : img.pixels) {
+            const uint32_t a = px >> 24;
+            if (a != 0u && a != 255u)
+                px = Unpremultiply(px);
         }
-        context_->Unmap(staging.Get(), 0);
+        stageTiming.Add("convert", timing::MsSince(tConvert));
+        stageTiming.EndUnit();
         return img;
     }
 

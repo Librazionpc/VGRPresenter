@@ -74,6 +74,10 @@ struct RenderOptions {
     double timeSec = 0.0;      // explicit time (else engine clock used)
     bool distribute = true;    // feed enabled outputs
     bool capture = false;      // also return the frame (preview/thumbnail path)
+    // A DISTRIBUTING render returns the frame it composed unless this is false: false moves the
+    // pixels straight into the shared frame the outputs hold and returns none (the live loop reads
+    // the picture back through LastDistributed(), so nothing copies 8 MB).
+    bool keepFrame = true;
     SlideFilterValues filters;
 
     float contentScrollChars = 0.0f;
@@ -147,6 +151,14 @@ public:
     Result<void> RemoveOutput(std::string_view name);
     size_t OutputCount() const;
     void Distribute(const Frame& frame) { outputs_.Distribute(frame); }
+    void Distribute(const std::shared_ptr<const Frame>& frame) { outputs_.Distribute(frame); }
+    // The frame the last DISTRIBUTING Render() handed to the outputs: shared and immutable, so the live
+    // loop keeps it for re-presenting without a copy of its own. (A render that distributes and does
+    // not capture no longer returns its pixels at all — this is where they are.)
+    std::shared_ptr<const Frame> LastDistributed() const {
+        std::lock_guard<std::mutex> lock(lastDistributedMutex_);
+        return lastDistributed_;
+    }
 
     // ---- Feed health (the automatic blackout's inputs) --------------------
     struct OutputFeedAge {
@@ -237,6 +249,8 @@ private:
     std::atomic<bool> alphaInspect_{false};
     mutable std::chrono::steady_clock::time_point lastFrameAt_;
     double lastFrameMs_ = 0.0;
+    mutable std::mutex lastDistributedMutex_;
+    std::shared_ptr<const Frame> lastDistributed_;
     mutable std::mutex renderMutex_;
 };
 } // namespace bps::rendering

@@ -435,12 +435,16 @@ void WriteHangDump(const char *reason)
         std::fclose(f);
     }
 
-    // The dump sits beside the crash log: hang-<pid>.dmp.
+    // The dump sits beside the crash log: hang-<pid>-<time>.dmp. The TIME is part of the name: two
+    // stalls in one run (the usual case — a freeze and then a second one) used to share
+    // hang-<pid>.dmp, so the second report overwrote the first one's evidence.
+    char stamp[16];
+    std::strftime(stamp, sizeof(stamp), "%H%M%S", std::localtime(&now));
+    const std::string hangTag = std::to_string(GetCurrentProcessId()) + "-" + stamp;
     std::string dumpPath = g_crashLogPath;
     const auto slash = dumpPath.rfind('/');
     if (slash != std::string::npos)
-        dumpPath = dumpPath.substr(0, slash + 1) + "hang-"
-                   + std::to_string(GetCurrentProcessId()) + ".dmp";
+        dumpPath = dumpPath.substr(0, slash + 1) + "hang-" + hangTag + ".dmp";
 
     using FnMiniDump = BOOL(WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
                                       PMINIDUMP_EXCEPTION_INFORMATION,
@@ -474,7 +478,7 @@ void WriteHangDump(const char *reason)
         const auto sep = dumpPath.find_last_of("\\/");
         const std::string dir = (sep != std::string::npos) ? dumpPath.substr(0, sep + 1)
                                                            : std::string();
-        gdbOut = dir + "hang-" + std::to_string(GetCurrentProcessId()) + "-gdb.txt";
+        gdbOut = dir + "hang-" + hangTag + "-gdb.txt";
         captured = SpawnGdbCapture(gdbOut);
         if (!captured)
             DeleteFileA(gdbOut.c_str());

@@ -20,6 +20,9 @@ public:
     Result<TextureId> AcquireTexture(std::string_view name, const RgbaImage& image);
     Result<TextureId> UpdateTexture(std::string_view name, const RgbaImage& image,
                                     uint64_t rev);
+    // The same for a picture held by pointer — handed to the backend without copying its pixels.
+    Result<TextureId> UpdateTextureShared(std::string_view name, const SharedRgbaImage& image,
+                                          uint64_t rev);
     Result<void> ReleaseTexture(std::string_view name);
     Result<TextureId> GetTexture(std::string_view name) const;
     size_t TextureCount() const;

@@ -2,6 +2,7 @@
 
 #include "core/common/Common.hpp"
 #include "core/services/ServiceManager.hpp"
+#include "core/threading/QtThread.hpp"
 #include "modules/presentation/PresentationTypes.hpp"
 #include "modules/rendering/RenderOutputs.hpp"   // rendering::Frame (the re-present copy)
 
@@ -126,7 +127,7 @@ private:
     std::atomic<double> lastPhaseMs_{0.0};
     std::atomic<uint64_t> previewFrames_{0};
     std::atomic<int64_t> replaceStampMs_{0};
-    std::thread worker_;
+    QtThread worker_;   // QThreads, not std::thread: the loop paints text with Qt (see QtThread.hpp)
     std::mutex control_;   // start/stop vs. the loop's document sync
     std::mutex lifecycle_;
     std::mutex pendingContentMutex_;
@@ -166,7 +167,7 @@ private:
     bool hasComposedFlow_ = false;
 
     std::atomic<bool> previewRunning_{false};
-    std::thread previewWorker_;
+    QtThread previewWorker_;
     presentation::PresentationEngine* presPreview_ = nullptr;
     static constexpr int kPreviewIntervalMs = 1000;
     // How many empty preview ticks in a row (no open show) before the worker

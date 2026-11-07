@@ -80,13 +80,35 @@ Rectangle {
     Connections {
         target: LiveOutputService
         function onMediaChanged() { root.refreshOnAirSlide() }
-        function onMediaTick() { root.refreshOnAirSlide() }
-        function onInputChanged() { root.refreshOnAirSlide() }
+        // mediaTick fires with every decoded frame and every position update. The composition depends on
+        // WHAT is on air, not on which frame of it: recomposing the whole slide per frame, for every tile,
+        // was ~0.4 s of interface-thread work per frame (the meters and animations froze with it).
+        function onMediaTick() {
+            const key = LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaIsAudio
+                        + "|" + LiveOutputService.mediaName
+            if (key === root.lastMediaKey)
+                return
+            root.lastMediaKey = key
+            root.refreshOnAirSlide()
+        }
+        // inputChanged fires with EVERY video frame (the revision counter rides it). The slide's
+        // composition depends on WHICH input is taken, not on its pixels: recomposing the whole
+        // slide per video frame, for every tile, was GUI-thread work that stalled the picture.
+        function onInputChanged() {
+            const key = LiveOutputService.inputLabel + "|" + LiveOutputService.inputKind
+                        + "|" + LiveOutputService.inputLive
+            if (key === root.lastInputKey)
+                return
+            root.lastInputKey = key
+            root.refreshOnAirSlide()
+        }
         function onReadingPageChanged() { root.refreshOnAirSlide() }
         function onStagedChanged() { root.refreshOnAirSlide() }
         function onOnAirChanged() { root.refreshOnAirSlide() }
         function onLiveChanged() { root.refreshOnAirSlide() }
     }
+    property string lastInputKey: ""
+    property string lastMediaKey: ""
     Component.onCompleted: root.refreshOnAirSlide()
     readonly property bool hasSlidePreview: onAirSlide.valid === true
                                             && onAirSlide.blocks
@@ -145,7 +167,15 @@ Rectangle {
     // ---- Taken input layer (the Media pane's click-to-preview) ----------
     readonly property bool blacked: LiveOutputService.blackedOut
     readonly property bool inputTaken: !root.blacked && LiveOutputService.inputLabel !== ""
-    readonly property url inputSource: inputTaken
+    // While live, the ENGINE has already composed this output's picture (the video AND its slide: exactly
+    // what NDI sends). The tile shows that frame, loaded off the interface thread, instead of decoding the
+    // camera's JPEG here for every camera frame and drawing the slide over it a second time — that
+    // per-frame work on the interface thread is what made the audio meters stutter. Before going live
+    // (the Media pane's click-to-preview) there is no composed frame, so the tap is shown directly.
+    readonly property bool engineComposed: !root.blacked && LiveOutputService.live && root.hasFrame
+                                           && (root.inputTaken
+                                               || (LiveOutputService.mediaOnAir && !LiveOutputService.mediaIsAudio))
+    readonly property url inputSource: inputTaken && !engineComposed
         ? "image://videopreview/" + encodeURIComponent(LiveOutputService.inputLabel)
           + "?n=" + LiveOutputService.inputRev : ""
 
@@ -216,7 +246,7 @@ Rectangle {
         DesignPreview {
             objectName: "selfTestTileBackdropPreview"
             anchors.fill: parent
-            visible: !root.blacked && root.hasSlidePreview && !root.framePriority
+            visible: !root.blacked && root.hasSlidePreview && !root.framePriority && !root.engineComposed
             showCheckerboard: false
             background: "transparent"
             backgroundImage: ""
@@ -228,7 +258,7 @@ Rectangle {
             id: inputImage
             objectName: "selfTestTileInputFeed"
             anchors.fill: parent
-            visible: root.inputTaken
+            visible: root.inputTaken && !root.engineComposed
             source: root.inputSource
             fillMode: Image.PreserveAspectCrop
             cache: false   // every rev IS a new frame
@@ -240,7 +270,10 @@ Rectangle {
             objectName: "selfTestTileMediaFrame"
             anchors.fill: parent
             visible: root.mediaOnAir && !LiveOutputService.live && !root.inputTaken
-            source: root.mediaOnAir ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
+            // Requested ONLY while it is the picture shown: a hidden tile asking for a new frame URL on every
+            // decoded frame kept the pixmap cache and the one image-loader thread busy for nothing.
+            source: (root.mediaOnAir && !LiveOutputService.live && !root.inputTaken)
+                    ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
             fillMode: root.effectiveFillMode
             sizeToItem: false     // the provider stretches to a requested size; the file's own aspect must survive
             // (every mediaRev IS a new frame; the double buffer is what keeps it from blanking between revs)
@@ -397,13 +430,14 @@ Rectangle {
         OverlayLayer {
             underSlide: true
             blacked: root.blacked
+            visible: !root.engineComposed   // the engine's frame already carries the overlays
         }
 
         DesignPreview {
             id: contentPreview
             objectName: "selfTestTileDesignPreview"
             anchors.fill: parent
-            visible: !root.blacked && root.hasSlidePreview && !root.framePriority
+            visible: !root.blacked && root.hasSlidePreview && !root.framePriority && !root.engineComposed
             // Only Scroll mode draws the passage flow. In Slide mode the selected
             // page stays intact even if an earlier scroll left flow data on it.
             animateLineSteps: LiveOutputService.scrollMode
@@ -423,9 +457,10 @@ Rectangle {
             objectName: "selfTestTileFrame"
             anchors.fill: parent
             visible: !root.blacked && root.hasFrame
-                     && (root.framePriority || !root.hasSlidePreview)
-                     && !root.inputTaken
-                     && !(root.mediaOnAir && !LiveOutputService.live)
+                     && (root.engineComposed
+                         || ((root.framePriority || !root.hasSlidePreview)
+                             && !root.inputTaken
+                             && !(root.mediaOnAir && !LiveOutputService.live)))
             source: root.frameSource
             fillMode: Image.Stretch
             // Loaded off the interface thread and double buffered (LiveFrameImage); the provider hands back
@@ -434,6 +469,7 @@ Rectangle {
 
         OverlayLayer {
             blacked: root.blacked
+            visible: !root.engineComposed   // the engine's frame already carries the overlays
         }
 
         // (The LIVE pill was removed by request — the red border alone marks

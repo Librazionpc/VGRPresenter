@@ -16,6 +16,22 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# A build tree configured by an IDE kit can arrive here with EMPTY Release flags — `-std=c++26` and
+# nothing else, i.e. NO optimisation at all. The live video path (the software rasteriser, the scaled
+# blits, the readback conversions, the compositor) then runs ~10-30x slower than the shipped build, and a
+# "video lags under stress" report is really a "-O0" report. When the active Release/RelWithDebInfo flags
+# carry no optimisation, the ENGINE (the pixel work; see the target below) gets -O2. A tree that sets its
+# own flags (-O3 in build-release) is left alone. Only the engine: the interface layer is Qt glue, and
+# optimising its ~225 translation units as well tripled the dev build time for nothing the user can feel.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _bps_active_cfg)
+set(BPS_ENGINE_FALLBACK_OPT "")
+if(_bps_active_cfg STREQUAL "RELEASE" OR _bps_active_cfg STREQUAL "RELWITHDEBINFO")
+    if(NOT CMAKE_CXX_FLAGS_${_bps_active_cfg} MATCHES "-O[0-9sg]" AND NOT CMAKE_CXX_FLAGS MATCHES "-O[0-9sg]")
+        set(BPS_ENGINE_FALLBACK_OPT "-O2")
+        message(STATUS "No optimisation flag in the ${_bps_active_cfg} flags: the engine is built with -O2")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # AddressSanitizer (opt-in, OFF by default) — the app has been crashing
 # repeatedly with Windows STATUS_HEAP_CORRUPTION (0xc0000374: confirmed via
@@ -335,6 +351,9 @@ else()
 endif()
 
 add_library(engine_core STATIC ${BPS_CORE_SOURCES})
+if(BPS_ENGINE_FALLBACK_OPT)
+    target_compile_options(engine_core PRIVATE ${BPS_ENGINE_FALLBACK_OPT})
+endif()
 # The executables are PIE on modern distros; the static library must be PIC
 # so vtables/late-bound relocations link cleanly.
 set_property(TARGET engine_core PROPERTY POSITION_INDEPENDENT_CODE ON)

@@ -1531,7 +1531,8 @@ Result<void> TheTableLibrary::Load() {
     bool damaged = false;
     std::string damage;
     J parsedRoot;
-    if (body.ok()) {
+    const bool bodyOk = body.ok();
+    if (bodyOk) {
         if (auto parsed = json::Parse(body.value()); parsed.ok()) {
             damage = recovery::DocumentShapeProblem(parsed.value(), "books", J::Type::Array);
             if (damage.empty())
@@ -1547,6 +1548,10 @@ Result<void> TheTableLibrary::Load() {
         (void)recovery::SetAsideDamagedDocument(filePath_, kModule, damage);
     }
 
+    // The raw ~100 MB text is dead weight once parsed: release it before the
+    // structures are built, so it never sits next to them at the memory peak.
+    { auto release = std::move(body); (void)release; }
+
     std::lock_guard<std::mutex> scanLock(scanMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     books_.clear();
@@ -1555,7 +1560,7 @@ Result<void> TheTableLibrary::Load() {
     exactWordBloomsReady_ = false;
     ++libraryRevision_;
 
-    if (!body.ok() || damaged) return Ok();   // first run, or a store just set aside
+    if (!bodyOk || damaged) return Ok();   // first run, or a store just set aside
     const J& root = parsedRoot;
     const J* booksArr = root.Find("books");
     if (!booksArr || !booksArr->asArray()) return Ok();
@@ -1658,19 +1663,21 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
         (void)engine.RegisterAdapter(std::make_shared<TheTableIndexAdapter>());
     });
 
-    // The library copy happens under the lock; indexing (an upsert per sermon)
-    // runs on it so browsing is never held up behind the engine's work.
-    std::vector<TheTableBook> snapshot;
+    // Only ONE book is copied at a time, under the lock; indexing (an upsert per
+    // sermon) runs on that copy so browsing is never held up behind the engine's
+    // work. Copying the whole ~100 MB library up front doubled the process's memory
+    // for the whole (minutes-long) pass. A library that changes mid-pass (revision
+    // moves) ends this pass — the reload that moved it schedules its own.
     uint64_t snapshotRevision = 0;
+    size_t bookCount = 0;
+    size_t total = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        snapshot = books_;
         snapshotRevision = libraryRevision_;
+        bookCount = books_.size();
+        for (const TheTableBook& book : books_)
+            total += book.chapters.size();
     }
-
-    size_t total = 0;
-    for (const TheTableBook& book : snapshot)
-        total += book.chapters.size();
     Logger::Instance().Info(std::format("The Table search indexing started ({} sermon documents)", total),
                             kModule);
 
@@ -1694,7 +1701,17 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
     };
     // One cache invalidation for the whole batch, not one per sermon.
     engine.SuspendCacheInvalidation();
-    for (const TheTableBook& book : snapshot) {
+    for (size_t bookIndex = 0; bookIndex < bookCount; ++bookIndex) {
+        TheTableBook book;
+        bool moved = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            moved = snapshotRevision != libraryRevision_ || bookIndex >= books_.size();
+            if (!moved)
+                book = books_[bookIndex];
+        }
+        if (moved)
+            break;
         for (const TheTableChapter& ch : book.chapters) {
             if (cancelled && cancelled->load(std::memory_order_relaxed)) {
                 engine.ResumeCacheInvalidation();   // (end the batch scope even when cancelled)

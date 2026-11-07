@@ -81,7 +81,8 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                    float readingFontPx,
                    const std::vector<int>* readingLineStarts,
                    uint64_t readingLineTextHash,
-                   bool flowWindow) {
+                   bool flowWindow,
+                   const std::string& readingStyleKey) {
     constexpr double kBlockStageW = bps::library::kStageWidth, kBlockStageH = bps::library::kStageHeight;
     constexpr double kDefaultTextFontSize = 16.0;
     constexpr double kNaturalLineHeight = template_text_metrics::kNaturalLineHeight;
@@ -163,6 +164,9 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             text->SetBounds(textBounds);
             // Scroll's max-words column fills the text area with no vertical alignment.
             text->SetFlowFillsBox(isFlowBlock && readingFontPx > 0.0f);
+            // Whose line breaks this block draws: a later refresh of the same scene hands it a new table.
+            if (isFlowBlock)
+                text->SetReadingStyleKey(readingStyleKey);
             auto styleComp = std::make_shared<rendering::TextStyleComponent>();
             styleComp->style.size = static_cast<float>(
                 ((isFlowBlock && readingFontPx > 0.0f)
@@ -380,6 +384,87 @@ void UpsertVideoLayer(rendering::RenderEngine& engine, const std::string& sceneI
     (void)engine.AddObject(sceneId, videoObj, "media");
 }
 
+// The same, for a caller that is DONE with the frame: it is moved into the scene object instead of
+// copied (8 MB at 1080p, once per scene per video frame — the taken input lands in every scene).
+void UpsertVideoLayerOwned(rendering::RenderEngine& engine, const std::string& sceneId,
+                           const std::string& objId, rendering::RgbaImage&& img,
+                           const rendering::Rect& bounds, uint64_t sourceSeq,
+                           rendering::BlendMode blend) {
+    auto existing = engine.GetObject(sceneId, objId);
+    if (existing.ok()) {
+        if (auto* v = dynamic_cast<rendering::VideoObject*>(existing.value())) {
+            v->SetFrame(std::move(img));
+            v->SetBounds(bounds);
+            v->SetSourceSeq(sourceSeq);
+            v->SetBlendMode(blend);
+        }
+        return;
+    }
+    if (img.empty())
+        return;
+    auto videoObj = std::make_shared<rendering::VideoObject>(objId, objId);
+    videoObj->SetFrame(std::move(img));
+    videoObj->SetBounds(bounds);
+    videoObj->SetSourceSeq(sourceSeq);
+    videoObj->SetBlendMode(blend);
+    videoObj->SetLayer("media");
+    (void)engine.AddObject(sceneId, videoObj, "media");
+}
+
+// The same for a picture held by pointer: every scene's object keeps the ONE shared allocation (no
+// pixel copy at all). A null image clears an existing layer, like an empty frame does.
+void UpsertVideoLayerShared(rendering::RenderEngine& engine, const std::string& sceneId,
+                            const std::string& objId, const rendering::SharedRgbaImage& img,
+                            const rendering::Rect& bounds, uint64_t sourceSeq,
+                            rendering::BlendMode blend) {
+    auto existing = engine.GetObject(sceneId, objId);
+    if (existing.ok()) {
+        if (auto* v = dynamic_cast<rendering::VideoObject*>(existing.value())) {
+            v->SetFrameShared(img);
+            v->SetBounds(bounds);
+            v->SetSourceSeq(sourceSeq);
+            v->SetBlendMode(blend);
+        }
+        return;
+    }
+    if (!img || img->empty())
+        return;
+    auto videoObj = std::make_shared<rendering::VideoObject>(objId, objId);
+    videoObj->SetFrameShared(img);
+    videoObj->SetBounds(bounds);
+    videoObj->SetSourceSeq(sourceSeq);
+    videoObj->SetBlendMode(blend);
+    videoObj->SetLayer("media");
+    (void)engine.AddObject(sceneId, videoObj, "media");
+}
+
+// One camera frame per sequence number, built once and shared by every scene that asks for it (the
+// program scene and each output's scene all want the SAME picture): the first asker pays the PAL copy
+// and the conversion, the rest get the pointer. An uncounted source (seq 0) is never cached.
+rendering::SharedRgbaImage SharedTakenFrame(const std::string& deviceId, uint64_t seq) {
+    static std::mutex cacheMutex;
+    static std::string cachedDevice;
+    static uint64_t cachedSeq = 0;
+    static rendering::SharedRgbaImage cachedImage;
+    if (seq != 0) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        if (cachedImage && cachedSeq == seq && cachedDevice == deviceId)
+            return cachedImage;
+    }
+    const auto frame = bps::platform::PlatformAccessor::Get().Video().PreviewFramePixels(deviceId);
+    rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
+    if (img.empty())
+        return nullptr;
+    rendering::SharedRgbaImage shared = std::make_shared<const rendering::RgbaImage>(std::move(img));
+    if (seq != 0) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        cachedDevice = deviceId;
+        cachedSeq = seq;
+        cachedImage = shared;
+    }
+    return shared;
+}
+
 // ---- DRAW A LIVE LAYER ONLY WHEN ITS PICTURE MOVED -------------------------
 bool LayerRefreshAlways() {
     static const bool always = std::getenv("BPS_LAYER_REFRESH_ALWAYS") != nullptr;
@@ -559,7 +644,8 @@ void ReportLayerState(const std::string& sceneId, const std::string& label, std:
 void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
                          const rendering::Size& size, bool showOverlay) {
     const auto taken = presentation::CompositorState::Instance().GetTakenInput();
-    rendering::RgbaImage takenImg;
+    rendering::SharedRgbaImage takenImg;
+    int takenW = 0, takenH = 0;
     uint64_t takenSeq = 0;
     bool takenRefresh = true;
     if (!taken.deviceId.empty() && bps::platform::PlatformAccessor::Installed()) {
@@ -567,26 +653,26 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
         takenRefresh = !LayerFrameCurrent(engine, sceneId, "takeninput", takenSeq);
     }
     if (takenRefresh) {
-        if (!taken.deviceId.empty() && bps::platform::PlatformAccessor::Installed()) {
-            const auto frame = bps::platform::PlatformAccessor::Get().Video()
-                                   .PreviewFramePixels(taken.deviceId);
-            takenImg = ToRgbaImage(frame.width, frame.height, frame.rgba);
-        }
-        UpsertVideoLayer(engine, sceneId, "takeninput", takenImg,
-                         rendering::Rect(0, 0, size.width, size.height), takenSeq);
+        if (!taken.deviceId.empty() && bps::platform::PlatformAccessor::Installed())
+            takenImg = SharedTakenFrame(taken.deviceId, takenSeq);
+        takenW = takenImg ? takenImg->width : 0;
+        takenH = takenImg ? takenImg->height : 0;
+        UpsertVideoLayerShared(engine, sceneId, "takeninput", takenImg,
+                               rendering::Rect(0, 0, size.width, size.height), takenSeq,
+                               rendering::BlendMode::Alpha);
     }
 
     if (takenRefresh) {
         const bool present = engine.GetObject(sceneId, "takeninput").ok();
         const std::string state = taken.deviceId.empty()
             ? std::string("absent — no input taken")
-            : (takenImg.empty()
+            : (takenW == 0 || takenH == 0
                ? std::format("absent — PAL tap gave no pixels for device '{}' (kind '{}')",
                              taken.deviceId, taken.kind)
                : std::format("{}{} — device '{}' (kind '{}') {}x{} px -> {}x{} px",
                              present ? "present" : "MISSING",
                              present ? "" : " (AddObject refused)",
-                             taken.deviceId, taken.kind, takenImg.width, takenImg.height,
+                             taken.deviceId, taken.kind, takenW, takenH,
                              size.width, size.height));
         ReportLayerState(sceneId, "taken input", state);
     }
@@ -594,36 +680,36 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
     const auto& compositorState = presentation::CompositorState::Instance();
     const uint64_t mediaSeq = compositorState.GetMediaSeq();
     const bool mediaRefresh = !LayerFrameCurrent(engine, sceneId, "mediaonair", mediaSeq);
-    const auto media = mediaRefresh ? compositorState.GetMediaFrame()
-                                    : presentation::CompositorState::MediaFrame{};
-    const rendering::RgbaImage mediaImg = mediaRefresh
-        ? ToRgbaImage(media.width, media.height, media.rgba)
-        : rendering::RgbaImage{};
+    // The frame arrives as one shared picture (converted once per frame, however many scenes ask).
+    const auto media = mediaRefresh ? compositorState.GetMediaShared()
+                                    : presentation::CompositorState::SharedMedia{};
+    const rendering::SharedRgbaImage& mediaImg = media.image;
+    const bool haveMedia = mediaImg && !mediaImg->empty();
     const std::string_view effectiveFit = media.fit.empty() ? std::string_view("contain")
                                                             : std::string_view(media.fit);
     rendering::Rect mediaRect(0, 0, size.width, size.height);
-    if (!mediaImg.empty()) {
+    if (haveMedia) {
         if (effectiveFit == "cover") {
-            mediaRect = CoverRect(mediaImg.width, mediaImg.height, size);
+            mediaRect = CoverRect(mediaImg->width, mediaImg->height, size);
         } else if (effectiveFit == "fill") {
             mediaRect = rendering::Rect(0, 0, size.width, size.height);
         } else {
-            mediaRect = ContainRect(mediaImg.width, mediaImg.height, size);
+            mediaRect = ContainRect(mediaImg->width, mediaImg->height, size);
         }
     }
     if (mediaRefresh)
-        UpsertVideoLayer(engine, sceneId, "mediaonair", mediaImg, mediaRect, mediaSeq);
+        UpsertVideoLayerShared(engine, sceneId, "mediaonair", mediaImg, mediaRect, mediaSeq,
+                               rendering::BlendMode::Alpha);
 
     if (mediaRefresh) {
         const bool present = engine.GetObject(sceneId, "mediaonair").ok();
-        const std::string state = mediaImg.empty()
-            ? std::format("absent — compositor frame empty (media {}x{}, {} bytes)",
-                          media.width, media.height, media.rgba.size())
+        const std::string state = !haveMedia
+            ? std::string("absent — compositor frame empty")
             : std::format("{}{} — compositor frame {}x{} -> {}x{} px{}",
                           present ? "present" : "MISSING",
                           present ? "" : " (AddObject refused)",
-                          media.width, media.height,
-                          mediaImg.width, mediaImg.height, mediaImg.pixels.size(),
+                          mediaImg->width, mediaImg->height,
+                          mediaImg->width, mediaImg->height, mediaImg->pixels.size(),
                           sceneId.find("@gated") != std::string::npos ? " [gated scene]" : "");
         ReportLayerState(sceneId, "media", state);
     }

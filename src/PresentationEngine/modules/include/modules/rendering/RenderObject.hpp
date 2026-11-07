@@ -7,6 +7,7 @@
 #include "modules/rendering/Scene.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -168,6 +169,9 @@ public:
     }
     bool HasReadingFlow() const { return flowPageLines_ > 0; }
     void SetFlowFillsBox(bool on) { flowFillsBox_ = on; }
+    // The output style whose line table this reading block draws (see Slide::flowBreaks).
+    void SetReadingStyleKey(std::string key) { readingStyleKey_ = std::move(key); }
+    const std::string& ReadingStyleKey() const { return readingStyleKey_; }
     bool FlowFillsBox() const { return flowFillsBox_; }
     int FlowPageLines() const { return flowPageLines_; }
     float FlowCharAt() const { return flowCharAt_; }
@@ -184,6 +188,7 @@ private:
     std::string pageText_;
     int flowPageLines_ = 0;
     bool flowFillsBox_ = false;
+    std::string readingStyleKey_;
     float flowCharAt_ = 0.0f;
     std::vector<int> flowCharStarts_;
 };
@@ -217,18 +222,33 @@ public:
     const char* TypeName() const noexcept override { return "Video"; }
     // The engine treats video as a frame source: modules push decoded frames.
     void SetFrame(RgbaImage frame) {
+        shared_.reset();
         frame_ = std::move(frame);
-        ++frameRev_;
+        frameRev_ = NextRevision();
     }
-    const RgbaImage& Frame() const { return frame_; }
-    bool HasFrame() const { return !frame_.empty(); }
+    // The frame by pointer: the object keeps the shared picture instead of a copy of its pixels.
+    void SetFrameShared(SharedRgbaImage frame) {
+        frame_ = RgbaImage{};
+        shared_ = std::move(frame);
+        frameRev_ = NextRevision();
+    }
+    const RgbaImage& Frame() const { return shared_ ? *shared_ : frame_; }
+    // Non-null when the frame is held by pointer (SetFrameShared).
+    const SharedRgbaImage& SharedFrame() const { return shared_; }
+    bool HasFrame() const { return shared_ ? !shared_->empty() : !frame_.empty(); }
     uint64_t SourceSeq() const { return sourceSeq_; }
     void SetSourceSeq(uint64_t seq) { sourceSeq_ = seq; }
-    // Monotonic version of the pixels currently in Frame() (0 = never pushed).
+    // Version of the pixels currently in Frame() (0 = never pushed). Unique across ALL video
+    // objects and only ever larger: two scenes' objects of the same name never share a revision.
     uint64_t FrameRevision() const { return frameRev_; }
 
 private:
+    static uint64_t NextRevision() {
+        static std::atomic<uint64_t> counter{0};
+        return ++counter;
+    }
     RgbaImage frame_;
+    SharedRgbaImage shared_;
     uint64_t frameRev_ = 0;
     uint64_t sourceSeq_ = 0;
 };

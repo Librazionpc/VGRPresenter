@@ -53,6 +53,9 @@ public:
 
     // Consume a frame (scaled to the output's target size by the engine).
     virtual Result<void> Present(const Frame& frame) = 0;
+    // The same frame handed to EVERY output of one distribution: an output that keeps the frame as it
+    // is (its target is the frame's size) just holds the pointer — no per-output copy of 8 MB.
+    virtual Result<void> PresentShared(const std::shared_ptr<const Frame>& frame) { return Present(*frame); }
     virtual Frame LastFrame() const = 0;
     virtual uint64_t FramesReceived() const = 0;
     virtual Size TargetSize() const = 0;
@@ -75,6 +78,7 @@ public:
     const char* Name() const noexcept override { return name_.c_str(); }
 
     Result<void> Present(const Frame& frame) override;
+    Result<void> PresentShared(const std::shared_ptr<const Frame>& frame) override;
     Frame LastFrame() const override;
     // Retain the immutable current frame without copying its pixel vector.
     // Live consumers use this to hand frames to worker threads cheaply.
@@ -120,6 +124,7 @@ public:
 
     // Distributes a frame to all enabled outputs (scaled to their targets).
     void Distribute(const Frame& frame);
+    void Distribute(const std::shared_ptr<const Frame>& frame);
     void Clear();
 
 private:

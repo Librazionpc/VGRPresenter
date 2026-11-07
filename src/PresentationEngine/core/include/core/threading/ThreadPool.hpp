@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/common/Common.hpp"
+#include "core/threading/QtThread.hpp"
 #include "interfaces/IService.hpp"
 
 #include <condition_variable>
@@ -115,7 +116,7 @@ private:
     };
     std::priority_queue<std::shared_ptr<Task>, std::vector<std::shared_ptr<Task>>, TaskCmp> queue_;
     std::unordered_map<TaskHandle, std::shared_ptr<Task>> byId_;
-    std::vector<std::thread> workers_;
+    std::vector<QtThread> workers_;   // QThreads, not std::thread: see QtThread.hpp
     std::atomic<size_t> desiredWorkers_{0};
     std::atomic<bool> initialized_{false};
     std::atomic<bool> shuttingDown_{false};

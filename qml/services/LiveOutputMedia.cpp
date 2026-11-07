@@ -56,6 +56,7 @@
 #include <QTextOption>
 #include <QEasingCurve>
 #include <QVariantAnimation>
+#include <QMediaMetaData>
 #include <QMediaPlayer>
 #include <QUrl>
 #include <QVideoFrame>
@@ -259,6 +260,35 @@ void LiveOutputService::applyMediaTake(const MediaPreflight &pre)
     emit mediaTick();
 }
 
+double LiveOutputService::mediaSourceFps() const
+{
+    if (!mediaPlayer_)
+        return 0.0;
+    return mediaPlayer_->metaData().value(QMediaMetaData::VideoFrameRate).toDouble();
+}
+
+void LiveOutputService::shutdownMedia()
+{
+    // Every Media Foundation worker thread behind a QMediaPlayer runs Qt code (frame and state
+    // callbacks) and so owns Qt thread data. The crash reports for a quit ("Qt6Core.dll,
+    // c0000005", always the same offset: Qt's per-thread cleanup reading thread data that was
+    // already gone) are those threads ending AFTER the app's teardown had removed what they
+    // clean up against. Stopping and deleting the player here, in order, ends them first.
+    if (!mediaPlayer_)
+        return;
+    mediaPlayer_->stop();
+    mediaPlayer_->setSource(QUrl());
+    mediaPlayer_->setVideoOutput(nullptr);
+    mediaPlayer_->setAudioOutput(nullptr);
+    delete mediaPlayer_;
+    mediaPlayer_ = nullptr;
+    delete mediaAudio_;
+    mediaAudio_ = nullptr;
+    delete mediaSink_;
+    mediaSink_ = nullptr;
+    mediaOnAir_ = false;
+}
+
 void LiveOutputService::EnsureMediaPlayer()
 {
     if (!mediaPlayer_) {
@@ -293,22 +323,38 @@ void LiveOutputService::EnsureMediaPlayer()
                 emit mediaChanged();
             }
         });
+        // DIRECT: this runs on the thread that DECODED the frame, not the interface thread. A frame used
+        // to be converted to an image, copied into the compositor (two more 8 MB passes) and announced
+        // to every QML listener, all on the interface thread — at 30-60 frames a second, a window that
+        // was also drawing the UI. The decoder thread now does the conversion and hands the engine every
+        // frame; the interface thread is told once per batch (coalesced), and only gets the newest.
         connect(mediaSink_, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame &f) {
             if (!f.isValid())
                 return;
-            setLastMediaFrame(f.toImage());
-            if (!lastMediaFrame_.isNull()) {
-                if (!mediaAlphaDecided_) {
-                    mediaAlphaDecided_ = true;
-                    mediaHasAlpha_ = imageHasTransparentPixel(lastMediaFrame_);
-                    g_mediaHasAlphaOnAir = mediaHasAlpha_;
-                    emit mediaChanged();
-                }
-                mediaRev_++;
+            const QImage image = f.toImage();
+            if (image.isNull())
+                return;
+            mediaFramesDecoded_.fetch_add(1, std::memory_order_relaxed);
+            mediaFrameShared_.store(std::make_shared<const QImage>(image));   // what the providers read
+            pushMediaFrameToCompositor(image);                                 // the engine: every frame
+            if (!mediaGuiUpdatePending_.exchange(true)) {
+                QMetaObject::invokeMethod(this, [this] {
+                    mediaGuiUpdatePending_.store(false);
+                    const std::shared_ptr<const QImage> newest = mediaFrameShared_.load();
+                    if (!newest || newest->isNull())
+                        return;
+                    lastMediaFrame_ = *newest;
+                    if (!mediaAlphaDecided_) {
+                        mediaAlphaDecided_ = true;
+                        mediaHasAlpha_ = imageHasTransparentPixel(lastMediaFrame_);
+                        g_mediaHasAlphaOnAir = mediaHasAlpha_;
+                        emit mediaChanged();
+                    }
+                    mediaRev_++;
+                    emit mediaTick();
+                }, Qt::QueuedConnection);
             }
-            pushMediaFrameToCompositor(lastMediaFrame_);
-            emit mediaTick();
-        });
+        }, Qt::DirectConnection);
     }
 }
 
@@ -471,6 +517,6 @@ QImage LiveMediaFrameProvider::requestImage(const QString &id, QSize *size,
         *size = frame.size();
     if (requestedSize.isValid() && !requestedSize.isEmpty()
         && requestedSize != frame.size())
-        return frame.scaled(requestedSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        return shrinkForPreview(frame, requestedSize, Qt::IgnoreAspectRatio);
     return frame;
 }

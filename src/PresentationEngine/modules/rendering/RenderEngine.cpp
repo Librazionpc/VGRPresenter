@@ -1,3 +1,4 @@
+#include "core/common/StageTiming.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
 #include "core/config/ConfigurationManager.hpp"
@@ -523,7 +524,9 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
         case ObjectKind::Video: {
             auto* v = static_cast<VideoObject*>(obj);
             if (!v->HasFrame()) break;
-            auto up = gpu_.UpdateTexture(v->Id(), v->Frame(), v->FrameRevision());
+            auto up = v->SharedFrame()
+                ? gpu_.UpdateTextureShared(v->Id(), v->SharedFrame(), v->FrameRevision())
+                : gpu_.UpdateTexture(v->Id(), v->Frame(), v->FrameRevision());
             if (!up.ok()) {
                 LogDrawFailureOnce(v->Id(), std::format(
                     "video texture upload failed: {} (frame {}x{} {} bytes, budget {} bytes, {} uploaded)",
@@ -888,6 +891,7 @@ uint64_t CommandWork(const DrawCommand& cmd, int frameW, int frameH) {
 } // namespace
 
 Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOptions& opts) {
+    static timing::StageTiming stageTiming("render");
     if (!backend_) return Error::Make(Err::Render_BackendUnavailable, "Render", "no backend");
     auto scene = scenes_.GetScene(sceneId);
     if (!scene.ok()) return scene.error();
@@ -909,7 +913,9 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // Layout: size the backend to the scene.
     const int w = static_cast<int>(scene.value()->SceneSize().width);
     const int h = static_cast<int>(scene.value()->SceneSize().height);
+    const auto tBegin = std::chrono::steady_clock::now();
     if (auto r = backend_->BeginFrame(w, h); !r.ok()) return r.error();
+    stageTiming.Add("begin", timing::MsSince(tBegin));
 
     std::vector<DrawCommand> cmds;
     cmds.reserve(64);
@@ -922,6 +928,7 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
         cmds.push_back(clear);
     }
 
+    const auto tCmds = std::chrono::steady_clock::now();
     auto objects = CollectObjects(sceneId);
     contentScrollChars_ = opts.contentScrollChars;
     contentScrollFromScene_ = opts.contentScrollFromScene;
@@ -1007,33 +1014,58 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // Custom graph passes run after the fixed pipeline (extensible effects).
     graph_.ExecutePasses();
 
+    stageTiming.Add("commands", timing::MsSince(tCmds));
     lastCommandCount_.store(static_cast<uint32_t>(cmds.size()));
+    const auto tSubmit = std::chrono::steady_clock::now();
     if (auto r = backend_->Submit(cmds); !r.ok()) return r.error();
     if (auto r = backend_->EndFrame(); !r.ok()) return r.error();
+    stageTiming.Add("submit", timing::MsSince(tSubmit));
 
     // Readback + distribute to outputs.
     if (opts.capture || opts.distribute) {
-        auto rb = backend_->Readback();
+        const auto tReadback = std::chrono::steady_clock::now();
+        auto rb = backend_->ReadbackMove();   // a system-memory backend hands its framebuffer over
         if (!rb.ok()) return rb.error();
-        frame = rb.value();
+        frame = std::move(rb.value());   // the readback is ours: no copy of 8 MB
+        stageTiming.Add("readback", timing::MsSince(tReadback));
+        const auto tFilters = std::chrono::steady_clock::now();
         if (!frame.empty())
             ApplyFilters(frame, opts.filters);
+        stageTiming.Add("filters", timing::MsSince(tFilters));
         // Transparency inspection (opt-in): make the alpha VISIBLE downstream.
         if (alphaInspect_.load(std::memory_order_relaxed) && !frame.empty())
             CompositeOverCheckerboard(frame);
     }
     if (opts.distribute) {
-        Frame out;
-        out.sceneId = std::string(sceneId);
-        out.frame = frameNumber;
-        out.width = frame.width;
-        out.height = frame.height;
-        out.pixels = frame.pixels;
-        out.timestampMs = std::chrono::duration<double, std::milli>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count();
-        outputs_.Distribute(out);
+        const auto tDistribute = std::chrono::steady_clock::now();
+        // When the last holder lets go, the 8 MB buffer goes back to the pool for the next frame.
+        std::shared_ptr<Frame> out(new Frame(), [](Frame* f) {
+            FramebufferPool::Instance().Give(std::move(f->pixels));
+            delete f;
+        });
+        out->sceneId = std::string(sceneId);
+        out->frame = frameNumber;
+        out->width = frame.width;
+        out->height = frame.height;
+        if (opts.capture || opts.keepFrame) {
+            out->pixels = frame.pixels;   // the caller wants the picture too: one copy
+        } else {
+            out->pixels = std::move(frame.pixels);   // distribute-only: the pixels move, nobody copies them
+            frame = RgbaImage{};
+        }
+        out->timestampMs = std::chrono::duration<double, std::milli>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        const std::shared_ptr<const Frame> shared(std::move(out));
+        {
+            std::lock_guard<std::mutex> keep(lastDistributedMutex_);
+            lastDistributed_ = shared;
+        }
+        outputs_.Distribute(shared);   // every output holds THIS frame (see FrameBufferOutput::PresentShared)
+        stageTiming.Add("distribute", timing::MsSince(tDistribute));
     }
+    stageTiming.Add("frame total (locked)", timing::MsSince(frameStart));
+    stageTiming.EndUnit();
 
     // Diagnostics + frame budget (60 FPS target ⇒ 16.67 ms; drops logged).
     const auto frameEnd = std::chrono::steady_clock::now();
@@ -1079,6 +1111,13 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     }   // renderMutex_ released here
 
     // Published with the render lock RELEASED (see the note where it is taken).
+    static timing::StageTiming tailTiming("render tail");
+    const auto tPublish = std::chrono::steady_clock::now();
+    struct PublishTimer {
+        timing::StageTiming& t;
+        std::chrono::steady_clock::time_point at;
+        ~PublishTimer() { t.Add("events", timing::MsSince(at)); t.EndUnit(); }
+    } publishTimer{tailTiming, tPublish};
     if (dropped)
         (void)EventBus::Instance().Publish(events::RenderFrameDropped{
             std::string(sceneId), frameMs, 16.67});

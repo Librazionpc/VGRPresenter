@@ -139,7 +139,20 @@ bool SceneBuilder::RefreshReadingFlow(rendering::RenderEngine& engine,
         if (!reading)
             return false;   // this scene draws no flow (a refused family, a bus feed)
     }
-    const auto* styleComp = reading->FindComponent<rendering::TextStyleComponent>();
+    auto* styleComp = reading->FindComponent<rendering::TextStyleComponent>();
+    // THE LINE BREAKS FOLLOW THE SERVICE'S TABLE, NOT THE ONE THE SCENE WAS BUILT WITH. The service anchors every
+    // output's table at the word the walk has reached (so each screen's top line begins on that word) and hands
+    // the new starts with the position; the scene keeps its text, so without this it would go on drawing
+    // the table it was built with and the top words would differ from screen to screen again.
+    if (styleComp && !reading->ReadingStyleKey().empty()) {
+        const auto breaks = slide.flowBreaks.find(reading->ReadingStyleKey());
+        if (breaks != slide.flowBreaks.end() && !breaks->second.empty()) {
+            auto forced = std::make_shared<rendering::ForcedLineBreaks>();
+            forced->starts = breaks->second;
+            forced->textHash = rendering::TextLayout::TextHash(slide.flowText);
+            styleComp->style.forcedBreaks = std::move(forced);
+        }
+    }
     const rendering::TextStyle style = styleComp ? styleComp->style : rendering::TextStyle{};
     reading->SetFlowCharTable(FlowCharStartsFor(slide.flowText, style, engine.Fonts()));
     reading->SetReadingFlow(reading->FlowPageLines(), slide.flowChar < 0.0f ? 0.0f : slide.flowChar);
@@ -456,7 +469,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         case SlideComposition::Source::FamilyTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tplf", "text", slide.flowText,
                                          style.readingFontPx, ReadingBreaksFor(slide, style),
-                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
+                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty(),
+                                         style.readingStyleKey);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', family {} template {} blocks)",
                                                 sceneId, style.name, comp.familyIdx, n), "SceneBuilder");
             return;
@@ -464,7 +478,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         case SlideComposition::Source::StyleTemplate: {
             const int n = AddStageBlocks(engine, sceneId, comp.blocks, size, "tpl", "text", slide.flowText,
                                          style.readingFontPx, ReadingBreaksFor(slide, style),
-                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
+                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty(),
+                                         style.readingStyleKey);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', template {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;
@@ -479,7 +494,8 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
         case SlideComposition::Source::SlideBlocks: {
             const int n = AddStageBlocks(engine, sceneId, slide.blocks, size, "blk", "text", slide.flowText,
                                          style.readingFontPx, ReadingBreaksFor(slide, style),
-                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty());
+                                         rendering::TextLayout::TextHash(slide.flowText), !slide.flowBreaks.empty(),
+                                         style.readingStyleKey);
             Logger::Instance().Debug(std::format("Scene built: {} (style '{}', {} blocks)",
                                                 sceneId, style.name, n), "SceneBuilder");
             return;

@@ -262,12 +262,37 @@ bool LiveOutputService::PushBusFeedFrames()
 
 void LiveOutputService::pumpTick()
 {
-    const QImage takenFrame = SampleTakenInput();
+    // A taken CAMERA or SCREEN tap keeps its pixels in the engine, which composes the program from
+    // them itself: all this tick needs from it is "did a frame arrive". The tap's counter answers that;
+    // the old way copied the whole frame (8 MB at 1080p) into a QImage on the interface thread every
+    // time one landed, just to compare its cache key. An NDI input, or a tap with no counter, still
+    // takes the copy.
+    QImage takenFrame;
+    bool movedByCounter = false;
+    bool countedKind = false;
+    if (!inputLabel_.isEmpty()
+        && (inputKind_ == QLatin1String("camera") || inputKind_ == QLatin1String("screen"))) {
+        const quint64 seq = EngineBridge::instance().previewFrameSeqFor(inputLabel_);
+        if (seq != 0) {
+            countedKind = true;
+            if (seq != inputFrameSeq_) {
+                inputFrameSeq_ = seq;
+                movedByCounter = true;
+            }
+            if (!inputLive_) {
+                inputLive_ = true;
+                qInfo("LiveOutputService: first frame decoded for '%s'", qUtf8Printable(inputLabel_));
+            }
+            producing_.insert(inputLabel_);
+        }
+    }
+    if (!countedKind)
+        takenFrame = SampleTakenInput();
     const bool cardMoved = SampleCardPreviews();
     if (!inputLabel_.isEmpty() && !producing_.contains(inputLabel_)
         && !takenFrame.isNull() && takenFrame.width() > 1)
         producing_.insert(inputLabel_);
-    bool moved = PushTakenInputFrame(takenFrame);
+    bool moved = countedKind ? movedByCounter : PushTakenInputFrame(takenFrame);
     if (PushBusFeedFrames())
         moved = true;
     if (cardMoved)
@@ -561,6 +586,7 @@ void LiveOutputService::clearInput()
     inputKind_.clear();
     inputMode_.clear();
     inputLive_ = false;
+    inputFrameSeq_ = 0;
     clearNdiInputFrame();   // the compositor frame side of an NDI take
     pl::CompositorState::Instance().ClearTakenInput();
     if (inputPump_ && cardPreviews_.isEmpty())
