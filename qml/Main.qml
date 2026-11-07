@@ -7495,6 +7495,105 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
+    // ---- MEDIA-PANE CARD PREVIEW (VGR_CARDPREVIEW_TEST=1) ---------------------------------------------
+    // What a card does when it is held: the camera card's live thumbnail (previewInput -> producing +
+    // inputRev) and a microphone card's L/R meter (startInputMeter -> peaks). Logged once a second.
+    property string cpCam: ""
+    property string cpMic: ""
+    property int cpTicks: 0
+    property int cpRev0: 0
+    Timer {
+        id: selfTestCardPreviewStart
+        running: typeof SelfTestCardPreview !== "undefined" && SelfTestCardPreview
+        interval: 9000
+        onTriggered: {
+            for (let i = 0; i < VideoSourceListModel.rowCount(); ++i) {
+                const row = VideoSourceListModel.getSource(i)
+                if (String(row.kind || "") === "camera" && String(row.sublabel || "").trim() !== "") {
+                    window.cpCam = String(row.sublabel).trim(); break
+                }
+            }
+            for (let i = 0; i < AudioInputListModel.rowCount(); ++i) {
+                const row = AudioInputListModel.getInput(i)
+                if (String(row.sublabel || "").trim() !== "") { window.cpMic = String(row.sublabel).trim(); break }
+            }
+            console.log("[SELFTEST-CARD] camera=" + JSON.stringify(window.cpCam) + " mic=" + JSON.stringify(window.cpMic))
+            window.cpRev0 = Number(LiveOutputService.inputRev)
+            // The real pane: open the Media tab, show the Buses, hold each bus card like a click would.
+            SelfTest.clickItem("selfTestTab_media")
+            selfTestCardPreviewHold.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewHold
+        interval: 2000
+        onTriggered: {
+            const pane = SelfTest.findItem("selfTestMediaPane")
+            console.log("[SELFTEST-CARD] pane=" + (pane ? "found" : "MISSING"))
+            if (!pane) { SelfTest.quit(); return }
+            pane.selection = "inputs"
+            const rows = pane.inputRows
+            console.log("[SELFTEST-CARD] bus rows=" + JSON.stringify(rows))
+            for (let i = 0; i < rows.length; ++i) {
+                const b = BusListModel.getBus(Number(rows[i]))
+                const vr = b.routedVideoSources || []
+                let why = ""
+                for (const r of vr) {
+                    const c = VideoSourceListModel.getSource(r)
+                    why += " [src " + r + " kind=" + c.kind + " label=" + JSON.stringify(c.sublabel)
+                           + " healthy=" + LiveOutputService.inputHealthy(String(c.sublabel || "").trim(), String(c.kind || ""))
+                           + " available=" + LiveOutputService.inputAvailable(String(c.sublabel || "").trim(), String(c.kind || "")) + "]"
+                }
+                console.log("[SELFTEST-CARD] bus " + rows[i] + " type=" + b.type + " muted=" + b.muted + " level=" + b.level
+                            + " videoRoutes=" + vr.length + " audioRoutes=" + (b.routedAudioInputs || []).length + why)
+                pane.toggleBusMonitorPreview(Number(rows[i]))
+            }
+            // The monitor tiles BEFORE going live: a media file taken to the output preview.
+            // What a double-click on the Camera bus does: take its media source to the output preview.
+            pane.toggleVideoSourcePreview(2)
+            console.log("[SELFTEST-CARD] held: videoBus=" + pane.busMonitorVideoBus + " audioBus=" + pane.busMonitorAudioBus
+                        + " previews=" + JSON.stringify(LiveOutputService.cardPreviews)
+                        + " metered=" + JSON.stringify(pane.meteredLabels))
+            selfTestCardPreviewSample.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewSample
+        interval: 1000
+        repeat: true
+        onTriggered: {
+            const list = EngineBridge.inputMeterList()
+            let peaks = "none"
+            for (let i = 0; i < list.length; ++i)
+                if (String(list[i].label || "") === window.cpMic)
+                    peaks = JSON.stringify(list[i].peaks) + " ch=" + list[i].channelCount
+            console.log("[SELFTEST-CARD] t=" + window.cpTicks + " mediaRev=" + Number(LiveOutputService.mediaRev)
+                        + " decoded=" + Number(LiveOutputService.mediaFramesDecoded())
+                        + " busMeterPeaks=" + (function () {
+                            const l = EngineBridge.inputMeterList(); const p = []
+                            for (let i = 0; i < l.length; ++i) p.push(String(l[i].label).slice(-14) + ":" + JSON.stringify(l[i].peaks))
+                            return p.join(" ") })()
+                        + " gui=" + (window.vfGuiN > 0 ? (window.vfGuiSum / window.vfGuiN).toFixed(1) : "-") + "/" + window.vfGuiMax.toFixed(0)
+                        + " producing=" + LiveOutputService.inputProducing(window.cpCam)
+                        + " inputRev+=" + (Number(LiveOutputService.inputRev) - window.cpRev0)
+                        + " meters=" + list.length + " micPeaks=" + peaks)
+            if (window.cpTicks === 3) {
+                const pane = SelfTest.findItem("selfTestMediaPane")
+                const rows = pane ? pane.inputRows : []
+                for (let i = 0; i < rows.length; ++i)
+                    SelfTest.grab("selfTestBusCard_" + rows[i], "cp_card_" + rows[i] + ".png")
+                for (let t = 0; t < 2; ++t)
+                    SelfTest.grab("selfTestMonitorTile" + t, "cp_tile_" + t + ".png")
+                console.log("[SELFTEST-CARD] tile state: mediaOnAir=" + LiveOutputService.mediaOnAir + " path=" + LiveOutputService.mediaPath
+                            + " live=" + LiveOutputService.live + " inputLabel=" + JSON.stringify(LiveOutputService.inputLabel)
+                            + " mediaIsAudio=" + LiveOutputService.mediaIsAudio + " name=" + LiveOutputService.mediaName)
+            }
+            if (++window.cpTicks >= 8) {
+                selfTestCardPreviewSample.stop()
+                SelfTest.quit()
+            }
+        }
+    }
     // ---- Program-feed rate for a held camera (VGR_INPUTRATE_TEST=1) ----------
     property string irLabel: ""
     property real irFirst: 0

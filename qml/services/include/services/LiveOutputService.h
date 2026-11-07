@@ -238,6 +238,10 @@ public:
 
     // ---- MEDIA ON AIR ----------------------------------------------------
     Q_INVOKABLE void takeMedia(const QString &path, const QString &name);
+    // Take a media file AS A SOURCE: it plays at that source's level (0..100 = linear gain) and mute.
+    Q_INVOKABLE void takeMediaAtLevel(const QString &path, const QString &name, qreal levelPercent, bool muted);
+    // Change the level/mute of the media on air now (a source edited while its file is playing).
+    Q_INVOKABLE void setMediaLevel(qreal levelPercent, bool muted);
     Q_INVOKABLE void clearMedia();
     // Update the current file's optional fill override and apply it to the
     // on-air frame. An empty value returns the file to the Outputs default.
@@ -930,6 +934,15 @@ private:
     qlonglong mediaDuration_ = 0;
     qulonglong mediaRev_ = 0;
     bool mediaMuted_ = false;
+    // The file's sound obeys the Routing screen: it is heard on the PC's speakers only while the Speakers
+    // output is on, at the source's level, and not muted (the transport's or the source's).
+    void applyMediaAudio();
+    void refreshSpeakersAudible();
+    bool speakersAudible_ = true;
+    qreal mediaLevel_ = 1.0;            // linear gain of the file's audio (the source's level / 100)
+    qreal pendingMediaLevel_ = 1.0;      // a source's level, waiting for the (asynchronous) take to arrive
+    bool pendingMediaMuted_ = false;
+    bool pendingFromSource_ = false;
     QMediaPlayer *mediaPlayer_ = nullptr;
     QAudioOutput *mediaAudio_ = nullptr;
     QVideoSink *mediaSink_ = nullptr;

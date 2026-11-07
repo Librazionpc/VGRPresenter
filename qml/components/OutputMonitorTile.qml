@@ -275,7 +275,9 @@ Rectangle {
             source: (root.mediaOnAir && !LiveOutputService.live && !root.inputTaken)
                     ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
             fillMode: root.effectiveFillMode
-            sizeToItem: false     // the provider stretches to a requested size; the file's own aspect must survive
+            // The tile is small: the provider hands back a tile-sized picture that keeps the file's own aspect
+            // (a full 1080p frame per tile per video frame was the monitor's stutter).
+            sizeToItem: true
             // (every mediaRev IS a new frame; the double buffer is what keeps it from blanking between revs)
         }
 

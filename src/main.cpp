@@ -931,6 +931,10 @@ int main(int argc, char *argv[])
         QVariant(qEnvironmentVariableIsSet("VGR_VIDEOFPS_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestCardPreview"),
+        QVariant(qEnvironmentVariableIsSet("VGR_CARDPREVIEW_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestVideoGpu"),
         QVariant(qEnvironmentVariableIsSet("VGR_VIDEOFPS_GPU")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));

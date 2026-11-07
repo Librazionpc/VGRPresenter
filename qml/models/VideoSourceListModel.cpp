@@ -8,8 +8,10 @@
 #include "modules/production/ProductionEngine.hpp"
 #include "platform/PlatformAccessor.hpp"
 
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QJSEngine>
 #include <QJsonObject>
 #include <QSet>
@@ -280,6 +282,21 @@ void VideoSourceListModel::addSource()
     addSourceWith(QStringLiteral(""), QStringLiteral("camera"), QStringLiteral(""), 75, false);
 }
 
+namespace {
+// A media source IS its file: until somebody renames it, its name is the file's name (no extension).
+QString fileTitleOf(const QString &path)
+{
+    return QFileInfo(path).completeBaseName();
+}
+// "Not renamed": empty, the generated "New Source N", or still the previous file's own name.
+bool nameIsAutomatic(const QString &name, const QString &previousSublabel)
+{
+    static const QRegularExpression generated(QStringLiteral("^New Source \\d+$"));
+    return name.isEmpty() || generated.match(name).hasMatch()
+           || (!previousSublabel.isEmpty() && name == fileTitleOf(previousSublabel));
+}
+} // namespace
+
 void VideoSourceListModel::addSourceWith(const QString &name, const QString &kind,
                                          const QString &sublabel, qreal level, bool muted)
 {
@@ -287,7 +304,9 @@ void VideoSourceListModel::addSourceWith(const QString &name, const QString &kin
     beginInsertRows(QModelIndex(), row, row);
     VideoSourceItem added;
     added.id = QStringLiteral("v%1").arg(m_nextId++);
-    added.name = name.isEmpty() ? QStringLiteral("New Source %1").arg(row + 1) : name;
+    added.name = !name.isEmpty() ? name
+               : (kind == QLatin1String("media") && !sublabel.isEmpty() ? fileTitleOf(sublabel)
+                                                                      : QStringLiteral("New Source %1").arg(row + 1));
     added.kind = kind;
     added.sublabel = sublabel;
     added.mode = QString();
@@ -372,9 +391,18 @@ void VideoSourceListModel::setSublabel(int index, const QString &sublabel)
     if (m_sources[index].sublabel == sublabel)
         return;
 
+    const QString previous = m_sources[index].sublabel;
     m_sources[index].sublabel = sublabel;
+    QList<int> roles{ SublabelRole };
+    // A media source follows its file's name until it has been renamed.
+    if (m_sources[index].kind == QLatin1String("media") && !sublabel.isEmpty()
+        && nameIsAutomatic(m_sources[index].name, previous)
+        && m_sources[index].name != fileTitleOf(sublabel)) {
+        m_sources[index].name = fileTitleOf(sublabel);
+        roles << NameRole;
+    }
     const QModelIndex changed = this->index(index);
-    emit dataChanged(changed, changed, { SublabelRole });
+    emit dataChanged(changed, changed, roles);
     scheduleSave();
 }
 

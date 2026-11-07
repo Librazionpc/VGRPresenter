@@ -316,6 +316,33 @@ Item {
         }
     }
 
+    // A media source IS its file: its name is the file's name until somebody renames it.
+    function fileTitleOf(path) {
+        const s = String(path).replace(/\\/g, "/")
+        const f = s.substring(s.lastIndexOf("/") + 1)
+        const d = f.lastIndexOf(".")
+        return d > 0 ? f.substring(0, d) : f
+    }
+    // "Not renamed": empty, the generated "New Source N", or still the previous file's own name.
+    function nameIsAutomatic(name, previousPath) {
+        const n = String(name || "")
+        return n === "" || /^New Source \d+$/.test(n)
+               || (String(previousPath || "") !== "" && n === root.fileTitleOf(previousPath))
+    }
+    function applyVideoPickedFile(target, path) {
+        if (target === "editVideo") {
+            const prev = root.editVideoSublabel
+            root.editVideoSublabel = path
+            if (root.editVideoKind === "media" && root.nameIsAutomatic(root.editVideoName, prev))
+                root.editVideoName = root.fileTitleOf(path)
+        } else if (target === "addSourceVideo") {
+            const prev = root.addSourceSublabel
+            root.addSourceSublabel = path
+            if (root.addSourceKind === "media" && root.nameIsAutomatic(root.addSourceName, prev))
+                root.addSourceName = root.fileTitleOf(path)
+        }
+    }
+
     // ---- Media Library picker — shared by all four Source "Browse..."
     property string mediaPickTarget: ""   // "" | "editAudio" | "addSourceAudio" | "editVideo" | "addSourceVideo"
     MediaSourceModal {
@@ -328,8 +355,8 @@ Item {
             const path = item.path !== undefined ? item.path : item.name
             if (root.mediaPickTarget === "editAudio") root.editAudioSublabel = path
             else if (root.mediaPickTarget === "addSourceAudio") root.addSourceSublabel = path
-            else if (root.mediaPickTarget === "editVideo") root.editVideoSublabel = path
-            else if (root.mediaPickTarget === "addSourceVideo") root.addSourceSublabel = path
+            else if (root.mediaPickTarget === "editVideo" || root.mediaPickTarget === "addSourceVideo")
+                root.applyVideoPickedFile(root.mediaPickTarget, path)
             root.mediaPickTarget = ""
         }
         onCancelled: root.mediaPickTarget = ""
@@ -341,8 +368,8 @@ Item {
             if (file !== "") {
                 if (root.mediaPickTarget === "editAudio") root.editAudioSublabel = file
                 else if (root.mediaPickTarget === "addSourceAudio") root.addSourceSublabel = file
-                else if (root.mediaPickTarget === "editVideo") root.editVideoSublabel = file
-                else if (root.mediaPickTarget === "addSourceVideo") root.addSourceSublabel = file
+                else if (root.mediaPickTarget === "editVideo" || root.mediaPickTarget === "addSourceVideo")
+                    root.applyVideoPickedFile(root.mediaPickTarget, file)
             }
             root.mediaPickTarget = ""
         }
@@ -659,7 +686,9 @@ Item {
     function openEditVideo(index) {
         const data = VideoSourceListModel.getSource(index)
         root.editVideoIndex = index
-        root.editVideoName = data.name
+        root.editVideoName = (data.kind === "media" && String(data.sublabel || "") !== ""
+                              && root.nameIsAutomatic(data.name, ""))
+            ? root.fileTitleOf(data.sublabel) : data.name   // an un-renamed media source shows its file's name
         root.editVideoSublabelByKind = ({})   // fresh buffer per row
         root.editVideoKind = data.kind
         root.editVideoSublabel = data.sublabel
@@ -678,6 +707,11 @@ Item {
         VideoSourceListModel.setMode(root.editVideoIndex, root.editVideoMode)
         VideoSourceListModel.setMuted(root.editVideoIndex, root.editVideoMuted)
         VideoSourceListModel.setLevel(root.editVideoIndex, root.editVideoLevel)
+        // This source's file is playing right now: the new level/mute applies to what is heard.
+        if (root.editVideoKind === "media" && LiveOutputService.mediaOnAir
+                && String(LiveOutputService.mediaPath).replace(/\\/g, "/").toLowerCase()
+                   === String(root.editVideoSublabel).replace(/\\/g, "/").toLowerCase())
+            LiveOutputService.setMediaLevel(root.editVideoLevel, root.editVideoMuted)
         root.editVideoIndex = -1
     }
 
@@ -2635,6 +2669,10 @@ Text {
             previewLabel: root.editVideoKind === "camera" || root.editVideoKind === "screen"
                           || root.editVideoKind === "ndi"
                           ? root.editVideoSublabel : ""
+            // A media source plays its file here, at the dialog's volume (see VideoPreviewPane).
+            mediaSource: root.editVideoKind === "media" ? root.editVideoSublabel : ""
+            mediaVolume: root.editVideoLevel
+            active: editVideoDialog.shown
             muted: root.editVideoMuted
             mode: root.editVideoMode
             modes: root.editVideoKind === "camera"

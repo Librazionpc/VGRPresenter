@@ -58,6 +58,10 @@ public:
     void StopAllOutputAudio();
     bool OutputAudioRunning(const std::string &outputNodeId) const;
 
+    // Whether the Speakers output is switched on in Routing (a read of the published graph snapshot).
+    // Other players of sound that do not run through the mixer (the media file on air) obey the same switch.
+    bool SpeakersAudible() const;
+
 private:
     AudioEngine() = default;
 
@@ -70,7 +74,6 @@ private:
     // (a recording or an NDI feed reads it), but the default playback device is opened only
     // while the Speakers output is on in Routing; otherwise the software clock drives the mix
     // and no device is touched. SyncSpeakerDevice re-reads that on the control thread.
-    bool SpeakersAudible() const;
     Result<void> OpenSpeakerDevice();
     void SyncSpeakerDevice();
     void Unbind(const std::string &sourceId);

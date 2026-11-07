@@ -73,6 +73,8 @@
 
 #include <utility>
 
+#include "modules/audio/AudioEngine.hpp"
+#include "services/RoutingService.h"
 #include "services/PressTimeline.h"
 #include "services/MediaOnAirState.h"
 
@@ -215,6 +217,44 @@ LiveOutputService::MediaPreflight LiveOutputService::preflightMediaTake(const QS
     return pre;
 }
 
+void LiveOutputService::takeMediaAtLevel(const QString &path, const QString &name, qreal levelPercent,
+                                         bool muted)
+{
+    pendingMediaLevel_ = qBound<qreal>(0.0, levelPercent / 100.0, 1.0);
+    pendingMediaMuted_ = muted;
+    pendingFromSource_ = true;
+    takeMedia(path, name);
+}
+
+void LiveOutputService::applyMediaAudio()
+{
+    if (!mediaAudio_)
+        return;
+    mediaAudio_->setVolume(static_cast<float>(mediaLevel_));
+    mediaAudio_->setMuted(mediaMuted_ || !speakersAudible_);
+    qInfo("media audio: level %.0f%%, %s (transport mute %s, Speakers output %s)", mediaLevel_ * 100.0,
+          (mediaMuted_ || !speakersAudible_) ? "SILENT" : "audible", mediaMuted_ ? "on" : "off",
+          speakersAudible_ ? "on" : "off");
+}
+
+void LiveOutputService::refreshSpeakersAudible()
+{
+    // The Routing screen's own state once it has synced; before that, what the audio engine itself
+    // loaded (the same answer that decides whether the playback device is opened at all).
+    RoutingService *routing = RoutingService::instance();
+    speakersAudible_ = (routing != nullptr && routing->speakersKnown())
+        ? routing->speakersEnabled()
+        : bps::audio::AudioEngine::Instance().SpeakersAudible();
+}
+
+void LiveOutputService::setMediaLevel(qreal levelPercent, bool muted)
+{
+    mediaLevel_ = qBound<qreal>(0.0, levelPercent / 100.0, 1.0);
+    mediaMuted_ = muted;
+    applyMediaAudio();
+    emit mediaChanged();
+}
+
 void LiveOutputService::takeMedia(const QString &path, const QString &name)
 {
     const quint64 token = ++mediaTakeToken_;
@@ -297,6 +337,12 @@ void LiveOutputService::EnsureMediaPlayer()
         mediaPlayer_ = new QMediaPlayer(this);
         mediaPlayer_->setAudioOutput(mediaAudio_);
         mediaPlayer_->setVideoOutput(mediaSink_);
+        // Switching the Speakers output on or off on the Routing screen changes what is heard at once.
+        if (RoutingService *routing = RoutingService::instance())
+            connect(routing, &RoutingService::routingChanged, this, [this] {
+                refreshSpeakersAudible();
+                applyMediaAudio();
+            });
         connect(mediaPlayer_, &QMediaPlayer::positionChanged, this, [this](qlonglong p) {
             mediaPosition_ = p;
             emit mediaTick();          // transport readout AND the tiles' rev bump
@@ -362,6 +408,15 @@ void LiveOutputService::ArmMediaTake(const MediaPreflight &pre)
 {
     mediaPath_ = pre.clean;
     mediaName_ = pre.name;
+    // A file taken as a SOURCE plays at that source's level and mute; any other take plays at full level
+    // (and keeps the transport's own mute, as before).
+    if (pendingFromSource_) {
+        mediaLevel_ = pendingMediaLevel_;
+        mediaMuted_ = pendingMediaMuted_;
+    } else {
+        mediaLevel_ = 1.0;
+    }
+    pendingFromSource_ = false;
     const QString fileFit = MediaLibraryService::instance().itemFit(pre.clean);
     mediaFitUsesDefault_ = fileFit.isEmpty();
     mediaFit_ = mediaFitUsesDefault_ ? defaultMediaFit_ : fileFit;
@@ -380,7 +435,8 @@ void LiveOutputService::StartMediaPlayback(const MediaPreflight &pre)
 {
     if (pre.isVideo || pre.isAudio) {
         mediaPlayer_->setSource(QUrl::fromLocalFile(pre.clean));
-        mediaAudio_->setMuted(mediaMuted_);
+        refreshSpeakersAudible();
+        applyMediaAudio();
         mediaState_ = QStringLiteral("playing");
         mediaPlayer_->play();
         return;
@@ -480,8 +536,7 @@ void LiveOutputService::mediaSeek(qreal fraction)
 void LiveOutputService::mediaToggleMuted()
 {
     mediaMuted_ = !mediaMuted_;
-    if (mediaAudio_)
-        mediaAudio_->setMuted(mediaMuted_);
+    applyMediaAudio();
     emit mediaChanged();
 }
 
@@ -513,10 +568,27 @@ QImage LiveMediaFrameProvider::requestImage(const QString &id, QSize *size,
             *size = QSize(1, 1);
         return empty;
     }
+    // A consumer that asks for a size (a small monitor tile) gets the picture shrunk to COVER that size,
+    // keeping the file's own aspect: the Image's fill mode then fits, crops or stretches it as it should.
+    // Never enlarged — a full 1080p upload per tile per frame was what made the monitor stutter.
+    if (requestedSize.isValid() && !requestedSize.isEmpty()) {
+        const QSize covering = frame.size().scaled(requestedSize, Qt::KeepAspectRatioByExpanding);
+        if (covering.width() < frame.width() && covering.height() < frame.height()) {
+            const QImage small = shrinkForPreview(frame, requestedSize, Qt::KeepAspectRatioByExpanding);
+            {   // TEMP-DIAG
+                static int n = 0;
+                if (n++ % 90 == 0)
+                    qInfo("mediaplay provider: frame %dx%d fmt=%d req=%dx%d -> %dx%d fmt=%d px=%08x", frame.width(),
+                          frame.height(), int(frame.format()), requestedSize.width(), requestedSize.height(),
+                          small.width(), small.height(), int(small.format()),
+                          small.isNull() ? 0u : small.pixel(small.width() / 2, small.height() / 2));
+            }
+            if (size)
+                *size = small.size();
+            return small;
+        }
+    }
     if (size)
         *size = frame.size();
-    if (requestedSize.isValid() && !requestedSize.isEmpty()
-        && requestedSize != frame.size())
-        return shrinkForPreview(frame, requestedSize, Qt::IgnoreAspectRatio);
     return frame;
 }

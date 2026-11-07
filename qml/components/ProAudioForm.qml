@@ -275,7 +275,7 @@ Column {
             anchors.left: parent.left
             anchors.leftMargin: 76
             anchors.verticalCenter: parent.verticalCenter
-            width: parent.width - 76 - 64 - 12
+            width: parent.width - 76 - 72 - 12
             height: 28
 
             readonly property real pct: Math.max(0, Math.min(1, root.volume / 100))
@@ -317,23 +317,63 @@ Column {
             }
         }
 
-        // dB readout box.
+        // dB readout box — EDITABLE: type a level ("-6", "-6 dB", "-inf") and press Enter. The fader is a
+        // linear gain, so a typed dB maps to 10^(dB/20) (0 dB is the top; anything above clamps to it).
         Rectangle {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            width: 56
+            width: 64
             height: 28
             radius: Theme.radiusSm
             color: Theme.chip
             border.width: 1
-            border.color: Theme.border
+            border.color: dbInput.activeFocus ? Theme.accent : Theme.border
 
-            Text {
+            TextInput {
+                id: dbInput
                 anchors.centerIn: parent
-                text: root.gainText(root.volume)
+                width: parent.width - 10
+                horizontalAlignment: TextInput.AlignHCenter
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.textSm
+                selectByMouse: true
+                clip: true
+                inputMethodHints: Qt.ImhNoPredictiveText
+                text: root.gainText(root.volume)
+
+                function refresh() { dbInput.text = root.gainText(root.volume) }
+                // The typed text -> a fader value 0..100, or -1 when it is not a level.
+                function parseVolume(s) {
+                    const t = String(s).toLowerCase().replace(/db/g, "").replace(",", ".").trim()
+                    if (t === "" ) return -1
+                    if (t.indexOf("inf") >= 0 || t.indexOf("∞") >= 0 || t === "off" || t === "mute")
+                        return 0
+                    const db = parseFloat(t)
+                    if (!isFinite(db)) return -1
+                    const linear = Math.pow(10, Math.min(0, db) / 20)
+                    if (linear <= Db.floorLinear) return 0
+                    return Math.round(linear * 1000) / 10
+                }
+                onActiveFocusChanged: {
+                    if (activeFocus) selectAll()
+                    else refresh()
+                }
+                onEditingFinished: {
+                    const v = dbInput.parseVolume(dbInput.text)
+                    if (v >= 0) root.volumeEdited(v)
+                    dbInput.refresh()
+                    dbInput.focus = false
+                }
+                Keys.onEscapePressed: (e) => {
+                    dbInput.refresh()
+                    dbInput.focus = false
+                    e.accepted = true
+                }
+                Connections {
+                    target: root
+                    function onVolumeChanged() { if (!dbInput.activeFocus) dbInput.refresh() }
+                }
             }
         }
     }

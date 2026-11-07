@@ -1,8 +1,34 @@
 import QtQuick
+import QtMultimedia
 import VGRPresenterUI
 
 Item {
     id: root
+    objectName: "selfTestMediaPane"
+
+    // A media FILE playing inside a card's window: the picture only — the sound is shown by the card's
+    // L/R meters (the file's stream meter), and what is HEARD is the Routing screen's business.
+    component MediaCardPlayer: Item {
+        id: cardPlayer
+        property string path: ""
+        clip: true
+        MediaPlayer {
+            id: cardMedia
+            source: cardPlayer.path !== "" ? "file:///" + cardPlayer.path.replace(/\\/g, "/") : ""
+            loops: MediaPlayer.Infinite
+            audioOutput: AudioOutput { muted: true }
+            videoOutput: cardVideo
+            onSourceChanged: if (source.toString() !== "") play()
+            onMediaStatusChanged: if ((mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia)
+                                      && playbackState !== MediaPlayer.PlayingState) play()
+        }
+        VideoOutput {
+            id: cardVideo
+            anchors.fill: parent
+            fillMode: VideoOutput.PreserveAspectCrop
+        }
+        Component.onDestruction: cardMedia.stop()
+    }
 
     // LAYOUT PROBE (VGR_LAYOUT_TEST): the media grid's own card churn (see DesignLibraryPane).
     property int gridRowBuilds: 0
@@ -177,6 +203,7 @@ Item {
     // ---- the bus monitor's own bookkeeping: ONE VIDEO, ONE AUDIO --------------
     property int busMonitorVideoBus: -1
     property string busMonitorVideoLabel: ""
+    property string busMonitorVideoKind: ""   // "media" = a FILE plays in the card (no tap to start)
     property int busMonitorAudioBus: -1
     property var busMonitorAudioLabels: []
     // Refreshed by the bridge's ~20 Hz meter pump while any tap is live.
@@ -220,6 +247,10 @@ Item {
         const live = []
         for (const l of LiveOutputService.cardPreviews)
             live.push(String(l).trim())
+        // A media file held in a bus card is metered like one on air (its stream meter feeds the L/R).
+        if (root.busMonitorVideoBus >= 0 && root.busMonitorVideoKind === "media"
+                && root.busMonitorVideoLabel !== "")
+            live.push(root.busMonitorVideoLabel)
         if (LiveOutputService.inputLabel)
             live.push(String(LiveOutputService.inputLabel).trim())
         if (LiveOutputService.mediaOnAir && LiveOutputService.mediaPath)
@@ -263,6 +294,7 @@ Item {
             LiveOutputService.endPreviewInput(root.busMonitorVideoLabel)
         root.busMonitorVideoBus = -1
         root.busMonitorVideoLabel = ""
+        root.busMonitorVideoKind = ""
     }
     function stopBusMonitorAudio() {
         for (const label of root.busMonitorAudioLabels)
@@ -307,7 +339,7 @@ Item {
                 const label = candidate && candidate.sublabel !== undefined
                     ? String(candidate.sublabel).trim() : ""
                 const kind = candidate && candidate.kind !== undefined ? String(candidate.kind) : ""
-                if (label === "" || ["camera", "screen", "ndi"].indexOf(kind) < 0)
+                if (label === "" || ["camera", "screen", "ndi", "media"].indexOf(kind) < 0)
                     continue
                 if (!LiveOutputService.inputHealthy(label, kind))
                     continue
@@ -374,7 +406,12 @@ Item {
             root.busMonitorAudioBus = busIndex
             root.busMonitorAudioLabels = audioLabels
         }
-        if (needsVideo) {
+        if (needsVideo && String(video.kind) === "media") {
+            // A file has no tap to start: the card plays it itself and meters it (videoMeterTargets).
+            root.busMonitorVideoBus = busIndex
+            root.busMonitorVideoLabel = videoLabel
+            root.busMonitorVideoKind = "media"
+        } else if (needsVideo) {
             if (LiveOutputService.cardPreviews.indexOf(videoLabel) < 0) {
                 LiveOutputService.previewInput(videoLabel, video.kind,
                                                video.mode !== undefined ? video.mode : "")
@@ -733,8 +770,13 @@ Item {
                             readonly property bool busVideoPreviewing: {
                                 void LiveOutputService.inputRev
                                 return busCard && busType !== "audio" && busVideoLabel !== ""
-                                    && LiveOutputService.cardPreviews.indexOf(busVideoLabel) >= 0
+                                    && (LiveOutputService.cardPreviews.indexOf(busVideoLabel) >= 0
+                                        || card.busMediaPlaying)
                             }
+                            // A MEDIA file held by this bus card: it plays in the window and is metered.
+                            readonly property bool busMediaPlaying: busCard && busType !== "audio"
+                                && root.busMonitorVideoBus === index && root.busMonitorVideoKind === "media"
+                                && busVideoLabel !== ""
                             readonly property string sub: {
                                 void root.modelsRev
                                 if (kind !== "video" && kind !== "audio")
@@ -871,6 +913,21 @@ Item {
                                         const level = Math.max(0, Math.min(1, s.peaks[sourceChannel]))
                                                      * gain * sourceLevel
                                         if (level > mix[c]) mix[c] = level
+                                    }
+                                }
+                                // ...and a held MEDIA/NDI video source: its own stream meter (the file's sound).
+                                if (card.busMediaPlaying) {
+                                    const vs = card.busVideoSource
+                                    const sv = root.meterSnapshot(card.busVideoLabel)
+                                    if (vs && vs.muted !== true && sv && sv.peaks !== undefined && sv.peaks.length > 0) {
+                                        const srcLevel = Math.max(0, Math.min(1, Number(vs.level || 0) / 100))
+                                        for (let c = 0; c < 2; ++c) {
+                                            const sc = sv.peaks.length === 1 ? 0 : c
+                                            if (sc >= sv.peaks.length) continue
+                                            const g = VideoSourceListModel.channelGain(card.busVideoSourceIndex, sv.peaks.length === 1 ? 0 : c)
+                                            const lv = Math.max(0, Math.min(1, sv.peaks[sc])) * g * srcLevel
+                                            if (lv > mix[c]) mix[c] = lv
+                                        }
                                     }
                                 }
                                 if (card.busMuted) return [0, 0]
@@ -1024,6 +1081,12 @@ Item {
                                     cache: false
                                     asynchronous: false
                                 }
+                                // A media FILE held by a bus card plays right here.
+                                Loader {
+                                    anchors.fill: parent
+                                    active: card.busMediaPlaying
+                                    sourceComponent: MediaCardPlayer { path: card.busVideoLabel }
+                                }
                                 Item {
                                     id: busDot
                                     visible: busCard
@@ -1107,6 +1170,7 @@ Item {
                                     return (videoCard && card.holding
                                             || busCard && card.busVideoPreviewing)
                                         && !LiveOutputService.inputProducing(card.heldVideoLabel)
+                                        && !card.busMediaPlaying   // a file that is playing has no warm-up
                                         && card.healthy && card.previewFailure === ""
                                 }
                                     width: 34; height: 34
@@ -1440,7 +1504,12 @@ Item {
                 LiveOutputService.clearMedia()
                 return
             }
-            LiveOutputService.takeMedia(label, v.name !== undefined ? v.name : "")
+            // The source plays at ITS level and mute; named for its file unless it was renamed.
+            const fileName = label.replace(/\\/g, "/").split("/").pop().replace(/\.[^.]*$/, "")
+            const named = (v.name === undefined || v.name === "" || /^New Source \d+$/.test(v.name))
+                          ? fileName : v.name
+            LiveOutputService.takeMediaAtLevel(label, named, v.level !== undefined ? v.level : 100,
+                                               v.muted === true)
             return
         }
         if (LiveOutputService.inputLabel === label) {

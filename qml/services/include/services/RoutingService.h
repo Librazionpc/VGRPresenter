@@ -47,6 +47,10 @@ public:
     // The program-speaker endpoint is not part of the output roster, so its
     // enabled state is stored on its graph node rather than OutputListModel.
     Q_INVOKABLE void setSpeakersEnabled(bool enabled);
+    // Whether the Speakers output is switched on (the same state the Routing screen's Speakers card shows).
+    bool speakersEnabled() const { return speakersEnabled_; }
+    // False until the first sync with the engine's graph: before that speakersEnabled() is only the default.
+    bool speakersKnown() const { return loggedFirstSync_; }
 
     Q_INVOKABLE bool acceptsSignal(int outputRow, const QString &kind) const;
 
