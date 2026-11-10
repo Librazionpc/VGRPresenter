@@ -1279,8 +1279,10 @@ Item {
             const e = filePath.substring(filePath.lastIndexOf(".") + 1).toLowerCase()
             return ["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv"].indexOf(e) >= 0
         }
+        // On air the shared live-media surface draws the file (see LiveMediaSurface); off air this is
+        // the file's poster.
         readonly property url previewSource: onAir
-            ? "image://mediaplay?v=" + LiveOutputService.mediaRev
+            ? ""
             : "image://mediathumb/500/-1/" + encodeURIComponent(filePath)
         readonly property bool playing: LiveOutputService.mediaState === "playing"
 
@@ -1316,12 +1318,21 @@ Item {
 
             Image {
                 anchors.fill: parent
+                visible: !mediaView.onAir
                 source: mediaView.previewSource
                 // The picture laid out by ITS OWN fill, so the preview answers
                 // the same question the outputs do.
                 fillMode: mediaView.previewFill
                 cache: false
                 asynchronous: true
+            }
+
+            // On air: the one shared surface — GPU frames from the player that decodes the file
+            // (the provider path on a machine with no GPU).
+            LiveMediaSurface {
+                anchors.fill: parent
+                active: mediaView.onAir
+                fit: mediaView.shownFit
             }
 
             // Not on air: the centre overlay IS the take button.

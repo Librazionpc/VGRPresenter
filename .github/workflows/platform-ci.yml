@@ -1,0 +1,109 @@
+name: Cross-platform builds
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows MinGW
+            os: windows-latest
+            qt_host: windows
+            qt_arch: win64_mingw
+          - label: Linux
+            os: ubuntu-latest
+            qt_host: linux
+            qt_arch: gcc_64
+          - label: macOS
+            os: macos-latest
+            qt_host: mac
+            qt_arch: clang_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js for source guards
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake ninja-build \
+            libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1
+
+      - name: Set up MinGW
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          host: ${{ matrix.qt_host }}
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
+          modules: 'qtmultimedia qtshadertools'
+          cache: true
+
+      - name: Configure and build
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -S . -B build-ci -G Ninja \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DBPS_NODE_EXE="$(command -v node)"
+          cmake --build build-ci --target appVGRPresenterUI bps_unit_tests --parallel 2
+
+      - name: Run the platform contract tests and source guards
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          ctest --test-dir build-ci --output-on-failure \
+            -R "^(unit_platform|platform_boundary|settings_keys|gui_thread)"
+
+      - name: Configure and build (MinGW)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          export QT_PREFIX="$(cygpath -u "$QT_ROOT_DIR")"
+          cmake -S . -B build-ci -G Ninja \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DBPS_NODE_EXE="$(command -v node)"
+          cmake --build build-ci --target appVGRPresenterUI bps_unit_tests --parallel 2
+
+      - name: Run the platform contract tests and source guards (MinGW)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          export PATH="$(cygpath -u "$QT_ROOT_DIR")/bin:$PATH"
+          ctest --test-dir build-ci --output-on-failure \
+            -R "^(unit_platform|platform_boundary|settings_keys|gui_thread)"

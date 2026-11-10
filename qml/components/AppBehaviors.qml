@@ -25,6 +25,8 @@ Item {
     Component.onCompleted: {
         NotificationCenter.registerAction("recovery.open", function() { root.openOfferedRecovery() })
         NotificationCenter.registerAction("buses.undoRemove", function() { BusListModel.restoreRemovedBus() })
+        // The media notice sends the operator straight to the board that fixes it.
+        NotificationCenter.registerAction("routing.open", function() { root.window.openSettings("routing") })
         SettingsService.whenReady(function() { startTimer.start() })
     }
 
@@ -43,6 +45,112 @@ Item {
                 NotificationCenter.unregisterAction(id)
             })
         }
+    }
+
+    // ---- the media on air with nowhere to go ---------------------------------------------------
+    // WHAT LETS THE MEDIA REACH AN OUTPUT DEPENDS ON THE OUTPUT'S CATEGORY. A display sink (a physical
+    // or network output) draws its picture from a BUS, so it needs a bus wired into it in Settings ·
+    // Audio & Video AND its own MEDIA switch on (Settings · Routing). A REC / STREAM row and a screen
+    // mirror take the composed picture themselves: they need only the MEDIA switch, and no bus has to
+    // be added for them in Audio & Video. When that is missing the screen stays black and nothing says
+    // why — so the take says it, names those outputs, and offers the page that fixes it.
+    //
+    // THE GATE IS ENFORCED, NOT MERELY ANNOUNCED. Every monitor surface asks
+    // RoutingService.mediaRouteState before it draws the file (see LiveMediaSurface), so an output
+    // whose route is not connected shows no media at all — this notice is then the explanation of a
+    // black tile, never a comment on a picture that was showing anyway.
+    //
+    // And it does not fire only on the take: the board can be changed UNDER a file that is already
+    // playing (a bus unplugged, an output's Media switch flipped) — the moment silence is most
+    // confusing — so every routing edit re-checks, and the key carries each output's state, so the
+    // same board only speaks again when something really changed.
+    property string mediaRoutingKey: ""
+    // The route is CONFIGURATION (a bus plus the Media layer), not a measurement, so the check runs the
+    // moment the take changes — nothing to settle, and nothing that can start playing unchecked.
+    Connections {
+        target: LiveOutputService
+        function onMediaChanged() { root.checkMediaRouting() }
+        // REFUSED BEFORE IT STARTED (LiveOutputService::takeMedia): nothing decodes, nothing plays —
+        // this is the whole explanation the operator gets, in the same words a black tile would use.
+        function onMediaTakeBlocked(path, name) {
+            const blocked = root.mediaUnroutedOutputs()
+            if (blocked.length === 0)
+                return
+            root.mediaRoutingKey = ""
+            root.notifyMediaUnrouted(blocked, false)
+        }
+    }
+    Connections {
+        target: RoutingService
+        function onRoutingChanged() { root.checkMediaRouting() }
+    }
+    Connections {
+        target: OutputListModel
+        function onOutputRosterChanged() { root.checkMediaRouting() }
+    }
+    // WHICH ENABLED VIDEO OUTPUTS CANNOT RECEIVE the media layer, and in what state: the one source of
+    // both the notice's words and the refusal's explanation, so they can never disagree.
+    function mediaUnroutedOutputs() {
+        const rows = RoutingService.rows
+        const out = []
+        for (let i = 0; i < rows.length; ++i) {
+            const row = rows[i]
+            if (!row || row.acceptsVideo !== true || row.enabled !== true)
+                continue
+            // ONE RULE, ONE PLACE. RoutingService.mediaRouteState is what the monitor surfaces GATE
+            // on: if it reports a route missing, that output is drawing nothing.
+            const state = String(RoutingService.mediaRouteState(Number(row.row)))
+            if (state === "ok")
+                continue
+            const name = String(row.name || "")
+            if (name === "")
+                continue
+            // The state is part of the key: unplugging the bus (or flipping Media off) on an output
+            // already named here is a NEW thing to say, so the operator hears that too.
+            out.push({ name: name, state: state })
+        }
+        return out
+    }
+    function notifyMediaUnrouted(blocked, onAir) {
+        const names = blocked.map((b) => b.name)
+        const states = blocked.map((b) => b.name + "+" + b.state)
+        // WHAT IS MISSING IS ALWAYS THE SAME THING: that output's own Media layer — its M switch on the
+        // board. A bus is not part of this rule (a bus needs a source AND the media layer; an output
+        // needs only the media layer), so the notice never sends anyone to Audio & Video for it.
+        const reason = qsTr("its Media layer has to be on (Settings · Routing) before the picture can be pushed there")
+        const sentence = onAir
+            ? qsTr("The media on air cannot reach %1 — %2.")
+            : qsTr("This file cannot be put on air: it cannot reach %1 — %2.")
+        EventBus.notify(sentence.arg(names.map((n) => "\u201C" + n + "\u201D").join(qsTr(", ")))
+                            .arg(reason),
+                        "warning", qsTr("Media not routed"), "routing.media.unrouted",
+                        names,
+                        { id: "routing.open", label: qsTr("Open Routing") })
+        EngineBridge.log("warning", "Routing",
+                         qsTr("Media on air cannot reach: ") + names.join(", "))
+    }
+    function checkMediaRouting() {
+        // Audio has its own routes; the picture is what this notice is about.
+        if (!LiveOutputService.mediaOnAir || LiveOutputService.mediaIsAudio) {
+            root.mediaRoutingKey = ""
+            return
+        }
+        const blocked = root.mediaUnroutedOutputs()
+        if (blocked.length === 0) {
+            root.mediaRoutingKey = ""     // everything can receive it now (or nothing is playing)
+            return
+        }
+        const key = String(LiveOutputService.mediaPath) + "\u001f"
+                    + blocked.map((b) => b.name + "+" + b.state).join("\u001f")
+        if (key === root.mediaRoutingKey)
+            return
+        root.mediaRoutingKey = key
+        root.notifyMediaUnrouted(blocked, true)
+        // A BOARD CHANGED UNDER A PLAYING FILE: when the last receiving output is unplugged mid-play the
+        // push is stopped here. (A take with nowhere to go never starts — LiveOutputService refuses it
+        // and answers with mediaTakeBlocked, below.)
+        if (!RoutingService.mediaCanReachAnyOutput())
+            LiveOutputService.clearMedia()
     }
 
     Timer {

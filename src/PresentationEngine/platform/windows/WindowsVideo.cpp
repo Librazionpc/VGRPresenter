@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -289,7 +290,8 @@ struct VideoTapShared {
     std::shared_ptr<const std::vector<uint8_t>> latestRgba;   // tightly packed RGBA8
     uint32_t rgbaW = 0, rgbaH = 0;
     std::atomic<uint64_t> frameSeq{0};
-    int64_t lastStoreMs = 0;            // the PANE gate (unused by a live tap)
+    int64_t lastStoreMs = 0;
+    std::atomic<int64_t> frameIntervalMs{66}; // pane/JPEG cadence; live RGBA follows device rate
 
     void Publish(std::vector<uint8_t> jpeg)
     {
@@ -324,7 +326,7 @@ struct VideoTapShared {
     std::atomic<bool> failed{false};
     HRESULT failure = S_OK;
     std::string failureText;           // WHY, in the platform's own words (guarded by `mutex`)
-    int64_t lastEncodeMs = 0;          // the ~15 fps ceiling the sync loop got from Sleep(66)
+    int64_t lastEncodeMs = 0;
 
     void Fail(HRESULT hr, std::string why)
     {
@@ -353,8 +355,8 @@ struct WindowsVideo::PreviewTap {
     ~PreviewTap() { if (worker.joinable()) worker.join(); }
 };
 
-constexpr int64_t kPreviewFrameMs = 66;
-constexpr int64_t kLiveJpegMs = 66;
+constexpr int64_t kDefaultPreviewFrameMs = 66;
+constexpr int64_t kLiveJpegMs = 66; // desktop capture has no selected camera mode
 constexpr auto kFlushWait = std::chrono::milliseconds(2000);
 
 int64_t SteadyMs()
@@ -437,7 +439,8 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
             {
                 const std::lock_guard<std::mutex> lock(shared.mutex);
                 const int64_t now = SteadyMs();
-                if (live && now - shared.lastEncodeMs < kLiveJpegMs)
+                const int64_t intervalMs = shared.frameIntervalMs.load(std::memory_order_relaxed);
+                if (live && now - shared.lastEncodeMs < intervalMs)
                     return;
                 shared.lastEncodeMs = now;
             }
@@ -550,7 +553,8 @@ public:
             if (sample && !(flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
                 const bool live = shared_->live.load(std::memory_order_relaxed);
                 const int64_t now = SteadyMs();
-                if (live || now - shared_->lastStoreMs >= kPreviewFrameMs) {
+                const int64_t intervalMs = shared_->frameIntervalMs.load(std::memory_order_relaxed);
+                if (live || now - shared_->lastStoreMs >= intervalMs) {
                     shared_->lastStoreMs = now;
                     store = true;
                 }
@@ -927,12 +931,31 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
     }
 
     UINT32 wantW = 0, wantH = 0;
+    double wantFps = 0.0;
     {
         const size_t x = tap.mode.find('x');
         if (x != std::string::npos) {
             wantW = static_cast<UINT32>(std::strtoul(tap.mode.c_str(), nullptr, 10));
             wantH = static_cast<UINT32>(std::strtoul(tap.mode.c_str() + x + 1, nullptr, 10));
         }
+        const size_t p = tap.mode.find('p');
+        if (p != std::string::npos) {
+            char *end = nullptr;
+            const double parsed = std::strtod(tap.mode.c_str() + p + 1, &end);
+            if (end != tap.mode.c_str() + p + 1 && std::isfinite(parsed) && parsed > 0.0)
+                wantFps = parsed;
+        }
+    }
+    // Keep pane/JPEG work in step with the selected camera mode, but cap it at
+    // 30 fps: the Qt image provider decodes these frames on the UI thread.
+    // Live RGBA frames continue at the camera's native cadence.
+    if (wantFps > 0.0) {
+        const double previewFps = std::min(wantFps, 30.0);
+        tap.shared->frameIntervalMs.store(
+            std::max<int64_t>(16, static_cast<int64_t>(std::ceil(1000.0 / previewFps))),
+            std::memory_order_relaxed);
+    } else {
+        tap.shared->frameIntervalMs.store(kDefaultPreviewFrameMs, std::memory_order_relaxed);
     }
     auto decodable = [](const GUID &sub) {
         return sub == MFVideoFormat_RGB32 || sub == MFVideoFormat_RGB24
@@ -944,6 +967,7 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
     DWORD chosen = 0;
     if (wantW > 0 && wantH > 0) {
         HRESULT hrEnum = S_OK;
+        double bestFpsDelta = std::numeric_limits<double>::infinity();
         for (DWORD t = 0; hrEnum == S_OK; ++t) {
             IMFMediaType *nat = nullptr;
             hrEnum = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, t, &nat);
@@ -955,12 +979,33 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
                     && SUCCEEDED(nat->GetUINT64(MF_MT_FRAME_SIZE, &frameSize))
                     && static_cast<UINT32>(frameSize >> 32) == wantW
                     && static_cast<UINT32>(frameSize & 0xFFFFFFFF) == wantH) {
-                    chosen = t;   // first same-size, decodable native type wins
-                    found = true;
+                    double fpsDelta = 0.0;
+                    if (wantFps > 0.0) {
+                        UINT64 frameRate = 0;
+                        if (FAILED(nat->GetUINT64(MF_MT_FRAME_RATE, &frameRate))) {
+                            nat->Release();
+                            continue;
+                        }
+                        const UINT32 numerator = static_cast<UINT32>(frameRate >> 32);
+                        const UINT32 denominator = static_cast<UINT32>(frameRate & 0xFFFFFFFF);
+                        if (denominator == 0) {
+                            nat->Release();
+                            continue;
+                        }
+                        fpsDelta = std::abs(static_cast<double>(numerator) / denominator - wantFps);
+                    }
+                    // The mode string includes FPS (for example 1280x720p30).
+                    // Matching only width/height silently selected the first
+                    // same-size mode, which could be a much slower capture rate.
+                    if (!found || fpsDelta < bestFpsDelta) {
+                        chosen = t;
+                        found = true;
+                        bestFpsDelta = fpsDelta;
+                    }
                 }
                 nat->Release();
             }
-            if (found && t >= chosen)
+            if (found && wantFps <= 0.0 && t >= chosen)
                 break;
             if (t > 64)
                 break;   // sanity cap — no device has 64 distinct sizes
@@ -1027,6 +1072,26 @@ void WindowsVideo::PreviewThread(PreviewTap &tap)
         notify->Release();
         source->Release();
         return;
+    }
+
+    IMFMediaType *activeType = nullptr;
+    if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                               &activeType)) && activeType) {
+        UINT64 frameSize = 0, frameRate = 0;
+        if (SUCCEEDED(activeType->GetUINT64(MF_MT_FRAME_SIZE, &frameSize))
+            && SUCCEEDED(activeType->GetUINT64(MF_MT_FRAME_RATE, &frameRate))) {
+            const UINT32 width = static_cast<UINT32>(frameSize >> 32);
+            const UINT32 height = static_cast<UINT32>(frameSize & 0xFFFFFFFF);
+            const UINT32 numerator = static_cast<UINT32>(frameRate >> 32);
+            const UINT32 denominator = static_cast<UINT32>(frameRate & 0xFFFFFFFF);
+            const double fps = denominator > 0
+                ? static_cast<double>(numerator) / denominator : 0.0;
+            std::printf("[videopreview] selected %s: %ux%u @ %.2f fps (preview %lld ms)\n",
+                        tap.deviceName.c_str(), width, height, fps,
+                        static_cast<long long>(tap.shared->frameIntervalMs.load()));
+            std::fflush(stdout);
+        }
+        activeType->Release();
     }
 
     // ---- the read chain: ASYNC, and therefore INTERRUPTIBLE ----------------
@@ -1297,7 +1362,8 @@ Result<void> WindowsVideo::StartPreview(const std::string &deviceId, const std::
     {
         const std::lock_guard<std::mutex> lock(previews_->mutex);
         auto &slot = previews_->taps[deviceId];
-        if (slot && slot->shared->running.load() && !slot->shared->failed.load())
+        if (slot && slot->shared->running.load() && !slot->shared->failed.load()
+            && slot->mode == mode)
             return Ok();
         if (slot) {
             slot->shared->running.store(false);
@@ -1378,6 +1444,30 @@ IVideo::DecodedFrame WindowsVideo::PreviewFramePixels(const std::string &deviceI
     out.height = raw.height;
     out.rgba = std::move(raw.rgba);
     return out;
+}
+
+// THE LIVE FRAME, SHARED. A live tap stores its newest RGBA as one immutable buffer (latestRgba); this
+// hands that same buffer out instead of copying it, so the consumer's cost per frame is its own one copy.
+// A tap still in pane mode holds only a JPEG: that falls back to the base wrapper (decode, one copy).
+IVideo::SharedFrame WindowsVideo::PreviewFrameShared(const std::string &deviceId)
+{
+    {
+        const std::lock_guard<std::mutex> lock(previews_->mutex);
+        const auto it = previews_->taps.find(deviceId);
+        if (it == previews_->taps.end())
+            return {};
+        auto &shared = *it->second->shared;
+        const std::lock_guard<std::mutex> frameLock(shared.mutex);
+        if (shared.latestRgba) {
+            SharedFrame out;
+            out.width = shared.rgbaW;
+            out.height = shared.rgbaH;
+            out.seq = shared.frameSeq.load(std::memory_order_acquire);
+            out.rgba = shared.latestRgba;
+            return out;
+        }
+    }
+    return IVideo::PreviewFrameShared(deviceId);   // pane-mode tap: the JPEG path, outside the table's lock
 }
 
 uint64_t WindowsVideo::PreviewFrameSeq(const std::string &deviceId)

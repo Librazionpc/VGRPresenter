@@ -652,8 +652,6 @@ void TestPlatform() {
     if (!platform) return;
 #if defined(_WIN32)
     CHECK(std::string(platform->Name()) == "WindowsPlatform");
-#elif defined(__APPLE__)
-    CHECK(std::string(platform->Name()) == "MacOSPlatform");
 #else
     CHECK(std::string(platform->Name()) == "LinuxPlatform");
 #endif

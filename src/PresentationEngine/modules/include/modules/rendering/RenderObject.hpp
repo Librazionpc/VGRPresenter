@@ -177,10 +177,11 @@ public:
     float FlowCharAt() const { return flowCharAt_; }
     void SetFlowCharTable(std::vector<int> lineStarts) { flowCharStarts_ = std::move(lineStarts); }
     bool HasFlowCharTable() const { return !flowCharStarts_.empty(); }
-    float FlowLineForChar(float charAt) const {
+    float FlowLineForChar(float charAt, float spanFrom = -1.0f, float spanTo = -1.0f) const {
         // The same function the monitor tiles use (FlowScrollMath.hpp): the shared
-        // character position, turned into THIS output's own line.
-        return static_cast<float>(flowscroll::LineForChar(flowCharStarts_, charAt));
+        // character position, turned into THIS output's own whole line (glided between the
+        // step's two lines while it moves).
+        return static_cast<float>(flowscroll::SnappedLineForChar(flowCharStarts_, charAt, spanFrom, spanTo));
     }
 
 private:

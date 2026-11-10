@@ -35,6 +35,9 @@ public:
     Q_INVOKABLE bool itemVisible(const QString &objectName);
     Q_INVOKABLE void clickItem(const QString &objectName);
     Q_INVOKABLE bool grab(const QString &itemName, const QString &pngPath);
+    // Grab a whole TOP-LEVEL window by its objectName (the output windows are their own QQuickWindows,
+    // so grab() — which searches this driver's main window for an item — cannot reach them).
+    Q_INVOKABLE bool grabWindow(const QString &windowObjectName, const QString &pngPath);
     // Resolve an item by objectName (no action) — for scenarios that poke
     // properties the invokables don't cover (e.g. a Flickable's contentY).
     Q_INVOKABLE QObject *findItem(const QString &objectName);

@@ -3984,6 +3984,7 @@ Item {
                             OptionNumber { settingKey: root.adapter.optionsPrefix + ".wordsPerSlide"; step: 5 }
                         }
                         // ---- THE READING STEP (Alt+Down / Alt+Up) ----
+                        OptionNumber { settingKey: "reading.stepLines"; step: 1 }   // cursor frequency: lines per press
                         OptionNumber { settingKey: "reading.stepMs"; step: 10 }
                         OptionChoice { settingKey: "reading.stepEasing" }
                         }

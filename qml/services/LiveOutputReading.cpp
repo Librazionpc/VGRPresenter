@@ -485,6 +485,8 @@ void LiveOutputService::setScrollMode(bool on)
     if (!on) {
         pendingReadingSteps_ = 0;
         bps::live::LiveOutputController::Instance().SetFlowChar(0.0f);
+        bps::live::LiveOutputController::Instance().SetFlowSpan(-1.0f, -1.0f);
+        readingSpanFrom_ = readingSpanTo_ = -1.0;
     }
     emit scrollModeChanged();
     QTimer::singleShot(0, this, []() {
@@ -808,7 +810,7 @@ void LiveOutputService::resetReadingRun()
     readingRunSizeForStyle_.clear();
     readingRunPageStart_.clear();
     readingRunPageLines_.clear();
-    anchoredLines_.clear();   // a new run: every output's lines start from its own wrap again
+    readingSpanFrom_ = readingSpanTo_ = -1.0;   // a new run: no step is in flight
 }
 
 int LiveOutputService::readingCharSpan(int from, int to) const
@@ -887,9 +889,6 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
             const QString columnCacheKey = QStringLiteral("c#") + columnKey + QLatin1Char('#')
                                            + QString::number(qHash(text), 16);
             if (const StyleRunLines *hit = CachedStyleRunLines(columnCacheKey)) {
-                // The table anchored at the current word, if one has been cut for this passage and size.
-                if (const AnchoredLines *anchored = anchoredLinesFor(styleId, text))
-                    return anchored->table;
                 return *hit;
             }
             QueueScrollColumnMeasure(columnKey, columnCacheKey, text,
@@ -922,81 +921,6 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
     const QVector<VisualSpan> spans = box.isEmpty() ? newlineSpansOf(text)
                                                    : visualLinesOfTextAtSize(text, box, pageSize);
     return CacheStyleRunLines(key, SpansToRunLines(text, spans));
-}
-
-// The key a column's tables are valid for: its output, passage, size and shape. Anything else, start over.
-static QString anchorBaseKeyFor(const QString &columnKey, const QString &text, const QString &sig, qreal size)
-{
-    return columnKey + QLatin1Char('#') + QString::number(qHash(text), 16) + QLatin1Char('#') + sig
-           + QLatin1Char('#') + QString::number(size, 'f', 2);
-}
-
-const LiveOutputService::AnchoredLines *LiveOutputService::anchoredLinesFor(const QString &styleId,
-                                                                           const QString &text) const
-{
-    if (!lineSourceTextOnly_ || !readingBudgetFitActive_ || text != readingFlowText_)
-        return nullptr;
-    const QString columnKey = ScrollColumnKey(styleId);
-    const auto column = scrollColumns_.constFind(columnKey);
-    const auto anchored = anchoredLines_.constFind(columnKey);
-    if (column == scrollColumns_.constEnd() || anchored == anchoredLines_.constEnd()
-            || anchored->anchor < 0 || anchored->table.charStarts.isEmpty())
-        return nullptr;
-    return anchored->baseKey == anchorBaseKeyFor(columnKey, text, column->sig, column->size)
-        ? &anchored.value() : nullptr;
-}
-
-void LiveOutputService::anchorReadingTablesAt(int windowChar)
-{
-    if (!lineSourceTextOnly_ || !readingBudgetFitActive_ || readingFlowText_.isEmpty())
-        return;
-    const QString &text = readingFlowText_;
-    const int at = qBound(0, windowChar, static_cast<int>(text.size()));
-    for (auto column = scrollColumns_.constBegin(); column != scrollColumns_.constEnd(); ++column) {
-        if (column->size <= 0.0)
-            continue;
-        const QString columnCacheKey = QStringLiteral("c#") + column.key() + QLatin1Char('#')
-                                       + QString::number(qHash(text), 16);
-        const StyleRunLines *base = CachedStyleRunLines(columnCacheKey);
-        if (!base || base->charStarts.isEmpty())
-            continue;   // not measured yet: the plain table stands until it lands
-        AnchoredLines &entry = anchoredLines_[column.key()];
-        const QString baseKey = anchorBaseKeyFor(column.key(), text, column->sig, column->size);
-        if (entry.baseKey != baseKey) {
-            entry.baseKey = baseKey;
-            entry.table = *base;
-            entry.anchor = -1;
-            entry.seams.clear();
-        }
-        if (entry.anchor == at)
-            continue;
-        // THE LINES BEFORE THE WORD STAY AS THEY WERE (the picture being walked away from keeps its lines, so
-        // nothing jumps at the start of a step); FROM THE WORD ON THE PASSAGE IS WRAPPED AFRESH at this
-        // output's own font and box, so the line that begins there begins ON the word.
-        QVector<int> starts;
-        for (const int start : entry.table.charStarts) {
-            if (start >= at)
-                break;
-            starts.append(start);
-        }
-        // Where the word was not already a line start, the line before it is cut short here: a surface that
-        // lays out a slice itself has to break at this word too, or it would run that line on past it.
-        if (!entry.table.charStarts.contains(at))
-            entry.seams.append(at);
-        starts.append(at);   // the word itself always begins a line (even if the wrap trims a leading blank)
-        const QVector<VisualSpan> fresh = visualLinesOfTextAtSize(text.mid(at), column->block, column->size);
-        for (const VisualSpan &span : fresh)
-            if (at + span.start > starts.last())
-                starts.append(at + span.start);
-        QVector<VisualSpan> spans;
-        spans.reserve(starts.size());
-        for (int i = 0; i < starts.size(); ++i)
-            spans.append({ starts.at(i), i + 1 < starts.size() ? starts.at(i + 1)
-                                                               : static_cast<int>(text.size()) });
-        entry.table = SpansToRunLines(text, spans);
-        entry.anchor = at;
-        ++anchorSerial_;
-    }
 }
 
 QString LiveOutputService::ScrollColumnKey(const QString &styleId) const
@@ -1473,15 +1397,7 @@ QVariantMap LiveOutputService::readingFlowSliceFor(const QString &styleId, int f
     const int b = qMin(total, a + lineCount);
     const int from = starts.at(a);
     const int to = b < total ? starts.at(b) : static_cast<int>(readingFlowText_.size());
-    QString sliceText = readingFlowText_.mid(from, to - from);
-    if (const AnchoredLines *anchored = anchoredLinesFor(styleId, readingFlowText_)) {
-        // Break where an anchor cut a line short (latest first, so the earlier offsets stay put).
-        for (int i = static_cast<int>(anchored->seams.size()) - 1; i >= 0; --i) {
-            const int seam = anchored->seams.at(i);
-            if (seam > from && seam < to)
-                sliceText.insert(seam - from, QLatin1Char('\n'));
-        }
-    }
+    const QString sliceText = readingFlowText_.mid(from, to - from);
     out.insert(QStringLiteral("text"), sliceText);
     out.insert(QStringLiteral("first"), a);
     out.insert(QStringLiteral("lines"), b - a);
@@ -1538,16 +1454,6 @@ QVariantMap LiveOutputService::readingBreaksFor(const QString &text) const
         const auto hit = readingBreaksCache_.constFind(cacheKey);
         if (hit != readingBreaksCache_.constEnd()) {
             breaks.insert(it.key(), hit.value());
-            continue;
-        }
-        // THE TABLE ANCHORED AT THE CURRENT WORD, when there is one: the engine draws the very lines the monitors
-        // do, and its first line begins on the same word.
-        if (const AnchoredLines *anchored = anchoredLinesFor(it.key(), text)) {
-            QVariantList starts;
-            starts.reserve(anchored->table.charStarts.size());
-            for (const int start : anchored->table.charStarts)
-                starts.append(start);
-            breaks.insert(it.key(), starts);
             continue;
         }
         ++laidOut;
@@ -1611,8 +1517,9 @@ qreal LiveOutputService::readingLineForStyle(const QString &styleId, qreal charA
     if (lineSourceTextOnly_)
         charAt = qMax(0.0, charAt - readingTextWindowCharStart_);
     // charAt is already the true character (readingCharForScroll); this style's line is
-    // read off ITS table by the function the engine's renderers use too.
-    return bps::rendering::flowscroll::LineForChar(starts, charAt);
+    // read off ITS table by the function the engine's renderers use too: whole lines of its own
+    // wrap, glided between the step's two lines (see SnappedLineForChar).
+    return bps::rendering::flowscroll::SnappedLineForChar(starts, charAt, readingSpanFrom_, readingSpanTo_);
 }
 
 int LiveOutputService::readingCharOffset() const
@@ -1949,7 +1856,11 @@ void LiveOutputService::applyReadingScroll(qreal lines, bool notify)
     // ends on the line the walk says it is on.
     const bool gliding = readingScrollAnim_
         && readingScrollAnim_->state() == QAbstractAnimation::Running;
-    const qint64 budget = qMax<qint64>(33, readingScrollNotifyCostMs_ * 2);
+    // The gap follows the SMOOTHED price of a tell (a moving average), not the last one: a single slow tell used to
+    // double the gap on the spot, and every monitor tile then froze for that long in the middle of a glide (the
+    // "sometimes it jitters" next to the engine output, which never waits). A layout that is slow EVERY time still
+    // earns its long gap — the average climbs to it within a few tells — so the protection is kept.
+    const qint64 budget = qMax<qint64>(33, static_cast<qint64>(readingScrollNotifyAvgMs_ * 2.0));
     const bool moved = !qFuzzyCompare(readingScroll_ + 1.0, readingScrollNotified_ + 1.0);
     if (notify && (moved || windowChanged)
             && (!gliding || !readingScrollNotifyClock_.isValid()
@@ -1959,6 +1870,7 @@ void LiveOutputService::applyReadingScroll(qreal lines, bool notify)
         emit readingScrollChanged();
         readingScrollNotified_ = readingScroll_;
         readingScrollNotifyCostMs_ = qBound<qint64>(qint64(0), cost.elapsed(), qint64(400));
+        readingScrollNotifyAvgMs_ = readingScrollNotifyAvgMs_ * 0.7 + static_cast<double>(readingScrollNotifyCostMs_) * 0.3;
         readingScrollNotifyClock_.restart();
         if (readingScrollNotifyCostMs_ >= 30)
             EngineBridge::write(QStringLiteral("info"), QStringLiteral("StepCost"),
@@ -2309,18 +2221,36 @@ bool LiveOutputService::lineStep(int direction)
     walk.begin(lineSlideIndex_, lineOffset_, static_cast<int>(readingScroll_));
     const int previousLines = (direction < 0 && lineSlideIndex_ > 0)
         ? readingPageLineCount(lineSlideIndex_ - 1) : 0;
-    const pl::LineWalk::Step step = walk.step(direction, ownLines, setSize, previousLines);
+    pl::LineWalk::Step step = walk.step(direction, ownLines, setSize, previousLines);
     if (!step.moved)
         return false;
+    // CURSOR FREQUENCY (Reading options): one press may move several lines. The extra lines are only taken while the
+    // walk stays on this page — a page turn has its own handling (the next page's window, the rebase) and is always
+    // taken on its own, so a press that reaches the end of a page stops there and the next press turns it.
+    const int perPress = qBound(1, SettingsService::instance().value(QStringLiteral("reading.stepLines")).toInt(), 20);
+    for (int extra = 1; extra < perPress && !step.crossedPage; ++extra) {
+        pl::LineWalk probe = walk;
+        const pl::LineWalk::Step next = probe.step(direction, ownLines, setSize, previousLines);
+        if (!next.moved || next.crossedPage)
+            break;
+        walk = probe;
+        step = next;
+    }
     if (!readingBudgetFitActive_) {
         readingBudgetFitActive_ = true;
         emit readingStageChanged();
     }
 
-    // EVERY SCREEN'S TOP LINE BEGINS ON THE WORD THE WALK IS GOING TO: the tables are anchored there before the
-    // glide starts (see anchorReadingTablesAt), and the engine is handed the same lines.
+    // EVERY SCREEN KEEPS ITS OWN WRAP AND MOVES BY WHOLE LINES OF IT. A screen of another width cannot begin a
+    // line on the word the walk goes to without re-wrapping (the old anchoring did: every press re-flowed the
+    // wider screens and left short cut lines scrolling past). So the tables never change during the walk; the
+    // step only says WHICH TWO CHARACTERS the glide runs between, and each screen glides between the whole
+    // lines those characters fall on (SnappedLineForChar) — the engine is handed the same pair.
     if (lineSourceTextOnly_ && !step.crossedPage) {
-        anchorReadingTablesAt(static_cast<int>(std::floor(readingCharForScroll(step.absolute))));
+        readingSpanFrom_ = std::floor(readingCharForScroll(readingScroll_));
+        readingSpanTo_ = std::floor(readingCharForScroll(step.absolute));
+        bps::live::LiveOutputController::Instance().SetFlowSpan(
+            static_cast<float>(readingSpanFrom_), static_cast<float>(readingSpanTo_));
         if (live_)
             scheduleReadingRepublish();
     }

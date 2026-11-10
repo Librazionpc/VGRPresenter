@@ -81,6 +81,9 @@ struct RenderOptions {
     SlideFilterValues filters;
 
     float contentScrollChars = 0.0f;
+    // The step's two characters (-1 = none): see flowscroll::SnappedLineForChar.
+    float contentScrollFrom = -1.0f;
+    float contentScrollTo = -1.0f;
     bool contentScrollFromScene = false;
 };
 
@@ -207,7 +210,9 @@ private:
     static std::string ConfiguredBackendName();
 
     IGraphicsBackend* backend_ = nullptr;
-    std::unique_ptr<IGraphicsBackend> d3d11Backend_;
+    std::unique_ptr<IGraphicsBackend> d3d11Backend_;   // Windows' native GPU path
+    std::unique_ptr<IGraphicsBackend> rhiBackend_;     // the same GPU path on every OS (QRhi)
+    bool rhiTried_ = false;                            // one attempt per Initialize: a failed bring-up is not retried
     std::unique_ptr<NullGraphicsBackend> nullBackend_;
     std::unique_ptr<SoftwareGraphicsBackend> softwareBackend_;
     // The one line that says which backend this process selected, and on which
@@ -219,6 +224,8 @@ private:
     std::string activeBackendName_;
 
     float contentScrollChars_ = 0.0f;
+    float contentScrollFrom_ = -1.0f;
+    float contentScrollTo_ = -1.0f;
     bool contentScrollFromScene_ = false;
 
     SceneGraph scenes_;
@@ -252,5 +259,7 @@ private:
     mutable std::mutex lastDistributedMutex_;
     std::shared_ptr<const Frame> lastDistributed_;
     mutable std::mutex renderMutex_;
+    // One backend switch at a time (Initialize, Reload and SetBackend can arrive from different threads).
+    std::mutex selectMutex_;
 };
 } // namespace bps::rendering

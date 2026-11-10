@@ -2,11 +2,22 @@
 
 #include "core/common/Common.hpp"
 
+#include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace bps::platform {
+class IFileWriteStream {
+public:
+    virtual ~IFileWriteStream() = default;
+    virtual Result<size_t> Write(const uint8_t* bytes, size_t size) = 0;
+    virtual Result<void> Seek(uint64_t offset) = 0;
+    virtual Result<void> Flush() = 0;
+    virtual Result<void> Close() = 0;
+};
+
 class IFilesystem {
 public:
     virtual ~IFilesystem() = default;
@@ -20,6 +31,13 @@ public:
     virtual Result<void> Write(std::string_view path, std::string_view data) = 0;
     virtual Result<void> WriteBinary(std::string_view path, const std::vector<uint8_t>& data) = 0;
     virtual Result<void> Append(std::string_view path, std::string_view data) = 0;
+
+    // Opens a seekable output stream for formats that finalize their headers
+    // after streaming data. Unsupported by legacy/test filesystems unless
+    // explicitly implemented.
+    virtual Result<std::unique_ptr<IFileWriteStream>> OpenWriteStream(std::string_view) {
+        return Error::Make(Err::Unsupported, "Filesystem", "seekable output streams are unavailable");
+    }
 
     // ---- Atomic replace: the ONE way the engine saves a file it owns -------
     virtual Result<void> WriteAtomic(std::string_view path, std::string_view data) = 0;

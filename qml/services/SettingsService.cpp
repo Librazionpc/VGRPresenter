@@ -16,6 +16,7 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJSEngine>
 #include <QLocale>
@@ -33,7 +34,7 @@ namespace bs = bps::settings;
 
 namespace {
 // One place the app's version is written for the Settings screens (the nav rail and menus still carry their own copy).
-constexpr const char *kAppVersion = "0.1.2";
+constexpr const char *kAppVersion = "0.1.3";
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
 
@@ -484,18 +485,51 @@ void SettingsService::announceLanguage()
 
 void SettingsService::applyLaunchAtLogin()
 {
-#ifdef Q_OS_WIN
     if (!settings_)
         return;
+    const bool enable = settings_->GetBool("startup.launchAtLogin");
+    // One setting, one meaning on every OS; only WHERE the OS keeps its start-up list differs. (This was
+    // Windows-only: on Linux and macOS the "Launch at login" switch saved its value and did nothing.)
+#if defined(Q_OS_WIN)
     QSettings run(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"), QSettings::NativeFormat);
     const QString name = QStringLiteral("VGRPresenter");
-    if (settings_->GetBool("startup.launchAtLogin"))
+    if (enable)
         run.setValue(name, QLatin1Char('"') + QDir::toNativeSeparators(QCoreApplication::applicationFilePath()) + QLatin1Char('"'));
     else
         run.remove(name);
     run.sync();
     if (run.status() != QSettings::NoError)
         report(tr("Windows would not let the app change its start-up entry."), QStringLiteral("warning"));
+#else
+    // macOS: a LaunchAgent in ~/Library/LaunchAgents (RunAtLoad). Linux: an XDG autostart entry in
+    // ~/.config/autostart (honoured by GNOME, KDE, XFCE, …). An AppImage's own path is a temporary
+    // mount, so the entry points at the file the user launched ($APPIMAGE) when there is one.
+    const QString exe = qEnvironmentVariable("APPIMAGE", QCoreApplication::applicationFilePath());
+#  if defined(Q_OS_MACOS)
+    const QString file = QDir::homePath() + QStringLiteral("/Library/LaunchAgents/com.vgr.presenter.plist");
+    const QByteArray body =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\"><dict>\n"
+        "  <key>Label</key><string>com.vgr.presenter</string>\n"
+        "  <key>ProgramArguments</key><array><string>" + exe.toHtmlEscaped().toUtf8() + "</string></array>\n"
+        "  <key>RunAtLoad</key><true/>\n"
+        "</dict></plist>\n";
+#  else
+    const QString file = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
+                         + QStringLiteral("/autostart/vgrpresenter.desktop");
+    const QByteArray body =
+        "[Desktop Entry]\nType=Application\nName=VGR Presenter\n"
+        "Exec=\"" + exe.toUtf8() + "\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n";
+#  endif
+    if (enable) {
+        QDir().mkpath(QFileInfo(file).absolutePath());
+        QFile out(file);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(body) != body.size())
+            report(tr("The system would not let the app change its start-up entry."), QStringLiteral("warning"));
+    } else if (QFile::exists(file) && !QFile::remove(file)) {
+        report(tr("The system would not let the app change its start-up entry."), QStringLiteral("warning"));
+    }
 #endif
 }
 
@@ -525,7 +559,8 @@ void SettingsService::applyEngineSettingsAsync()
             if (render.changed)
                 QMetaObject::invokeMethod(this, [this, render] {
                     rendererInUse_ = render.active;
-                    rendererOnGpu_ = render.active == QLatin1String("directx11");
+                    rendererOnGpu_ = render.active != QLatin1String("software") && render.active != QLatin1String("null")
+                                    && !render.active.isEmpty();   // "directx11" or "rhi": any GPU backend
                     if (render.wantGpu && !rendererOnGpu_)
                         report(tr("Hardware rendering is on, but no usable GPU was found — frames are drawn in software."),
                                QStringLiteral("warning"));

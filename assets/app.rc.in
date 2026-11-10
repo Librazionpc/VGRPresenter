@@ -18,8 +18,8 @@
 
 // Version block: File Explorer's Properties › Details reads this.
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    0,1,2,0
- PRODUCTVERSION 0,1,2,0
+ FILEVERSION    @BPS_RC_VERSION@
+ PRODUCTVERSION @BPS_RC_VERSION@
  FILEFLAGSMASK  0x3fL
  FILEFLAGS      0x0L
  FILEOS         VOS_NT_WINDOWS32
@@ -32,9 +32,9 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "VGR"
             VALUE "FileDescription",  "VGRPresenter — presentation engine"
-            VALUE "FileVersion",      "0.1.2"
+            VALUE "FileVersion",      "@BPS_APP_VERSION@"
             VALUE "ProductName",      "VGRPresenter"
-            VALUE "ProductVersion",   "0.1.2"
+            VALUE "ProductVersion",   "@BPS_APP_VERSION@"
             VALUE "OriginalFilename", "appVGRPresenterUI.exe"
         END
     END

@@ -2,6 +2,7 @@
 // Loads the NDI runtime dynamically (same DLL the app uses). Stored-block PNG, no zlib needed.
 #include <windows.h>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -77,11 +78,20 @@ int main(int argc, char** argv) {
         if (type == 1 && v.data && v.xres > 0) {
             printf("frame %dx%d fourcc=%08x stride=%d\n", v.xres, v.yres, v.fourcc, v.stride);
             std::vector<uint8_t> rgb((size_t)v.xres * v.yres * 3);
+            // Pixels the frame actually carries, so a caller can tell "the output is transparent"
+            // from "the output has the design" without decoding the PNG: opaque = alpha > 2%,
+            // ink = composited away from the mid-grey a transparent pixel becomes, bright = white-ish.
+            long opaque = 0, ink = 0, bright = 0;
             for (int y = 0; y < v.yres; y++) for (int x = 0; x < v.xres; x++) {
                 const uint8_t* p = v.data + (size_t)y * v.stride + x * 4; uint8_t* o = &rgb[((size_t)y * v.xres + x) * 3];
                 float al = p[3] / 255.0f;   // composite over mid-grey so transparency is visible
                 for (int c = 0; c < 3; c++) o[c] = (uint8_t)(p[2 - c] * al + 90 * (1 - al));
+                if (al > 0.02f) ++opaque;
+                if (std::abs((int)o[0] - 90) > 12 || std::abs((int)o[1] - 90) > 12
+                    || std::abs((int)o[2] - 90) > 12) ++ink;
+                if ((o[0] + o[1] + o[2]) / 3 > 200) ++bright;
             }
+            printf("stats opaque=%ld ink=%ld bright=%ld total=%d\n", opaque, ink, bright, v.xres * v.yres);
             bool ok = writePng(argv[2], v.xres, v.yres, rgb);
             freeVideo(recv, &v);
             printf(ok ? "saved %s\n" : "save failed %s\n", argv[2]);

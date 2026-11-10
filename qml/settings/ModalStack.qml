@@ -15,6 +15,12 @@ QtObject {
     property Item settingsShell: null
     property var pageLayer: null
 
+    // TRUE WHILE THE SETTINGS OVERLAY IS UP. The page behind it keeps receiving
+    // events that belong to the modal (a right-click on a routing card also landed
+    // in the show list underneath and opened ITS Rename/Move to/Delete menu), so
+    // the screens read this flag and ignore those clicks.
+    property bool settingsOpen: false
+
     property var stack: []
     function push(cardItem) {
         if (!cardItem || root.stack.indexOf(cardItem) >= 0)

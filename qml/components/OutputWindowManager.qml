@@ -6,9 +6,16 @@ Instantiator {
     id: root
     model: OutputListModel
 
+    // SELF-TEST ONLY (see OutputWindow.selfTestForceVisible): show every output window so a scenario can
+    // grab them. Nothing in the app sets this.
+    property bool selfTestForceVisible: false
+
     delegate: OutputWindow {
         id: win
         required property int index
+        // One name per output, so a grab can address THIS output's window (SelfTest.grabWindow).
+        objectName: "outputWindow_" + win.index
+        selfTestForceVisible: root.selfTestForceVisible
         required property bool isEnabled
         required property string screenName
         required property string frameBuffer

@@ -22,7 +22,9 @@ shared shape is not.
 
 ### 1. The platform classes repeated the same 18 service accessors — 18 lines x 3 OSes
 
-`WindowsPlatform`, `LinuxPlatform` and `MacOSPlatform` each carried the identical block
+`WindowsPlatform`, `LinuxPlatform` and `MacOSPlatform` each carried the identical block (the
+macOS backend, stubs for everything, has since been deleted outright — see
+`docs/platform/qt_first_platform.md`)
 
 ```cpp
 IFilesystem& Filesystem() override { return filesystem_; }

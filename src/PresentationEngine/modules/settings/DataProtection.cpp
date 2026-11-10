@@ -1,3 +1,4 @@
+#include "core/common/LocalTime.hpp"
 #include "modules/settings/DataProtection.hpp"
 
 #include "core/config/Json.hpp"
@@ -39,12 +40,7 @@ bool LooksLikeStamp(std::string_view s) {
 
 std::string NowStamp() {
     const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::tm local{};
-#ifdef _WIN32
-    localtime_s(&local, &t);
-#else
-    localtime_r(&t, &local);
-#endif
+    const std::tm local = bps::LocalTime(t);
     char buf[32];
     std::strftime(buf, sizeof buf, "%Y%m%d-%H%M%S", &local);
     return buf;

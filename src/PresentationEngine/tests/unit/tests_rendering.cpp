@@ -1075,7 +1075,7 @@ void TestShapeEdgeSeams() {
 
     // The same rule on the hardware path, when this machine has a device (a
     // machine without one keeps the software answer, as everywhere else).
-    CHECK(engine.SetBackend("directx11").ok());
+    CHECK(engine.SetBackend("gpu").ok());
     if (engine.BackendCaps().gpuAccelerated) {
         auto gpu = engine.Render(sceneId, opts);
         CHECK(gpu.ok());
@@ -1417,12 +1417,13 @@ void TestRenderBackendPreference() {
     CHECK(r::RenderEngine::ResolveBackendName("", false) == "software");
     // The switch on -> the GPU is ASKED for (whether this machine has one is a
     // different question, answered by the active name below).
-    CHECK(r::RenderEngine::ResolveBackendName("", true) == "directx11");
+    CHECK(r::RenderEngine::ResolveBackendName("", true) == "gpu");
     // An explicit choice outranks the switch, in BOTH directions.
     CHECK(r::RenderEngine::ResolveBackendName("software", true) == "software");
     CHECK(r::RenderEngine::ResolveBackendName("null", false) == "null");
     CHECK(r::RenderEngine::ResolveBackendName("auto", false) == "auto");
     CHECK(r::RenderEngine::ResolveBackendName("directx11", false) == "directx11");
+    CHECK(r::RenderEngine::ResolveBackendName("rhi", false) == "rhi");
 
     // 2. THE REAL SELECTION, through the configuration the app writes.
     auto& config = bps::ConfigurationManager::Instance();
@@ -1439,8 +1440,8 @@ void TestRenderBackendPreference() {
 
     CHECK(config.Set("render.hardwareAcceleration", J::Value::Bool(true)).ok());
     CHECK(engine.Reload().ok());
-    CHECK(engine.RequestedBackendName() == "directx11");   // the GPU was asked for
-    CHECK(engine.ActiveBackendName() == "directx11" || engine.ActiveBackendName() == "software");
+    CHECK(engine.RequestedBackendName() == "gpu");   // the GPU was asked for
+    CHECK(engine.ActiveBackendName() == "directx11" || engine.ActiveBackendName() == "rhi" || engine.ActiveBackendName() == "software");
     // The app's read of "what is drawing" is the backend that is really installed.
     CHECK(engine.Backend() != nullptr);
     if (engine.Backend() != nullptr)
@@ -1920,7 +1921,9 @@ void TestSoftwareFastPaths() {
                           [](uint32_t p) { return p == 0u; }));
 }
 
-void TestD3D11Backend() {
+// The GPU-vs-CPU frame comparison, run against whichever GPU backend `request` names: "gpu" = this OS's
+// own best (Direct3D 11 on Windows, the QRhi backend elsewhere), "directx11" / "rhi" = that backend only.
+static void GpuBackendMatchesSoftware(const std::string& request) {
     auto& engine = r::RenderEngine::Instance();
     CHECK(engine.Initialize().ok());
     CHECK(engine.Start().ok());
@@ -1974,10 +1977,10 @@ void TestD3D11Backend() {
     CHECK(soft.value().width == 64 && soft.value().height == 64);
     CHECK(!soft.value().empty());
 
-    CHECK(engine.SetBackend("directx11").ok());
+    CHECK(engine.SetBackend(request).ok());
     const bool gpu = engine.BackendCaps().gpuAccelerated;
     const std::string active = engine.BackendCaps().name;
-    std::fprintf(stderr, "[d3d11] requested=directx11 active=%s gpu=%d\n", active.c_str(),
+    std::fprintf(stderr, "[gpu] requested=%s active=%s gpu=%d\n", request.c_str(), active.c_str(),
                  gpu ? 1 : 0);
     if (!gpu) {
         // The documented fallback, asserted rather than skipped: the software
@@ -1991,7 +1994,12 @@ void TestD3D11Backend() {
         CHECK(engine.SetBackend("software").ok());
         return;
     }
-    CHECK(active == "directx11");
+    if (request == "rhi")
+        CHECK(active == "rhi");
+    else if (request == "directx11")
+        CHECK(active == "directx11");
+    else
+        CHECK(active == "directx11" || active == "rhi");   // "gpu": this OS's best
     CHECK(engine.BackendCaps().maxTextureSize >= 8192);
 
     auto gpuFrame = engine.Render(sceneId, opts);
@@ -2062,6 +2070,15 @@ void TestD3D11Backend() {
     CHECK(engine.SetBackend("software").ok());
     (void)engine.DestroyScene(sceneId);
 }
+
+// "gpu" is the setting's own request: Direct3D 11 on Windows, the QRhi backend everywhere else, so this
+// one runs the engine's real GPU path on every OS (a machine with no device asserts the software fallback).
+void TestD3D11Backend() { GpuBackendMatchesSoftware("gpu"); }
+
+// The QRhi backend by name, on EVERY OS including Windows (where it drives Direct3D 11 through Qt): the
+// one frame the CPU rasterizer draws must come back from the shared shaders within the blend tolerance.
+// Run with BPS_RHI_API=d3d11|vulkan|gl|metal to pick the API underneath.
+void TestRhiBackend() { GpuBackendMatchesSoftware("rhi"); }
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
@@ -2169,7 +2186,7 @@ void TestD3D11StageFrame() {
         auto softAgain = engine.Render(id, opts);
         CHECK(softAgain.ok());
 
-        CHECK(engine.SetBackend("directx11").ok());
+        CHECK(engine.SetBackend("gpu").ok());
         const bool gpu = engine.BackendCaps().gpuAccelerated;
         if (!gpu) {
             CHECK(engine.BackendCaps().name == std::string("software"));

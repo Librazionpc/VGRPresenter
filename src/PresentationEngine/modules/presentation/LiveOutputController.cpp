@@ -691,6 +691,8 @@ void LiveOutputController::SeedFlowCharFromContent() {
     const float rest = liveContent_.slides.empty()
         ? 0.0f : std::max(0.0f, liveContent_.slides.front().flowChar);
     flowChar_.store(rest);
+    flowSpanFrom_.store(-1.0f);   // a fresh pick rests: no step in flight
+    flowSpanTo_.store(-1.0f);
     hasComposedFlow_ = false;
 }
 
@@ -746,6 +748,8 @@ Result<void> LiveOutputController::RenderOnce() {
     const int64_t nowSteadyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now().time_since_epoch()).count();
     const float scrollChars = flowChar_.load();
+    const float spanFrom = flowSpanFrom_.load();
+    const float spanTo = flowSpanTo_.load();
     const bool scrollMoving = FlowCharMoving(nowSteadyMs);
     // ---- THE SCROLL'S FRAME BUDGET ---------------------------------------
     // Composing per tick measured 0.4 s a frame — never motion. The budget is not a
@@ -769,7 +773,7 @@ Result<void> LiveOutputController::RenderOnce() {
         // ---- DIRTY-FRAME SKIP: RE-PRESENT, DO NOT RE-RASTERISE ---------------
         const auto presentStart = std::chrono::steady_clock::now();
         if (RepresentLastFrame(render)) {
-            RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+            RenderPerOutputPasses(scrollChars, spanFrom, spanTo);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
             const double ms = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - presentStart).count();
             representedFrames_.fetch_add(1);
@@ -790,6 +794,8 @@ Result<void> LiveOutputController::RenderOnce() {
     // The reading scroll for THIS frame: how far the reading block's flow sits
     // into its passage, in its own line heights. Nothing else in the scene moves.
     opts.contentScrollChars = scrollChars;
+    opts.contentScrollFrom = spanFrom;
+    opts.contentScrollTo = spanTo;
     opts.contentScrollFromScene = freshScene;
     const auto tRender = std::chrono::steady_clock::now();
     auto frame = render.Render(sceneId, opts);
@@ -833,7 +839,7 @@ Result<void> LiveOutputController::RenderOnce() {
         }
     }
     const auto tPasses = std::chrono::steady_clock::now();
-    RenderPerOutputPasses(scrollChars);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
+    RenderPerOutputPasses(scrollChars, spanFrom, spanTo);   // lock-ok: control_ is what keeps the runtime's compiled set stable under this pass
     stageTiming.Add("build", buildMs);
     stageTiming.Add("program", renderMs);
     stageTiming.Add("outputs", timing::MsSince(tPasses));
@@ -877,7 +883,7 @@ bool LiveOutputController::RepresentLastFrame(rendering::RenderEngine& render) {
     return true;
 }
 
-void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
+void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, float spanFrom, float spanTo) {
     if (!pres_) return;
     const bool refreshReadingFlow = readingFlowWindowMoved_;
     readingFlowWindowMoved_ = false;
@@ -945,6 +951,8 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars) {
         passOpts.capture = true;
         passOpts.filters = slide->filters;
         passOpts.contentScrollChars = contentScrollChars;
+        passOpts.contentScrollFrom = spanFrom;
+        passOpts.contentScrollTo = spanTo;
         passOpts.contentScrollFromScene = false;
         const auto tPassRender = std::chrono::steady_clock::now();
         auto img = engine.Render(sceneId.value(), passOpts);

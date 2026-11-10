@@ -13,6 +13,7 @@
 #include <QString>
 #include <QThread>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -22,13 +23,17 @@
 #include <ctime>
 #include <exception>
 #include <string>
+#include <thread>
 #include <vector>    // CreateProcess needs a mutable argv buffer
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <dbghelp.h>   // SYMBOL_INFO / IMAGEHLP_MODULE64 (dll still loaded dynamically)
 #else
+#include <dlfcn.h>
 #include <execinfo.h>
+#include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #endif
 
@@ -510,6 +515,207 @@ void WriteHangDump(const char *reason)
     }
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// The micro-stall sampler — ALWAYS ON (BPS_GUI_STALL_MS=<ms> changes the threshold, 0 turns it off; default 100).
+// The hang watchdog above reports a freeze of SECONDS and names the traced call it was in; a 300 ms hitch on a
+// camera take is far below that and usually outside every traced entry point. This samples WHERE the interface
+// thread actually is: when it has not ticked for the threshold, its stack is captured a few times DURING the
+// stall (module + offset per frame, plus the symbol where the OS can name it), and one line says how long the
+// stall lasted when it ends. The same loop runs on every OS; only the capture differs:
+//   Windows  suspend the thread, unwind its saved context (RtlVirtualUnwind), resume - nothing allocates while it
+//            is suspended (it might hold the heap lock).
+//   Linux / macOS  a SIGUSR2 sent to that thread: its handler records backtrace() into a static buffer.
+// Resolve a line afterwards against the exe: gdb -batch -ex "info symbol 0x<imagebase+rva>" appVGRPresenterUI.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr int kStallMaxFrames = 24;
+constexpr int kStallMaxSamples = 6;   // per stall: enough to see what dominates, cheap enough not to perturb it
+
+#if defined(_WIN32)
+
+// Captures the interface thread's stack. The thread handle is opened once and kept.
+int CaptureGuiStack(unsigned long long nativeId, unsigned long long *frames, int maxFrames)
+{
+    static HANDLE gui = nullptr;
+    if (!gui) {
+        gui = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                         static_cast<DWORD>(nativeId));
+        if (!gui)
+            return 0;
+    }
+    int count = 0;
+    // ---- suspended: nothing below may allocate, log or take a lock ----
+    if (SuspendThread(gui) != static_cast<DWORD>(-1)) {
+        CONTEXT ctx = {};
+        ctx.ContextFlags = CONTEXT_FULL;
+        if (GetThreadContext(gui, &ctx)) {
+            for (; count < maxFrames && ctx.Rip != 0; ++count) {
+                frames[count] = ctx.Rip;
+                DWORD64 imageBase = 0;
+                PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(ctx.Rip, &imageBase, nullptr);
+                if (!entry) {   // a leaf with no unwind data: the return address is on top of the stack
+                    ctx.Rip = *reinterpret_cast<DWORD64 *>(ctx.Rsp);
+                    ctx.Rsp += 8;
+                } else {
+                    PVOID handlerData = nullptr;
+                    DWORD64 establisher = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, ctx.Rip, entry, &ctx, &handlerData,
+                                     &establisher, nullptr);
+                }
+            }
+        }
+        ResumeThread(gui);
+    }
+    return count;
+}
+
+std::string DescribeFrame(unsigned long long address)
+{
+    HMODULE module = nullptr;
+    char name[MAX_PATH] = {};
+    unsigned long long rva = address;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(address), &module) && module) {
+        GetModuleFileNameA(module, name, MAX_PATH);
+        rva = address - reinterpret_cast<unsigned long long>(module);
+    }
+    const char *base = std::strrchr(name, '\\');
+    char one[128];
+    std::snprintf(one, sizeof(one), " %s+0x%llx", base ? base + 1 : (name[0] ? name : "?"), rva);
+    return one;
+}
+
+#else   // Linux and macOS
+
+std::atomic<int> g_stallCount{-1};
+void *g_stallFrames[kStallMaxFrames];
+
+extern "C" void vgrStallSignalHandler(int)
+{
+    // async-signal context: backtrace() into a static buffer, publish the count, nothing else.
+    void *local[kStallMaxFrames];
+    const int n = backtrace(local, kStallMaxFrames);
+    for (int i = 0; i < n; ++i)
+        g_stallFrames[i] = local[i];
+    g_stallCount.store(n, std::memory_order_release);
+}
+
+int CaptureGuiStack(unsigned long long nativeId, unsigned long long *frames, int maxFrames)
+{
+    static bool installed = false;
+    if (!installed) {
+        // The first backtrace() may load libgcc / allocate: warm it up here, outside any signal handler.
+        void *warm[4];
+        (void)backtrace(warm, 4);
+        struct sigaction action = {};
+        action.sa_handler = vgrStallSignalHandler;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        if (sigaction(SIGUSR2, &action, nullptr) != 0)
+            return 0;
+        installed = true;
+    }
+    g_stallCount.store(-1, std::memory_order_release);
+#if defined(__APPLE__)
+    const pthread_t target = reinterpret_cast<pthread_t>(static_cast<uintptr_t>(nativeId));   // a pointer type there
+#else
+    const pthread_t target = static_cast<pthread_t>(nativeId);                                // an integer type here
+#endif
+    if (pthread_kill(target, SIGUSR2) != 0)
+        return 0;
+    for (int waited = 0; waited < 40; ++waited) {   // up to ~40 ms for the thread to run its handler
+        const int n = g_stallCount.load(std::memory_order_acquire);
+        if (n >= 0) {
+            const int count = n < maxFrames ? n : maxFrames;
+            for (int i = 0; i < count; ++i)
+                frames[i] = reinterpret_cast<unsigned long long>(g_stallFrames[i]);
+            return count;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return 0;
+}
+
+std::string DescribeFrame(unsigned long long address)
+{
+    Dl_info info = {};
+    char one[256];
+    if (dladdr(reinterpret_cast<void *>(address), &info) != 0 && info.dli_fname) {
+        const char *base = std::strrchr(info.dli_fname, '/');
+        const unsigned long long offset = address - reinterpret_cast<unsigned long long>(info.dli_fbase);
+        std::snprintf(one, sizeof(one), " %s+0x%llx%s%s", base ? base + 1 : info.dli_fname, offset,
+                      info.dli_sname ? ":" : "", info.dli_sname ? info.dli_sname : "");
+    } else {
+        std::snprintf(one, sizeof(one), " 0x%llx", address);
+    }
+    return one;
+}
+
+#endif
+
+} // namespace
+
+void StartGuiStallSampler(int thresholdMs)
+{
+    static std::atomic<bool> started{false};
+    if (thresholdMs <= 0 || started.exchange(true))
+        return;
+    std::thread([thresholdMs] {
+        bool inStall = false;
+        int samples = 0;
+        double worstMs = 0.0;
+        std::string lastCall;
+        auto lastSample = std::chrono::steady_clock::now();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (calltrace::heartbeatTickCount() < 20)
+                continue;   // still starting
+            const long long beat = calltrace::lastHeartbeatTicks();
+            const auto nowPoint = std::chrono::steady_clock::now();
+            const long long now = nowPoint.time_since_epoch().count();
+            const double stalledMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::duration(now - beat)).count();
+            if (stalledMs < thresholdMs) {
+                if (inStall) {   // it is ticking again: one line for the whole stall
+                    // qInfo, not qWarning: warnings are surfaced to the operator as toasts, and a
+                    // diagnostic about the interface freezing must not itself pop up on the interface.
+                    qInfo("GuiStall: the interface thread was silent for about %.0f ms%s", worstMs,
+                             lastCall.empty() ? "" : (" - last traced call: " + lastCall).c_str());
+                    inStall = false;
+                    worstMs = 0.0;
+                }
+                continue;
+            }
+            if (!inStall) {
+                inStall = true;
+                samples = 0;
+                worstMs = 0.0;
+                lastCall.clear();
+            }
+            worstMs = std::max(worstMs, stalledMs);
+            if (samples >= kStallMaxSamples
+                || std::chrono::duration<double, std::milli>(nowPoint - lastSample).count() < 15.0)
+                continue;
+            const unsigned long long tid = calltrace::guiNativeThreadId();
+            if (tid == 0)
+                continue;
+            unsigned long long frames[kStallMaxFrames] = {};
+            const int count = CaptureGuiStack(tid, frames, kStallMaxFrames);
+            lastSample = std::chrono::steady_clock::now();
+            if (count <= 0)
+                continue;
+            ++samples;
+            if (lastCall.empty())
+                lastCall = calltrace::guiChain().toStdString();
+            std::string text;
+            for (int i = 0; i < count; ++i)
+                text += DescribeFrame(frames[i]);
+            qInfo("GuiStall: interface thread silent for %.0f ms - sample %d:%s", stalledMs, samples, text.c_str());
+        }
+    }).detach();
+}
 
 QString ConsumePendingCrashSummary()
 {

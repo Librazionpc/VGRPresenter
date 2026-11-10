@@ -1,217 +1,127 @@
 #pragma once
 
 #include "platform/PlatformAccessors.hpp"
-#include "platform/common/Filesystem.hpp"
+#include "platform/PlatformServices.hpp"
+#include "platform/common/PosixProcess.hpp"
+#include "platform/common/PosixSocket.hpp"
 #include "platform/common/Timer.hpp"
+#include "platform/qt/QtClipboard.hpp"
+#include "platform/qt/QtComposed.hpp"
+#include "platform/qt/QtMediaDevices.hpp"
+
+#include <optional>
 
 namespace bps::platform {
+
+class MacOSThreading final : public IThreading {
+public:
+    unsigned HardwareConcurrency() const override;
+    Result<void> SetCurrentThreadName(std::string_view name) override;
+    std::string CurrentThreadName() const override;
+    uint64_t CurrentThreadId() const override;
+    Result<void> SetThreadAffinity(std::thread& thread, unsigned cpu) override;
+    Result<void> SetCurrentThreadPriority(int priority) override;
+};
+
+class MacOSMonitor final : public IMonitor {
+public:
+    std::vector<MonitorInfo> Enumerate() const override;
+    Result<MonitorInfo> Primary() const override;
+    std::string DefaultMonitorId() const override;
+};
+
+class MacOSNetwork final : public INetwork {
+public:
+    std::string Hostname() const override;
+    std::vector<NetworkAdapterInfo> Adapters() const override;
+    Result<std::string> IpAddress() const override;
+    Result<bool> InternetAvailable() const override;
+    Result<std::string> Gateway() const override;
+    std::vector<std::string> DnsServers() const override;
+    std::string Proxy() const override;
+    FirewallAccess ProbeInboundAccess(const std::string&, const std::string&) const override;
+    FirewallRequestOutcome RequestInboundAccess(const std::string&, const std::string&,
+                                                const std::string&, std::string*) override;
+};
+
+class MacOSPower final : public IPower {
+public:
+    PowerInfo Current() const override;
+};
+
+class MacOSEnvironment final : public IEnvironment {
+public:
+    EnvironmentInfo Current() const override;
+};
+
+class MacOSInput final : public IInput {
+public:
+    std::vector<InputDeviceInfo> Enumerate() const override;
+    bool HasKeyboard() const override;
+    bool HasPointer() const override;
+};
+
+class MacOSDialogs final : public IDialogs {
+public:
+    Result<std::optional<std::string>> OpenFileDialog(
+        std::string_view title, const std::vector<std::string>& filters) override;
+    Result<std::optional<std::string>> SaveFileDialog(
+        std::string_view title, std::string_view defaultName) override;
+    Result<std::optional<std::string>> SelectFolderDialog(std::string_view title) override;
+    Result<void> MessageDialog(std::string_view title, std::string_view message) override;
+    Result<bool> QuestionDialog(std::string_view title, std::string_view message) override;
+};
+
+class MacOSNotifications final : public INotifications {
+public:
+    bool Supported() const override { return true; }
+    Result<void> Show(std::string_view title, std::string_view body) override;
+};
+
 class MacOSPlatform final : public PlatformAccessors<MacOSPlatform> {
     friend class PlatformAccessors<MacOSPlatform>;
-
 public:
     const char* Name() const noexcept override { return "MacOSPlatform"; }
-
     SystemInfo Info() override;
     std::string OsName() const override { return "macOS"; }
     std::string OsVersion() const override;
     std::string Arch() const override;
-
+    PlatformCapabilities Capabilities() const override;
     Snapshot Sample() override;
+    std::vector<OsEvent> PollChanges() override;
 
 private:
-    FilesystemImpl filesystem_;
+    PlatformPaths paths_;
+    MacOSThreading nativeThreading_;
+    PlatformThreading threading_{nativeThreading_};
+    PlatformFilesystem filesystem_;
+    PlatformLibrary library_;
+    PlatformLocale locale_;
     TimerImpl timer_;
+    PosixProcess process_;
+    MacOSMonitor monitor_;
+    QtAudioDevices audio_;
+    QtVideoDevices video_;
+    MacOSNetwork nativeNetwork_;
+    QtNetwork network_{nativeNetwork_};
+    MacOSPower power_;
+    QtClipboard clipboard_;   // QClipboard (same class on every OS)
+    MacOSEnvironment nativeEnvironment_;
+    QtEnvironment environment_{nativeEnvironment_};
+    PosixSocketFactory sockets_;
+    MacOSInput nativeInput_;
+    QtInput input_{nativeInput_};
+    MacOSDialogs dialogs_;
+    MacOSNotifications nativeNotifications_;
+    QtNotifications notifications_{nativeNotifications_};
 
-    struct StubPaths final : IPaths {
-        std::string Unsupported() const { return {}; }
-        std::string ExecutableDir() const override { return Unsupported(); }
-        std::string CurrentWorkingDir() const override { return Unsupported(); }
-        std::string ConfigDir() const override { return Unsupported(); }
-        std::string CacheDir() const override { return Unsupported(); }
-        std::string PluginDir() const override { return Unsupported(); }
-        std::string AssetDir() const override { return Unsupported(); }
-        std::string LogDir() const override { return Unsupported(); }
-        std::string TempDir() const override { return Unsupported(); }
-        std::string DownloadsDir() const override { return Unsupported(); }
-        std::string DocumentsDir() const override { return Unsupported(); }
-        std::string DesktopDir() const override { return Unsupported(); }
-        std::string UserDataDir() const override { return Unsupported(); }
-        std::string AppDataDir() const override { return Unsupported(); }
-    };
-    struct StubThreading final : IThreading {
-        unsigned HardwareConcurrency() const override { return 1; }
-        Result<void> SetCurrentThreadName(std::string_view) override { return Ok(); }
-        std::string CurrentThreadName() const override { return {}; }
-        uint64_t CurrentThreadId() const override { return 0; }
-        Result<void> SetThreadAffinity(std::thread&, unsigned) override {
-            return Error::Make(Err::Unsupported, "Threading", "macOS backend pending");
-        }
-        Result<void> SetCurrentThreadPriority(int) override {
-            return Error::Make(Err::Unsupported, "Threading", "macOS backend pending");
-        }
-    };
-    struct StubProcess final : IProcess {
-        Result<int> Start(std::string_view, std::vector<std::string>) override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<void> Wait(int, int) override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<int> ExitCode(int) const override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<void> Kill(int) override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<void> Terminate(int) override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<bool> IsRunning(int) const override { return false; }
-        int CurrentProcessId() const override { return 0; }
-        Result<int> Restart(int, std::string_view, std::vector<std::string>) override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<std::string> Environment(std::string_view) const override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-        Result<void> SetEnvironment(std::string_view, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Process", "macOS backend pending");
-        }
-    };
-    struct StubLibrary final : ILibrary {
-        Result<Handle> Load(std::string_view) override {
-            return Error::Make(Err::Unsupported, "Library", "macOS backend pending");
-        }
-        Result<void> Unload(Handle) override {
-            return Error::Make(Err::Unsupported, "Library", "macOS backend pending");
-        }
-        Result<void*> Symbol(Handle, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Library", "macOS backend pending");
-        }
-        bool IsLoaded(Handle) const override { return false; }
-        std::string LastError() const override { return "macOS backend pending"; }
-        Result<Handle> Reload(Handle, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Library", "macOS backend pending");
-        }
-    };
-    struct StubMonitor final : IMonitor {
-        std::vector<MonitorInfo> Enumerate() const override { return {}; }
-        Result<MonitorInfo> Primary() const override {
-            return Error::Make(Err::Unsupported, "Monitor", "macOS backend pending");
-        }
-        std::string DefaultMonitorId() const override { return {}; }
-    };
-    struct StubAudio final : IAudio {
-        std::vector<AudioDeviceInfo> Enumerate() const override { return {}; }
-        Result<AudioDeviceInfo> DefaultOutput() const override {
-            return Error::Make(Err::Unsupported, "Audio", "macOS backend pending");
-        }
-        Result<AudioDeviceInfo> DefaultInput() const override {
-            return Error::Make(Err::Unsupported, "Audio", "macOS backend pending");
-        }
-        std::string Fingerprint() const override { return {}; }
-    };
-    struct StubVideo final : IVideo {
-        std::vector<VideoDeviceInfo> Enumerate() const override { return {}; }
-        std::string Fingerprint() const override { return {}; }
-    };
-    struct StubNetwork final : INetwork {
-        std::string Hostname() const override { return {}; }
-        std::vector<NetworkAdapterInfo> Adapters() const override { return {}; }
-        Result<std::string> IpAddress() const override {
-            return Error::Make(Err::Unsupported, "Network", "macOS backend pending");
-        }
-        Result<bool> InternetAvailable() const override { return false; }
-        Result<std::string> Gateway() const override {
-            return Error::Make(Err::Unsupported, "Network", "macOS backend pending");
-        }
-        std::vector<std::string> DnsServers() const override { return {}; }
-        std::string Proxy() const override { return {}; }
-        FirewallAccess ProbeInboundAccess(const std::string&, const std::string&) const override {
-            return FirewallAccess::Unavailable;
-        }
-        FirewallRequestOutcome RequestInboundAccess(const std::string&, const std::string&,
-                                                     const std::string&, std::string*) override {
-            return FirewallRequestOutcome::Unavailable;
-        }
-    };
-    struct StubPower final : IPower {
-        PowerInfo Current() const override { return {}; }
-    };
-    struct StubClipboard final : IClipboard {
-        Result<std::string> ReadText() const override {
-            return Error::Make(Err::Unsupported, "Clipboard", "macOS backend pending");
-        }
-        Result<void> WriteText(std::string_view) override {
-            return Error::Make(Err::Unsupported, "Clipboard", "macOS backend pending");
-        }
-        Result<std::vector<std::string>> GetFiles() const override {
-            return Error::Make(Err::Unsupported, "Clipboard", "macOS backend pending");
-        }
-        Result<void> SetFiles(const std::vector<std::string>&) override {
-            return Error::Make(Err::Unsupported, "Clipboard", "macOS backend pending");
-        }
-    };
-    struct StubEnvironment final : IEnvironment {
-        EnvironmentInfo Current() const override { return {}; }
-    };
-    struct StubLocale final : ILocale {
-        LocaleInfo Current() const override { return {}; }
-        std::string Language() const override { return {}; }
-        std::string Country() const override { return {}; }
-    };
-    struct StubInput final : IInput {
-        std::vector<InputDeviceInfo> Enumerate() const override { return {}; }
-        bool HasKeyboard() const override { return false; }
-        bool HasPointer() const override { return false; }
-    };
-    struct StubDialogs final : IDialogs {
-        Result<std::optional<std::string>> OpenFileDialog(std::string_view, const std::vector<std::string>&) override {
-            return Error::Make(Err::Unsupported, "Dialogs", "macOS backend pending");
-        }
-        Result<std::optional<std::string>> SaveFileDialog(std::string_view, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Dialogs", "macOS backend pending");
-        }
-        Result<std::optional<std::string>> SelectFolderDialog(std::string_view) override {
-            return Error::Make(Err::Unsupported, "Dialogs", "macOS backend pending");
-        }
-        Result<void> MessageDialog(std::string_view, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Dialogs", "macOS backend pending");
-        }
-        Result<bool> QuestionDialog(std::string_view, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Dialogs", "macOS backend pending");
-        }
-    };
-    struct StubNotifications final : INotifications {
-        bool Supported() const override { return false; }
-        Result<void> Show(std::string_view, std::string_view) override {
-            return Error::Make(Err::Unsupported, "Notifications", "macOS backend pending");
-        }
-    };
-    struct StubSocket final : ISocketFactory {
-        Result<std::unique_ptr<ISocket>> Connect(std::string, uint16_t) override {
-            return Error::Make(Err::Unsupported, "Socket", "macOS backend pending");
-        }
-        Result<std::unique_ptr<ISocketListener>> Listen(uint16_t) override {
-            return Error::Make(Err::Unsupported, "Socket", "macOS backend pending");
-        }
-    };
-
-    StubPaths paths_;
-    StubThreading threading_;
-    StubProcess process_;
-    StubLibrary library_;
-    StubMonitor monitor_;
-    StubAudio audio_;
-    StubVideo video_;
-    StubNetwork network_;
-    StubPower power_;
-    StubClipboard clipboard_;
-    StubEnvironment environment_;
-    StubLocale locale_;
-    StubInput input_;
-    StubDialogs dialogs_;
-    StubNotifications notifications_;
-    StubSocket sockets_;
+    std::string lastMonitorIds_;
+    std::string lastResolutions_;
+    std::string lastNetworkFingerprint_;
+    std::string lastAudioFingerprint_;
+    std::string lastVideoFingerprint_;
+    std::optional<PowerInfo> lastPower_;
+    bool havePollBaseline_ = false;
 };
+
 } // namespace bps::platform

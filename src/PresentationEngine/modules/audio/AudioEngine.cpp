@@ -32,8 +32,8 @@ std::string Normalize(std::string_view text)
     return out;
 }
 
-std::optional<uint32_t> ResolveWaveIn(const std::vector<platform::AudioDeviceInfo> &roster,
-                                      std::string_view name)
+std::optional<uint32_t> ResolveInputDevice(const std::vector<platform::AudioDeviceInfo> &roster,
+                                           std::string_view name)
 {
     const std::string want = Normalize(name);
     if (want.empty())
@@ -41,14 +41,23 @@ std::optional<uint32_t> ResolveWaveIn(const std::vector<platform::AudioDeviceInf
     for (const auto &dev : roster) {
         if (!dev.isInput || Normalize(dev.name) != want)
             continue;
+        uint32_t number = 0;
         constexpr std::string_view prefix = "wavein:";
-        if (dev.id.rfind(prefix, 0) != 0)
-            return std::nullopt;
-        try {
-            return static_cast<uint32_t>(std::stoul(dev.id.substr(prefix.size())));
-        } catch (const std::exception &) {
-            return std::nullopt;
+        if (dev.id.rfind(prefix, 0) == 0) {
+            try {
+                number = static_cast<uint32_t>(std::stoul(dev.id.substr(prefix.size())));
+            } catch (const std::exception &) {
+                return std::nullopt;
+            }
+        } else {
+            number = platform::IAudio::StableDeviceNumber(dev.id);
+            for (const auto &other : roster) {
+                if (!other.isInput || other.id == dev.id) continue;
+                if (platform::IAudio::StableDeviceNumber(other.id) == number)
+                    return std::nullopt;
+            }
         }
+        return number;
     }
     return std::nullopt;
 }
@@ -550,20 +559,30 @@ void AudioEngine::Reconcile()
         wanted[from] = label;
     }
 
-    // Sources that stopped qualifying, or changed device, let go of their capture.
+    const auto now = std::chrono::steady_clock::now();
+    auto& audio = platform::PlatformAccessor::Get().Audio();
+    const std::vector<uint32_t> activeTaps = audio.ActiveInputMeters();
+
+    // Release sources that stopped qualifying, changed device, or lost their
+    // capture session. A UI meter and the mixer can share one device tap; if
+    // either owner closes it, the next reconciliation reopens it for survivors.
     for (auto it = boundLabel_.begin(); it != boundLabel_.end();) {
         const auto keep = wanted.find(it->first);
         if (keep != wanted.end() && keep->second == it->second) {
-            ++it;
-            continue;
+            const auto device = boundDevice_.find(it->first);
+            if (device != boundDevice_.end()
+                && std::find(activeTaps.begin(), activeTaps.end(), device->second) != activeTaps.end()) {
+                ++it;
+                continue;
+            }
         }
         const std::string id = it->first;
         it = boundLabel_.erase(it);
         Unbind(id);
+        nextRetry_ = now; // an existing source lost its tap; retry its roster resolution now
     }
 
     // New sources: resolve the device name and open its capture.
-    const auto now = std::chrono::steady_clock::now();
     std::vector<platform::AudioDeviceInfo> roster;
     bool rosterRead = false;
     for (const auto &[id, label] : wanted) {
@@ -572,17 +591,17 @@ void AudioEngine::Reconcile()
         if (!rosterRead) {
             if (now < nextRetry_)
                 break;
-            roster = platform::PlatformAccessor::Get().Audio().Enumerate();
+            roster = audio.Enumerate();
             rosterRead = true;
             nextRetry_ = now + kRosterRetry;
         }
-        const auto dev = ResolveWaveIn(roster, label);
+        const auto dev = ResolveInputDevice(roster, label);
         if (!dev) {
             Logger::Instance().Warning("no capture device named '" + label
                                            + "' for source " + id, kModule);
             continue;
         }
-        auto tap = platform::PlatformAccessor::Get().Audio().StartInputMeter(*dev, label);
+        auto tap = audio.StartInputMeter(*dev, label);
         if (!tap.ok()) {
             Logger::Instance().Warning("could not open '" + label + "' for source " + id
                                            + ": " + tap.error().message, kModule);

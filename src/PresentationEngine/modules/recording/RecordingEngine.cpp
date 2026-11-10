@@ -4,9 +4,15 @@
 #include "core/logging/Logger.hpp"
 #include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
+#include "modules/recording/WaveAudioContainer.hpp"
+#ifndef _WIN32
+#include "modules/recording/QtRecordingContainer.hpp"   // Linux/macOS: files written through Qt Multimedia
+#endif
+#ifdef _WIN32
 #include "modules/recording/AudioFileContainer.hpp"
 #include "modules/recording/MatroskaContainer.hpp"
 #include "modules/recording/MediaFoundationMp4.hpp"
+#endif
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 
@@ -55,6 +61,7 @@ struct RecordingEngine::Pump {
 namespace {
 constexpr const char* kModule = "RecordingEngine";
 
+#ifdef _WIN32
 class MediaFoundationVideoEncoder final : public IVideoEncoder {
 public:
     const char* Codec() const noexcept override { return "H.264"; }
@@ -87,6 +94,30 @@ public:
 private:
     bool initialized_ = false;
 };
+#else
+// Linux and macOS: the encoding itself is Qt Multimedia's (QtRecordingContainer.cpp), so these two only
+// stand for "this machine can encode" in the engine's encoder lists (SelectEncoder / DetectEncoders).
+// The software entry is always the backend's own choice: it uses a hardware encoder when it has one.
+class QtVideoEncoder final : public IVideoEncoder {
+public:
+    const char* Codec() const noexcept override { return "H.264"; }
+    EncoderKind Kind() const noexcept override { return EncoderKind::Software; }
+    Result<void> Initialize(const RecordingProfile&) override {
+        if (QtSupportedContainers().empty())
+            return Error::Make(Err::Recording_EncoderUnavailable, "RecordingEngine",
+                               "the Qt media backend has no video encoder on this machine");
+        return Ok();
+    }
+    Result<void> Shutdown() override { return Ok(); }
+};
+
+class QtAudioEncoder final : public IAudioEncoder {
+public:
+    const char* Codec() const noexcept override { return "AAC"; }
+    Result<void> Initialize(const RecordingProfile&) override { return Ok(); }
+    Result<void> Shutdown() override { return Ok(); }
+};
+#endif
 
 const char* EncoderKindName(EncoderKind k) {
     switch (k) {
@@ -154,9 +185,15 @@ Result<void> RecordingEngine::Initialize() {
     }
     { std::error_code ec; (void)std::filesystem::create_directories(dir, ec); }
 
+#ifndef _WIN32
+    // Asked BEFORE the engine lock is taken: the first answer loads Qt's media backend.
+    const std::vector<ContainerKind> qtContainers = QtSupportedContainers();
+#endif
+
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (initialized_.load()) return Ok();   // lost the race; other caller finished
 
+#ifdef _WIN32
     containers_.emplace(ContainerName(ContainerKind::MP4),
                         []() -> std::shared_ptr<IRecordingContainer> {
                             return std::make_shared<MediaFoundationMp4>();
@@ -181,6 +218,27 @@ Result<void> RecordingEngine::Initialize() {
     audioEncoders_.emplace("AAC", []() -> std::shared_ptr<IAudioEncoder> {
         return std::make_shared<MediaFoundationAudioEncoder>();
     });
+#else
+    containers_.emplace(ContainerName(ContainerKind::WAV),
+                        []() -> std::shared_ptr<IRecordingContainer> {
+                            return std::make_shared<WaveAudioContainer>();
+                        });
+    // Everything else the Qt backend can encode on this machine: MP4 / MKV / MOV / WebM video, and the
+    // compressed audio formats. The list a preset can pick from is the list that works here.
+    for (const ContainerKind kind : qtContainers) {
+        containers_.emplace(ContainerName(kind), [kind]() -> std::shared_ptr<IRecordingContainer> {
+            return MakeQtRecordingContainer(kind);
+        });
+    }
+    if (!qtContainers.empty()) {
+        videoEncoders_.emplace(EncoderKindName(EncoderKind::Software), []() -> std::shared_ptr<IVideoEncoder> {
+            return std::make_shared<QtVideoEncoder>();
+        });
+        audioEncoders_.emplace("AAC", []() -> std::shared_ptr<IAudioEncoder> {
+            return std::make_shared<QtAudioEncoder>();
+        });
+    }
+#endif
 
     // Default master profile (docs/specs/28 §2: Output Recording Profiles).
     if (!profiles_.count("master")) {
@@ -415,6 +473,8 @@ std::vector<EncoderKind> RecordingEngine::DetectEncoders() const {
 
 Result<EncoderKind> RecordingEngine::SelectEncoder(const RecordingProfile& profile) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (profile.videoCodec == VideoCodec::None)
+        return EncoderKind::Software; // audio-only containers do not need a video encoder
     // Hardware first, software fallback (docs/specs/28 §13).
     if (profile.encoderPreference != EncoderKind::Auto) {
         if (videoEncoders_.count(EncoderKindName(profile.encoderPreference)))
@@ -641,8 +701,25 @@ Result<void> RecordingEngine::StopRecording(std::string_view recordingId,
         container = std::move(it->second.container);
         it->second.container.reset();
     }
-    // Finalize the provider container with NO lock held.
-    if (container) (void)container->Close(true);
+    // Finalize the provider container with NO lock held. A close failure means
+    // the output may be truncated or missing its index/header; do not report a
+    // successful recording in that case.
+    const Result<void> finalized = container ? container->Close(true) : Ok();
+    if (!finalized.ok()) {
+        const std::string message = finalized.error().message;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            auto it = sessions_.find(recordingId);
+            if (it == sessions_.end())
+                return Error::Make(Err::Recording_NotFound, kModule, "recording not found");
+            it->second.state = RecordingState::Failed;
+            errorCount_.fetch_add(1);
+            Journal(JournalEntry::Kind::Failed, std::string(recordingId), message);
+        }
+        (void)EventBus::Instance().Publish(
+            events::RecordingFailed{std::string(recordingId), message});
+        return finalized.error();
+    }
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto it = sessions_.find(recordingId);

@@ -160,7 +160,9 @@ void RecordingService::refreshCapabilities()
     QThreadPool::globalInstance()->start([this, guard] {
         auto &rec = rr::RecordingEngine::Instance();
         // The hardware encoders THIS machine has (NVENC, AMF, QuickSync) join the engine's list.
+#ifdef _WIN32
         (void)rr::RegisterHardwareEncoders(rec);
+#endif
         QStringList encoders;
         for (const rr::EncoderKind kind : rec.DetectEncoders()) {
             switch (kind) {
@@ -281,6 +283,14 @@ bool RecordingService::beginRecording(const QVariantMap &settings, const QString
                 toast(QStringLiteral("Recording refused: %1").arg(message));
             });
         };
+        const auto capabilities = bps::platform::PlatformAccessor::Get().Capabilities();
+        const bool audioOnly = profile.videoCodec == rr::VideoCodec::None;
+        if (audioOnly ? !capabilities.audioRecording : !capabilities.videoRecording) {
+            refuse(audioOnly
+                ? QStringLiteral("this platform does not have a configured audio recording provider")
+                : QStringLiteral("this platform does not have a configured video recording provider"));
+            return;
+        }
         // The engine boots after the kernel; the UI can reach this before a
         // Start() has run (e.g. a boot failure) — refuse honestly.
         const bool existed = rec.GetProfile(pid.toStdString()).ok();

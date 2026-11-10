@@ -18,6 +18,16 @@ void TestPlatform();
 void TestPal();
 void TestPalPerfStress();
 void TestAtomicWrite();
+void TestQtFilesystemContract();
+void TestQtFilesystemWatch();
+void TestQtServicesLocaleAndLibrary();
+void TestPlatformListingSpelling();
+void TestPlatformPathsParity();
+void TestPreviewFrameSharedContract();
+#ifndef _WIN32
+void TestQtFrameSourceStills();
+void TestQtRecordingContainer();
+#endif
 void TestAssets();
 void TestDrivers();
 void TestDatabase();
@@ -120,6 +130,7 @@ void TestRenderEngine();
 // The D3D11 GPU backend behind the same IGraphicsBackend seam: the CPU frame and
 // the GPU frame of one scene compared, plus the software fallback's contract.
 void TestD3D11Backend();
+void TestRhiBackend();
 void TestD3D11StageFrame();
 void TestRenderBackendPreference();
 void TestRenderStress();
@@ -222,9 +233,11 @@ void TestProductionAudioDsp();
 void TestProductionPersistence();
 void TestProductionRoutingPolicy();
 void TestProductionGraphSavedToDisk();
+#ifdef _WIN32
 void TestRecordingEngine();
 void TestRecordingDispatchOutsideLock();
 void TestRecordingRealEncode();
+#endif
 void TestTelemetry();
 void TestBroadcastEngine();
 void TestBroadcastSenders();

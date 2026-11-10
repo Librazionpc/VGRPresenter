@@ -661,6 +661,7 @@ void EngineBridge::enumeratePlatformDevicesAsync()
         audioDevices_.clear();
         screenDevices_.clear();
         videoDevices_.clear();
+        platformCapabilities_.clear();
         emit devicesChanged();
         return;
     }
@@ -719,8 +720,29 @@ void EngineBridge::enumeratePlatformDevicesAsync()
         QVariantList audioDevices;
         QVariantList screenDevices;
         QVariantList videoDevices;
+        QVariantMap platformCapabilities;
         if (bps::platform::PlatformAccessor::Installed()) {
             auto &platform = bps::platform::PlatformAccessor::Get();
+            const auto c = platform.Capabilities();
+            platformCapabilities = {
+                {QStringLiteral("audioDeviceDiscovery"), c.audioDeviceDiscovery},
+                {QStringLiteral("audioInputCapture"), c.audioInputCapture},
+                {QStringLiteral("audioOutputPlayback"), c.audioOutputPlayback},
+                {QStringLiteral("audioLoopbackCapture"), c.audioLoopbackCapture},
+                {QStringLiteral("audioStreamTaps"), c.audioStreamTaps},
+                {QStringLiteral("videoDeviceDiscovery"), c.videoDeviceDiscovery},
+                {QStringLiteral("videoCapture"), c.videoCapture},
+                {QStringLiteral("screenCapture"), c.screenCapture},
+                {QStringLiteral("audioRecording"), c.audioRecording},
+                {QStringLiteral("videoRecording"), c.videoRecording},
+                {QStringLiteral("displayEnumeration"), c.displayEnumeration},
+                {QStringLiteral("advancedDisplayManagement"), c.advancedDisplayManagement},
+                {QStringLiteral("globalInputMonitoring"), c.globalInputMonitoring},
+                {QStringLiteral("batteryTelemetry"), c.batteryTelemetry},
+                {QStringLiteral("desktopNotifications"), c.desktopNotifications},
+                {QStringLiteral("nativeDialogs"), c.nativeDialogs},
+                {QStringLiteral("clipboardImages"), c.clipboardImages},
+            };
         // USED-DEVICE SWEEP (see requestUsedDevices): the boot sweep ASKS the
         // platform for the endpoints this setup names — EnumerateFor walks to
         // those and stops. It is NOT "enumerate the machine, then drop what is
@@ -834,6 +856,7 @@ void EngineBridge::enumeratePlatformDevicesAsync()
 
         QMetaObject::invokeMethod(guard,
             [guard, onlyUsed, bootSweep, usedAudio, usedVideo, usedDisplay,
+             platformCapabilities = std::move(platformCapabilities),
              audioDevices = std::move(audioDevices),
              screenDevices = std::move(screenDevices),
              videoDevices = std::move(videoDevices)]() mutable {
@@ -845,6 +868,7 @@ void EngineBridge::enumeratePlatformDevicesAsync()
                     self->audioDevices_ = std::move(audioDevices);
                     self->screenDevices_ = std::move(screenDevices);
                     self->videoDevices_ = std::move(videoDevices);
+                    self->platformCapabilities_ = std::move(platformCapabilities);
                     // The other half of the used-device sweep: a device the app
                     // was set up with that is NOT there this time is said out
                     // loud, once, right where the user can act on it — instead
@@ -1543,6 +1567,11 @@ QVariantMap EngineBridge::primaryDisplay() const
     return first;
 }
 
+QVariantMap EngineBridge::platformCapabilities() const
+{
+    return platformCapabilities_;
+}
+
 // "I installed it — check again": bypasses refreshDevices()'s throttle so the
 // UI reacts immediately instead of making the user wait out the window.
 void EngineBridge::recheckNdi()
@@ -1659,9 +1688,9 @@ void EngineBridge::requestUsedDevices(const QStringList &audioLabels,
 }
 
 // ============================================================================
-// Live input metering — the UI half of the PAL's WASAPI capture tap.
+// Live input metering — the UI half of the PAL's per-device capture tap.
 //
-// Taps are a SET keyed by device (the PAL holds one tap per waveIn id):
+// Taps are a SET keyed by the backend-stable numeric device key:
 // the AV screen starts a meter for every device row on the board that NAMES a
 // device, each consumer reads its own device's snapshot from the inputLevels
 // list, and stopInputMeter(label) releases just that device when its row goes
@@ -1672,16 +1701,15 @@ void EngineBridge::requestUsedDevices(const QStringList &audioLabels,
 // An EMPTY label is refused (no device chosen ⇒ no capture session), and a
 // label that is already held is never re-resolved — see both functions below.
 // ============================================================================
-// The roster label → PAL wavein number, from the CACHED roster (audioDevices_)
-// — a live IAudio::Enumerate() here re-ran the WASAPI mix-format COM queries on
+// The roster label → PAL numeric device key, from the CACHED roster (audioDevices_)
+// — a live IAudio::Enumerate() here re-ran platform format queries on
 // every kind chip / device pick, and that storm stalled the dialogs exactly like
 // the video one did. Matching is TRIMMED + CASE-INSENSITIVE: a hand-stored
 // sublabel that differs by whitespace/case used to die SILENTLY (the meter card
 // showed idle forever — "no signal" with no reason logged).
 //
-// Windows ids are "wavein:<n>"; other platforms have no WASAPI tap to address
-// (their IAudio keeps the default Unsupported metering) — never guess a number
-// from an alien id scheme.
+// Windows retains waveIn ordinals; non-Windows PALs derive the numeric tap key
+// from the stable roster id using IAudio::StableDeviceNumber().
 bool EngineBridge::resolveDeviceTap(const QString &deviceLabel, uint32_t *deviceId) const
 {
     const QString want = deviceLabel.trimmed();
@@ -1694,10 +1722,27 @@ bool EngineBridge::resolveDeviceTap(const QString &deviceLabel, uint32_t *device
         if (d.value("label").toString().trimmed().compare(want, Qt::CaseInsensitive) != 0)
             continue;
         const QString id = d.value("id").toString();
-        if (!id.startsWith(QStringLiteral("wavein:")))
-            return false;
-        if (deviceId)
-            *deviceId = static_cast<uint32_t>(id.mid(7).toULong());
+        uint32_t resolved = 0;
+        if (id.startsWith(QStringLiteral("wavein:"), Qt::CaseInsensitive)) {
+            bool ok = false;
+            resolved = id.mid(7).toUInt(&ok);
+            if (!ok) return false;
+        } else {
+            if (id.isEmpty()) return false;
+            resolved = bps::platform::IAudio::StableDeviceNumber(id.toStdString());
+            // The compact key is a legacy PAL API bridge, not a globally unique
+            // device ID. Refuse ambiguous rosters instead of starting a meter
+            // on whichever device happens to be enumerated first.
+            for (const QVariant &otherValue : audioDevices_) {
+                const QVariantMap other = otherValue.toMap();
+                if (!other.value("isInput").toBool()) continue;
+                const QString otherId = other.value("id").toString();
+                if (otherId != id && !otherId.isEmpty()
+                    && bps::platform::IAudio::StableDeviceNumber(otherId.toStdString()) == resolved)
+                    return false;
+            }
+        }
+        if (deviceId) *deviceId = resolved;
         return true;
     }
     return false;
@@ -1731,8 +1776,8 @@ void EngineBridge::resolveAndStartMeterOffThread(const QString &deviceLabel)
     if (!resolveDeviceTap(want, &deviceId)) {
         // LOUD now: the earlier silent return hid the exact failure class
         // the "meter doesn't get signal" report was (unresolvable label).
-        qWarning("EngineBridge: no input device named '%s' to meter (unplugged, "
-                 "roster drift, or a non-WASAPI id)", qUtf8Printable(want));
+        qWarning("EngineBridge: no input device named '%s' to meter "
+                 "(unplugged or roster drift)", qUtf8Printable(want));
         return;
     }
     // Already tapped: this call is the per-enumeration / per-sync
@@ -1764,7 +1809,7 @@ void EngineBridge::resolveAndStartMeterOffThread(const QString &deviceLabel)
                 // device would not open").
                 inputLabels_.remove(deviceId);
                 qWarning("EngineBridge: input meter tap failed to start for '%s' "
-                         "(wavein:%u): %s",
+                         "(tap %u): %s",
                          qUtf8Printable(want), deviceId, qUtf8Printable(why));
                 return;
             }
@@ -1774,7 +1819,7 @@ void EngineBridge::resolveAndStartMeterOffThread(const QString &deviceLabel)
             // a line with no signal behind it = the device itself is silent).
             if (!alreadyLive)
                 write(QStringLiteral("info"), QStringLiteral("AudioMeters"),
-                      QStringLiteral("input meter tap live for '%1' (wavein:%2)")
+                      QStringLiteral("input meter tap live for '%1' (tap %2)")
                           .arg(want)
                           .arg(deviceId));
         });
@@ -2004,20 +2049,23 @@ QImage EngineBridge::previewPixelsFor(const QString &label)
     }
     if (seq == previewPixelsSeq_.value(devId, 0))
         return previewPixelsLast_.value(devId);
-    auto pixels = video.PreviewFramePixels(id);
-    if (pixels.empty())
+    // THE TAP'S OWN BUFFER, SHARED: no copy at all. This used to pull the pixels into a std::vector (one
+    // 8 MB copy) and then memcpy them into a QImage (a second), on the INTERFACE thread, for every feed
+    // on every frame — ~480 MB/s of the thread that draws, per 30 fps camera. The QImage now WRAPS the
+    // tap's immutable buffer and keeps it alive through a cleanup hook; anything that writes to the image
+    // detaches first (QImage is copy-on-write), so the tap's frame is never modified.
+    auto pixels = video.PreviewFrameShared(id);
+    if (pixels.empty() || pixels.width < 2 || pixels.height < 2)
         return previewPixelsLast_.value(devId);   // hold-last, like every pull here
-    // The PAL hands over tightly packed RGBA8 (its contract), which is ALSO the
-    // compositor's layout — so this is one copy and no format conversion at all
-    // (previewFrameFor's JPEG would have cost a decode here plus a swizzle later).
-    QImage frame(static_cast<int>(pixels.width), static_cast<int>(pixels.height),
-                 QImage::Format_RGBA8888);
+    const qsizetype rowBytes = static_cast<qsizetype>(pixels.width) * 4;
+    if (pixels.rgba->size() < static_cast<size_t>(rowBytes) * pixels.height)
+        return previewPixelsLast_.value(devId);   // a short buffer must never be wrapped
+    using Held = std::shared_ptr<const std::vector<uint8_t>>;
+    auto *held = new Held(pixels.rgba);
+    QImage frame(pixels.rgba->data(), static_cast<int>(pixels.width), static_cast<int>(pixels.height), rowBytes,
+                 QImage::Format_RGBA8888, [](void *p) { delete static_cast<Held *>(p); }, held);
     if (frame.isNull())
         return {};
-    const qsizetype rowBytes = static_cast<qsizetype>(pixels.width) * 4;
-    for (uint32_t y = 0; y < pixels.height; ++y)
-        std::memcpy(frame.scanLine(static_cast<int>(y)),
-                    pixels.rgba.data() + static_cast<size_t>(y) * rowBytes, rowBytes);
     previewPixelsSeq_[devId] = pixels.seq;
     previewPixelsLast_[devId] = frame;
     return frame;
@@ -2366,7 +2414,8 @@ QImage EngineBridge::VideoPreviewProvider::requestImage(const QString &id, QSize
     } else {
         // One warning per label per session — a missing tap is a wiring
         // bug (start never ran / a different label spelling), not a warm-up.
-        if (!owner_->previewNoTapWarned_.contains(label)) {
+        if (!owner_->previewNoTapWarned_.contains(label) && !owner_->previewEverStarted_.contains(label.trimmed())
+            && !QCoreApplication::closingDown()) {
             owner_->previewNoTapWarned_.insert(label);
             qWarning("EngineBridge: preview requested for '%s' but no tap was started",
                      qUtf8Printable(label));
@@ -2424,6 +2473,7 @@ void EngineBridge::markTapLiveOffThread(const QString &label, const QString &kin
 bool EngineBridge::startVideoPreview(const QString &deviceLabel, const QString &mode,
                                      const QString &owner)
 {
+    previewEverStarted_.insert(deviceLabel.trimmed());
     if (!bps::platform::PlatformAccessor::Installed())
         return false;
     // NOTE: no PAL fetch here any more — the device call this used to make on
@@ -2630,6 +2680,7 @@ bool EngineBridge::inputSourceReachable(const QString &label, const QString &kin
 
 bool EngineBridge::startScreenPreview(const QString &monitorLabel, const QString &owner)
 {
+    previewEverStarted_.insert(monitorLabel.trimmed());
     if (!bps::platform::PlatformAccessor::Installed())
         return false;
     const QString want = monitorLabel.trimmed();
@@ -2771,6 +2822,7 @@ void EngineBridge::stopAllVideoPreviews()
 // ============================================================================
 bool EngineBridge::startNdiPreview(const QString &sourceName, const QString &owner)
 {
+    previewEverStarted_.insert(sourceName.trimmed());
     const QString want = sourceName.trimmed();
     if (want.isEmpty())
         return false;

@@ -3,6 +3,7 @@
 #include "core/common/Common.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,30 @@ public:
     {
         (void)deviceId;
         return 0;
+    }
+    // The newest frame WITHOUT a copy. A tap already holds its pixels as one immutable buffer, so a
+    // consumer that only READS them (a GPU surface drawing the camera on an output) shares that buffer
+    // instead of taking a private 8 MB copy per call — PreviewFramePixels copies, and three scenes plus
+    // a feed asking per frame was the bulk of a camera's per-frame cost. The base implementation wraps
+    // PreviewFramePixels (one copy, correct everywhere); a backend that keeps the buffer shared
+    // overrides it.
+    struct SharedFrame {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint64_t seq = 0;
+        std::shared_ptr<const std::vector<uint8_t>> rgba;   // tightly packed RGBA8, row 0 at the top
+        bool empty() const { return width == 0 || height == 0 || !rgba || rgba->empty(); }
+    };
+    virtual SharedFrame PreviewFrameShared(const std::string &deviceId)
+    {
+        DecodedFrame frame = PreviewFramePixels(deviceId);
+        SharedFrame shared;
+        shared.width = frame.width;
+        shared.height = frame.height;
+        shared.seq = frame.seq;
+        if (!frame.empty())
+            shared.rgba = std::make_shared<const std::vector<uint8_t>>(std::move(frame.rgba));
+        return shared;
     }
     virtual void SetPreviewLive(const std::string &deviceId, bool live)
     {

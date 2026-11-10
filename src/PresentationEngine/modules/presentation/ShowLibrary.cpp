@@ -89,7 +89,137 @@ Result<void> ShowLibrary::Refresh() {
     return Scan();
 }
 
-Result<void> ShowLibrary::ScanUnlocked(Scanned& out) const {
+// ---- the persisted index ------------------------------------------------------------------------------
+// A line per record, tab separated; strings escape \ \t \n \r. First line is the format tag, then the library
+// root (an index of another folder is never used), the categories, then the entries.
+namespace {
+constexpr const char* kIndexTag = "VGRSHOWIDX 1";
+
+std::string Esc(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '\t': out += "\\t"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+std::string Unesc(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            const char n = s[++i];
+            out += n == 't' ? '\t' : n == 'n' ? '\n' : n == 'r' ? '\r' : n;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+std::vector<std::string_view> SplitTabs(std::string_view line) {
+    std::vector<std::string_view> parts;
+    size_t from = 0;
+    for (;;) {
+        const size_t at = line.find('\t', from);
+        if (at == std::string_view::npos) { parts.push_back(line.substr(from)); break; }
+        parts.push_back(line.substr(from, at - from));
+        from = at + 1;
+    }
+    return parts;
+}
+} // namespace
+
+std::string ShowLibrary::IndexPath() const {
+    auto& platform = platform::PlatformAccessor::Get();
+    const std::string dir = platform.Paths().CacheDir();
+    if (dir.empty()) return {};
+    return platform.Filesystem().Join(dir, "show-library-index.tsv");
+}
+
+size_t ShowLibrary::LoadCachedIndex() {
+    const std::string path = IndexPath();
+    if (path.empty()) return 0;
+    auto text = platform::PlatformAccessor::Get().Filesystem().ReadText(path);   // no lock held
+    if (!text.ok()) return 0;
+
+    std::vector<ShowEntry> entries;
+    std::vector<std::string> categories;
+    IndexMap index;
+    bool rootMatches = false;
+    size_t pos = 0;
+    const std::string& all = text.value();
+    bool first = true;
+    while (pos < all.size()) {
+        size_t end = all.find('\n', pos);
+        if (end == std::string::npos) end = all.size();
+        std::string_view line(all.data() + pos, end - pos);
+        pos = end + 1;
+        if (first) {
+            first = false;
+            if (line != kIndexTag) return 0;   // another format: ignore it, the scan rebuilds it
+            continue;
+        }
+        const auto f = SplitTabs(line);
+        if (f.empty()) continue;
+        if (f[0] == "R" && f.size() >= 2) {
+            rootMatches = Unesc(f[1]) == root_;
+            if (!rootMatches) return 0;
+        } else if (f[0] == "C" && f.size() >= 2) {
+            categories.push_back(Unesc(f[1]));
+        } else if (f[0] == "E" && f.size() >= 9 && rootMatches) {
+            IndexRec rec;
+            rec.entry.path = Unesc(f[1]);
+            rec.size = std::strtoull(std::string(f[2]).c_str(), nullptr, 10);
+            rec.mtimeNs = std::strtoll(std::string(f[3]).c_str(), nullptr, 10);
+            rec.entry.id = Unesc(f[4]);
+            rec.entry.name = Unesc(f[5]);
+            rec.entry.category = Unesc(f[6]);
+            rec.entry.modifiedMs = std::strtoll(std::string(f[7]).c_str(), nullptr, 10);
+            rec.entry.slideCount = std::atoi(std::string(f[8]).c_str());
+            entries.push_back(rec.entry);
+            index.emplace(rec.entry.path, std::move(rec));
+        }
+    }
+    if (!rootMatches || entries.empty()) return 0;
+    std::sort(entries.begin(), entries.end(),
+              [](const ShowEntry& a, const ShowEntry& b) { return a.modifiedMs > b.modifiedMs; });
+    const size_t count = entries.size();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!entries_.empty()) return 0;   // a real scan already landed: the cache is older than what is held
+    entries_ = std::move(entries);
+    categories_ = std::move(categories);
+    index_ = std::move(index);
+    return count;
+}
+
+void ShowLibrary::SaveIndex(const Scanned& scanned) const {
+    const std::string path = IndexPath();
+    if (path.empty()) return;
+    std::string out;
+    out.reserve(scanned.index.size() * 160 + 256);
+    out += kIndexTag;
+    out += "\nR\t" + Esc(root_) + "\n";
+    for (const std::string& c : scanned.categories) out += "C\t" + Esc(c) + "\n";
+    for (const auto& [p, rec] : scanned.index) {
+        out += "E\t" + Esc(rec.entry.path) + "\t" + std::to_string(rec.size) + "\t" + std::to_string(rec.mtimeNs) +
+               "\t" + Esc(rec.entry.id) + "\t" + Esc(rec.entry.name) + "\t" + Esc(rec.entry.category) + "\t" +
+               std::to_string(rec.entry.modifiedMs) + "\t" + std::to_string(rec.entry.slideCount) + "\n";
+        (void)p;
+    }
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    (void)fs.CreateDirectories(platform::PlatformAccessor::Get().Paths().CacheDir());
+    (void)fs.WriteAtomic(path, out);   // best effort: a failed write only costs the next start its head start
+}
+
+Result<void> ShowLibrary::ScanUnlocked(Scanned& out, const IndexMap& previous) const {
     auto& fs = platform::PlatformAccessor::Get().Filesystem();
     if (!fs.Exists(root_)) {
         if (auto c = fs.CreateDirectories(root_); !c.ok()) return c.error();
@@ -105,6 +235,21 @@ Result<void> ShowLibrary::ScanUnlocked(Scanned& out) const {
         }
         for (const std::string& path : files.value()) {
             if (fs.IsDirectory(path) || !IsShowFile(path)) continue;
+            // UNCHANGED SINCE THE LAST SCAN (same size, same modification time): reuse what its header said
+            // — a stat instead of reading and parsing the whole file.
+            const auto stat = fs.Metadata(path);
+            const uint64_t size = stat.ok() ? stat.value().sizeBytes : 0;
+            const int64_t mtimeNs = stat.ok() ? stat.value().modifiedEpochNs : 0;
+            if (stat.ok()) {
+                const auto known = previous.find(path);
+                if (known != previous.end() && known->second.size == size && known->second.mtimeNs == mtimeNs) {
+                    IndexRec rec = known->second;
+                    rec.entry.category = category;
+                    out.entries.push_back(rec.entry);
+                    out.index.emplace(path, std::move(rec));
+                    continue;
+                }
+            }
             auto doc = vgr::VgrFile::Read(path);
             if (!doc.ok()) {
                 out.problems.push_back(path + ": " + doc.error().message);
@@ -123,6 +268,7 @@ Result<void> ShowLibrary::ScanUnlocked(Scanned& out) const {
             e.modifiedMs = h.modifiedMs;
             if (auto it = h.searchMetadata.find("slides"); it != h.searchMetadata.end())
                 e.slideCount = std::atoi(it->second.c_str());
+            if (stat.ok()) out.index.emplace(path, IndexRec{size, mtimeNs, e});
             out.entries.push_back(std::move(e));
         }
     };
@@ -145,11 +291,18 @@ Result<void> ShowLibrary::ScanUnlocked(Scanned& out) const {
 
 Result<void> ShowLibrary::Scan() {
     Scanned scanned;   // filled with no lock held
-    if (auto s = ScanUnlocked(scanned); !s.ok()) return s.error();
+    IndexMap previous;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        previous = index_;   // what the last scan (or the persisted index) knew
+    }
+    if (auto s = ScanUnlocked(scanned, previous); !s.ok()) return s.error();
+    SaveIndex(scanned);   // file I/O: no lock held
     std::lock_guard<std::mutex> lock(mutex_);
     entries_ = std::move(scanned.entries);
     categories_ = std::move(scanned.categories);
     problems_ = std::move(scanned.problems);
+    index_ = std::move(scanned.index);
     return Ok();
 }
 

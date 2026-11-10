@@ -5,11 +5,12 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bps::platform {
 struct AudioDeviceInfo {
-    std::string id;            // stable id (e.g. ALSA "hw:0,0", "default")
+    std::string id;            // stable backend id (e.g. a Qt device id or native endpoint key)
     std::string name;          // friendly name
     bool isInput = false;      // false = output device
     bool isDefault = false;
@@ -48,8 +49,8 @@ public:
     virtual std::string Fingerprint() const = 0;
 
     // ---- Input metering ------------------------------------------------
-    // deviceId is the input device's own index (Windows: the waveIn device
-    // number — AudioDeviceInfo::id is "wavein:<n>").
+    // deviceId is a backend-stable numeric key. Windows uses its waveIn
+    // ordinal; other backends use StableDeviceNumber(AudioDeviceInfo::id).
 
     // Channels beyond this many in the mix format are not metered.
     static constexpr int kMaxInputMeterChannels = 16;
@@ -136,6 +137,21 @@ public:
 
     // ---- STREAM taps (audio that is not a capture device) ---------------
     static constexpr uint32_t kStreamTapBase = 0x40000000u;
+    // Stable numeric key for PAL APIs whose legacy contract uses a uint32_t
+    // device key. Windows keeps its native waveIn/waveOut ordinals; other
+    // backends hash their stable AudioDeviceInfo::id with this function.
+    // Backends must reject a collision within the relevant device direction.
+    static uint32_t StableDeviceNumber(std::string_view stableId) noexcept
+    {
+        uint32_t hash = 2166136261u;
+        for (const char character : stableId) {
+            hash ^= static_cast<unsigned char>(character);
+            hash *= 16777619u;
+        }
+        hash &= (kStreamTapBase - 1u);
+        return hash == 0 ? 1u : hash;
+    }
+
     static bool IsStreamTap(uint32_t id) { return id >= kStreamTapBase; }
 
     virtual Result<void> StartStreamTap(uint32_t tapId, const std::string &source,

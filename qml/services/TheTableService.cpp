@@ -27,10 +27,6 @@
 #include <optional>
 #include <thread>
 
-#ifdef Q_OS_WIN
-#  include <windows.h>
-#endif
-
 namespace bl = bps::library;
 
 namespace {
@@ -1167,13 +1163,13 @@ void TheTableService::startIndexing()
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
                         QStringLiteral("The Table search indexing worker starting"));
     indexWorker_ = std::thread([this] {
-#ifdef Q_OS_WIN
         // A pass tokenizes the whole library (tens of seconds of pure CPU and allocator
         // work). The interface and the output feed must win every contest for the cores and
         // the heap, so the pass runs below normal priority and simply takes longer when the
-        // machine is busy.
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-#endif
+        // machine is busy. Through the PAL (level 2 = below normal: SetThreadPriority on Windows, a
+        // nice value on Linux/macOS) — this used to be a Win32 call behind Q_OS_WIN, so on the other
+        // two OSes the indexing pass ran at full priority and fought the output feed for the cores.
+        (void)bps::platform::PlatformAccessor::Get().Threading().SetCurrentThreadPriority(2);
         do {
             indexReindex_.store(false, std::memory_order_relaxed);
             if (indexCancel_.load(std::memory_order_relaxed))

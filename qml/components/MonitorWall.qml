@@ -106,7 +106,8 @@ Item {
             return enabled
         }
         // Keep the same tile grid on every paged view; a sparse last page should
-        // not enlarge its tiles or shorten the wall.
+        // not enlarge its tiles or shorten the wall. An odd count therefore leaves
+        // its last slot EMPTY — every tile keeps the width of its column.
         readonly property int perPage: count === 1 ? 1 : 4
         readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
         readonly property real pageW: root.width
@@ -125,8 +126,15 @@ Item {
                 if (OutputListModel.getOutput(i).isEnabled === true) ++slot
             return slot
         }
+        // A page that carries ONE output gives it the whole page: full width, and the
+        // height of a four-tile page, so paging to a fifth output fills the wall
+        // instead of leaving one small tile in the corner. Every other page is the
+        // usual two-by-two grid.
+        function isSoloPage(page) {
+            return pageCount > 1 && itemsOnPage(page) === 1
+        }
         function columnsForPage(page) {
-            return count === 1 ? 1 : 2
+            return (count === 1 || isSoloPage(page)) ? 1 : 2
         }
         function slotWidthForPage(page) {
             const columns = columnsForPage(page)
@@ -134,30 +142,40 @@ Item {
         }
         function slotXForPage(page, slot) {
             const tileWidth = slotWidthForPage(page)
-            const items = itemsOnPage(page)
-            const loneLastTile = columnsForPage(page) === 2 && items % 2 === 1 && slot === items - 1
-            const column = loneLastTile ? (pageW - tileWidth) / 2 : (slot % columnsForPage(page)) * (tileWidth + columnGap)
+            // A row's first tile always sits in the LEFT column — an odd tile out
+            // starts the row rather than being centred between the two columns,
+            // so every row reads down the same grid.
+            const column = (slot % columnsForPage(page)) * (tileWidth + columnGap)
             return page * pageW + column
         }
         function rowsForPage(page) {
-            if (pageCount > 1) return 2
+            // The grid is FIXED once the wall pages: two rows on every page, so a
+            // sparse page neither shortens the wall nor moves its tiles — except a
+            // solo page, whose one tile IS the whole page.
+            if (pageCount > 1) return isSoloPage(page) ? 1 : 2
             return Math.max(1, Math.ceil(itemsOnPage(page) / columnsForPage(page)))
         }
         function slotYForPage(page, slot) {
-            const slotHeight = slotHeightForPage(page)
-            if (pageCount > 1 && itemsOnPage(page) === 1)
-                return (pageHeightForPage(page) - slotHeight) / 2
-            return Math.floor(slot / columnsForPage(page)) * slotHeight
+            // Row/column from the slot number alone. An empty slot is simply left
+            // empty: no tile is centred across the gap or grown to fill a row.
+            return Math.floor(slot / columnsForPage(page)) * slotHeightForPage(page)
         }
         // Every tile wears a NAME CARD above its picture.
         readonly property int headerH: 20
-        function slotHeightForPage(page) {
-            return headerH + 2 + (slotWidthForPage(page) - 2) * 9 / 16
-        }
+        // ONE ROW OF THE FOUR-TILE GRID, measured at half width. Every paged page is
+        // two of these tall, so a solo page matches a full page's height exactly and
+        // the wall does not change size as it pages.
+        readonly property real gridRowH: headerH + 2 + ((pageW - columnGap) / 2 - 2) * 9 / 16
         function pageHeightForPage(page) {
             if (itemsOnPage(page) === 0) return 0
-            const rows = rowsForPage(page)
-            return rows * slotHeightForPage(page)
+            // A wall with a single output is one full-width preview, whatever the
+            // formula below would say about a half-width row.
+            if (count === 1) return headerH + 2 + (pageW - 2) * 9 / 16
+            return (pageCount > 1 ? 2 : Math.max(1, Math.ceil(count / 2))) * gridRowH
+        }
+        function slotHeightForPage(page) {
+            // Rows split the page evenly, so a solo page's single row takes all of it.
+            return pageHeightForPage(page) / rowsForPage(page)
         }
         width: root.width
         height: {
@@ -239,6 +257,11 @@ Item {
                 x: wall.slotXForPage(page, slot)
                 y: wall.slotYForPage(page, slot) + wall.headerH
                 width: tileWidth
+                // A solo page's tile fills the page under its name strip; on the grid
+                // this is exactly the tile's own 16:9 height.
+                readonly property bool solo: wall.isSoloPage(page)
+                height: wall.slotHeightForPage(page) - wall.headerH
+                fillHeight: solo
             }
         }
 
@@ -703,13 +726,20 @@ Item {
                     tipTitle: qsTr("Clear audio")
                     tipDetail: qsTr("Clear the on-air audio file or a taken input")
                 }
+                // AUTO-ADVANCE: the set slides by itself — the same step the toolbar's Next takes.
                 ToolButton {
                     width: parent.btnW; height: root.actionButtonHeight
                     icon: "timerFill"
-                    danger: true
-                    enabled2: false
-                    tipTitle: qsTr("Clear timer")
-                    tipDetail: qsTr("Not available yet")
+                    lit: LiveOutputService.autoAdvancing
+                    enabled2: root.live
+                    objectName: "selfTestWallAutoAdvance"
+                    onPicked: LiveOutputService.toggleAutoAdvance()
+                    tipTitle: qsTr("Auto-advance this show")
+                    tipDetail: !root.live
+                               ? qsTr("Go live first — then this show can advance by itself")
+                               : (LiveOutputService.autoAdvancing
+                                  ? qsTr("This show advances by itself on each slide's NEXT TIMER — press to stop")
+                                  : qsTr("Let this show advance by itself, on the NEXT TIMER each slide carries"))
                 }
             }
 

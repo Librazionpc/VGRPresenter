@@ -101,6 +101,10 @@ public:
     const Slide* CurrentSlide() const;
     PresentationRuntime& Runtime() { return runtime_; }
     const PresentationRuntime& Runtime() const { return runtime_; }
+    // Whether slides carrying their own duration advance by themselves — the app sets this per show, so
+    // only the show the timer was turned on for slides by itself.
+    void SetTimedAdvance(bool on) { runtime_.SetTimedAdvance(on); }
+    bool TimedAdvance() const { return runtime_.TimedAdvance(); }
 
     // --- Session / recovery --------------------------------------------------------
     Result<void> SaveSession();

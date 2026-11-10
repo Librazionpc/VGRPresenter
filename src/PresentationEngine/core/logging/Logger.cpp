@@ -1,3 +1,4 @@
+#include "core/common/LocalTime.hpp"
 #include "core/logging/Logger.hpp"
 
 #include "core/config/Json.hpp"
@@ -112,12 +113,7 @@ std::string LogJsonLine(const LogRecord& rec) {
     json::Value::Object o;
     o["level"] = json::Value::String(ToString(rec.level));
     std::time_t t = std::chrono::system_clock::to_time_t(rec.timestamp);
-    std::tm tmv{};
-#if defined(_WIN32)
-    localtime_s(&tmv, &t);
-#else
-    localtime_r(&t, &tmv);
-#endif
+    std::tm tmv = bps::LocalTime(t);
     char ts[32];
     std::strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", &tmv);
     o["ts"] = json::Value::String(ts);
@@ -386,12 +382,7 @@ std::string Logger::Format(const LogRecord& rec) const {
     // Local wall-clock time first, so a tailed log reads as a timeline of what the app is doing.
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(rec.timestamp.time_since_epoch()).count() % 1000;
     std::time_t tt = std::chrono::system_clock::to_time_t(rec.timestamp);
-    std::tm tmv{};
-#if defined(_WIN32)
-    localtime_s(&tmv, &tt);
-#else
-    localtime_r(&tt, &tmv);
-#endif
+    std::tm tmv = bps::LocalTime(tt);
     std::string out = std::format("{:02}:{:02}:{:02}.{:03} [{}][{}][Thread-{}]", tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
                                   static_cast<int>(ms), ToString(rec.level), rec.module, ThreadName(rec.threadId));
     if (!rec.category.empty()) out += std::format("[{}]", rec.category);

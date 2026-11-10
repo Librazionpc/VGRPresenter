@@ -5,6 +5,7 @@
 namespace bps::platform {
 class LinuxDialogs final : public IDialogs {
 public:
+    bool Supported() const;
     Result<std::optional<std::string>> OpenFileDialog(
         std::string_view title, const std::vector<std::string>& filters) override;
     Result<std::optional<std::string>> SaveFileDialog(

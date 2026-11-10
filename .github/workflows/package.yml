@@ -1,0 +1,71 @@
+name: Package Linux and macOS
+
+# Windows has its own release workflow (windows-release.yml). This one runs the SAME command a person
+# runs on their machine — tools/make_installer.sh, which on Linux and macOS builds the Release binary,
+# seeds it and packages it as VGRPresenter-Setup-<version>-<os>-<arch>.{AppImage,dmg} — so CI and a
+# local release can never differ. It runs on demand and on version tags; it does not publish a release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux AppImage
+            os: ubuntu-latest
+            qt_host: linux
+            qt_arch: gcc_64
+          - label: macOS dmg
+            os: macos-latest
+            qt_host: mac
+            qt_arch: clang_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js for the source guards and the seed step
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake ninja-build imagemagick \
+            libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1
+
+      - name: Install Qt (with the multimedia module the capture paths need)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          host: ${{ matrix.qt_host }}
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
+          modules: 'qtmultimedia qtshadertools'
+          cache: true
+
+      - name: Build and package (tools/make_installer.sh)
+        shell: bash
+        run: |
+          chmod +x tools/*.sh tools/lib/*.sh
+          tools/make_installer.sh
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: VGRPresenter-${{ matrix.qt_host }}
+          path: dist/VGRPresenter-Setup-*
+          if-no-files-found: error

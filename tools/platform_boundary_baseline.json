@@ -1,0 +1,30 @@
+{
+  "note": "Existing platform-boundary violations, waived by file+rule. Shrink this file as sites move behind the PAL; every entry needs a reason.",
+  "entries": [
+    {
+      "path": "src/PresentationEngine/core/include/core/threading/QtThread.hpp",
+      "rule": "qt-header",
+      "reason": "existing site — move behind the PAL or record why it must stay"
+    },
+    {
+      "path": "src/PresentationEngine/modules/include/modules/presentation/BlockMeta.hpp",
+      "rule": "qt-header",
+      "reason": "existing site — move behind the PAL or record why it must stay"
+    },
+    {
+      "path": "src/PresentationEngine/modules/include/modules/rendering/TextEngine.hpp",
+      "rule": "qt-header",
+      "reason": "existing site — move behind the PAL or record why it must stay"
+    },
+    {
+      "path": "src/PresentationEngine/modules/presentation/SceneBuilder.cpp",
+      "rule": "qt-header",
+      "reason": "existing site — move behind the PAL or record why it must stay"
+    },
+    {
+      "path": "src/PresentationEngine/modules/rendering/TextEngine.cpp",
+      "rule": "qt-header",
+      "reason": "existing site — move behind the PAL or record why it must stay"
+    }
+  ]
+}

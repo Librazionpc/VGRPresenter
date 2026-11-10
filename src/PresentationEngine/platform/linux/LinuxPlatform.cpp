@@ -1,5 +1,8 @@
 #include "platform/linux/LinuxPlatform.hpp"
 #include "platform/OsTag.hpp"
+#include "platform/qt/QtRecording.hpp"
+
+#include <QGuiApplication>
 
 #include <pwd.h>
 #include <sys/statvfs.h>
@@ -37,6 +40,28 @@ std::string LinuxPlatform::Arch() const {
     struct utsname u {};
     if (uname(&u) == 0) return CanonicalArch(u.machine);   // canonical naming
     return "unknown";
+}
+
+PlatformCapabilities LinuxPlatform::Capabilities() const {
+    PlatformCapabilities c;
+    c.audioDeviceDiscovery = true;
+    c.audioInputCapture = true;  // Qt Multimedia capture tap feeds meters and the mixer
+    c.audioOutputPlayback = true; // Qt Multimedia render callbacks feed the program and outputs
+    c.audioStreamTaps = true;    // decoded media buffers + pushed NDI audio share the mixer tap ring
+    c.audioLoopbackCapture = true; // output metering: measured in the app's own render stream (QtAudioDevices::OutputLevels)
+    c.videoDeviceDiscovery = true;
+    c.videoCapture = true; // asynchronous Qt Multimedia camera preview
+    c.screenCapture = QGuiApplication::instance()
+        && (QGuiApplication::platformName() == QStringLiteral("xcb")
+            || QGuiApplication::platformName().startsWith(QStringLiteral("wayland")));   // Wayland: the portal's own picker
+    c.audioRecording = true; // WAV (portable writer) plus M4A/MP3/FLAC where the Qt backend encodes them
+    c.videoRecording = QtVideoRecordingSupported(); // QMediaRecorder (Qt Multimedia, FFmpeg backend): MP4/MKV/MOV/WebM
+    c.displayEnumeration = true;
+    c.batteryTelemetry = true;
+    c.desktopNotifications = notifications_.Supported();
+    c.nativeDialogs = dialogs_.Supported();
+    c.clipboardImages = true;   // QClipboard carries images on X11 and Wayland alike
+    return c;
 }
 
 SystemInfo LinuxPlatform::Info() {

@@ -1,3 +1,5 @@
+#include <QLoggingCategory>
+#include <algorithm>
 #include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QIcon>
@@ -35,6 +37,7 @@
 
 #include "services/CallTrace.h"
 #include "services/CrashHandler.h"
+#include "services/FontService.h"
 #include "services/GuardedApplication.h"
 #include "services/EngineBridge.h"
 #include "services/SearchService.h"
@@ -447,6 +450,44 @@ void copyTree(const QString &from, const QString &to)
     }
 }
 
+// FIRST RUN OF AN INSTALLED LINUX / macOS PACKAGE. On Windows the Inno installer lays the shipped seed
+// data (design catalogs, the operator's configuration, the Shows library) onto a fresh machine, only
+// where nothing exists. A Linux AppImage or a macOS .app has no installer step, so the package carries
+// the same data next to the executable and the app lays it down itself, once — with the same rule:
+// copyTree never overwrites a file that is already there, and nothing happens on a profile that already
+// has a settings.json. Needs the application and organisation names (AppDataLocation depends on them).
+void seedFirstRun()
+{
+#ifndef Q_OS_WIN
+    if (qEnvironmentVariableIsSet("VGR_PROFILE_DIR") || qEnvironmentVariableIsSet("VGR_SANDBOX"))
+        return;                                // a dev/test profile is its own business
+    const QString appDir = QCoreApplication::applicationDirPath();
+    // AppImage: <AppDir>/usr/bin/<exe> → ../share/vgrpresenter/seed-data;  macOS: Contents/MacOS → ../Resources/seed-data
+    const QString candidates[] = {
+        QDir::cleanPath(appDir + QStringLiteral("/../share/vgrpresenter/seed-data")),
+        QDir::cleanPath(appDir + QStringLiteral("/../Resources/seed-data")),
+    };
+    QString seed;
+    for (const QString &c : candidates)
+        if (QFileInfo(c).isDir()) { seed = c; break; }
+    if (seed.isEmpty())
+        return;                                // not an installed package (a dev build, a plain binary)
+    // The same three homes the Windows installer seeds, in this OS's own places: the per-user data
+    // folder (…/bps — IPaths::UserDataDir), the application data folder (…/VGR/VGRPresenter) and the
+    // Shows library under Documents.
+    const QString local = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                          + QStringLiteral("/bps");
+    if (QFileInfo::exists(local + QStringLiteral("/settings.json")))
+        return;                                // not a fresh profile: never touch what a user already has
+    copyTree(seed + QStringLiteral("/local"), local);
+    copyTree(seed + QStringLiteral("/roaming"),
+             QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    copyTree(seed + QStringLiteral("/shows"),
+             QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                 + QStringLiteral("/VGR Presenter/Shows"));
+#endif
+}
+
 void selectProfile()
 {
 #ifdef Q_OS_WIN
@@ -474,10 +515,15 @@ void selectProfile()
 }
 } // namespace
 
+#ifdef Q_OS_WIN
+// Windows laptops with two GPUs: these two exported symbols are how the NVIDIA and AMD drivers are asked to
+// run this process on the discrete GPU. `__declspec` is a Windows-compiler keyword — unguarded it stopped
+// the Linux and macOS builds — and no other OS has anything to ask for.
 extern "C" {
 __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -486,11 +532,17 @@ int main(int argc, char *argv[])
         QStandardPaths::setTestModeEnabled(true);
 
     qInstallMessageHandler(ForwardToEventBus);
+    // Windows still lists its legacy raster fonts (System, Fixedsys, Terminal ...) and DirectWrite refuses every one
+    // of them: ~11 harmless "CreateFontFaceFromHDC() failed" warnings on EVERY start, each of which was also shown
+    // to the operator as a toast. None of them is a font the app can use. (QT_LOGGING_RULES still wins.)
+    if (!qEnvironmentVariableIsSet("QT_LOGGING_RULES"))
+        QLoggingCategory::setFilterRules(QStringLiteral("qt.qpa.fonts.warning=false"));
 
     GuardedApplication app(argc, argv);
     calltrace::markGuiThread();   // before anything can publish from another thread
     app.setApplicationName(QStringLiteral("VGRPresenter"));
     app.setOrganizationName(QStringLiteral("VGR"));
+    seedFirstRun();   // an installed Linux/macOS package's shipped seed data, once, before anything reads a profile
     const QString sourceSerifResource = QStringLiteral(":/fonts/SourceSerif4-VariableFont_opsz,wght.ttf");
     const QString sourceSerifItalicResource = QStringLiteral(":/fonts/SourceSerif4-Italic-VariableFont_opsz,wght.ttf");
     const int sourceSerifFontId = QFontDatabase::addApplicationFont(
@@ -499,7 +551,15 @@ int main(int argc, char *argv[])
     Q_UNUSED(sourceSerifItalicFontId)
     if (sourceSerifFontId < 0)
         qWarning() << "Bundled Source Serif 4 font could not be loaded";
-    app.setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
+    {
+        // The interface font is THIS OS's own face, chosen in code (the engine's per-OS list), at the size Qt's
+        // system font has — not whatever name another OS's theme happens to hand back.
+        QFont uiFont = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
+        const QString family = FontService::instance().defaultFamily();
+        if (!family.isEmpty() && family != QLatin1String("builtin"))
+            uiFont.setFamily(family);
+        app.setFont(uiFont);
+    }
 #ifdef Q_OS_WIN
     // Qt's font database serves QML. Add the same bundled faces to this
     // process's GDI font collection too, which the presentation renderer uses.
@@ -661,19 +721,41 @@ int main(int argc, char *argv[])
     if (rootWindow)
         rootWindow->setIcon(appIcon);
 
-    // Keep the native splash over the first QML frame, then hand over. The
-    // short event-loop beat lets the newly-created scene render underneath it.
+    // SHOW FIRST, THEN HAND OVER. This used to hold the window back for a fixed
+    // 350 ms beat (a nested event loop under the splash) "so the scene could
+    // render underneath it" — but the beat was pure clock time: the frame it
+    // waited for only starts once show() runs, and show() is what takes the
+    // time. Now the window is shown immediately and the splash closes on the
+    // first frame it actually paints (or a short cap, so a machine that cannot
+    // paint one is not left staring at the splash).
     bootSplash.complete();
-#ifdef Q_OS_WIN
-    QEventLoop splashHandoff;
-    QTimer::singleShot(350, &splashHandoff, &QEventLoop::quit);
-    splashHandoff.exec();
-#endif
-    bootSplash.close();
+    QElapsedTimer handoverClock;
+    handoverClock.start();
+    bool splashClosed = false;
+    auto closeSplash = [&splashClosed, &handoverClock, &bootSplash](const char *why) {
+        if (splashClosed)
+            return;
+        splashClosed = true;
+        bootSplash.close();
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
+                            QStringLiteral("splash handed over after %1 ms (%2)")
+                                .arg(handoverClock.elapsed())
+                                .arg(QString::fromLatin1(why)));
+    };
     if (rootWindow) {
+        QObject::connect(rootWindow, &QQuickWindow::frameSwapped, &app,
+                         [closeSplash] { closeSplash("first frame published"); },
+                         Qt::QueuedConnection);
         rootWindow->show();
         rootWindow->raise();
         rootWindow->requestActivate();
+        // A "never paints" guard, NOT the normal path: normally frameSwapped
+        // closes the splash. 600 ms is above a slow first frame on the GPU, so
+        // the cap can only win when the scene really is not painting — it must
+        // never expose a window that has nothing on it yet.
+        QTimer::singleShot(600, &app, [closeSplash] { closeSplash("cap reached"); });
+    } else {
+        closeSplash("no window");
     }
     EngineBridge::write(QStringLiteral("info"), QStringLiteral("StartupTrace"),
                         QStringLiteral("main window shown; visible=%1")
@@ -759,11 +841,18 @@ int main(int argc, char *argv[])
     uiHeartbeat.start();
 
     QTimer callTraceHeartbeat;
-    callTraceHeartbeat.setInterval(250);
+    // THE STALL SAMPLER IS ALWAYS ON (every OS): any time the interface thread goes silent for 100 ms the log
+    // gets stack samples of where it was and a line with how long it lasted ("GuiStall:"). BPS_GUI_STALL_MS
+    // changes the threshold; 0 turns it off. The tick has to be fine enough to see a stall of that size.
+    const int stallHuntMs = qEnvironmentVariableIsSet("BPS_GUI_STALL_MS")
+                                ? qEnvironmentVariableIntValue("BPS_GUI_STALL_MS") : 100;
+    callTraceHeartbeat.setInterval(stallHuntMs > 0 ? std::clamp(stallHuntMs / 4, 5, 250) : 250);
     QObject::connect(&callTraceHeartbeat, &QTimer::timeout, &app, [] { calltrace::heartbeat(); });
     callTraceHeartbeat.start();
     calltrace::heartbeat();   // arm it now: the watchdog stays quiet until this is set
     calltrace::installHangWatchdog(5);
+    if (stallHuntMs > 0)
+        StartGuiStallSampler(stallHuntMs);
     // Env-gated (VGR_CALLTRACE_SELFTEST=1): proves the breadcrumb wiring on a
     // real run — an annotated warning and a reported exception in engine.log.
     calltrace::runEnvSelfTest();
@@ -904,6 +993,13 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestStyleBg"),
         QVariant(qEnvironmentVariableIsSet("VGR_STYLEBG_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // VGR_QUIETTIME_TEST: the QML side photographs the MONITOR WALL after the C++ scenario has
+    // staged the Quiet Time pick and pressed GO LIVE — the app's own tile pixels, grabbed with the
+    // same SelfTest.grab the tablewalk scenario uses.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestQuietTime"),
+        QVariant(qEnvironmentVariableIsSet("VGR_QUIETTIME_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestForensics"),
         QVariant(qEnvironmentVariableIsSet("VGR_FORENSICS_TEST")
@@ -941,6 +1037,9 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestVideoFpsFile"),
         QVariant(qEnvironmentVariable("VGR_VIDEOFPS_FILE")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestTileFactsMedia"),
+        QVariant(qEnvironmentVariable("VGR_TILEFACTS_MEDIA")));
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestBlackout"),
         QVariant(qEnvironmentVariableIsSet("VGR_BLACKOUT_TEST")

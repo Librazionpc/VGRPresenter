@@ -74,7 +74,7 @@ class SettingsService : public QObject
     // back at the user would hide exactly that.
     //
     // `rendererInUse` is the engine's own name for the active backend
-    // ("directx11" | "software" | "null"), empty until the engine has answered
+    // ("directx11" | "rhi" | "software" | "null"), empty until the engine has answered
     // — the choice is pushed to it off the interface thread (see
     // applyEngineSettingsAsync). `rendererOnGpu` is the same fact as a bool, so
     // no QML file has to spell a backend's name.

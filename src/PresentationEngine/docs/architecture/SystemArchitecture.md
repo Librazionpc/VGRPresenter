@@ -123,12 +123,15 @@ never beside their `.cpp` (DoD §folder): `core/include/core/`,
 `platform/include/platform/`; all includes are root-relative
 (`core/...`, `modules/...`, `interfaces/...`, `platform/...`).
 
-- **Backends**: OS-agnostic implementations live in `platform/common/` (`FilesystemImpl`
-  on `std::filesystem`, `TimerImpl` on `std::chrono`, `PosixSocket`); the Linux backend
-  (`platform/linux/`) reads `/proc`, `/sys`, `statvfs`, XDG dirs, ALSA PCM streams,
-  `getifaddrs`, `/proc/bus/input/devices`, clipboard tools and desktop tools
-  (zenity/notify-send). The **Windows backend (`platform/windows/`) is complete** for all
-  18 subsystems (Win32, Winsock, Common Item Dialog, …); macOS is interface stubs.
+- **Backends**: the OS-generic services are implemented once, with Qt, in `platform/qt/`
+  (`QtFilesystem`, `QtPaths`, `QtLocale`, `QtLibrary`, `QtThreading`) — there is no
+  per-OS paths/locale/library class any more. `platform/common/` keeps only the Qt-free
+  pieces (`TimerImpl` on `std::chrono`, `PosixSocket`); the Linux backend
+  (`platform/linux/`) reads `/proc`, `/sys`, ALSA PCM streams, `getifaddrs`,
+  `/proc/bus/input/devices`, clipboard tools and desktop tools (zenity/notify-send).
+  The **Windows backend (`platform/windows/`) covers every device and display
+  subsystem** (Win32, Winsock, Common Item Dialog, …); macOS has no backend — a port
+  is the device adapters only, since Qt already serves everything generic.
 - **Access**: the Kernel installs the backend at boot
   (`platform::PlatformAccessor::Install(CreatePlatform())`); managers route OS access
   through `PlatformAccessor::Get()` — PluginManager (IFilesystem + ILibrary),

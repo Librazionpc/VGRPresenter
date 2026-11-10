@@ -31,6 +31,7 @@ public:
     std::vector<std::string> ActivePreviews() const override;
     DecodedFrame PreviewFramePixels(const std::string &deviceId) override;
     uint64_t PreviewFrameSeq(const std::string &deviceId) override;
+    SharedFrame PreviewFrameShared(const std::string &deviceId) override;
     void SetPreviewLive(const std::string &deviceId, bool live) override;
 
     Result<void> StartScreenPreview(const std::string &monitorId) override;

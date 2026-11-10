@@ -5,6 +5,8 @@
 #include <QQuickItemGrabResult>
 #include <QQuickWindow>
 #include <QGuiApplication>
+#include <QImage>
+#include <QWindow>
 #include <QColor>
 #include <QVariantList>
 #include <QVariantMap>
@@ -182,6 +184,37 @@ bool SelfTestDriver::grab(const QString &itemName, const QString &pngPath)
         qDebug() << "SelfTestDriver: grab" << itemName << "->" << pngPath << (ok ? "ok" : "FAILED");
     });
     return true;
+}
+
+bool SelfTestDriver::grabWindow(const QString &windowObjectName, const QString &pngPath)
+{
+    // AN OUTPUT WINDOW IS NOT IN THIS DRIVER'S WINDOW: OutputWindow.qml is its own top-level
+    // QQuickWindow, so grab() (which searches the main window's item tree) can never reach it and a
+    // monitor tile had a pixel test while the real output it stands for had none. Grabbed on its own,
+    // by the window's objectName, which is how a scenario names one output's window.
+    for (QWindow *w : QGuiApplication::allWindows()) {
+        if (w->objectName() != windowObjectName)
+            continue;
+        auto *qw = qobject_cast<QQuickWindow *>(w);
+        if (!qw)
+            continue;
+        if (!qw->isVisible()) {
+            qWarning() << "SelfTestDriver: window" << windowObjectName
+                       << "is not visible — nothing to grab";
+            return false;
+        }
+        const QImage image = qw->grabWindow();
+        if (image.isNull()) {
+            qWarning() << "SelfTestDriver: window grab" << windowObjectName << "returned no image";
+            return false;
+        }
+        const bool ok = image.save(pngPath);
+        qDebug() << "SelfTestDriver: window grab" << windowObjectName << "->" << pngPath
+                 << image.width() << "x" << image.height() << (ok ? "ok" : "FAILED");
+        return ok;
+    }
+    qWarning() << "SelfTestDriver: no window named" << windowObjectName;
+    return false;
 }
 
 void SelfTestDriver::quit()

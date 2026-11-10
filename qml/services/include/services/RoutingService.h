@@ -32,10 +32,6 @@ public:
     QVariantList rows() const { return rows_; }
     int revision() const { return revision_; }
 
-    // The bus ROW feeding `outputRow` for `kind` ("audio" | "video"); -1 when
-    // nothing is wired. Answered from the published snapshot.
-    Q_INVOKABLE int busRowForOutput(int outputRow, const QString &kind) const;
-
     Q_INVOKABLE bool assignBus(int outputRow, const QString &kind, int busRow);
 
     Q_INVOKABLE bool unwireBus(int outputRow, const QString &kind, int busRow);
@@ -52,7 +48,28 @@ public:
     // False until the first sync with the engine's graph: before that speakersEnabled() is only the default.
     bool speakersKnown() const { return loggedFirstSync_; }
 
-    Q_INVOKABLE bool acceptsSignal(int outputRow, const QString &kind) const;
+
+    // Whether the program's MEDIA can reach this output's picture, answered from the published
+    // rows: "ok" when the output's own Media layer is on, else "media". A bus is NOT part of this
+    // rule — a bus needs a source AND the media layer, an output needs only the media layer. THE one
+    // place this rule lives: the monitor
+    // surfaces gate on it and the take notice names what it reports, so the picture on screen and
+    // the words in the toast cannot disagree. A row that is not a video output, or is switched
+    // off, answers "ok" — nothing to gate and nothing to report.
+    Q_INVOKABLE QString mediaRouteState(int outputRow) const;
+    // THE SAME RULE, ASKED BY OUTPUT NAME. A monitor tile's model index and the board's row are not the
+    // same key in every model, and matching on the index left a genuinely routed tile asking about a
+    // row that was not its own — the gate then reported "not routed" forever and the tile stayed black.
+    // The name is the identity every surface already has.
+    Q_INVOKABLE QString mediaRouteStateForName(const QString &name) const;
+    Q_INVOKABLE bool outputShowsOverlaysForName(const QString &name) const;
+
+    // Is there at least one enabled video output on the board at all? An app with nothing to route to
+    // (a library-only session) must still be able to play a file as a preview.
+    Q_INVOKABLE bool hasEnabledVideoOutput() const;
+    // Can the media layer reach ANY enabled video output right now? Asked BEFORE a take: a file nothing
+    // can receive is refused up front instead of being started and pulled back down.
+    Q_INVOKABLE bool mediaCanReachAnyOutput() const;
 
     Q_INVOKABLE void refresh();
 
@@ -63,6 +80,14 @@ signals:
 
 private:
     explicit RoutingService(QObject *parent = nullptr);
+
+    // ---- C++-ONLY, DELIBERATELY NOT QML ------------------------------------
+    // The QML surface of this service is what QML actually asks: the gates are asked BY NAME
+    // (mediaRouteStateForName / outputShowsOverlaysForName — the pair OutputGateState gives the monitor
+    // tile and the output window), and the setters the Routing screen calls. acceptsSignal is the
+    // row-keyed half the wiring code below checks before it writes an edge (three call sites, in
+    // assignBus / unwireBus / linkScreen), so it is not part of the invokable surface either.
+    bool acceptsSignal(int outputRow, const QString &kind) const;
 
     struct RowSpec
     {

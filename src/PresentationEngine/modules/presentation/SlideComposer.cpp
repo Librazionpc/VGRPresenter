@@ -56,7 +56,10 @@ SceneBuilder::SlideComposition SceneBuilder::ComposeSlide(const Slide& slide,
     comp.frameTransparent = comp.explicitTransparent || !comp.paintBackground;
 
     // ---- A TAKE CLEARS THE STYLE'S BACKGROUND -------------------------------
-    if (presentation::CompositorState::Instance().HasMediaFrame()) {
+    // ONLY ON AN OUTPUT THAT ACTUALLY SHOWS THE FILE: the compositor's frame is global, so clearing here
+    // for every output left an unrouted screen with a blanked background and no media to replace it —
+    // black, for a route the board said was not connected.
+    if (style.showMedia && presentation::CompositorState::Instance().HasMediaFrame()) {
         comp.paintBackground = false;
         comp.background.clear();
         comp.explicitTransparent = true;

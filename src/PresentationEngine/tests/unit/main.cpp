@@ -5,7 +5,11 @@
 #include "core/threading/ThreadPool.hpp"
 #include "modules/recording/RecordingEngine.hpp"
 
+#include <QGuiApplication>
+#include <QtGlobal>
+
 #include <cstdio>
+#include <memory>
 #include <cstring>
 
 struct Suite {
@@ -32,6 +36,16 @@ static const Suite kSuites[] = {
     {"core", "pal", TestPal},
     {"core", "palstress", TestPalPerfStress},
     {"core", "atomic-write", TestAtomicWrite},
+    {"platform", "fs-contract", TestQtFilesystemContract},
+    {"platform", "fs-watch", TestQtFilesystemWatch},
+    {"platform", "locale-library", TestQtServicesLocaleAndLibrary},
+    {"platform", "listing-spelling", TestPlatformListingSpelling},
+    {"platform", "paths-parity", TestPlatformPathsParity},
+    {"platform", "frame-shared", TestPreviewFrameSharedContract},
+#ifndef _WIN32
+    {"platform", "frame-source-stills", TestQtFrameSourceStills},
+    {"platform", "qt-recording", TestQtRecordingContainer},
+#endif
     {"core", "assets", TestAssets},
     {"core", "drivers", TestDrivers},
     {"core", "database", TestDatabase},
@@ -132,6 +146,7 @@ static const Suite kSuites[] = {
     {"rendering", "seam", TestShapeEdgeSeams},
     {"rendering", "rengine", TestRenderEngine},
     {"rendering", "d3d11-backend", TestD3D11Backend},
+    {"rendering", "rhi-backend", TestRhiBackend},
     {"rendering", "d3d11-stage-frame", TestD3D11StageFrame},
     {"rendering", "backend-preference", TestRenderBackendPreference},
     {"rendering", "rstress", TestRenderStress},
@@ -225,7 +240,9 @@ static const Suite kSuites[] = {
     {"production", "persistence", TestProductionPersistence},
     {"production", "routing-policy", TestProductionRoutingPolicy},
     {"production", "graph-durable", TestProductionGraphSavedToDisk},
+#ifdef _WIN32
     {"recording", "recording", TestRecordingEngine},
+#endif
     {"telemetry", "telemetry", TestTelemetry},
     // The automatic stall blackout: the per-output present heartbeat and the
     // opaque black frame handed to an output whose feed stopped moving.
@@ -238,8 +255,10 @@ static const Suite kSuites[] = {
     // Dispatch scope: the lock-scope guard reads source, these three prove at
     // runtime that a bus dispatch runs with the engine lock released.
     {"production", "dispatch-scope", TestProductionDispatchOutsideLock},
+#ifdef _WIN32
     {"recording", "dispatch-scope", TestRecordingDispatchOutsideLock},
     {"recording", "real-encode", TestRecordingRealEncode},
+#endif
     {"core", "resource-dispatch-scope", TestResourceDispatchOutsideLock},
     {"core", "kernel-degrade", TestKernelDegrade},
 };
@@ -267,10 +286,14 @@ static void TearDownPhaseFixture() {
     (void)TaskScheduler::Instance().Shutdown();
 }
 
+#ifdef _WIN32
+// Windows dual-GPU laptops: ask the NVIDIA/AMD drivers for the discrete GPU. `__declspec` exists only on
+// Windows compilers, so this is guarded (unguarded it broke the Linux and macOS test builds).
 extern "C" {
 __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
+#endif
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -282,6 +305,15 @@ int main(int argc, char** argv) {
         for (const auto& f : filters) std::fprintf(stderr, " '%s'", f.c_str());
         std::fprintf(stderr, "\n");
     }
+    // The QRhi GPU backend needs a Qt GUI application to host an OpenGL/Vulkan device (Direct3D 11 and
+    // Metal do not). Opt-in, so every other suite keeps running in a bare process: BPS_TEST_GUI=1,
+    // with QT_QPA_PLATFORM=offscreen on a machine that has no display.
+    std::unique_ptr<QGuiApplication> guiApp;
+    int guiArgc = 1;
+    static char guiArg0[] = "bps_unit_tests";
+    static char* guiArgv[] = {guiArg0, nullptr};
+    if (qEnvironmentVariableIntValue("BPS_TEST_GUI") != 0)
+        guiApp = std::make_unique<QGuiApplication>(guiArgc, guiArgv);
     size_t ran = 0;
     const char* lastPhase = "";
     const char* last = "";

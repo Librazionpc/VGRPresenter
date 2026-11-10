@@ -46,6 +46,12 @@ void heartbeat();
 
 void installHangWatchdog(int stallSeconds = 5);
 
+// For the micro-stall sampler (CrashHandler.cpp): when the GUI thread last ticked (steady_clock ticks), how
+// many ticks it has made, and its native thread id.
+long long lastHeartbeatTicks();
+unsigned long long heartbeatTickCount();
+unsigned long long guiNativeThreadId();
+
 void reportException(const char *what, const char *detail);
 
 // Stops the watchdog. Call from the app's own aboutToQuit: the watchdog thread

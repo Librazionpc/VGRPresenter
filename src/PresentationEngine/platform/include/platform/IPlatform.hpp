@@ -113,6 +113,31 @@ struct OsEvent {
     std::string detail; // e.g. monitor id, "on battery", device name
 };
 
+// Runtime feature report. A platform may enumerate hardware without providing
+// a production capture/playback path for it; callers use these flags to avoid
+// presenting unsupported operations as available.
+struct PlatformCapabilities {
+    bool audioDeviceDiscovery = false;
+    bool audioInputCapture = false;
+    bool audioOutputPlayback = false;
+    bool audioLoopbackCapture = false;
+    bool audioStreamTaps = false;
+    bool videoDeviceDiscovery = false;
+    bool videoCapture = false;
+    bool screenCapture = false;
+    // Audio-only WAV and picture/audio recording are reported separately
+    // because a platform may provide one without the other.
+    bool audioRecording = false;
+    bool videoRecording = false;
+    bool displayEnumeration = false;
+    bool advancedDisplayManagement = false;
+    bool globalInputMonitoring = false;
+    bool batteryTelemetry = false;
+    bool desktopNotifications = false;
+    bool nativeDialogs = false;
+    bool clipboardImages = false;
+};
+
 // ---------------------------------------------------------------------------
 // The PAL facade
 // ---------------------------------------------------------------------------
@@ -126,6 +151,8 @@ public:
     virtual std::string OsName() const = 0;
     virtual std::string OsVersion() const = 0;
     virtual std::string Arch() const = 0;
+
+    virtual PlatformCapabilities Capabilities() const { return {}; }
 
     // Subsystem accessors — never null on a supported OS.
     virtual IFilesystem& Filesystem() = 0;

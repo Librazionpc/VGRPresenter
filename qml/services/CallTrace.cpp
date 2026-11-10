@@ -171,6 +171,10 @@ void heartbeat()
     g_heartbeatCount.fetch_add(1, std::memory_order_relaxed);
 }
 
+long long lastHeartbeatTicks() { return g_lastHeartbeat.load(std::memory_order_relaxed); }
+unsigned long long heartbeatTickCount() { return static_cast<unsigned long long>(g_heartbeatCount.load(std::memory_order_relaxed)); }
+unsigned long long guiNativeThreadId() { return static_cast<unsigned long long>(g_guiThreadId.load(std::memory_order_relaxed)); }
+
 void installHangWatchdog(int stallSeconds)
 {
     static std::atomic<bool> installed{false};

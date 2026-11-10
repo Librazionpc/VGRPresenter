@@ -90,24 +90,30 @@ tests and pre-Kernel code work without explicit setup.
 
 ## 5. Backends
 
-- **`platform/common/`** — OS-agnostic implementations built on the C++
-  standard library: `FilesystemImpl` (`std::filesystem`), `TimerImpl`
-  (`std::chrono`).
-- **`platform/linux/`** — Linux: XDG paths, pthread naming/affinity/priority,
-  fork/exec/waitpid, dlopen, sysfs DRM monitors, ALSA PCM streams
+- **`platform/qt/`** — the OS-generic services, implemented once with Qt:
+  `QtFilesystem`, `QtPaths` (`QStandardPaths` plus the app's own folder
+  layout), `QtLocale` (`QLocale::system()`), `QtLibrary` (`QLibrary`) and
+  `QtThreading` (counts/ids from `QThread`; naming, affinity and priority are
+  delegated to the native adapter, which Qt has no API for). The per-OS
+  paths/locale/library classes are gone — see
+  `docs/platform/qt_first_platform.md`.
+- **`platform/common/`** — OS-agnostic and Qt-free: `TimerImpl` (`std::chrono`)
+  and `PosixSocket`.
+- **`platform/linux/`** — Linux device adapters: pthread naming/affinity/priority,
+  fork/exec/waitpid, sysfs DRM monitors, ALSA PCM streams
   (`/proc/asound/pcm`), getifaddrs + `/proc/net/route` + `/etc/resolv.conf`,
-  `/sys/class/power_supply`, clipboard tools (wl-copy/xclip/xsel,
-  `text/uri-list`), `/proc/bus/input/devices` (input), zenity/notify-send
-  (dialogs/notifications), environment/locale from `LANG`/`/proc`.
-- **`platform/windows/`** — complete Win32 backend for all 18 subsystems:
-  SHGetKnownFolderPath paths, `SetThreadDescription` naming, `SetThreadPriority`,
-  `CreateProcessW`, `LoadLibraryW`, `EnumDisplayMonitors`, winmm
+  `/sys/class/power_supply`, (the clipboard is `QtClipboard`, not a command line;
+  `text/uri-list`), `/proc/bus/input/devices` (input), Qt platform-theme dialogs with zenity as fallback, notify-send
+  (dialogs/notifications), environment from `/proc`.
+- **`platform/windows/`** — the Win32 device and display adapters:
+  `SetThreadDescription` naming, `SetThreadPriority`,
+  `CreateProcessW`, `EnumDisplayMonitors`, winmm
   waveIn/waveOut, iphlpapi, `GetSystemPowerStatus`, `CF_UNICODETEXT` +
   `CF_HDROP`, Raw Input, Common Item Dialog + `MessageBoxW`, PowerShell
   balloon, Winsock (`WindowsSocket`). Requires a Windows host to
   compile-verify (developed on Linux/WSL — Conformance §15.1).
-- **`platform/macos/`** — interface stubs; adding macOS = implementing the
-  same interfaces (DoD §24).
+- **`platform/macos/`** — deleted. Everything generic is Qt, so that directory
+  only held stubs; a macOS port is now the device adapters alone (DoD §24).
 
 **Architecture coverage** (DoD §24 — every target, nobody left behind): the
 PAL is pointer-width and endianness agnostic, with **no host-architecture
@@ -156,8 +162,8 @@ pipeline.
 ## 7. Threading model
 
 - Every PAL subsystem is **thread-safe**: state is mutex-guarded
-  (`FilesystemImpl` watches, `LinuxProcess` pid table, `LinuxLibrary` handle
-  set, `PlatformAccessor` magic-static slot).
+  (`QtFilesystem` watches, `LinuxProcess` pid table, `QtLibrary` handle set,
+  `PlatformAccessor` magic-static slot).
 - Interfaces document ownership in their headers. Callbacks fire **outside**
   locks (e.g. `Watch` change callbacks, so a callback may safely cancel its own
   watch).
@@ -209,7 +215,8 @@ Already behind interfaces, ready to deepen without redesign:
   `text/uri-list`, `CF_HDROP`).
 - **Dialogs** — color / font pickers; **Notifications** — progress + alert
   variants with actions.
-- **Windows compile validation** on a Windows host; **macOS backend** for all
-  18 subsystems (same interfaces).
+- **Cross-platform parity** — the macOS PAL composition now exists and Qt
+  Multimedia supplies camera discovery/preview on Linux and macOS. Production
+  audio capture/playback, screen capture and native-host validation remain open.
 - **Transports** — WebSocket / gRPC / named-pipe IPC servers behind the same
   handler API, on the same `ISocket`/`ISocketListener` primitives.

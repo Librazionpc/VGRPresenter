@@ -59,10 +59,14 @@ ApplicationWindow {
             const label = String(row && row.sublabel ? row.sublabel : "").trim()
             if (label === "")
                 continue
-            // "screen" rows name a monitor or a captured window (both live in
-            // the screen roster); camera/NDI rows name a capture device.
-            if (String(row.kind || "") === "screen") screens.push(label)
-            else video.push(label)
+            // "screen" rows name a monitor or a captured window (both live in the screen roster) and
+            // "camera" rows name a capture device. EVERY OTHER kind is not a device at all: a media row's
+            // sublabel is a FILE PATH, The Table's is its own name, and an NDI source is found by the NDI
+            // finder, not the camera roster. They used to be pushed here too, so each start reported
+            // "Not connected this time: <your video file>, The Table" for sources that were perfectly fine.
+            const kind = String(row.kind || "")
+            if (kind === "screen") screens.push(label)
+            else if (kind === "camera") video.push(label)
         }
         for (let i = 0; i < OutputListModel.rowCount(); ++i) {
             const row = OutputListModel.getOutput(i)
@@ -549,6 +553,14 @@ ApplicationWindow {
         }
     }
 
+    // Ctrl+Shift+T: the wall's timer button, on the keyboard. It is one toggle in the service, so the key,
+    // the wall button and the scenario that proves the timer all press the same thing.
+    Shortcut {
+        action: "toggleTimer"
+        enabled: !Hotkeys.canAccept
+        onActivated: LiveOutputService.toggleAutoAdvance()
+    }
+
     // Ctrl+N / O / S / Shift+S — the same actions as the File menu.
     Shortcut {
         action: "newShow"
@@ -699,6 +711,13 @@ ApplicationWindow {
             // Opening and closing Settings is part of "where you were" (see
             // rememberSettingsPage): open records the page on screen, closed clears it.
             window.rememberSettingsPage()
+            // The page underneath must not answer clicks that belong to this modal.
+            ModalStack.settingsOpen = settingsScrim.visible
+            if (settingsScrim.visible) {
+                // A menu the page lifted into the window overlay would float ABOVE this
+                // card — both live in Overlay.overlay, and the menu was opened later.
+                showScreen.closeContextMenus()
+            }
             if (settingsScrim.visible) {
                 window.settingsHotkeyScope = Hotkeys.open({
                     name: "Settings",
@@ -836,7 +855,7 @@ ApplicationWindow {
         anchors.fill: parent
     }
 
-    OutputWindowManager {}
+    OutputWindowManager { id: outputWindows }
 
     // File > Import: every format the engine reads (FreeShow's Import screen). Above the screens and the Settings overlay, below the toasts.
     ImportDialog {
@@ -1131,8 +1150,12 @@ ApplicationWindow {
     // ---- REAL-PASSAGE reading walk (VGR_TABLEWALK_TEST=1 only) ---------------
     // "live:" puts the pick on air; "bible:" selects a Scripture result instead of an
     // earlier Table match. The prefixes can be combined for the real-output Bible walk.
-    readonly property string twQueryRaw: (typeof SelfTestTableWalkQuery !== "undefined")
+    // A trailing "~back" turns the walk round after press 30: presses 31..36 step BACK, then the tiles
+    // are photographed (tw_back6_*.png) — the check that every style follows a back-step like Main.
+    readonly property string twQueryFull: (typeof SelfTestTableWalkQuery !== "undefined")
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
+    readonly property bool twBack: window.twQueryFull.endsWith("~back")
+    readonly property string twQueryRaw: window.twBack ? window.twQueryFull.slice(0, -5) : window.twQueryFull
     readonly property bool twGoLive: window.twQueryRaw.indexOf("live:") === 0
     // "live:swap:<table query>" = after the Table pick is on air, change to a Bible pick, show it, and
     // go off air (the user's stall report), timing every step with a GUI-gap heartbeat.
@@ -1310,7 +1333,16 @@ ApplicationWindow {
             window.selfTestLineStepPress = press
             try {
                 const absFrom = Number(LiveOutputService.readingAbsoluteLine)
-                const moved = LiveOutputService.lineStep(1)
+                if (window.twBack && press === 37) {
+                    window.twGrab("back6")
+                    selfTestTableWalkPress.stop()
+                    return
+                }
+                const moved = LiveOutputService.lineStep(window.twBack && press >= 31 && press <= 36 ? -1 : 1)
+                if (window.twBack && press === 36) {
+                    window.twMidN = 0
+                    twMidGrab.restart()   // frames DURING the back-glide: every tile, same instants
+                }
                 const abs = Number(LiveOutputService.readingAbsoluteLine)
                 const page = LiveOutputService.readingPage
                 console.log("[SELFTEST-TABLEWALK] press=" + press
@@ -1343,6 +1375,18 @@ ApplicationWindow {
                 selfTestTableWalkPress.stop()
                 selfTestTableWalkJump.restart()
             }
+        }
+    }
+    property int twMidN: 0
+    Timer {
+        id: twMidGrab
+        interval: 45
+        repeat: true
+        onTriggered: {
+            const n = window.twMidN++
+            window.twGrab("mid" + n)
+            if (n >= 3)
+                twMidGrab.stop()
         }
     }
     Timer {
@@ -2289,13 +2333,15 @@ ApplicationWindow {
                     const pane = SelfTest.findItem("selfTestMediaPane")
                     if (pane) {
                         try {
+                            const pillBusId = Number(BusListModel.getBus(window.pillRow).id)
                             pane.toggleBusMonitorPreview(window.pillRow)
-                            const opened = pane.busMonitorAudioBus === window.pillRow
+                            const opened = pane.busMonitorAudioBusId === pillBusId
                             const taps = pane.meteredLabels.length
                             pane.toggleBusMonitorPreview(window.pillRow)
                             console.log("[SELFTEST-PILL] busmon bus=" + window.pillRow
+                                        + " id=" + pillBusId
                                         + " opened=" + opened + " audioTaps=" + taps
-                                        + " released=" + (pane.busMonitorAudioBus === -1))
+                                        + " released=" + (pane.busMonitorAudioBusId === -1))
                         } catch (e) {
                             console.log("[SELFTEST-PILL] busmon bus=" + window.pillRow
                                         + " threw: " + e)
@@ -2807,7 +2853,8 @@ ApplicationWindow {
                 if (routed > 0) window.busLightRouted++
                 if (routed > 0 && status === "connected") window.busLightGreen++
                 if (routedVideo > 0 && video !== "")
-                    window.busLightCandidates.push({ bus: i, label: video, kind: vkind })
+                    window.busLightCandidates.push({ bus: i, busId: Number(b && b.id !== undefined ? b.id : -1),
+                                                     label: video, kind: vkind })
                 window.busLightLines.push("bus=" + i + " name=\"" + name + "\" type=" + type
                     + " routed=" + routed + " status=" + status
                     + " video=\"" + video + "\"(" + vkind + ")"
@@ -2836,9 +2883,9 @@ ApplicationWindow {
                     const cand = wants[c]
                     try {
                         pane.toggleBusMonitorPreview(cand.bus)
-                        if (Number(pane.busMonitorVideoBus) !== cand.bus)
+                        if (Number(pane.busMonitorVideoBusId) !== cand.busId)
                             pane.toggleBusMonitorPreview(cand.bus)   // the pane's own undo
-                        if (Number(pane.busMonitorVideoBus) === cand.bus) {
+                        if (Number(pane.busMonitorVideoBusId) === cand.busId) {
                             window.busLightHold = cand
                             window.busLightLines.push("held bus=" + cand.bus + " label=\""
                                 + cand.label + "\" kind=" + cand.kind + " via=cardMonitor"
@@ -2972,15 +3019,20 @@ ApplicationWindow {
     // A file that is NOT there, with the stored level the reported row carries.
     readonly property string mediaMeterMissingFile: "selftest-meter-missing.mp4"
     readonly property real mediaMeterMissingLevel: 4
-    // Real files with real audio, longest first: Windows' own sounds, which
-    // every machine has, and Media Foundation decodes a WAV with no codec pack.
+    // Real files with real audio, longest first: each OS's own stock sounds, which every machine of
+    // that OS has, and the platform's media decoder reads a WAV/AIFF with no codec pack.
     readonly property var mediaMeterFiles: [
         "C:/Windows/Media/Ring05.wav",
         "C:/Windows/Media/Ring08.wav",
         "C:/Windows/Media/Ring09.wav",
         "C:/Windows/Media/Alarm05.wav",
         "C:/Windows/Media/Alarm06.wav",
-        "C:/Windows/Media/Alarm01.wav"
+        "C:/Windows/Media/Alarm01.wav",
+        // ...and the same on the other platforms: macOS's system sounds, and the sample ALSA ships.
+        "/System/Library/Sounds/Glass.aiff",
+        "/System/Library/Sounds/Ping.aiff",
+        "/usr/share/sounds/alsa/Front_Center.wav",
+        "/usr/share/sounds/freedesktop/stereo/complete.oga"
     ]
     // The runner's own pick first (it checks the file exists), then the list —
     // so the script may name any file and the scenario still runs on its own.
@@ -5236,6 +5288,49 @@ ApplicationWindow {
         onTriggered: SelfTest.quit()
     }
 
+    // ---- Quiet Time pick -> the WALL'S OWN PIXELS (VGR_QUIETTIME_TEST=1) ------
+    // The C++ scenario stages the pick and presses GO LIVE; this side photographs what the wall
+    // actually drew afterwards, with the app's own grab (SelfTest.grab, the same one the tablewalk
+    // uses), and prints each tile's own facts beside its picture. "The lower third went black on
+    // GO LIVE" then reads as pixels plus the reason, instead of being inferred from a map.
+    function quietTimeFacts(i) {
+        const t = SelfTest.findItem("selfTestMonitorTile" + i)
+        if (!t)
+            return "tile=" + i + " facts=<missing>"
+        const s = t.onAirSlide || {}
+        return "tile=" + i
+            + " name=" + t.name
+            + " slide=" + t.hasSlidePreview
+            + " blocks=" + ((s.blocks && s.blocks.length) || 0)
+            + " engineComposed=" + t.engineComposed
+            + " framePriority=" + (s.framePriority === true)
+            + " frameClear=" + t.frameClear
+            + " cleared=" + (s.cleared === true)
+            + " category='" + (s.showCategory || "") + "'"
+            + " enabled=" + ((OutputListModel.getOutput(i) || {}).isEnabled === true)
+    }
+    Timer {
+        id: selfTestQuietTimeGrab
+        running: typeof SelfTestQuietTime !== "undefined" && SelfTestQuietTime
+        interval: 14000   // boot + the C++ scenario's stage/GO LIVE, then a settled frame
+        onTriggered: {
+            const count = OutputListModel.rowCount()
+            for (let i = 0; i < count; ++i) {
+                const ok = SelfTest.grab("selfTestMonitorTile" + i, "qt_tile_" + i + ".png")
+                console.log("[SELFTEST-QUIETTIME] grabbed ok=" + ok
+                            + " live=" + LiveOutputService.live
+                            + " onAir='" + LiveOutputService.onAirTitle + "'"
+                            + " " + window.quietTimeFacts(i))
+            }
+            selfTestQuietTimeDone.restart()
+        }
+    }
+    Timer {
+        id: selfTestQuietTimeDone
+        interval: 2500    // grabToImage renders asynchronously; quit() would destroy the picture
+        onTriggered: SelfTest.quit()
+    }
+
     // ---- The tab search's SEED: does the open sermon fill the box, and do the
     function seedState(tag, paneName) {
         const box = SelfTest.findItem("selfTestSearchBox")
@@ -6599,7 +6694,7 @@ ApplicationWindow {
             const kind = String(item.kind)
             // A row REPORTS when its line opens with its own kind. A row that
             // says nothing (the NDI/SDI-only line this replaced) fails here.
-            if (status.indexOf(kind + " \u00b7 ") === 0)
+            if (status.indexOf(kind + " \u00b7 ") === 0 || status.indexOf("Live \u00b7 ") === 0)
                 ++reporting
             if (status.indexOf("blackout up") >= 0)
                 ++blackout
@@ -6720,9 +6815,14 @@ ApplicationWindow {
             if (p !== undefined && p !== "" && SettingsService.fileExists(p))
                 return String(p)
         }
+        // A picture every machine of that OS ships: the stock wallpapers (Windows, macOS, a common Linux one).
         const candidates = ["C:/Windows/Web/Wallpaper/Windows/img0.jpg",
                             "C:/Windows/Web/Wallpaper/Windows/img1.jpg",
-                            "C:/Windows/Web/Screen/img100.jpg"]
+                            "C:/Windows/Web/Screen/img100.jpg",
+                            "/System/Library/Desktop Pictures/Solid Colors/Black.png",
+                            "/Library/Desktop Pictures/Monterey Graphic.heic",
+                            "/usr/share/backgrounds/warty-final-ubuntu.png",
+                            "/usr/share/pixmaps/debian-logo.png"]
         for (const c of candidates)
             if (SettingsService.fileExists(c))
                 return c
@@ -6799,7 +6899,17 @@ ApplicationWindow {
         const tile = window.bsTileItem
         if (tag === "cleared")
             console.log("[SELFTEST-STYLEBG] tile layers: " + window.bsLayerFacts().line)
-        const bg = tile ? tile.styleBg : null
+        // THE TILE'S CURRENT PROPERTIES. This probe used to read `tile.styleBg` / `tile.styled`, which
+        // the tile has not exposed since it started reading the roster itself — every step printed "?"
+        // and the scenario failed its own premise. The style background is `styleBackground`, and
+        // whether the tile PAINTS it is answered by the layer itself (found by name), which is the
+        // thing under test: a tile that knows the image but does not draw it is the bug this catches.
+        const bg = tile && tile.styleBackground ? tile.styleBackground : null
+        const styleLayer = tile ? window.bsLayerFacts_find(tile, "selfTestTileStyleImage") : null
+        const layerSource = styleLayer ? String(styleLayer.source) : ""
+        const tileHasImage = styleLayer
+            ? (styleLayer.visible === true && layerSource !== "")
+            : (bg ? bg.hasImage === true : false)
         const ti = window.bsTileIndex
         const modelBg = ti >= 0 ? OutputListModel.styleBackground(ti) : null
         console.log("[SELFTEST-STYLEBG] " + tag
@@ -6807,15 +6917,17 @@ ApplicationWindow {
                     + " tileIndex=" + ti
                     + " tileStyleId=" + (tile ? String(tile.styleId) : "?")
                     + " styleMatch=" + (tile ? String(String(tile.styleId) === window.bsStyleId) : "?")
-                    + " tileHasImage=" + (bg ? String(bg.hasImage) : "?")
-                    + " tileImage=" + JSON.stringify(bg ? String(bg.image) : "")
-                    + " tileColor=" + (bg ? String(bg.color) : "?")
-                    + " tileStyled=" + (tile ? String(tile.styled) : "?")
+                    + " tileHasImage=" + String(tileHasImage)
+                    + " tileImage=" + JSON.stringify(layerSource.replace("file:///", ""))
+                    + " tileColor=" + JSON.stringify(bg ? String(bg.backgroundColor) : "?")
+                    + " tileStyled=" + (tile ? String(tile.styleBackgroundPaints === true) : "?")
                     + " modelHasImage=" + (modelBg ? String(modelBg.hasImage) : "?")
                     + " styleImage=" + JSON.stringify(String(StyleListModel.getStyle(window.bsStyleRow).backgroundImage)))
     }
     // ---- What each wall tile is drawing (VGR_TILEFACTS_TEST=1) -------------
-    property string tfMedia: "C:/Users/znwaj/Documents/Iwaya Churh Live Stream/9_16 harvest.jpeg"
+    // The still the tile-facts run takes: VGR_TILEFACTS_MEDIA, else the folder's own test file (no
+    // machine's personal path is baked in; without either, the media phase of the run is skipped).
+    property string tfMedia: typeof SelfTestTileFactsMedia !== "undefined" ? String(SelfTestTileFactsMedia) : ""
     function tfTile(i) {
         return window.bsFindTile(SelfTest.findItem("selfTestMonitorWall"), i)
     }
@@ -6918,7 +7030,10 @@ ApplicationWindow {
         id: selfTestTileFactsMedia
         interval: 3000
         onTriggered: {
-            LiveOutputService.takeMedia(window.tfMedia, "9_16 harvest.jpeg")
+            if (window.tfMedia === "")
+                console.log("[SELFTEST-TILES] no VGR_TILEFACTS_MEDIA — the media phase is skipped")
+            else
+                LiveOutputService.takeMedia(window.tfMedia, window.tfMedia.replace(/^.*[\\/]/, ""))
             console.log("[SELFTEST-TILES] takeMedia label=" + JSON.stringify(String(LiveOutputService.mediaMeterLabel)))
             selfTestTileFactsAfterMedia.restart()
         }
@@ -7495,6 +7610,26 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
+    // ONE ROW PER MONITOR TILE: every term its picture depends on, plus the grab of that tile. A blank
+    // tile is then a line in this table, not a guess — `gate`/`onAir`/`engine`/`frame` say which term
+    // refused it.
+    function selfTestTileFacts(tag) {
+        for (let t = 0; ; ++t) {
+            const tile = SelfTest.findItem("selfTestMonitorTile" + t)
+            if (!tile)
+                break
+            console.log("[SELFTEST-CARD] " + tag + " tile=" + t
+                        + " name=" + JSON.stringify(String(tile.name))
+                        + " enabled=" + tile.isEnabled
+                        + " gate=" + tile.mediaGateOpen
+                        + " onAir=" + tile.mediaOnAir
+                        + " engine=" + tile.engineComposed
+                        + " frame=" + tile.hasFrame
+                        + " slide=" + tile.hasSlidePreview
+                        + " overlays=" + tile.overlaysOn)
+            SelfTest.grab("selfTestMonitorTile" + t, "cp_" + tag + "_tile_" + t + ".png")
+        }
+    }
     // ---- MEDIA-PANE CARD PREVIEW (VGR_CARDPREVIEW_TEST=1) ---------------------------------------------
     // What a card does when it is held: the camera card's live thumbnail (previewInput -> producing +
     // inputRev) and a microphone card's L/R meter (startInputMeter -> peaks). Logged once a second.
@@ -7551,7 +7686,7 @@ ApplicationWindow {
             // The monitor tiles BEFORE going live: a media file taken to the output preview.
             // What a double-click on the Camera bus does: take its media source to the output preview.
             pane.toggleVideoSourcePreview(2)
-            console.log("[SELFTEST-CARD] held: videoBus=" + pane.busMonitorVideoBus + " audioBus=" + pane.busMonitorAudioBus
+            console.log("[SELFTEST-CARD] held: videoBusId=" + pane.busMonitorVideoBusId + " audioBusId=" + pane.busMonitorAudioBusId
                         + " previews=" + JSON.stringify(LiveOutputService.cardPreviews)
                         + " metered=" + JSON.stringify(pane.meteredLabels))
             selfTestCardPreviewSample.start()
@@ -7582,17 +7717,195 @@ ApplicationWindow {
                 const rows = pane ? pane.inputRows : []
                 for (let i = 0; i < rows.length; ++i)
                     SelfTest.grab("selfTestBusCard_" + rows[i], "cp_card_" + rows[i] + ".png")
-                for (let t = 0; t < 2; ++t)
-                    SelfTest.grab("selfTestMonitorTile" + t, "cp_tile_" + t + ".png")
+                window.selfTestTileFacts("pre")
+                selfTestCardPreviewWindowsEarly.start()   // the real output windows, same moment
                 console.log("[SELFTEST-CARD] tile state: mediaOnAir=" + LiveOutputService.mediaOnAir + " path=" + LiveOutputService.mediaPath
                             + " live=" + LiveOutputService.live + " inputLabel=" + JSON.stringify(LiveOutputService.inputLabel)
                             + " mediaIsAudio=" + LiveOutputService.mediaIsAudio + " name=" + LiveOutputService.mediaName)
             }
             if (++window.cpTicks >= 8) {
                 selfTestCardPreviewSample.stop()
-                SelfTest.quit()
+                // ---- GO LIVE PHASE --------------------------------------------------------------
+                // THE SAME TAKE, NOW LIVE. A tile draws a media file with LiveMediaSurface on both
+                // sides of GO LIVE, so the grabs taken here must show the same kind of picture as the
+                // pre-live ones — a swap to the engine's frame would show up as a changed grab.
+                console.log("[SELFTEST-CARD] pressing GO LIVE (live before=" + LiveOutputService.live + ")")
+                LiveOutputService.goLive()
+                selfTestCardPreviewLive.start()
             }
         }
+    }
+    // The GO LIVE phase of the card-preview scenario: grab the SAME tiles once the session is live.
+    Timer {
+        id: selfTestCardPreviewLive
+        interval: 5000
+        onTriggered: {
+            console.log("[SELFTEST-CARD] live phase: live=" + LiveOutputService.live
+                        + " mediaOnAir=" + LiveOutputService.mediaOnAir
+                        + " name=" + LiveOutputService.mediaName
+                        + " frameRev=" + Number(LiveOutputService.frameRev))
+            window.selfTestTileFacts("live")
+            selfTestCardPreviewStage.start()
+        }
+    }
+    // THE OTHER TWO SURFACES THAT SHOW THE SAME FILE: the centre page (ShowCenter — what the Stage tab
+    // puts on screen) and the library's own grid card. Both draw through the same shared surface as the
+    // monitor tiles, so both grabs must show the file's picture, not a poster or a blank.
+    Timer {
+        id: selfTestCardPreviewStage
+        interval: 1400
+        // The folder this run put in the library for the card, and whether it was already there: it is
+        // removed at the end either way, so the scenario is idempotent and leaves no trace.
+        property string folder: ""
+        property bool folderWasPresent: false
+        onTriggered: {
+            // The file needs a CARD for the grid surface to be testable at all, so its folder goes in
+            // the library first (a no-op when the folder is already there).
+            // The folder of the file the run was given (VGR_VIDEOFPS_FILE) — no machine's own path is
+            // baked in. Without a file there is nothing to stage, so the phase ends cleanly.
+            const given = typeof SelfTestVideoFpsFile !== "undefined" ? String(SelfTestVideoFpsFile) : ""
+            const folder = given.replace(/[\\/][^\\/]*$/, "")
+            if (folder === "" || folder === given) {
+                console.log("[SELFTEST-CARD] stage phase: no VGR_VIDEOFPS_FILE — skipped")
+                SelfTest.quit()
+                return
+            }
+            const folders = MediaLibraryService.folders
+            let present = false
+            for (let i = 0; i < folders.length; ++i)
+                if (String(folders[i].path) === folder)
+                    present = true
+            if (!present)
+                MediaLibraryService.addFolderPath(folder)
+            selfTestCardPreviewStage.folder = folder
+            selfTestCardPreviewStage.folderWasPresent = present
+            const pane = SelfTest.findItem("selfTestMediaPane")
+            if (pane) {
+                pane.selection = "all"          // the grid again (the take phase used the Buses list)
+                // ASK FOR THE ROWS, never rely on onSelectionChanged: when the selection was already
+                // "all" that handler does not fire, and the grid kept whatever it read before the
+                // library's scan had published (it read nothing, so it drew the empty state).
+                pane.reload()
+            }
+            console.log("[SELFTEST-CARD] stage phase: folder=" + folder + " present=" + present)
+            selfTestCardPreviewStageGrab.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewStageGrab
+        interval: 3200
+        onTriggered: {
+            // THE LIBRARY'S OWN PREVIEW: the card holding the file that is on air, grabbed as it is drawn
+            // (no poster, no thumbnail — the shared surface's picture).
+            const path = String(LiveOutputService.mediaPath)
+            const card = SelfTest.findItem("selfTestMediaTile:" + path)
+            SelfTest.grab("selfTestMediaPane", "cp_grid.png")
+            console.log("[SELFTEST-CARD] grid phase: card=" + (card ? "found" : "MISSING")
+                        + " cards=" + (SelfTest.findItem("selfTestMediaPane") ? "pane" : "-")
+                        + " path=" + JSON.stringify(path))
+            // THE USER'S OWN GESTURE: a click on the card, which is what puts the file on the centre page
+            // (and what the splash above it waits for).
+            if (card)
+                SelfTest.clickItem("selfTestMediaTile:" + path)
+            selfTestCardPreviewStageClick.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewStageClick
+        interval: 2500
+        onTriggered: {
+            const sc = SelfTest.findItem("selfTestShowCenter")
+            SelfTest.grab("selfTestMainScreen", "cp_stage.png")
+            if (sc)
+                SelfTest.grab("selfTestShowCenter", "cp_view.png")
+            console.log("[SELFTEST-CARD] stage grabs: centre="
+                        + (sc ? ("visible=" + sc.visible + " size=" + Math.round(sc.width) + "x"
+                                 + Math.round(sc.height)) : "MISSING")
+                        + " centerItem=" + JSON.stringify(showScreen.centerItem)
+                        + " onAir=" + LiveOutputService.mediaOnAir)
+            // The scenario's folder entry goes away again: it exists only to give this file a card, so the
+            // library is left as it was found instead of carrying the test's folder from run to run.
+            const usedFolder = selfTestCardPreviewStage.folder
+            if (usedFolder !== "")
+                MediaLibraryService.removeFolder(usedFolder)
+            showScreen.centerItem = null
+            selfTestCardPreviewWindows.start()
+        }
+    }
+    // ---- THE OUTPUT WINDOWS BEFORE GO LIVE ----------------------------------------------------
+    // Before the session is live no frame is flowing, so each window shows its OWN state — the media file
+    // where its route is open, the checkerboard where nothing paints — which is what the tile grabs are
+    // read against. (After GO LIVE every window draws the engine's frame, a different picture, so the
+    // empty state has to be grabbed here as well as there.)
+    Timer {
+        id: selfTestCardPreviewWindowsEarly
+        interval: 500
+        onTriggered: {
+            outputWindows.selfTestForceVisible = true
+            selfTestCardPreviewWindowsEarlyGrab.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewWindowsEarlyGrab
+        interval: 1000
+        onTriggered: {
+            const wins = SelfTest.windows()
+            let grabbed = 0
+            for (let i = 0; i < wins.length; ++i) {
+                const name = String(wins[i].objectName ?? "")
+                if (name.indexOf("outputWindow_") !== 0)
+                    continue
+                if (SelfTest.grabWindow(name, "cp_early_" + name + ".png"))
+                    grabbed++
+            }
+            outputWindows.selfTestForceVisible = false
+            console.log("[SELFTEST-CARD] early window phase: grabbed=" + grabbed
+                        + " live=" + LiveOutputService.live
+                        + " mediaOnAir=" + LiveOutputService.mediaOnAir)
+        }
+    }
+    // ---- THE REAL OUTPUT WINDOWS, GRABBED THE SAME WAY -----------------------------------------
+    // An output window is its own top-level QQuickWindow (OutputWindow.qml), so it is grabbed BY NAME
+    // (SelfTest.grabWindow): the monitor tile had a pixel test while the real output it stands for had
+    // none. Forced visible because a window is otherwise only up with an output live on a real screen,
+    // and this machine has none — the grab is of the window's own content, which is what the tile test
+    // reads too, so the empty state (checkerboard / black) can be compared surface to surface.
+    Timer {
+        id: selfTestCardPreviewWindows
+        interval: 900
+        onTriggered: {
+            outputWindows.selfTestForceVisible = true
+            selfTestCardPreviewWindowsGrab.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewWindowsGrab
+        interval: 1400
+        onTriggered: {
+            const wins = SelfTest.windows()
+            let grabbed = 0
+            for (let i = 0; i < wins.length; ++i) {
+                const name = String(wins[i].objectName ?? "")
+                if (name.indexOf("outputWindow_") !== 0)
+                    continue
+                if (SelfTest.grabWindow(name, "cp_" + name + ".png"))
+                    grabbed++
+            }
+            console.log("[SELFTEST-CARD] window phase: windows=" + wins.length
+                        + " grabbed=" + grabbed
+                        + " live=" + LiveOutputService.live
+                        + " mediaOnAir=" + LiveOutputService.mediaOnAir
+                        + " mediaName=" + LiveOutputService.mediaName)
+            outputWindows.selfTestForceVisible = false
+            // Give the folder removal time to reach the settings store before the process exits (a
+            // 1.5 s quit left the test's folder in the user's library).
+            selfTestCardPreviewQuit.start()
+        }
+    }
+    Timer {
+        id: selfTestCardPreviewQuit
+        interval: 4000
+        onTriggered: SelfTest.quit()
     }
     // ---- Program-feed rate for a held camera (VGR_INPUTRATE_TEST=1) ----------
     property string irLabel: ""

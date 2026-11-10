@@ -46,6 +46,10 @@ public:
 
     void AdvanceStyleRevision() noexcept { styleRevision_.fetch_add(1, std::memory_order_relaxed); }
     uint64_t StyleRevision() const noexcept { return styleRevision_.load(std::memory_order_relaxed); }
+    // Timed slides advance themselves on their own durationMs (see Tick). The app turns that OFF for every
+    // show that was not given the timer, so one show's timings never drive another.
+    void SetTimedAdvance(bool on) noexcept { timedAdvance_ = on; }
+    bool TimedAdvance() const noexcept { return timedAdvance_; }
     Result<void> GoLive();
     Result<void> Pause();
     Result<void> Resume();
@@ -102,6 +106,7 @@ private:
     std::atomic<uint64_t> styleRevision_{0};
     std::atomic<double> clockSec_{0.0};
     double autoAdvanceAccum_ = 0.0;
+    bool timedAdvance_ = true;   // false: a timed slide waits for the operator
     std::vector<Subscription> subscriptions_;
     bool eventsWired_ = false;
 };

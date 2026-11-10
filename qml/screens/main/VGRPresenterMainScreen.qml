@@ -9,6 +9,16 @@ import "../../shortcuts"
 Rectangle {
     id: vGRPresenter_Main_Screen
 
+    // ---- Menus this screen lifts into the window overlay ------------------
+    // A DropdownPanel reparents itself to Overlay.overlay when it opens, which puts
+    // it ABOVE the Settings card (z 30000 in the window). Settings calls this as it
+    // opens so no row menu from this screen can float over it.
+    function closeContextMenus() {
+        showContextMenu.visible = false
+        showMoveMenu.closeFlyout()
+        catContextMenu.visible = false
+    }
+
     Component.onCompleted: EngineBridge.log("info", "StartupTrace", "main screen component completed")
     onVisibleChanged: if (visible) EngineBridge.log("info", "StartupTrace", "main screen became visible")
 
@@ -872,6 +882,10 @@ Rectangle {
                     property int deletingCategoryIndex: -1
                     property int menuIndex: -1
                     function openCatMenu(i, x, y) {
+                        // A right-click while the Settings modal is up belongs to the
+                        // MODAL, not to the list underneath it (see ModalStack).
+                        if (ModalStack.settingsOpen)
+                            return
                         closeShowMenu()
                         menuIndex = i
                         catContextMenu.openAt(media_table, x, y, boundsItem())
@@ -895,6 +909,10 @@ Rectangle {
                     readonly property string showMoveLabel: qsTr("Move to")
                     property var showMoveRow: null
                     function openShowMenu(i, x, y) {
+                        // A right-click while the Settings modal is up belongs to the
+                        // MODAL, not to the list underneath it (see ModalStack).
+                        if (ModalStack.settingsOpen)
+                            return
                         closeCatMenu()
                         showMoveMenu.closeFlyout()
                         const shows = table_body.shownShows

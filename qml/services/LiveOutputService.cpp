@@ -179,6 +179,9 @@ LiveOutputService *LiveOutputService::create(QQmlEngine *engine, QJSEngine *jsEn
 void LiveOutputService::goLive()
 {
     VGR_CALL_TRACE("LiveOutputService.goLive");
+    // Before anything goes on air: if this roster asks for more pixels than this machine carried last
+    // session, say so now — a warning the user can act on, never a block.
+    warnIfNdiLoadExceedsSustained();
     g_pressTimeline.arm();
     qInfo("PRESS TIMELINE: press | live=%d stagedSlides=%d mediaOnAir=%d mediaIsVideo=%d "
           "mediaState='%s' mediaRev=%d input='%s' overlays=%d ndiSending=%d '%s'",
@@ -190,6 +193,33 @@ void LiveOutputService::goLive()
     if (!stagedSlidesRaw_.isEmpty()) {
         pressTimelineStep("branch: staged pick");
         goLiveWithSlides(stagedName_, stagedSlidesRaw_);
+        return;                     // the last step inside closes the trace
+    }
+    // WHAT IS ALREADY ON AIR IS THE ANSWER. GO LIVE is "put the program on air", not "load
+    // something new": with nothing staged, replacing the live slide with the loaded show's first
+    // one is GO LIVE INVENTING content — and the show's slide is what made a lower third that was
+    // up before the press disappear from the wall. Nothing on air is touched here; only the feed
+    // (poll timer + NDI clock) is re-asserted around it.
+    if (live_ && !onAirSlideRaw_.isEmpty()) {
+        pressTimelineStep("branch: already on air (kept as it is)");
+        refreshOnAirSlide();
+        emit onAirChanged();
+        ensurePollTimer();
+        startNdiSendClock();
+        pollTick();
+        if (g_pressTimeline.armed()) {
+            qInfo("PRESS TIMELINE: done | live=%d onAir='%s' ndiSending=%d '%s' mediaOnAir=%d",
+                  live_ ? 1 : 0, qUtf8Printable(onAirTitle_), ndiSending_ ? 1 : 0,
+                  qUtf8Printable(ndiSendingOutput_), mediaOnAir_ ? 1 : 0);
+            g_pressTimeline.report("press done");
+            g_pressTimeline.close();
+        }
+        return;
+    }
+    // NOTHING PICKED IS NOT "NOTHING TO SHOW": the wall's loaded show is what the operator means by GO LIVE.
+    // A blank carrier used to go on air instead and clear every output.
+    if (goLiveLoadedShow()) {
+        pressTimelineStep("branch: loaded show (nothing picked)");
         return;                     // the last step inside closes the trace
     }
     pressTimelineStep("branch: blank carrier (nothing staged)");
@@ -276,15 +306,21 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         live_ = true;
         emit liveChanged();
     }
+    // THE ON-AIR MAP FIRST, THE STAGED COPY SECOND. A monitor tile draws "the staged slide,
+    // else the on-air one" (OutputMonitorTile.refreshOnAirSlideOnce), so clearing the pick
+    // before the on-air map carries it leaves every tile composing from nothing until the
+    // engine commit lands: the slide the operator just took vanished from the wall, and a
+    // lower third — which exists only in that pick — was simply gone. Filling on-air first
+    // makes the fallback the slide that actually went out.
+    if (!replacingLiveContent) {
+        refreshOnAirSlide();
+        emit onAirChanged();
+    }
     if (!stagedSlidesRaw_.isEmpty() || !stagedSlide_.isEmpty()) {
         stagedName_.clear();
         stagedSlidesRaw_.clear();
         stagedSlide_ = QVariantMap{};
         BumpStaged();
-    }
-    if (!replacingLiveContent) {
-        refreshOnAirSlide();
-        emit onAirChanged();
     }
     pressTimelineStep(replacingLiveContent ? "refreshOnAirSlide deferred to pollTick"
                                        : "refreshOnAirSlide + onAirChanged");
@@ -312,6 +348,212 @@ void LiveOutputService::BumpStaged()
 void LiveOutputService::stageSlides(const QString &name, const QVariantList &slides)
 {
     stageSlidesWithPreview(name, slides, {});
+}
+
+// ---- QUIET TIME PICK, THEN EVERY OUTPUT'S PICTURE (VGR_QUIETTIME_TEST=1) ----
+// The report: "the Quiet Time overlay does not show on the outputs". The design is a show
+// CATEGORY — a style overrides one of its Shows templates per category (StyleStore's
+// showCategoryTemplates), and the lookup key is the slide's own showCategory, so a surface can
+// only draw the Quiet Time design if the map it composes CARRIES that key (SlidePreviewMap keeps
+// it on the on-air copy for exactly this reason). This drives the operator's path — stage the
+// Quiet Time pick, press GO LIVE — and then asks each output's own style for the picture that
+// output would draw, which is the thing on the wall and on the wire. An empty or cleared
+// composition is the failure; a title-only one means the style's default Shows template was
+// used instead of the category's.
+void LiveOutputService::runQuietTimeSelfTestOnce()
+{
+    const QString text = QStringLiteral("This, in the sanctuary here, is where the Lord dwells.");
+    const QString ref = QStringLiteral("63-1226 - Church Order Pr 150");
+
+    auto textBlock = [](const QString &id, const QString &bind, const QString &body) {
+        return QVariantMap{
+            { QStringLiteral("id"), id }, { QStringLiteral("kind"), QStringLiteral("text") },
+            { QStringLiteral("bind"), bind }, { QStringLiteral("text"), body },
+            { QStringLiteral("x"), 0.0 }, { QStringLiteral("y"), 0.0 },
+            { QStringLiteral("width"), 754.0 }, { QStringLiteral("height"), 400.0 },
+        };
+    };
+
+    QVariantMap slide;
+    slide.insert(QStringLiteral("id"), QStringLiteral("quiet-time-selftest"));
+    slide.insert(QStringLiteral("title"), QStringLiteral("Verse 1"));
+    slide.insert(QStringLiteral("tag"), QStringLiteral("Quiet Time"));
+    slide.insert(QStringLiteral("line1"), text);
+    slide.insert(QStringLiteral("ref"), ref);
+    slide.insert(QStringLiteral("showCategory"), QStringLiteral("Quiet Time"));
+    slide.insert(QStringLiteral("templateOverride"), false);
+    slide.insert(QStringLiteral("blocks"),
+                 QVariantList{ textBlock(QStringLiteral("item-1"), QStringLiteral("title"), text),
+                               textBlock(QStringLiteral("item-2"), QStringLiteral("text"), ref) });
+
+    qInfo("[SELFTEST-QUIETTIME] staging a Quiet Time pick (title='%s', category='Quiet Time', blocks=2)",
+          qUtf8Printable(slide.value(QStringLiteral("title")).toString()));
+    stageSlides(QStringLiteral("Quiet Time selftest"), QVariantList{ slide });
+    goLive();
+
+    QTimer::singleShot(2500, this, [this, slide] {
+        const auto *model = OutputListModel::instance();
+        if (!model) {
+            qWarning("[SELFTEST-QUIETTIME] FAIL no output roster");
+            return;
+        }
+        const QString onAirCategory = onAirSlideRaw_.value(QStringLiteral("showCategory")).toString();
+        const int onAirBlocks = onAirSlideRaw_.value(QStringLiteral("blocks")).toList().size();
+        qInfo("[SELFTEST-QUIETTIME] on air: title='%s' live=%d blocks=%d category='%s'",
+              qUtf8Printable(onAirTitle_), live_ ? 1 : 0, onAirBlocks, qUtf8Printable(onAirCategory));
+
+        int rows = 0, shown = 0, blank = 0, drained = 0, wallBad = 0;
+        for (int i = 0; i < model->rowCount(); ++i) {
+            const QVariantMap row = model->getOutput(i);
+            if (!row.value(QStringLiteral("isEnabled")).toBool())
+                continue;
+            ++rows;
+            const QString styleId = row.value(QStringLiteral("styleId")).toString();
+            // What THIS output draws: its own style, the same call the wall tile makes.
+            const QVariantMap composed = previewWithStyle(slide, styleId);
+            const int blocks = composed.value(QStringLiteral("blocks")).toList().size();
+            const QString title = composed.value(QStringLiteral("title")).toString();
+            const QString category = composed.value(QStringLiteral("showCategory")).toString();
+            const bool cleared = composed.value(QStringLiteral("cleared")).toBool()
+                                 || composed.value(QStringLiteral("refusedByStyle")).toBool();
+            const bool ok = !cleared && blocks > 0 && !title.isEmpty();
+            if (ok)
+                ++shown;
+            else if (cleared || blocks == 0)
+                ++blank;
+            else
+                ++drained;
+            // THE WALL'S OWN PATH: once GO LIVE has taken the pick the staged copy is gone, so a
+            // monitor tile composes THIS map — the on-air copy, which was built with an EMPTY style
+            // spec so each output can re-style it — with its own style. Same style, different map:
+            // if that composition is empty while the pick's is not, the pick is on air and the wall
+            // shows a blank output (the reported "go live clears it").
+            const QVariantMap onAirComposed = previewWithStyle(onAirSlideRaw_, styleId);
+            const int onAirBlocks = onAirComposed.value(QStringLiteral("blocks")).toList().size();
+            const bool onAirCleared = onAirComposed.value(QStringLiteral("cleared")).toBool()
+                                      || onAirComposed.value(QStringLiteral("refusedByStyle")).toBool();
+            const bool onAirOk = !onAirCleared && onAirBlocks > 0;
+            if (!onAirOk)
+                ++wallBad;
+            qInfo("[SELFTEST-QUIETTIME] output=%s kind=%s style=%s blocks=%d title='%s' category='%s' cleared=%d ok=%d wallBlocks=%d wallCleared=%d wallOk=%d",
+                  qUtf8Printable(row.value(QStringLiteral("name")).toString()),
+                  qUtf8Printable(row.value(QStringLiteral("kind")).toString()),
+                  qUtf8Printable(styleId), blocks, qUtf8Printable(title),
+                  qUtf8Printable(category), cleared ? 1 : 0, ok ? 1 : 0,
+                  onAirBlocks, onAirCleared ? 1 : 0, onAirOk ? 1 : 0);
+            // ---- THE FRAME THE NDI SENDER WOULD CONVERT: does it still carry a KEY? ----------------
+            // The sender's own path reads FrameBufferOutput::LastFrameSnapshot() and hands pixels[] to
+            // RgbaToUyvy, which reads only R/G/B — the alpha byte (Color::Pack keeps it in the top one) is
+            // never looked at. This reads the SAME snapshot through the SAME row->buffer mapping
+            // (FeedBufferForRow) with NO conversion, so these counts are what a UYVA key would be made of:
+            // a0 = fully transparent pixels (a real key), a255 = fully opaque (nothing to key),
+            // apart = partial coverage (antialiased glyph edges), colouredClear = transparent-but-not-black
+            // (premultiplied or a painted stage, which tells the fill from a genuine clear).
+            {
+                const QString bufferName = FeedBufferForRow(i);
+                QString line = QStringLiteral("[SELFTEST-QUIETTIME] alpha output=%1 buffer=%2")
+                                   .arg(row.value(QStringLiteral("name")).toString(), bufferName);
+                auto found = pr::RenderEngine::Instance().GetOutput(bufferName.toStdString());
+                auto *fb = found.ok()
+                    ? dynamic_cast<pr::FrameBufferOutput *>(found.value().get()) : nullptr;
+                const auto frame = fb ? fb->LastFrameSnapshot() : nullptr;
+                if (!frame || frame->empty()) {
+                    line += QStringLiteral(" frame=none");
+                } else {
+                    qulonglong a0 = 0, apart = 0, a255 = 0, colouredClear = 0, ink = 0;
+                    int amin = 255, amax = 0;
+                    for (uint32_t px : frame->pixels) {
+                        const int a = int((px >> 24) & 0xFFu);
+                        if (a < amin) amin = a;
+                        if (a > amax) amax = a;
+                        if (a == 0) {
+                            ++a0;
+                            if ((px & 0x00FFFFFFu) != 0) ++colouredClear;
+                        } else if (a == 255) {
+                            ++a255;
+                        } else {
+                            ++apart;
+                        }
+                        const int r = int(px & 0xFFu), g = int((px >> 8) & 0xFFu), b = int((px >> 16) & 0xFFu);
+                        if (a > 0 && ((77 * r + 150 * g + 29 * b) >> 8) > 40) ++ink;
+                    }
+                    line += QStringLiteral(" w=%1 h=%2 amin=%3 amax=%4 a0=%5 a255=%6 apart=%7 ink=%8 colouredClear=%9 of=%10")
+                                .arg(frame->width).arg(frame->height).arg(amin).arg(amax)
+                                .arg(a0).arg(a255).arg(apart).arg(ink).arg(colouredClear)
+                                .arg(qulonglong(frame->pixels.size()));
+                }
+                qInfo("%s", qUtf8Printable(line));
+            }
+        }
+        qInfo("[SELFTEST-QUIETTIME] verdict outputs=%d shown=%d blank=%d drained=%d wallBad=%d live=%d onAirCategory='%s'",
+              rows, shown, blank, drained, wallBad, live_ ? 1 : 0, qUtf8Printable(onAirCategory));
+    });
+}
+
+// ---- AUTO-ADVANCE: DOES THE WALL'S TIMER MOVE THE SLIDE? (VGR_AUTOADVANCE_TEST=1) ----
+// The report: "the timer isn't moving the slide". Two separate defects produced that, and this run
+// covers both: the PACE (the timer must fire on each slide's own NEXT TIMER and take the step the Next
+// button takes) and the RECORD (it belongs to the SHOW, not to the slide title it was armed on, which
+// went false on the first step and disarmed it). Three slides, 2 s each: two steps in about 4 s.
+// run_auto_advance_test.sh counts the "auto-advance step" lines and checks the indexes advance in order.
+void LiveOutputService::runAutoAdvanceSelfTestOnce()
+{
+    if (qEnvironmentVariableIsSet("VGR_AUTOADVANCE_SCROLL")) {
+        // ---- SCROLL MODE: the timer must walk ONE LINE at a time, not change slide ----
+        // Scroll is switched on BEFORE the pick is staged, exactly as the wall's Slide/Scroll switch does
+        // it. Each page carries its own NEXT TIMER (2 s), so the pace is the page's, not a constant here.
+        setScrollMode(true);
+        const QStringList words{ QStringLiteral("alpha"), QStringLiteral("bravo"), QStringLiteral("charlie"),
+                                 QStringLiteral("delta"), QStringLiteral("echo"), QStringLiteral("foxtrot"),
+                                 QStringLiteral("golf"), QStringLiteral("hotel"), QStringLiteral("india"),
+                                 QStringLiteral("juliet") };
+        QVariantList pages;
+        for (int p = 0; p < 12; ++p) {
+            QString body = QStringLiteral("p%1 ").arg(p + 1);
+            for (int i = 0; i < 12; ++i)
+                body += words.at((i + p) % words.size()) + QLatin1Char(' ');
+            QVariantMap page;
+            page.insert(QStringLiteral("valid"), true);
+            page.insert(QStringLiteral("title"), QStringLiteral("Probe %1").arg(p + 1));
+            page.insert(QStringLiteral("body"), body);
+            page.insert(QStringLiteral("nextTimer"), 2.0);   // ONE LINE every 2 s
+            page.insert(QStringLiteral("blocks"), QVariantList{});
+            page.insert(QStringLiteral("background"), QString());
+            pages.append(page);
+        }
+        stageSlideSet(QStringLiteral("Auto-scroll selftest"), pages, 0);
+        if (!live_)
+            goLive();
+        // A RUN MUST NOT INHERIT THE LAST RUN'S RECORD (see the slide branch below).
+        autoAdvanceShow_.clear();
+        timedAdvanceApplied_ = false;
+        armAutoAdvanceTimer();
+        toggleAutoAdvance();
+        qInfo("[SELFTEST-AUTOADVANCE] armed scroll=%d live=%d advancing=%d set='%s' line=%.2f durationMs=%.0f",
+              scrollMode() ? 1 : 0, live_ ? 1 : 0, autoAdvancing() ? 1 : 0,
+              qUtf8Printable(lineSetName_), readingAbsoluteLine(), onAirDurationMs_);
+        return;
+    }
+    // THE MODE IS NOT INHERITED EITHER: Scroll persists (the wall's Slide/Scroll switch keeps it), and a
+    // slide run that began in Scroll took lineStep against an empty reading set — it logged "stopped at
+    // the end" on its first tick with the show perfectly steppable. Slide is this branch's subject.
+    setScrollMode(false);
+    // goLiveLoadedShow builds the selftest show for this gate too (see its env check).
+    if (!goLiveLoadedShow()) {
+        qWarning("[SELFTEST-AUTOADVANCE] FAIL could not go live with the selftest show");
+        return;
+    }
+    // A RUN MUST NOT INHERIT THE PREVIOUS RUN'S RECORD. shows.timedShow persists ON PURPOSE (a show keeps
+    // its timer), and applyTimedAdvance loads it lazily at go-live — so a stored name equal to this
+    // selftest's own show had ALREADY armed the timer before the press arrived, and the press toggled it
+    // OFF ("armed show='' advancing=0"). Cleared first, then armed deliberately.
+    autoAdvanceShow_.clear();
+    timedAdvanceApplied_ = false;
+    armAutoAdvanceTimer();
+    // THE WALL'S OWN BUTTON, pressed the way a hand presses it — no engine flag, no test-only path.
+    toggleAutoAdvance();
+    qInfo("[SELFTEST-AUTOADVANCE] armed show='%s' live=%d advancing=%d durationMs=%.0f",
+          qUtf8Printable(autoAdvanceShow_), live_ ? 1 : 0, autoAdvancing() ? 1 : 0, onAirDurationMs_);
 }
 
 // ---- CLEAR ALL / SHOW ALL ------------------------------------------------
@@ -554,6 +796,14 @@ bool LiveOutputService::next()
         emit onAirChanged();
         return true;
     }
+    // WHY THE STEP WAS REFUSED, on the record: "the timer isn't moving the slide" is exactly this
+    // return value, and the engine's own reason (the end of the set, or a position it will not leave)
+    // is otherwise invisible from here. The position is asked of the controller, not of the QML members,
+    // so a stale title/index cannot dress the answer up.
+    size_t at = 0, total = 0;
+    (void)bps::live::LiveOutputController::Instance().OnAirPositionSnapshot(at, total);
+    qInfo("LiveOutputService: Next() refused — %s (on air index %d of %d, live=%d)",
+          qUtf8Printable(QString::fromStdString(r.error().message)), int(at), int(total), live_ ? 1 : 0);
     return false;
 }
 
@@ -694,6 +944,8 @@ void LiveOutputService::refreshOnAirSlide()
     onAirSlide_ = slide ? slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle())
                         : QVariantMap{};
     onAirSlideRaw_ = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{}) : QVariantMap{};
+    // THIS slide's own NEXT TIMER, which is the wall's timer pace (0 = the slide waits for a hand).
+    onAirDurationMs_ = slide ? slide->durationMs : 0.0;
     if (slide && !slide->flowText.empty()) {
         onAirSlideRaw_.insert(QStringLiteral("flowText"), QString::fromStdString(slide->flowText));
         onAirSlideRaw_.insert(QStringLiteral("flowChar"), slide->flowChar);
@@ -705,6 +957,18 @@ void LiveOutputService::refreshOnAirSlide()
         if (OutputListModel *outputs = OutputListModel::instance())
             outputs->repushActiveStyleForTag(tag);
     }
+    // Re-apply the timer record: this slide belongs to some show, and only the recorded show advances by
+    // itself. The pace is the slide's own NEXT TIMER (nextTimer in the show file reads back as durationMs).
+    if (qEnvironmentVariableIsSet("VGR_TIMED_TEST")) {
+        // The selftest's own switch: it proves the engine advances on the slide's duration without a
+        // hand on the wall's timer button.
+        if (live_ && slide && slide->durationMs > 0.0)
+            pl::PresentationEngine::Instance().SetTimedAdvance(true);
+        qInfo("LiveOutputService: [TIMEDTEST] index=%d durationMs=%.0f title='%s' recorded='%s'",
+              onAirIndex_, slide ? slide->durationMs : 0.0, qUtf8Printable(onAirTitle_),
+              qUtf8Printable(autoAdvanceShow_));
+    }
+    applyTimedAdvance();
 }
 
 bool LiveOutputService::stagedHasFlow() const
@@ -1201,6 +1465,12 @@ QImage LivePreviewProvider::requestImage(const QString &id, QSize *size,
     const int q = name.indexOf(QLatin1Char('?'));
     if (q >= 0)
         name.truncate(q);
+
+    // For image://livepreview?v=... Qt supplies the query as the image-provider ID
+    // ("v=...") rather than an empty ID. Treat query-only IDs as the default program
+    // buffer; otherwise each frame request looks for a fictitious output named v=... .
+    if (name.startsWith(QLatin1String("v=")) || name.startsWith(QLatin1String("r=")))
+        name.clear();
     QImage out;
 
     const std::string bufferName = name.isEmpty()

@@ -275,7 +275,7 @@ Result<size_t> PresentationRuntime::Tick(double dt) {
 
     // Auto-advance for Timed/Automatic slides with a duration.
     const Slide* slide = CurrentSlide();
-    if (slide && slide->durationMs > 0.0) {
+    if (timedAdvance_ && slide && slide->durationMs > 0.0) {
         autoAdvanceAccum_ += dt;
         if (autoAdvanceAccum_ >= slide->durationMs / 1000.0) {
             autoAdvanceAccum_ = 0.0;

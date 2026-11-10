@@ -74,6 +74,9 @@ void RefreshBusPlanes(rendering::RenderEngine& engine, const std::string& sceneI
 void ReportLayerState(const std::string& sceneId, const std::string& label, std::string state);
 
 // ---- the compositor + overlay pass -----------------------------------------
+// `showMedia` is THIS OUTPUT's media gate (Settings · Routing's M switch, already ANDed into the
+// spec): false paints no media plane at all, so the file reaches only the outputs it is routed to.
 void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
-                         const rendering::Size& size, bool showOverlay = true);
+                         const rendering::Size& size, bool showOverlay = true,
+                         bool showMedia = true);
 } // namespace bps::presentation

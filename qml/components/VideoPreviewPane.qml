@@ -72,8 +72,14 @@ Column {
 
     // ---- Live preview plumbing ------------------------------------------
     property int previewNonce: 0
+    readonly property bool hardwarePreviewSupported: kind === "camera"
+        ? EngineBridge.platformCapabilities.videoCapture === true
+        : kind === "screen"
+            ? EngineBridge.platformCapabilities.screenCapture === true
+            : true
     readonly property bool live: (kind === "camera" || kind === "screen" || kind === "ndi")
                                  && previewLabel !== ""
+                                 && (kind === "ndi" || hardwarePreviewSupported)
     property string activeTapLabel: ""
     property string activeTapKind: ""
     function syncTap() {
@@ -104,6 +110,13 @@ Column {
         }
     }
     readonly property bool effectiveLive: live && (kind === "ndi" || !muted)
+    readonly property int previewIntervalMs: {
+        if (kind !== "camera")
+            return 66
+        const match = /p([0-9]+(?:\.[0-9]+)?)/i.exec(mode)
+        const fps = match ? Number(match[1]) : 0
+        return fps > 0 ? Math.max(16, Math.ceil(1000 / Math.min(fps, 30))) : 66
+    }
     onEffectiveLiveChanged: syncTap()
     onPreviewLabelChanged: syncTap()
     Component.onCompleted: syncTap()
@@ -115,7 +128,7 @@ Column {
     }
     Timer {
         id: previewTimer
-        interval: 66   // ~15 fps, matching the tap's production rate
+        interval: root.previewIntervalMs
         repeat: true
         running: root.effectiveLive
         onTriggered: root.previewNonce++
@@ -159,6 +172,21 @@ Column {
             visible: root.frameReady
             fillMode: root.kind === "screen" ? Image.PreserveAspectFit : Image.PreserveAspectFit
             cache: false   // every nonce IS a new frame — never cache stale ones
+        }
+
+        Text {
+            anchors.centerIn: parent
+            width: parent.width - 32
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            visible: (root.kind === "camera" || root.kind === "screen")
+                     && !root.hardwarePreviewSupported
+            text: root.kind === "camera"
+                  ? qsTr("Camera preview is not available on this platform yet")
+                  : qsTr("Screen capture is not available on this platform yet")
+            color: Theme.textSecondary
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.textSm
         }
 
         Item {

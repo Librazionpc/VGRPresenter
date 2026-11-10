@@ -53,6 +53,10 @@ Result<std::optional<std::string>> RunFileDialog(const std::string& args) {
 }
 } // namespace
 
+bool LinuxDialogs::Supported() const {
+    return HasDisplay() && CommandAvailable(kZenity);
+}
+
 Result<std::optional<std::string>> LinuxDialogs::OpenFileDialog(
     std::string_view title, const std::vector<std::string>& filters) {
     std::string cmd = std::string(kZenity) + " --file-selection --title=" +

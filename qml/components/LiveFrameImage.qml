@@ -50,13 +50,25 @@ Item {
         if (img.status !== Image.Ready || img === root.front)
             return
         if (root.isPlaceholder(img)) {
-            if (root.retries < root.maxRetries)
+            // A newer frame may have arrived while this full-resolution request was in flight.
+            // Skip retrying the stale placeholder and ask for the newest revision instead.
+            if (String(img.source) !== String(root.source)) {
+                img.source = root.source
+            } else if (root.retries < root.maxRetries) {
                 retryTimer.restart()
+            }
             return
         }
         root.retries = 0
         retryTimer.stop()
         root.aFront = (img === imgA)
+        // Full-screen HDMI frames take longer to load than the monitor tile's downscaled images.
+        // Do not cancel an in-flight load for every revision; show the completed frame, then
+        // immediately load the latest revision into the now-hidden buffer (dropping intermediates).
+        if (String(img.source) !== String(root.source)) {
+            const back = root.aFront ? imgB : imgA
+            back.source = root.source
+        }
     }
     Timer {
         id: retryTimer
@@ -79,6 +91,10 @@ Item {
             return
         }
         const back = root.aFront ? imgB : imgA
+        // Reassigning source while an async image is Loading repeatedly cancels a large HDMI
+        // frame before it can finish. swapIfReady() will load the latest source after completion.
+        if (back.status === Image.Loading)
+            return
         back.source = root.source
     }
 

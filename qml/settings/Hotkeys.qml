@@ -15,6 +15,8 @@ QtObject {
         search: "Ctrl+K",
         importShow: "Ctrl+I",
         record: "Ctrl+R",
+        // The wall's timer (auto-advance), so a show can be armed and stopped from the keyboard.
+        toggleTimer: "Ctrl+Shift+T",
         newShow: "Ctrl+N",
         openShow: "Ctrl+O",
         saveShow: "Ctrl+S",

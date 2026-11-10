@@ -140,6 +140,13 @@ struct NdiApi {
     void (*find_destroy)(NdiFindInstance);
     NdiSendInstance (*send_create)(const NdiSendCreateT*);
     void (*send_send_video_v2)(NdiSendInstance, const NdiVideoFrameV2*);
+    // Async: hands the frame over and returns, so a slow receiver cannot hold up the sender's
+    // cadence. p_data must stay valid until the next async call for that instance (the caller
+    // double-buffers).
+    void (*send_send_video_async_v2)(NdiSendInstance, const NdiVideoFrameV2*);
+    // Compressed (SpeedHQ): ~100-150 Mbit/s for 1080p30 against ~1 Gbit/s of raw 4:2:2, which is
+    // what makes a network link usable at all. Takes UYVY only. Optional in old runtimes.
+    void (*send_send_video_compressed_v2)(NdiSendInstance, const NdiVideoFrameV2*);
     void (*send_send_audio_v2)(NdiSendInstance, const NdiAudioFrameV2*);
     void (*send_destroy)(NdiSendInstance);
     // Receivers currently connected to a sender (mDNS-answered). 0 while
@@ -288,6 +295,20 @@ public:
         f.timecode = kNdiTimecodeSynthesize;
         f.p_data = static_cast<uint8_t*>(const_cast<void*>(data));
         f.line_stride_in_bytes = static_cast<int>(stride);
+        // ---- ASYNC FIRST, THEN COMPRESSED ------------------------------------------------
+        // A synchronous send blocks this caller on the socket, so one slow receiver holds up every
+        // later frame — which is exactly how lag builds up on the far machine. Async returns at once
+        // and the sender keeps its own cadence.
+        if (api_.send_send_video_async_v2) {
+            // Compressed (SpeedHQ) is the difference between "works over the LAN" and "drops most
+            // frames": raw 4:2:2 1080p30 is ~1 Gbit/s and saturates a gigabit link, compressed is a
+            // tenth of that. It accepts UYVY only; anything else takes the raw async path.
+            if (api_.send_send_video_compressed_v2 && info.fourCC == kFourCcUyvy)
+                api_.send_send_video_compressed_v2(it->second, &f);
+            else
+                api_.send_send_video_async_v2(it->second, &f);
+            return Ok();
+        }
         api_.send_send_video_v2(it->second, &f);
         return Ok();
     }
@@ -473,6 +494,8 @@ private:
         sym((void**)&api.find_destroy, "NDIlib_find_destroy");
         sym((void**)&api.send_create, "NDIlib_send_create");
         sym((void**)&api.send_send_video_v2, "NDIlib_send_send_video_v2");
+        sym((void**)&api.send_send_video_async_v2, "NDIlib_send_send_video_async_v2");
+        sym((void**)&api.send_send_video_compressed_v2, "NDIlib_send_send_video_compressed_v2");
         sym((void**)&api.send_send_audio_v2, "NDIlib_send_send_audio_v2");
         sym((void**)&api.send_destroy, "NDIlib_send_destroy");
         // Optional (absent in very old runtimes): connected-receiver count.

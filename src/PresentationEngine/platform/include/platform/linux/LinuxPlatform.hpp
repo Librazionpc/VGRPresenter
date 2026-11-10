@@ -1,22 +1,21 @@
 #pragma once
 
 #include "../PlatformAccessors.hpp"
-#include "../common/Filesystem.hpp"
+#include "../PlatformServices.hpp"
 #include "../common/Timer.hpp"
-#include "LinuxPaths.hpp"
 #include "LinuxThreading.hpp"
 #include "LinuxProcess.hpp"
-#include "LinuxLibrary.hpp"
 #include "LinuxMonitor.hpp"
-#include "LinuxAudio.hpp"
+#include "platform/qt/QtMediaDevices.hpp"
 #include "LinuxVideo.hpp"
 #include "LinuxNetwork.hpp"
 #include "LinuxPower.hpp"
-#include "LinuxClipboard.hpp"
+#include "platform/qt/QtClipboard.hpp"
+#include "platform/qt/QtComposed.hpp"
 #include "LinuxEnvironment.hpp"
-#include "LinuxLocale.hpp"
 #include "LinuxInput.hpp"
 #include "LinuxDialogs.hpp"
+#include "platform/qt/QtDialogs.hpp"
 #include "LinuxNotifications.hpp"
 #include "../common/PosixSocket.hpp"
 
@@ -37,28 +36,39 @@ public:
     std::string OsName() const override;
     std::string OsVersion() const override;
     std::string Arch() const override;
+    PlatformCapabilities Capabilities() const override;
 
     Snapshot Sample() override;
     std::vector<OsEvent> PollChanges() override;
 
 private:
-    FilesystemImpl filesystem_;
-    LinuxPaths paths_;
+    // THE PLATFORM SERVICES (docs/platform/qt_first_platform.md): Qt serves
+    // all five — ONE implementation on every OS. The native threading adapter
+    // remains only for what Qt has no API for (naming, affinity, priority).
+    PlatformPaths paths_;
+    LinuxThreading nativeThreading_;
+    PlatformThreading threading_{nativeThreading_};
+    PlatformFilesystem filesystem_;
+    PlatformLibrary library_;
+    PlatformLocale locale_;
     TimerImpl timer_;
-    LinuxThreading threading_;
     LinuxProcess process_;
-    LinuxLibrary library_;
     LinuxMonitor monitor_;
-    LinuxAudio audio_;
+    QtAudioDevices audio_;
     LinuxVideo video_;
-    LinuxNetwork network_;
+    LinuxNetwork nativeNetwork_;
+    QtNetwork network_{nativeNetwork_};
     LinuxPower power_;
-    LinuxClipboard clipboard_;
-    LinuxEnvironment environment_;
-    LinuxLocale locale_;
-    LinuxInput input_;
-    LinuxDialogs dialogs_;
-    LinuxNotifications notifications_;
+    QtClipboard clipboard_;   // QClipboard on the GUI thread (was xclip / wl-paste command lines)
+    LinuxEnvironment nativeEnvironment_;
+    QtEnvironment environment_{nativeEnvironment_};
+    LinuxInput nativeInput_;
+    QtInput input_{nativeInput_};
+    // File pickers: Qt's platform-theme dialogs first (nothing to install), zenity/kdialog as the fallback.
+    LinuxDialogs nativeDialogs_;
+    QtDialogs dialogs_{&nativeDialogs_, [this] { return nativeDialogs_.Supported(); }};
+    LinuxNotifications nativeNotifications_;
+    QtNotifications notifications_{nativeNotifications_};
     PosixSocketFactory sockets_;
 
     std::string lastMonitorIds_;              // for hot-plug change detection

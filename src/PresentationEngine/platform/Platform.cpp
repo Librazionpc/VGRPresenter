@@ -5,7 +5,15 @@
 #elif defined(_WIN32)
 #include "platform/windows/WindowsPlatform.hpp"
 #elif defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#define BPS_PLATFORM_MACOS 1
 #include "platform/macos/MacOSPlatform.hpp"
+#else
+#error "VGR Presenter PAL supports macOS, not other Apple platforms"
+#endif
+#else
+#error "VGR Presenter PAL supports only Windows, Linux, and macOS"
 #endif
 
 namespace bps::platform {
@@ -17,10 +25,8 @@ std::unique_ptr<IPlatform> CreatePlatform() {
     return std::make_unique<LinuxPlatform>();
 #elif defined(_WIN32)
     return std::make_unique<WindowsPlatform>();
-#elif defined(__APPLE__)
+#elif defined(BPS_PLATFORM_MACOS)
     return std::make_unique<MacOSPlatform>();
-#else
-    return nullptr;   // platform not yet available on this OS
 #endif
 }
 

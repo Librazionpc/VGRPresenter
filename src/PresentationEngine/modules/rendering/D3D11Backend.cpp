@@ -1196,7 +1196,7 @@ std::unique_ptr<IGraphicsBackend> CreateD3D11Backend(std::string* failureReason)
 namespace bps::rendering {
 std::unique_ptr<IGraphicsBackend> CreateD3D11Backend(std::string* failureReason) {
     if (failureReason)
-        *failureReason = "this build has no D3D11 (not Windows)";
+        failureReason->clear();   // not Windows: there is nothing to explain (the QRhi backend is the GPU path here)
     return nullptr;
 }
 } // namespace bps::rendering

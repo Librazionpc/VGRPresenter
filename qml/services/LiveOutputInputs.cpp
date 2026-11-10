@@ -59,6 +59,7 @@
 #include <QMediaPlayer>
 #include <QUrl>
 #include <QVideoFrame>
+#include <QVideoFrameFormat>
 #include <QVideoSink>
 #include <algorithm>
 #include <chrono>
@@ -143,6 +144,95 @@ void LiveOutputService::EnsureInputPump()
         inputPump_->start();
 }
 
+void LiveOutputService::attachInputSink(QVideoSink *sink)
+{
+    if (!sink)
+        return;
+    std::lock_guard<std::mutex> mirrors(inputMirrorMutex_);
+    for (const QPointer<QVideoSink> &have : inputMirrorSinks_)
+        if (have == sink)
+            return;
+    inputMirrorSinks_.erase(std::remove_if(inputMirrorSinks_.begin(), inputMirrorSinks_.end(),
+                                           [](const QPointer<QVideoSink> &p) { return p.isNull(); }),
+                            inputMirrorSinks_.end());
+    inputMirrorSinks_.emplace_back(sink);
+}
+
+void LiveOutputService::forwardInputFrame(const QVideoFrame &frame)
+{
+    std::lock_guard<std::mutex> mirrors(inputMirrorMutex_);
+    for (const QPointer<QVideoSink> &sink : inputMirrorSinks_)
+        if (sink)
+            sink->setVideoFrame(frame);   // thread-safe: the surface paints it on the render thread
+}
+
+// ONE WORKER per taken camera/screen. It waits (a 2 ms nap) for the tap's frame counter to move, copies
+// the newest picture ONCE into a QVideoFrame and hands that to every attached surface. The interface
+// thread is not involved: no JPEG, no QImage, no per-consumer decode. A slow consumer cannot slow the
+// tap, and a frame that arrives while the last is still being copied simply replaces it (latest wins).
+void LiveOutputService::startInputFeed(const QString &resolvedDeviceId)
+{
+    stopInputFeed();
+    if (resolvedDeviceId.isEmpty())
+        return;
+    inputFeedStop_.store(false, std::memory_order_release);
+    spawnInputFeedWorker(resolvedDeviceId.toStdString());   // everything below runs on the worker
+}
+
+void LiveOutputService::spawnInputFeedWorker(const std::string &deviceId)
+{
+    inputFeedThread_ = bps::QtThread([this, deviceId] {
+        if (!bps::platform::PlatformAccessor::Installed())
+            return;
+        auto &video = bps::platform::PlatformAccessor::Get().Video();
+        uint64_t last = 0;
+        while (!inputFeedStop_.load(std::memory_order_acquire)) {
+            const uint64_t seq = video.PreviewFrameSeq(deviceId);
+            if (seq == 0 || seq == last) {
+                QThread::msleep(2);
+                continue;
+            }
+            // The tap's own buffer, SHARED (no copy of its own): the one copy this feed makes is the one
+            // into the QVideoFrame below. (The counter above is checked first because a backend whose
+            // shared frame is a copy must not pay it on every 2 ms poll.)
+            const auto pixels = video.PreviewFrameShared(deviceId);
+            if (pixels.empty() || pixels.width < 2 || pixels.height < 2) {
+                QThread::msleep(2);
+                continue;
+            }
+            last = pixels.seq != 0 ? pixels.seq : seq;
+            QVideoFrameFormat format(QSize(static_cast<int>(pixels.width), static_cast<int>(pixels.height)),
+                                     QVideoFrameFormat::Format_RGBA8888);
+            QVideoFrame frame(format);
+            if (!frame.map(QVideoFrame::WriteOnly))
+                continue;
+            const size_t srcStride = static_cast<size_t>(pixels.width) * 4u;
+            const size_t dstStride = static_cast<size_t>(frame.bytesPerLine(0));
+            const size_t rowBytes = std::min(srcStride, dstStride);
+            const uint8_t *src = pixels.rgba->data();
+            uchar *dst = frame.bits(0);
+            if (pixels.rgba->size() < srcStride * pixels.height) {   // a short buffer must never be read past its end
+                frame.unmap();
+                continue;
+            }
+            for (uint32_t y = 0; y < pixels.height; ++y)
+                std::memcpy(dst + y * dstStride, src + y * srcStride, rowBytes);
+            frame.unmap();
+            inputFramesFed_.fetch_add(1, std::memory_order_relaxed);
+            forwardInputFrame(frame);
+        }
+        forwardInputFrame(QVideoFrame());   // stopped: every surface lets go of the last picture
+    });
+}
+
+void LiveOutputService::stopInputFeed()
+{
+    // The worker clears the surfaces itself as it leaves, so this is only a flag and a join (which
+    // returns at once when no feed was running) — nothing here for the interface thread to wait on.
+    inputFeedStop_.store(true, std::memory_order_release);
+    inputFeedThread_.join();
+}
+
 void LiveOutputService::takeInput(const QString &label, const QString &kind, const QString &mode)
 {
     if (!InputKindHasTap(kind)) {
@@ -171,6 +261,11 @@ void LiveOutputService::takeInput(const QString &label, const QString &kind, con
     EnsureInputPump();
     const QString resolvedId = EngineBridge::instance().resolvedPreviewDeviceId(label);
     pl::CompositorState::Instance().SetTakenInput(resolvedId.toStdString(), kind.toStdString());
+    // A camera or screen goes to the GPU surfaces from a worker; NDI keeps the frame path it has.
+    if (kind == QLatin1String("camera") || kind == QLatin1String("screen"))
+        startInputFeed(resolvedId);
+    else
+        stopInputFeed();
     emit inputChanged();
 }
 
@@ -186,6 +281,8 @@ void LiveOutputService::pushNdiInputFrame(const QImage &frame)
     mf.height = uint32_t(frame.height());
     mf.rgba.assign(frame.constBits(), frame.constBits() + size_t(frame.sizeInBytes()));
     compositor.SetMediaFrame(std::move(mf));
+    // The same picture to the GPU surfaces (an NDI input has no PAL tap for the worker to read).
+    forwardInputFrame(QVideoFrame(frame));
     ndiInputLive_ = true;
 }
 
@@ -194,6 +291,7 @@ void LiveOutputService::clearNdiInputFrame()
     if (!ndiInputLive_)
         return;
     pl::CompositorState::Instance().ClearMedia();
+    forwardInputFrame(QVideoFrame());   // the surfaces let go of the last NDI picture
     ndiInputLive_ = false;
 }
 
@@ -262,6 +360,15 @@ bool LiveOutputService::PushBusFeedFrames()
 
 void LiveOutputService::pumpTick()
 {
+    // A taken camera/screen whose feed is not running yet: the tap's device id is only known once the
+    // (asynchronous) tap open has registered it, which can be a beat AFTER the take. Start the feed the
+    // first tick the id is there, so a take that raced the open still ends up on the GPU surface.
+    if (!inputLabel_.isEmpty() && !inputFeedThread_.joinable()
+        && (inputKind_ == QLatin1String("camera") || inputKind_ == QLatin1String("screen"))) {
+        const QString id = EngineBridge::instance().resolvedPreviewDeviceId(inputLabel_);
+        if (!id.isEmpty())
+            startInputFeed(id);
+    }
     // A taken CAMERA or SCREEN tap keeps its pixels in the engine, which composes the program from
     // them itself: all this tick needs from it is "did a frame arrive". The tap's counter answers that;
     // the old way copied the whole frame (8 MB at 1080p) into a QImage on the interface thread every
@@ -580,6 +687,7 @@ void LiveOutputService::clearInput()
 {
     if (inputLabel_.isEmpty())
         return;
+    stopInputFeed();   // before the tap goes: the worker reads it
     StopTap(inputKind_, inputLabel_, QStringLiteral("output"));
     producing_.remove(inputLabel_);
     inputLabel_.clear();
@@ -629,7 +737,11 @@ static void runMediaTakeSelfTest()
     for (const QString &dir : { QStringLiteral("C:/Windows/Web/Wallpaper/Windows"),
                                 QStringLiteral("C:/Windows/Web/Wallpaper/Theme1"),
                                 QStringLiteral("C:/Windows/Web/Wallpaper"),
-                                QStringLiteral("C:/Windows/Web/Screen") }) {
+                                QStringLiteral("C:/Windows/Web/Screen"),
+                                QStringLiteral("/System/Library/Desktop Pictures"),
+                                QStringLiteral("/Library/Desktop Pictures"),
+                                QStringLiteral("/usr/share/backgrounds"),
+                                QStringLiteral("/usr/share/wallpapers") }) {
         const QDir d(dir);
         if (!d.exists())
             continue;
@@ -702,6 +814,14 @@ static void runMediaTakeSelfTest()
     });
 }void LiveOutputService::runEnvSelfTest()
 {
+    if (qEnvironmentVariableIsSet("VGR_QUIETTIME_TEST")) {
+        QTimer::singleShot(3000, &instance(), [] { instance().runQuietTimeSelfTestOnce(); });
+        return;
+    }
+    if (qEnvironmentVariableIsSet("VGR_AUTOADVANCE_TEST")) {
+        QTimer::singleShot(3000, &instance(), [] { instance().runAutoAdvanceSelfTestOnce(); });
+        return;
+    }
     if (!qEnvironmentVariableIsSet("VGR_OUTPUT_INPUT_TEST"))
         return;
     QTimer::singleShot(25000, &instance(), [] { runMediaTakeSelfTestOnce(); });
@@ -737,8 +857,11 @@ QString LiveOutputService::PickSelfTestInputLabel() const
     }
     label.clear();
     for (const QVariant &v : screen) {
+        // Any monitor entry — Windows names them "\\.\DISPLAYn", the other OSes use their own ids; a
+        // window source ("win:") is not one, and the first monitor is as good a source as any here.
         const QVariantMap d = v.toMap();
-        if (d.value("id").toString().startsWith(QStringLiteral("\\\\.\\DISPLAY"))) {
+        if (!d.value("id").toString().startsWith(QStringLiteral("win:"))
+            && !d.value("label").toString().isEmpty()) {
             label = d.value("label").toString();
             break;
         }

@@ -40,12 +40,18 @@ Item {
     readonly property var frameRates: ["24 fps", "30 fps", "50 fps", "60 fps"]
     readonly property var resolutions: ["720p", "1080p", "4K"]
 
-    function containerOk(name) {
+    function containerOk(name, kind) {
         const list = RecordingService.availableContainers
+        if (kind === "audio" && EngineBridge.platformCapabilities.audioRecording === false)
+            return false
+        if (kind === "recording" && EngineBridge.platformCapabilities.videoRecording === false)
+            return false
         return list.length === 0 || list.indexOf(String(name).toUpperCase()) >= 0
     }
     function encoderOk(name) {
         const list = RecordingService.availableEncoders
+        if (EngineBridge.platformCapabilities.videoRecording === false)
+            return false
         return list.length === 0 || list.indexOf(String(name)) >= 0
     }
     // The warning for a saved choice the engine cannot honour ("" = fine).
@@ -53,11 +59,11 @@ Item {
         const bad = []
         if (kind === "audio") {
             const format = root.cfgText("format")
-            if (!root.containerOk(format)) bad.push(format)
+            if (!root.containerOk(format, "audio")) bad.push(format)
         } else {
             const container = root.cfgText("container")
             const encoder = root.cfgText("encoder")
-            if (kind === "recording" && !root.containerOk(container)) bad.push(container)
+            if (kind === "recording" && !root.containerOk(container, "recording")) bad.push(container)
             if (!root.encoderOk(encoder)) bad.push(encoder)
         }
         if (bad.length === 0)
@@ -269,7 +275,7 @@ Item {
                         // rowCount() call, so adding the first preset hides this at once.
                         visible: presetRepeater.count === 0
                         width: parent.width
-                        text: qsTr("No presets yet. Add a Recording preset (a video file on this machine), an Audio preset (WAV, M4A or MP3) or a Streaming preset (an RTMP target), then add it as an output in Settings · Routing.")
+                        text: qsTr("No presets yet. Add a Recording preset (where video recording is supported), an Audio preset (using a format available on this machine) or a Streaming preset (an RTMP target), then add it as an output in Settings · Routing.")
                         wrapMode: Text.WordWrap
                         color: Theme.textMuted
                         font.family: Theme.fontFamily
@@ -542,7 +548,7 @@ Item {
                                 label: modelData.label
                                 selected: root.cfgText("format") === modelData.key
                                 // Greyed out when this machine has no writer for it (MP3 needs an encoder).
-                                enabled: root.containerOk(modelData.key)
+                                enabled: root.containerOk(modelData.key, "audio")
                                 opacity: enabled ? 1 : 0.35
                                 onPicked: root.setCfg("format", modelData.key)
                             }
@@ -599,7 +605,7 @@ Item {
                                 required property string modelData
                                 label: modelData
                                 // Greyed out when this build has no writer for it.
-                                enabled: root.containerOk(modelData)
+                                enabled: root.containerOk(modelData, "recording")
                                 opacity: enabled ? 1 : 0.35
                                 selected: root.cfgText("container") === modelData
                                 onPicked: root.setCfg("container", modelData)

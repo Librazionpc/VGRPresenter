@@ -70,6 +70,12 @@ public:
 
     // ---- THE READING SCROLL (Alt+Down / Alt+Up) ----------------------------
     void SetFlowChar(float chars) { FlowCharPush(chars); }
+    // The two characters the current step glides between (-1,-1 = no step in flight): every output
+    // turns them into whole lines of its own table (flowscroll::SnappedLineForChar).
+    void SetFlowSpan(float fromChar, float toChar) {
+        flowSpanFrom_.store(fromChar);
+        flowSpanTo_.store(toChar);
+    }
     // The position the outputs are drawn with: the stored number, and whether it is
     // still moving ("keep composing" — see FlowCharMoving).
     float FlowChar() const { return flowChar_.load(); }
@@ -153,6 +159,8 @@ private:
     void SeedFlowCharFromContent();
     bool FlowCharMoving(int64_t nowMs);
     std::atomic<float> flowChar_{0.0f};
+    std::atomic<float> flowSpanFrom_{-1.0f};
+    std::atomic<float> flowSpanTo_{-1.0f};
     std::atomic<int64_t> flowCharAtMs_{0};
     std::atomic<bool> flowCharSettle_{false};
     static constexpr int kFlowCharSettleMs = 60;
@@ -182,7 +190,7 @@ private:
     presentation::Presentation liveContent_;
     std::shared_ptr<rendering::FrameBufferOutput> preview_;   // the QML feed
 
-    void RenderPerOutputPasses(float contentScrollChars = 0.0f);
+    void RenderPerOutputPasses(float contentScrollChars = 0.0f, float spanFrom = -1.0f, float spanTo = -1.0f);
 
     // The interface thread's copy of what is on air (see OnAirSlidesSnapshot).
     mutable std::mutex snapshotMutex_;

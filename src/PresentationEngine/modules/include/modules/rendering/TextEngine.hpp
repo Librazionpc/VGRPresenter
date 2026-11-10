@@ -131,7 +131,13 @@ public:
 
     std::string SubstituteFamily(std::string_view family) const;
 
+    // THE PLATFORM'S OWN FACES, chosen in code per OS (TextEngine.cpp: the chains). SystemUiFamily() is the face
+    // the interface and any design that names none is drawn with; PlatformContentFamily() the serif slide text
+    // starts in; PlatformMonoFamily() the fixed-width face. Each is the FIRST installed face of that OS's own
+    // list, so no OS depends on another one's fonts (the app used to ask every OS for "Cambria").
     std::string SystemUiFamily() const;
+    std::string PlatformContentFamily() const;
+    std::string PlatformMonoFamily() const;
 
     // The face to draw with when a design names NONE — SystemUiFamily(), and
     // "builtin" only when no system font backend resolves at all.
@@ -158,6 +164,10 @@ private:
     mutable std::map<std::string, std::string, std::less<>> substitutes_;
     mutable std::string systemUiFamily_;
     mutable bool systemUiFamilyResolved_ = false;
+    mutable std::string platformContentFamily_;
+    mutable bool platformContentResolved_ = false;
+    mutable std::string platformMonoFamily_;
+    mutable bool platformMonoResolved_ = false;
 };
 
 // ---------------------------------------------------------------------------

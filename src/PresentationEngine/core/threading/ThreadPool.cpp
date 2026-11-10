@@ -111,7 +111,7 @@ Result<void> ThreadPool::SetWorkerAffinity(size_t workerIndex, int cpu) {
         return Error::Make(Err::NotFound, "ThreadPool", "worker index out of range");
     if (cpu < 0) return Error::Make(Err::InvalidArgument, "ThreadPool", "cpu must be >= 0");
     // Affinity control goes through the PAL (Phase 2): pthread_setaffinity_np
-    // lives in platform/linux/LinuxThreading.cpp, never here.
+    // lives in the native platform threading adapters (platform/windows/, platform/linux/), never here.
     auto r = platform::PlatformAccessor::Get().Threading().SetThreadAffinityById(
         workers_[workerIndex].nativeId(), static_cast<unsigned>(cpu));
     if (!r.ok())

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================================
-# tools/make_installer.sh — build the USER-FACING Windows installer.
+# tools/make_installer.sh — build the USER-FACING installer. THE one release command on every OS:
+#   Windows  → dist/VGRPresenter-Setup-<version>.exe            (this file, below)
+#   Linux    → dist/VGRPresenter-Setup-<version>-linux-<arch>.AppImage   (tools/make_installer_unix.sh)
+#   macOS    → dist/VGRPresenter-Setup-<version>-macos-<arch>.dmg        (tools/make_installer_unix.sh)
+# Run it the same way everywhere; it picks the platform's flow and reads the version from one place.
+#
+# (Windows flow:)
 #
 # The end user downloads ONE exe and runs it: everything is inside (app + Qt +
 # MinGW runtime), it installs per-user with no admin prompt, adds Start-menu /
@@ -33,6 +39,15 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+
+# ONE RELEASE COMMAND ON EVERY OS. On Linux and macOS this hands over, unchanged, to the same flow for
+# that platform (release build → seed → AppImage / signed .app in a .dmg, named
+# VGRPresenter-Setup-<version>-<os>-<arch>.<ext>, same version source, same verdict lines). Only Windows
+# continues below, to the Inno Setup .exe.
+case "$(uname -s)" in
+    Linux*|Darwin*) exec bash "$ROOT/tools/make_installer_unix.sh" "$@" ;;
+esac
+
 DIST="$ROOT/dist/VGRPresenter"
 # Same overrides as dev_cycle/make_portable: bps_cli needs the msys2 runtime AND the Qt runtime on PATH
 # (it links the engine, which links Qt Gui). Without Qt there Windows shows a missing-DLL popup instead of

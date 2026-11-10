@@ -119,6 +119,17 @@ Item {
     property int sliceLines: 0
     property string sliceText: ""
     property string sliceKey: ""
+    // The numbers the slice was last validated against (see refreshSlice: the per-tick path compares these, not the text).
+    property var sliceStage: -1
+    property string sliceStyle: ""
+    property int sliceVisible: -1
+    // WHEN THIS SURFACE RE-SLICES, STAGGERED. Every surface (each monitor tile, the pane) re-slices at the same line, and
+    // a new slice is a justified re-layout of ~3 screens of text on EACH of them, inside ONE tick: ~35 ms on a real
+    // passage — a hitch every few lines on the tiles while the engine output stayed smooth (a short passage never
+    // slices, which is why it ran clean). Each surface now re-slices a few lines EARLIER than the minimum, by its own
+    // random margin picked when its slice is made, so the shifts land on different ticks and each costs a few
+    // milliseconds instead of all of them at once.
+    property int shiftSkew: 0
     property bool sliceAtEnd: false
     // A list format rewrites the text, so the table's line starts are not its line starts:
     // that one block keeps the whole passage (it is the case `sliced` already excludes).
@@ -132,8 +143,8 @@ Item {
     // surface's passage text; a scroll tick that stays inside the current window leaves it
     // alone, so the justified Text is not laid out again (which is what a tell used to cost).
     function refreshSlice() {
-        const flow = String(LiveOutputService.readingFlowText ?? "")
         if (!root.animateLineSteps || LiveOutputService.readingBudgetFitActive !== true) {
+            const flow = String(LiveOutputService.readingFlowText ?? "")   // (only this branch needs the whole text)
             root.sliceWhole = true
             root.sliceFirst = 0
             root.sliceLines = 0
@@ -146,15 +157,34 @@ Item {
         const style = String(root.readingStyleId)
         const visible = Math.max(3, LiveOutputService.readingVisibleLinesFor(style))
         const first = Math.max(0, Math.floor(root.stepLine))
-        const key = LiveOutputService.readingStageSerial + "|" + flow.length + "|" + flow.slice(0, 24)
-                    + "|" + style + "|" + visible + "|" + LiveOutputService.readingAnchorSerial()
+        const stage = LiveOutputService.readingStageSerial
         const roomBelow = root.sliceFirst + root.sliceLines - (first + visible)
-        // (a whole-passage surface answers from the memo too: re-slicing it every tick
-        // bought the same text back)
-        if (key === root.sliceKey && first >= root.sliceFirst
-                && (root.sliceWhole || roomBelow >= 2 || root.sliceAtEnd))
+        // THE PER-TICK PATH COSTS NUMBERS, NOT THE PASSAGE. This check runs on EVERY surface on EVERY tick of
+        // every glide (twice: the position change and the service's tell). It used to build its key from the
+        // passage text itself (`flow`, fetched from C++ into JS, sliced, concatenated) — a cost that grows with the
+        // passage (a 3-6k character Bible chapter or sermon page against a short probe) and was multiplied by
+        // every monitor tile: the reason a real passage's glide cost ~35 ms per tick while a short one did not,
+        // so the surfaces had to be throttled to a few frames a second (they read as a jitter next to the
+        // engine's own smooth output). The stage serial already says "the passage changed"; the text is only
+        // fetched when it (or the style / size / window) did.
+        if (stage === root.sliceStage && style === root.sliceStyle
+                && visible === root.sliceVisible && first >= root.sliceFirst
+                && (root.sliceWhole || roomBelow >= 2 + root.shiftSkew || root.sliceAtEnd))
             return                      // still comfortably inside the slice
+        const flowText = String(LiveOutputService.readingFlowText ?? "")
+        const key = stage + "|" + flowText.length + "|" + flowText.slice(0, 24)
+                    + "|" + style + "|" + visible
+        if (key === root.sliceKey && first >= root.sliceFirst
+                && (root.sliceWhole || roomBelow >= 2 + root.shiftSkew || root.sliceAtEnd)) {
+            root.sliceStage = stage; root.sliceStyle = style; root.sliceVisible = visible
+            return                      // the same passage after all (a serial moved, the text did not)
+        }
+        root.sliceStage = stage; root.sliceStyle = style; root.sliceVisible = visible
         const slice = LiveOutputService.readingFlowSliceFor(style, Math.max(0, first - visible), visible * 3)
+        // A new random margin for THIS slice (0 .. visible-4 lines earlier than the bare minimum), so the surfaces' next
+        // shifts are spread over different ticks. The new slice leaves `visible` lines of room, so the margin can
+        // never exceed what it holds.
+        root.shiftSkew = Math.floor(Math.random() * Math.max(1, visible - 3))
         root.sliceKey = key
         root.sliceFirst = slice.first
         root.sliceLines = slice.lines

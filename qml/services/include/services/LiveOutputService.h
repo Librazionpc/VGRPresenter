@@ -6,6 +6,9 @@
 #include <QQuickImageProvider>
 #include <QSet>
 #include <QObject>
+#include <QPointer>
+#include "core/threading/QtThread.hpp"
+#include <QVideoSink>
 #include <QQmlEngine>
 #include <QtQml/qqmlregistration.h>
 #include <QVariantMap>
@@ -27,6 +30,8 @@ class QVariantAnimation;
 class QAudioOutput;
 class QVideoSink;
 namespace bps::rendering { struct Frame; }
+namespace bps::display { struct NdiRgbaFrame; }
+class QThreadPool;
 
 // ONE MEASURED LINE of a passage, as a span of its source text (not a string): where the line starts
 // and one past where it ends (the break itself is not included). Shared by the reading run's cache
@@ -203,8 +208,10 @@ public:
     bool ndiWarming() const;
     QString ndiWarmingOutputName() const;
     QVariantMap ndiOutputStates() const { return ndiOutputStates_; }
+    // The frame arrives already copied to alpha-preserving RGBA: the feed tick copies each distinct buffer ONCE
+    // and hands the same bytes to every output fed by it (see ndiWorkerTick).
     static void ndiWorkerSendFrame(void *provider,
-                                   std::shared_ptr<const bps::rendering::Frame> frame,
+                                   std::shared_ptr<const bps::display::NdiRgbaFrame> frame,
                                    QString senderName, float fps);
     QVariantList cardPreviewsList() const
     {
@@ -242,6 +249,13 @@ public:
     Q_INVOKABLE void takeMediaAtLevel(const QString &path, const QString &name, qreal levelPercent, bool muted);
     // Change the level/mute of the media on air now (a source edited while its file is playing).
     Q_INVOKABLE void setMediaLevel(qreal levelPercent, bool muted);
+    // Show the media on air in a QML VideoOutput (the GPU video path the Media tab's thumbnail uses) fed by
+    // the ONE player the app already decodes with — no second decoder, no per-frame image conversion.
+    Q_INVOKABLE void attachMediaSink(QVideoSink *sink);
+    // The same for the CAMERA or SCREEN that is taken to the output (LiveInputSurface.qml).
+    Q_INVOKABLE void attachInputSink(QVideoSink *sink);
+    // Frames handed to the attached surfaces since the app started (diagnostics + the self-test).
+    Q_INVOKABLE qulonglong inputFramesFed() const { return inputFramesFed_.load(std::memory_order_relaxed); }
     Q_INVOKABLE void clearMedia();
     // Update the current file's optional fill override and apply it to the
     // on-air frame. An empty value returns the file to the Outputs default.
@@ -256,6 +270,12 @@ public:
     Q_INVOKABLE QString formatMediaTime(qlonglong ms) const;
 
     static void runEnvSelfTest();
+    // VGR_QUIETTIME_TEST: a Quiet Time pick staged and taken, then every output's own style
+    // asked for the picture it would draw (see runQuietTimeSelfTestOnce).
+    void runQuietTimeSelfTestOnce();
+    // VGR_AUTOADVANCE_TEST: a 3-slide show with a 2 s NEXT TIMER each, live, then the wall's timer is
+    // PRESSED — the proof that the timer moves the slide (see run_auto_advance_test.sh).
+    void runAutoAdvanceSelfTestOnce();
 
     Q_INVOKABLE void goLive();
     Q_INVOKABLE void goLiveWithSlides(const QString &name, const QVariantList &slides);
@@ -350,6 +370,26 @@ public:
 
     Q_INVOKABLE void stepPassage(int direction);
 
+    // ---- AUTO-ADVANCE (the wall's timer button): the on-air set slides by itself ------
+    Q_PROPERTY(bool autoAdvancing READ autoAdvancing NOTIFY autoAdvanceChanged)
+    bool autoAdvancing() const;
+    // The timer is RECORDED WITH THE SHOW it was turned on for (shows.timedShow) and paces that show by
+    // its own per-slide NEXT TIMER values (the engine advances a slide on its durationMs) — another show
+    // never inherits it, and a show with no times on its slides stays manual.
+    Q_INVOKABLE void toggleAutoAdvance();
+    // Push the record at the engine: on only for the recorded show, while it is the one on air.
+    void applyTimedAdvance();
+    // THE SET the timer is recorded against — the SHOW's name, not the title of the slide showing at the
+    // moment of the press (onAirTitle_ follows the slide, and comparing against it disarmed the timer on
+    // the first step: the reported "the timer isn't moving the slide").
+    QString autoAdvanceShowKey() const;
+    // The wall's pace: one shot per slide, armed with that slide's own NEXT TIMER. RE-ARMED on every slide
+    // change (applyTimedAdvance calls it), so each slide keeps its own time.
+    void armAutoAdvanceTimer();
+    // The step: the SAME one the Next button and its hotkeys take — a line in Scroll, the next slide in
+    // Slide — so a show scrolls when Scroll is on, without a second stepping path to keep in step.
+    void onAutoAdvanceTimeout();
+
     Q_INVOKABLE bool stagedIsOurs(const QString &title) const;
 
     // ---- The wall transport's steppers -------------------------------------
@@ -419,15 +459,21 @@ signals:
     // and the ~30 fps position/frame tick while a video plays.
     void mediaChanged();
     void mediaTick();
+    // A take REFUSED before it started: no enabled video output can receive the media layer, so nothing
+    // decoded and nothing is on air. The explanation (and the Routing action) belongs to the UI.
+    void mediaTakeBlocked(const QString &path, const QString &name);
     // stepPassage() reached the edge of the on-air set: the tab whose content
     // IS on air should re-pick the neighbouring passage (direction -1/+1).
     void passageStepRequested(int direction);
     // The set of tabs claiming they can step the tile's content changed (see
     // setWallStepper): the wall's ‹ › relight themselves from this.
     void wallStepperChanged();
+    // The wall's timer button started/stopped advancing the on-air set by itself.
+    void autoAdvanceChanged();
 
 private:
     explicit LiveOutputService(QObject *parent = nullptr);
+    ~LiveOutputService() override { stopInputFeed(); }   // the feed thread must never outlive the members it reads
 
     static LiveOutputService *s_instance;
 
@@ -551,6 +597,8 @@ private:
     // (see applyReadingScroll: the next one waits out the last one's price).
     mutable QElapsedTimer readingScrollNotifyClock_;
     qint64 readingScrollNotifyCostMs_ = 0;
+    // The tell price SMOOTHED (see applyReadingScroll): one slow tell must not freeze every tile for twice its length.
+    double readingScrollNotifyAvgMs_ = 0.0;
     // The position the surfaces were last told (-1e9 = never). A tell that says the
     // same number is a full surface re-layout bought for nothing.
     qreal readingScrollNotified_ = -1e9;
@@ -630,27 +678,13 @@ private:
         QString sig;
     };
     QHash<QString, ScrollColumn> scrollColumns_;
-    // EVERY SCREEN'S FIRST LINE STARTS ON THE SAME WORD. Each output wraps the passage at its own size, so a
-    // character that begins a line on one screen is mid-line on another, and that screen's top line began
-    // a few words earlier ("darkness was upon the face…" on the Lower Third where Main began "was upon…").
-    // The line table of every output is therefore ANCHORED at the character the walk is going to: the lines
-    // before it stay as they were (nothing on screen jumps), and from it on the passage is wrapped afresh at
-    // that output's own font and box — a small reflow below the top line, and the same word at the top
-    // of every screen. See anchorReadingTablesAt.
-    struct AnchoredLines {
-        QString baseKey;          // which (output, size, passage) this was derived for: another one, start over
-        int anchor = -1;          // the window-local character the table is anchored at
-        QVector<int> seams;       // anchors that cut the line before them short (a slice must break there too)
-        StyleRunLines table;
-    };
-    mutable QHash<QString, AnchoredLines> anchoredLines_;   // by output style
-    void anchorReadingTablesAt(int windowChar);
-    quint64 anchorSerial_ = 0;   // moves whenever any output's anchored table changed
-public:
-    // A surface keys its slice on this: the lines move when the anchor does, with the same passage and size.
-    Q_INVOKABLE qulonglong readingAnchorSerial() const { return anchorSerial_; }
-private:
-    const AnchoredLines *anchoredLinesFor(const QString &styleId, const QString &text) const;
+    // THE STEP'S TWO CHARACTERS (window-local; -1 = no step in flight). Every output wraps the passage at its
+    // own size and keeps that wrap for the whole walk — nothing re-flows on a press. A press only says which
+    // two characters the glide runs between; each screen turns them into whole lines of ITS OWN table and
+    // glides between those (flowscroll::SnappedLineForChar), so Main, the Lower Third and the engine's
+    // outputs all move by whole lines with their breaks where they were.
+    qreal readingSpanFrom_ = -1.0;
+    qreal readingSpanTo_ = -1.0;
     QHash<QString, qreal> scrollSizeBySig_;   // block + pick + budget -> solved size
     QSet<QString> scrollSizePending_;          // sigs being solved on a worker (QML retries on readingScrollChanged)
     mutable QHash<QString, double> readingRunSizeForStyle_;
@@ -928,6 +962,24 @@ private:
     bool mediaHasAlpha_ = false;
     bool mediaAlphaDecided_ = false;
     bool mediaIsVideo_ = false;
+    std::mutex mediaMirrorMutex_;                    // the decoder thread forwards frames; the interface thread attaches
+    std::vector<QPointer<QVideoSink>> mediaMirrorSinks_;
+
+    // ---- A TAKEN CAMERA / SCREEN ON THE GPU (LiveInputSurface.qml) ------------------------------------
+    // The output window and the monitor tiles drew a taken camera from `image://videopreview`: a JPEG the
+    // tap re-encodes ~15 times a second, decoded again on the interface thread for every consumer. That
+    // is what made HDMI lag. Now one worker thread hands the tap's own newest frame to every attached
+    // VideoOutput as it arrives (a QVideoFrame, no JPEG anywhere), and the interface thread does nothing
+    // per frame. The image path stays as the fallback for a QML scene with no GPU.
+    std::mutex inputMirrorMutex_;
+    std::vector<QPointer<QVideoSink>> inputMirrorSinks_;
+    bps::QtThread inputFeedThread_;
+    std::atomic<bool> inputFeedStop_{false};
+    std::atomic<quint64> inputFramesFed_{0};
+    void startInputFeed(const QString &resolvedDeviceId);
+    void spawnInputFeedWorker(const std::string &deviceId);   // starts the worker thread (see the .cpp)
+    void stopInputFeed();
+    void forwardInputFrame(const QVideoFrame &frame);
     bool mediaIsAudio_ = false;
     QString mediaState_ = QStringLiteral("stopped");
     qlonglong mediaPosition_ = 0;
@@ -1005,13 +1057,16 @@ private:
     void AddNdiPlanFor(const NdiProbeResult &result, const QSet<QString> &activeNames,
                        NdiPlanBuild &build);
     bool ndiGateLogged_ = false;      // GUI thread only
-    QSet<QString> ndiSendFailedNames_;   // feed thread only
-    QSet<QString> ndiFirstFrameNames_;   // feed thread only
-    QSet<QString> ndiSlowNames_;         // feed thread only
-    QHash<QString, int> ndiFastStreaks_; // feed thread only
+    // Written by the feed thread AND the send pool, so they are guarded by ndiSendBookMutex_.
+    QSet<QString> ndiSendFailedNames_;
+    QSet<QString> ndiFirstFrameNames_;
+    QSet<QString> ndiSlowNames_;
+    QHash<QString, int> ndiFastStreaks_;
     bool ndiWaitLogged_ = false;      // GUI thread only; "waiting for buffer/frame" note
     QElapsedTimer ndiSendClock_;
-    QHash<QString, QElapsedTimer> ndiSendClocks_; // feed-thread pacing, one clock per sender
+    // Feed thread: each sender's NEXT DEADLINE (ms on ndiSendClock_), advanced by exactly one period per
+    // frame so a late tick delays one frame instead of shifting every later one.
+    QHash<QString, double> ndiSendDueMs_;
     // ---- The NDI feed: WHAT on the GUI thread, WHEN on the feed thread -----
     void startNdiSendClock();          // go-live: bring the feed thread up + publish
     void stopNdiSendClock();           // off air: clear the plan, stop its clock
@@ -1026,6 +1081,7 @@ private:
         bool warned = false;        // one drift warning per slow episode
         int tier = -1;              // -1 unknown, 0 at rate, 1 ~half, 2 lower
         float configured = 0.0f;    // its configured rate last window (re-baseline on change)
+        double measured = 0.0;      // its ACTUAL rate last window (what it held, not what was asked)
     };
     QHash<QString, NdiRateWindow> ndiRateWindows_;   // GUI thread only
     static constexpr int kDriftWindowMs = 4000;
@@ -1036,7 +1092,34 @@ private:
     void ResetNdiSenderForRecovery(const QString &name);
     void ReportNdiRateStep(const QString &name, double measured, float configured,
                            NdiRateWindow &w);
+    QString autoAdvanceShow_;            // the show this timer was recorded for
+    bool autoAdvanceLoaded_ = false;     // shows.timedShow read once
+    bool timedAdvanceApplied_ = false;   // the last value pushed at the engine
+    QTimer *autoAdvanceTimer_ = nullptr;   // GUI thread: single shot per slide, re-armed on every change
+    double onAirDurationMs_ = 0.0;         // the on-air slide's own NEXT TIMER (0 = it waits for a hand)
+    qreal lastAutoLine_ = -1.0;            // settled absolute line at the previous auto step (-1 = none)
     QTimer *ndiSendTimer_ = nullptr;   // feed thread only
+
+    // ---- The send pool: a few threads, each sender's cadence still its own ---------------------
+    // One sender's SDK handoff used to hold every sender behind it on the single feed thread, so a slow
+    // route delayed the whole board. The tick still decides WHO is due and WHEN (one clock per sender);
+    // the pool only runs the work. Small on purpose: the runtime compresses on its own threads, so this
+    // side's share is the conversion plus a non-blocking handoff.
+    QThreadPool *ndiPool_ = nullptr;      // created with the feed thread (GUI side)
+    std::mutex ndiSendBookMutex_;         // the per-sender notes the pool writes
+    std::mutex ndiInFlightMutex_;         // guards ndiInFlight_
+    QSet<QString> ndiInFlight_;           // one send per sender at a time (feed thread + pool)
+    // Converted frames kept for REUSE, keyed by the frame buffer: a fresh 4 MB buffer every tick is malloc
+    // churn on top of the conversion. A slot a sender still reads has use_count() > 1 and is never refilled.
+    std::mutex ndiRgbaMutex_;
+    QHash<const void *, std::vector<std::shared_ptr<bps::display::NdiRgbaFrame>>> ndiRgbaSlots_;
+    // The last conversion per frame buffer: while the buffer still holds the SAME snapshot (a still slide,
+    // a paused picture) the next tick re-sends the converted frame instead of converting 8 MB again.
+    struct NdiConvertedFrame {
+        std::shared_ptr<const void> source;   // the snapshot that was converted (held, so its address stays unique)
+        std::shared_ptr<bps::display::NdiRgbaFrame> converted;
+    };
+    QHash<const void *, NdiConvertedFrame> ndiConverted_;   // guarded by ndiRgbaMutex_
 
     // ---- The NDI feed thread --------------------------------------------------
     QThread *ndiThread_ = nullptr;
@@ -1050,6 +1133,17 @@ private:
     // One beat of the feed (FEED THREAD): read the plan, keep the clock's
     // interval at the published rate, and send at most one frame per period.
     void ndiWorkerTick();
+    // Convert ONCE for this buffer and send it to every plan in `sends` on the pool (posted by the tick).
+    void postNdiSendGroup(std::shared_ptr<bps::rendering::FrameBufferOutput> buffer,
+                          std::vector<NdiSendPlan> sends);
+    // The pool measurement's second NDI output: added for VGR_NDI_POOL_TEST runs, removed otherwise.
+    void ensureNdiPoolTestRoster();
+    // GO LIVE with nothing picked: put the wall's LOADED show on air (true = it went live with it).
+    bool goLiveLoadedShow();
+    // ---- GO LIVE load check: what this machine carried last session vs what is configured now ----
+    // A warning, never a block: the numbers are the machine's own, and the user may know better.
+    void warnIfNdiLoadExceedsSustained();
+    void RecordNdiSustainedLoad(qint64 pixelsPerSecond, const QString &detail);
 };
 
 // A picture shrunk for a small preview tile, quickly: each destination pixel averages a small grid of

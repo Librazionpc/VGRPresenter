@@ -14,6 +14,7 @@
 #include "modules/presentation/CompositorState.hpp"
 #include "modules/rendering/Effects.hpp"
 #include "modules/rendering/RenderObject.hpp"
+#include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/Scene.hpp"
 #include "platform/PlatformAccessor.hpp"
 
@@ -222,7 +223,10 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
             styleComp->style.strikeout = MetaBool(block.metaJson, "strikethrough");
             {
                 const std::string family = MetaString(block.metaJson, "fontFamily");
-                styleComp->style.fontId = family.empty() ? "Cambria" : family;
+                // A design that names no face starts in THIS OS's own slide serif (Cambria on Windows, the bundled
+                // Source Serif 4 where there is no Cambria) — never a font another OS happens to have.
+                styleComp->style.fontId = family.empty()
+                    ? rendering::RenderEngine::Instance().Fonts().PlatformContentFamily() : family;
             }
             styleComp->style.italic = MetaBool(block.metaJson, "italic");
             styleComp->style.wrap = !oneLine;
@@ -642,7 +646,7 @@ void ReportLayerState(const std::string& sceneId, const std::string& label, std:
 }
 
 void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sceneId,
-                         const rendering::Size& size, bool showOverlay) {
+                         const rendering::Size& size, bool showOverlay, bool showMedia) {
     const auto taken = presentation::CompositorState::Instance().GetTakenInput();
     rendering::SharedRgbaImage takenImg;
     int takenW = 0, takenH = 0;
@@ -679,7 +683,17 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
 
     const auto& compositorState = presentation::CompositorState::Instance();
     const uint64_t mediaSeq = compositorState.GetMediaSeq();
+    // THE FILE IS THIS OUTPUT'S TO SHOW OR NOT — its own M switch on Settings · Routing, already ANDed
+    // into this scene's spec by the QML push. The compositor holds ONE global frame, so without this
+    // check every scene painted it: the take's notice said "cannot reach Lower Third" while Lower
+    // Third's picture (and the NDI feed built from it) carried the media anyway.
     const bool mediaRefresh = !LayerFrameCurrent(engine, sceneId, "mediaonair", mediaSeq);
+    if (!showMedia) {
+        // A switch that just went off must take the plane OFF this scene — leaving it there would freeze
+        // the last frame in a picture whose route says it should not carry the file at all.
+        if (engine.GetObject(sceneId, "mediaonair").ok())
+            (void)engine.RemoveObject(sceneId, "mediaonair");
+    } else {
     // The frame arrives as one shared picture (converted once per frame, however many scenes ask).
     const auto media = mediaRefresh ? compositorState.GetMediaShared()
                                     : presentation::CompositorState::SharedMedia{};
@@ -712,6 +726,7 @@ void AddCompositorLayers(rendering::RenderEngine& engine, const std::string& sce
                           mediaImg->width, mediaImg->height, mediaImg->pixels.size(),
                           sceneId.find("@gated") != std::string::npos ? " [gated scene]" : "");
         ReportLayerState(sceneId, "media", state);
+    }
     }
 
     const std::vector<presentation::CompositorState::ActiveOverlay> overlays = showOverlay

@@ -19,6 +19,21 @@ struct RenderFrameView {
     const uint32_t* pixels = nullptr;   // Color::Pack format (0xAABBGGRR)
 };
 
+// One alpha-preserving RGBA frame shared by every NDI sender fed by the same rendered buffer.
+struct NdiRgbaFrame {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> bytes;   // RGBA8, width*height*4
+};
+
+// Copy Color::Pack RGBA pixels to a shared frame, preserving template alpha.
+std::shared_ptr<const NdiRgbaFrame> MakeNdiRgbaFrame(const uint32_t* pixels, int width, int height);
+
+// Convert into an EXISTING frame, reusing its bytes. The feed keeps a couple of slots per frame buffer and
+// refills a slot only when nothing is still reading it, so the steady state allocates nothing per frame
+// (a fresh 4 MB buffer every tick is malloc churn plus a full memset of the frame it is about to overwrite).
+void ConvertToNdiRgba(const uint32_t* pixels, int width, int height, NdiRgbaFrame& target);
+
 inline constexpr float kMaxOutputFrameRateHz = 240.0f;
 inline constexpr float kDefaultOutputFrameRateHz = 30.0f;
 
@@ -94,7 +109,12 @@ public:
     Result<std::vector<DisplayDevice>> Probe() override;   // static device set
     DisplayProviderCapabilities Capabilities() const noexcept override;
 
+    // The single-frame entry: converts and sends (kept for callers that hold no shared frame).
     Result<void> SendFrame(const RenderFrameView& frame);
+    // Send a frame already copied to RGBA, preserving alpha for transparent template backgrounds.
+    // The provider keeps `frame` alive until it hands the runtime the NEXT one — that is the async send's
+    // own contract, and why the shared frame is a shared_ptr rather than a borrowed pointer.
+    Result<void> SendRgbaFrame(std::shared_ptr<const NdiRgbaFrame> frame, float fps);
 
     // Sender name used for the NDI source ("VGR Program" by default).
     void SetSenderName(std::string name);
@@ -117,6 +137,16 @@ private:
     std::atomic<uint64_t> framesSent_{0};
     int sendFailStreak_ = 0;
     std::chrono::steady_clock::time_point lastHeal_{};
-    std::vector<uint32_t> sendBuffer_;
+    // The last converted frame handed to an async send. It stays ALIVE here until the next one replaces
+    // it: the runtime reads its bytes until the next call for this instance (the frame is shared, not
+    // owned — see SendRgbaFrame).
+    std::shared_ptr<const NdiRgbaFrame> lastShared_;
+    // ---- PER-SECOND SEND TELEMETRY (SendFrame) -------------------------------------------
+    // What this sender is actually putting on the wire, summed over the current one-second window
+    // (sendMutex_ guards all three). Logged as one line per second so a bandwidth/lag report can be
+    // answered from engine.log instead of guessed at.
+    std::chrono::steady_clock::time_point sendWindowStart_{};
+    uint64_t sendWindowFrames_ = 0;
+    uint64_t sendWindowBytes_ = 0;
 };
 } // namespace bps::display

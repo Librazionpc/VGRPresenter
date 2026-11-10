@@ -958,16 +958,17 @@ Item {
         if (k === "gate:media")
             return LiveOutputService.mediaOnAir === true ? 1 : 0
         if (k.indexOf("style:") === 0) {
-            const slide = LiveOutputService.onAirSlide || {}
-            const textOnAir = LiveOutputService.live === true && !!(slide.blocks && slide.blocks.length > 0)
-                              && LiveOutputService.blackedOut !== true
-            if (!textOnAir || root.styleScreenCount(root.styleRowOf(k)) === 0)
+            const index = root.styleRowOf(k)
+            if (!root.textOnProgram || root.styleScreenCount(index) === 0)
                 return 0
-            // An output wearing this style has to be receiving frames for the text to arrive.
+            // The text reaches an output when that output WEARS this style and is switched on. It is
+            // NOT a feed-health question: feed health only samples rows with their own frame buffer, so
+            // it read "not receiving" for the very outputs that were plainly showing the text (it is a
+            // stall signal, not the delivery test).
+            const id = String(root.styleRoster[index] ? root.styleRoster[index].id : "")
             const rows = root.outputRows
-            const style = root.styleRoster[root.styleRowOf(k)]
             for (let i = 0; i < rows.length; ++i)
-                if (style && rows[i].styleId === style.styleId && rows[i].feedLive === true)
+                if (!rows[i].system && String(rows[i].styleId) === id && rows[i].enabled !== false)
                     return 1
             return 0
         }
@@ -989,6 +990,45 @@ Item {
             return o.feedLive === true ? 1 : 0
         }
         return -1
+    }
+
+    // ---- IS THE PROGRAM CARRYING TEXT? ----------------------------------------------
+    // ONE answer, asked by the style cards AND their wires (each used to keep its own copy of this).
+    // It reads the PROGRAM's composition — staged or live — and asks whether it has CONTENT, instead
+    // of asking one output's view of it:
+    //   * `onAirSlide` is composed against a SINGLE output's style with that output's gates applied,
+    //     and it stays empty until GO LIVE has run (`LiveOutputService::refreshOnAirSlide` needs a
+    //     live session), so a routed style's dashed wire sat still with text plainly on the program —
+    //     exactly the state the board exists to show;
+    //   * `stagedSlide` is that same composition for the program BEFORE it goes live, which is what
+    //     the operator is looking at while setting the board up.
+    // Either of those can be empty for a TEMPLATE style (its blocks come from the style, not from the
+    // slide), so the RAW composition — no style, no gates — is the fallback: the slide's own blocks.
+    readonly property bool textOnProgram: {
+        void root.modelsRev
+        if (LiveOutputService.blackedOut === true)
+            return false
+        const live = LiveOutputService.live === true
+        const candidates = live
+            ? [LiveOutputService.onAirSlide, LiveOutputService.onAirSlideRaw]
+            : [LiveOutputService.stagedSlide, LiveOutputService.stagedSlideRaw]
+        for (const composed of candidates) {
+            const blocks = (composed && composed.blocks) ? composed.blocks : []
+            if (blocks.length > 0)
+                return true
+        }
+        return false
+    }
+
+    // ---- IS MEDIA DATA MOVING? ----------------------------------------------------
+    // A file on air is only PUSHING data while it plays: a paused video holds its last frame and a
+    // still is one frame, so nothing travels and the flow overlay below stays off (the plain on-air
+    // dash stays). mediaRev bumps per decoded frame, so this reads the player itself.
+    readonly property bool mediaPushing: {
+        void LiveOutputService.mediaRev
+        return LiveOutputService.mediaOnAir === true
+               && LiveOutputService.mediaIsVideo === true
+               && LiveOutputService.mediaState === "playing"
     }
 
     // ---- How fast a wire's data moves ---------------------------------------------
@@ -1284,7 +1324,12 @@ Item {
     function syncMeters() {
         if (!root)
             return
-        const wanted = root.meterTargets
+        // A page that is not on screen holds NO device taps. These meters are the only reason a bus's
+        // routed inputs are opened, and every settings page is built at startup — without this the
+        // laptop's microphone was pulled the moment the app launched, with nobody having clicked one.
+        const wanted = root.visible
+                     && EngineBridge.platformCapabilities.audioInputCapture === true
+                     ? root.meterTargets : []
         const held = root.heldMeters
         for (const label of held)
             if (wanted.indexOf(label) < 0)
@@ -1294,7 +1339,9 @@ Item {
                 EngineBridge.startInputMeter(label)
         root.heldMeters = wanted
 
-        const wantStreams = root.streamMeterTargets
+        const wantStreams = root.visible
+                          && EngineBridge.platformCapabilities.audioStreamTaps === true
+                          ? root.streamMeterTargets : []
         const heldStreams = root.heldStreamMeters
         const has = (list, t) => list.some(x => x.label === t.label && x.kind === t.kind)
         for (const t of heldStreams)
@@ -1307,6 +1354,10 @@ Item {
     }
     onMeterTargetsChanged: root.syncMeters()
     onStreamMeterTargetsChanged: root.syncMeters()
+    Connections {
+        target: EngineBridge
+        function onDevicesChanged() { root.syncMeters() }
+    }
 
     Component.onCompleted: {
         RoutingService.refresh()
@@ -2158,6 +2209,43 @@ Item {
                         readonly property real toY: reversed ? modelData.y1 : modelData.y2
                         readonly property real bend: Math.max(24, Math.abs(toX - fromX) * 0.5)
                         readonly property bool offAir: modelData.onAir === false
+                        // THE OUTPUT THIS WIRE ENDS AT, and whether it is really receiving: a disabled
+                        // output passes nothing on, and a video (or style) wire is only "streaming" when
+                        // that output is delivering frames at all. An audio wire reaches an enabled output
+                        // by being wired into it, so its own bus level is the measurement there.
+                        readonly property var sink: root.outputByRow(Number(String(modelData.to).substring(4)))
+                        // A DIRECT SINK TAKES THE COMPOSED PROGRAM ITSELF — a REC / STREAM row, a screen
+                        // mirror. Nothing is published as a feed for one, so "frames arrived" can never be
+                        // its delivery test; being switched on is, and that is the same rule its media and
+                        // overlay gates already use.
+                        readonly property bool sinkDirect: !!sink
+                            && (sink.screen === true
+                                || String(sink.kind || "").toUpperCase() === "REC"
+                                || String(sink.kind || "").toUpperCase() === "STREAM")
+                        readonly property bool sinkLive: {
+                                if (!sink)
+                                    return false
+                                if (sink.system !== true && sink.enabled === false)
+                                    return false
+                                if (sinkDirect)
+                                    return true
+                                // ONLY A MONITOR'S VIDEO WIRE is answered by frames: a physical sink
+                                // publishes no feed sample either, so requiring one silenced the audio,
+                                // style and gate wires that reach it while their own source was plainly
+                                // carrying data.
+                                return modelData.kind !== "video" || sink.feedLive === true
+                            }
+                        // A STYLE WIRE CARRIES TEXT, and text is on its way the moment it is on air and
+                        // the output at the far end wears the style and is switched on. (The wire only
+                        // exists because that output has a style, so the style side needs no lookup —
+                        // and feed health, which samples only rows with their own buffer, is not the
+                        // test: it reported a physical sink as receiving nothing while it showed text.)
+                        // Text is travelling once the PROGRAM carries it AND this wire's output is
+                        // switched on — the one rule the style card's own state reads too (see
+                        // root.textOnProgram): GO LIVE decides whether outputs are enabled, not whether
+                        // the wire is carrying anything.
+                        readonly property bool textPushed: root.textOnProgram
+                                                           && !!sink && sink.enabled !== false
         // ms for the pattern to travel once: the output's frame rate (video, style) or audio bitrate.
         readonly property int cycleMs: { root.modelsRev; return root.wireCycleMs(modelData.kind, modelData.to) }
 
@@ -2181,8 +2269,11 @@ Item {
                                 to: 0
                                 duration: wireShape.cycleMs
                                 loops: Animation.Infinite
+                                // A travelling dash IS a picture of data moving, so it runs only while
+                                // this wire's source is really reaching this output — the same test the
+                                // flow overlay below uses (see sinkLive).
                                 running: (wireShape.modelData.kind === "style"
-                                          && (root.outputByRow(Number(String(wireShape.modelData.to).substring(4))) || {}).enabled !== false)
+                                          && wireShape.textPushed)
                                          || (wireShape.modelData.kind === "gate"
                                              && root.cardLiveState(wireShape.modelData.from) === 1)
                             }
@@ -2201,11 +2292,50 @@ Item {
                         ShapePath {
                             id: dataFlow
                             readonly property bool isAudio: wireShape.modelData.kind === "audio"
-                            // Moves only while the bus it leaves is really carrying something (a source
-                            // delivering frames, or sound above silence) — measured, not assumed.
-                            readonly property bool flows: (isAudio || wireShape.modelData.kind === "video")
-                                                          && !wireShape.offAir
-                                                          && root.cardLiveState(wireShape.modelData.from) === 1
+                            // A GATE wire carries data only for the MEDIA layer (the overlay gate is a
+                            // look decision, so it never flows). It moves while a file is really being
+                            // pushed — media on air AND playing (see mediaPushing).
+                            readonly property bool isMediaGate: wireShape.modelData.kind === "gate"
+                                                                && String(wireShape.modelData.from) === "gate:media"
+                            // IS THE SOURCE CARRYING THIS KIND OF DATA? Kind-aware on purpose: one card
+                            // state used to answer for both, so a VIDEO bus's picture set its AUDIO wire
+                            // moving too. And a bus whose channels are closed pushes nothing.
+                            readonly property bool sourceLive: {
+                                void root.modelsRev
+                                void LiveOutputService.inputRev
+                                const from = String(wireShape.modelData.from)
+                                const kind = String(wireShape.modelData.kind)
+                                if (from.indexOf("bus:") === 0) {
+                                    const busRow = root.busRowOf(from)
+                                    if (kind === "audio") {
+                                        const mix = root.busChannelMix(busRow)
+                                        return Math.max(mix[0], mix[1]) > 0.01
+                                    }
+                                    if (kind === "video")
+                                        return root.busHasVideo(busRow) && root.busVideoValue(busRow) > 0
+                                }
+                                return root.cardLiveState(from) === 1
+                            }
+                            // The OVERLAY gate: a look decision for the output, which travels while the
+                            // show layer actually has overlays (see cardLiveState's gate:overlay).
+                            readonly property bool isOverlayGate: wireShape.modelData.kind === "gate"
+                                                                  && String(wireShape.modelData.from) === "gate:overlay"
+                            // Moves only while the source it leaves is really carrying that data AND it
+                            // reaches THIS output. Measured, not assumed — and NOT gated on GO LIVE: a
+                            // bus that is on air is pushing frames/sound whether or not the show has
+                            // been taken live, and the wire is supposed to show exactly that. The media
+                            // gate moves only while the file is PLAYING (a paused one pushes nothing).
+                            // Boolean() IS NOT DECORATION: any term that is momentarily undefined makes the
+                            // whole `&&` chain undefined, and a bool property cannot take that ("Unable to
+                            // assign [undefined] to bool"). Coercing here keeps one unread card state from
+                            // throwing on every wire, and reads as "not moving" until it is known.
+                            readonly property bool flows: Boolean((isMediaGate
+                                                                   ? root.mediaPushing === true
+                                                                   : (isAudio || wireShape.modelData.kind === "video"
+                                                                      || wireShape.isOverlayGate === true))
+                                                                  && wireShape.offAir !== true
+                                                                  && wireShape.sinkLive === true
+                                                                  && wireShape.sourceLive === true)
                             // Stroke widths per pattern: dash + gap (video) or bead + gap (audio).
                             readonly property real period: isAudio ? 3.6 : 10
                             strokeColor: flows

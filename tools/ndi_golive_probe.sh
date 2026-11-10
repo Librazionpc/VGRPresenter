@@ -9,7 +9,7 @@
 #
 # Cause: std::filesystem::absolute() throws on an EMPTY path on Windows
 # (GetFullPathNameW -> ERROR_INVALID_PARAMETER), and the throw escaped into
-# std::terminate. Fixed in platform/common/Filesystem.cpp. This script proves
+# std::terminate. Fixed in platform/qt/QtFilesystem.cpp. This script proves
 # the flow that triggered it now survives.
 #
 # WHAT IT DOES

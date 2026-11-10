@@ -16,7 +16,7 @@
 // "filesystem error: cannot make absolute path: Invalid argument []") was
 // reproduced by: enabling the NDI plugin feature, then pressing GO LIVE with
 // an NDI output row enabled. The fix is in
-// src/PresentationEngine/platform/common/Filesystem.cpp (Absolute/Metadata
+// src/PresentationEngine/platform/qt/QtFilesystem.cpp (Absolute/Metadata
 // now answer an empty path instead of erroring). This scenario is the
 // regression check: it must run to completion WITHOUT a new
 // crash.log.<epoch>.log appearing in

@@ -1,34 +1,9 @@
 import QtQuick
-import QtMultimedia
 import VGRPresenterUI
 
 Item {
     id: root
     objectName: "selfTestMediaPane"
-
-    // A media FILE playing inside a card's window: the picture only — the sound is shown by the card's
-    // L/R meters (the file's stream meter), and what is HEARD is the Routing screen's business.
-    component MediaCardPlayer: Item {
-        id: cardPlayer
-        property string path: ""
-        clip: true
-        MediaPlayer {
-            id: cardMedia
-            source: cardPlayer.path !== "" ? "file:///" + cardPlayer.path.replace(/\\/g, "/") : ""
-            loops: MediaPlayer.Infinite
-            audioOutput: AudioOutput { muted: true }
-            videoOutput: cardVideo
-            onSourceChanged: if (source.toString() !== "") play()
-            onMediaStatusChanged: if ((mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia)
-                                      && playbackState !== MediaPlayer.PlayingState) play()
-        }
-        VideoOutput {
-            id: cardVideo
-            anchors.fill: parent
-            fillMode: VideoOutput.PreserveAspectCrop
-        }
-        Component.onDestruction: cardMedia.stop()
-    }
 
     // LAYOUT PROBE (VGR_LAYOUT_TEST): the media grid's own card churn (see DesignLibraryPane).
     property int gridRowBuilds: 0
@@ -57,13 +32,16 @@ Item {
         target: BusListModel
         function onDataChanged() { root.modelsRev++ }
         function onRowsInserted() { root.modelsRev++ }
-        function onRowsRemoved() { root.modelsRev++ }
-        function onModelReset() { root.modelsRev++ }
+        function onRowsRemoved() { root.modelsRev++; root.releaseMonitorOfMissingBus() }
+        function onModelReset() { root.modelsRev++; root.releaseMonitorOfMissingBus() }
     }
     property int devicesRev: 0
     Connections {
         target: EngineBridge
-        function onDevicesChanged() { root.devicesRev++ }
+        function onDevicesChanged() {
+            root.devicesRev++
+            root.syncVideoMeters()
+        }
     }
 
     // The dock tab bar's Media search: only files whose name matches (the engine's search, so it
@@ -201,10 +179,13 @@ Item {
     // LiveOutputService.monitoredAudio) — nothing another page metered.
     onMeteredLabelsChanged: LiveOutputService.setMonitoredAudio(root.meteredLabels)
     // ---- the bus monitor's own bookkeeping: ONE VIDEO, ONE AUDIO --------------
-    property int busMonitorVideoBus: -1
+    // KEYED BY THE BUS'S STABLE ID, NEVER BY ITS BOARD ROW. BusItem::id is the engine's bus number and
+    // does not move; a row does — add or delete a bus and every row after it shifts, so a hold kept by
+    // row lit a DIFFERENT card's window while the preview it had opened stayed on the real bus. -1 = none.
+    property int busMonitorVideoBusId: -1
     property string busMonitorVideoLabel: ""
     property string busMonitorVideoKind: ""   // "media" = a FILE plays in the card (no tap to start)
-    property int busMonitorAudioBus: -1
+    property int busMonitorAudioBusId: -1
     property var busMonitorAudioLabels: []
     // Refreshed by the bridge's ~20 Hz meter pump while any tap is live.
     property var meterList: []
@@ -212,6 +193,26 @@ Item {
         target: EngineBridge
         function onInputLevelsChanged() { root.meterList = EngineBridge.inputMeterList() }
         Component.onCompleted: root.meterList = EngineBridge.inputMeterList()
+    }
+    // ONE PRESS PREVIEWS, TWO TAKE IT ON AIR (the bus card's interaction, see onDoubleClicked).
+    // A double click ALSO delivers the single click, so a preview armed straight from the press opened
+    // underneath a take: the card started a decoder and an audio capture tap, went on air, and kept monitoring
+    // — which is why an audio bus sat there animating its L/R pair with nobody previewing it. The press
+    // waits out the double-click interval instead, and the take cancels it outright.
+    property int busClickBusId: -1
+    Timer {
+        id: busClickTimer
+        interval: 220
+        repeat: false
+        onTriggered: {
+            const busId = root.busClickBusId
+            root.busClickBusId = -1
+            // The press named a BUS; its row is looked up when the timer fires, so a deletion inside the
+            // double-click interval cannot hand the preview to whichever bus has taken that row since.
+            const row = busId >= 0 ? root.rowOfBusId(busId) : -1
+            if (row >= 0)
+                root.toggleBusMonitorPreview(row)
+        }
     }
     function meterSnapshot(label) {
         const want = label === undefined ? "" : String(label).trim()
@@ -224,6 +225,11 @@ Item {
     }
     function toggleAudioMeter(label) {
         const want = label === undefined ? "" : String(label).trim()
+        if (EngineBridge.platformCapabilities.audioInputCapture !== true) {
+            EventBus.notify(qsTr("Live audio input metering is not available on this platform."),
+                            "info", qsTr("Audio input"), "media.audio.meter.unavailable")
+            return
+        }
         if (want === "") {
             EventBus.notify(qsTr("This audio input has no device chosen yet — set its Source in Settings - Audio & Video, then click the card to meter it."),
                             "info", qsTr("Audio input"), "media.audio.meter.no-device")
@@ -248,7 +254,7 @@ Item {
         for (const l of LiveOutputService.cardPreviews)
             live.push(String(l).trim())
         // A media file held in a bus card is metered like one on air (its stream meter feeds the L/R).
-        if (root.busMonitorVideoBus >= 0 && root.busMonitorVideoKind === "media"
+        if (root.busMonitorVideoBusId >= 0 && root.busMonitorVideoKind === "media"
                 && root.busMonitorVideoLabel !== "")
             live.push(root.busMonitorVideoLabel)
         if (LiveOutputService.inputLabel)
@@ -271,7 +277,9 @@ Item {
     // Idempotent diff (see the AV screen's twin): release what left, start what
     // arrived, leave the rest decoding — a stream tap is a decoder.
     function syncVideoMeters() {
-        root.heldVideoMeters = ScreenHelpers.syncVideoMeters(root.videoMeterTargets,
+        const wanted = EngineBridge.platformCapabilities.audioStreamTaps === true
+                     ? root.videoMeterTargets : []
+        root.heldVideoMeters = ScreenHelpers.syncVideoMeters(wanted,
                                                              root.heldVideoMeters)
     }
     onVideoMeterTargetsChanged: root.syncVideoMeters()
@@ -281,18 +289,18 @@ Item {
             EngineBridge.stopStreamMeter(t.label)
         root.heldVideoMeters = []
         // ...and the bus monitor the pane itself opened: a tab switch must not
-        // leave a WASAPI tap or a decoder running behind a card nobody sees.
+        // leave an audio capture tap or a decoder running behind a card nobody sees.
         root.stopBusMonitorVideo()
         root.stopBusMonitorAudio()
         LiveOutputService.setMonitoredAudio([])   // the selection goes with the pane
     }
     function stopBusMonitorVideo() {
-        if (root.busMonitorVideoBus < 0)
+        if (root.busMonitorVideoBusId < 0)
             return
         if (root.busMonitorVideoLabel !== ""
                 && LiveOutputService.cardPreviews.indexOf(root.busMonitorVideoLabel) >= 0)
             LiveOutputService.endPreviewInput(root.busMonitorVideoLabel)
-        root.busMonitorVideoBus = -1
+        root.busMonitorVideoBusId = -1
         root.busMonitorVideoLabel = ""
         root.busMonitorVideoKind = ""
     }
@@ -300,12 +308,59 @@ Item {
         for (const label of root.busMonitorAudioLabels)
             if (root.meteredLabels.indexOf(label) >= 0)
                 root.toggleAudioMeter(label)
-        root.busMonitorAudioBus = -1
+        root.busMonitorAudioBusId = -1
         root.busMonitorAudioLabels = []
+    }
+    // A CARD WHOSE SOURCE IS NOW ON AIR NEEDS NO THUMBNAIL PREVIEW. The single click opens one (a
+    // decoder and the audio taps behind it); once that source is the PROGRAM's, the picture the
+    // operator needs is the output, and the preview is a second decode of a frame nobody is watching.
+    // Released here rather than only on the double click, because a bus can reach the program from
+    // anywhere — a routing-board take, GO LIVE — and the preview must not outlive that.
+    function releaseMonitorOfOnAirVideo() {
+        if (root.busMonitorVideoBusId < 0 || root.busMonitorVideoLabel === "")
+            return
+        const label = root.busMonitorVideoLabel
+        const onAir = LiveOutputService.inputLabel === label
+                      || (LiveOutputService.mediaOnAir === true
+                          && LiveOutputService.mediaPath === label)
+        if (!onAir)
+            return
+        console.log("[BUSMON] preview released — its source is on air: " + label)
+        root.stopBusMonitorVideo()
+        root.stopBusMonitorAudio()
+    }
+    Connections {
+        target: LiveOutputService
+        function onInputChanged() { root.releaseMonitorOfOnAirVideo() }
+        function onMediaChanged() { root.releaseMonitorOfOnAirVideo() }
+    }
+    // ...AND A HOLD OUTLIVES NO BUS. Keyed by the stable id a hold cannot drift onto another card, but a
+    // bus can be DELETED outright, and then the hold belongs to nothing: without this, the preview and the
+    // taps behind it kept running for a card that is no longer on the board.
+    function releaseMonitorOfMissingBus() {
+        if (root.busMonitorVideoBusId >= 0 && root.rowOfBusId(root.busMonitorVideoBusId) < 0) {
+            console.log("[BUSMON] monitor released — its bus is gone: " + root.busMonitorVideoBusId)
+            root.stopBusMonitorVideo()
+        }
+        if (root.busMonitorAudioBusId >= 0 && root.rowOfBusId(root.busMonitorAudioBusId) < 0) {
+            console.log("[BUSMON] audio monitor released — its bus is gone: " + root.busMonitorAudioBusId)
+            root.stopBusMonitorAudio()
+        }
+        if (root.busClickBusId >= 0 && root.rowOfBusId(root.busClickBusId) < 0)
+            root.busClickBusId = -1
+    }
+    // A board row, expressed as the bus's stable id (-1 for a row that is not a bus).
+    function busStableIdAt(row) {
+        const b = BusListModel.getBus(row)
+        return b && b.id !== undefined ? Number(b.id) : -1
     }
     function toggleBusMonitorPreview(busIndex) {
         const bus = BusListModel.getBus(busIndex)
         if (!bus || Object.keys(bus).length === 0)
+            return
+        // Everything this function holds is held BY ID below; the row is only how the caller pointed at it.
+        const busId = root.busStableIdAt(busIndex)
+        if (!(busId >= 0))
             return
 
         const type = String(bus.type || "audio").toLowerCase()
@@ -361,12 +416,12 @@ Item {
             return
         }
 
-        const holdsSomething = root.busMonitorAudioBus === busIndex
-                               || root.busMonitorVideoBus === busIndex
+        const holdsSomething = root.busMonitorAudioBusId === busId
+                               || root.busMonitorVideoBusId === busId
         if (holdsSomething) {
-            if (root.busMonitorVideoBus === busIndex) root.stopBusMonitorVideo()
-            if (root.busMonitorAudioBus === busIndex) root.stopBusMonitorAudio()
-            console.log("[BUSMON] released bus=" + busIndex)
+            if (root.busMonitorVideoBusId === busId) root.stopBusMonitorVideo()
+            if (root.busMonitorAudioBusId === busId) root.stopBusMonitorAudio()
+            console.log("[BUSMON] released bus=" + busIndex + " id=" + busId)
             return
         }
 
@@ -395,20 +450,20 @@ Item {
             return
         }
 
-        if (needsVideo && root.busMonitorVideoBus !== busIndex)
+        if (needsVideo && root.busMonitorVideoBusId !== busId)
             root.stopBusMonitorVideo()
-        if (meterAudio && root.busMonitorAudioBus !== busIndex)
+        if (meterAudio && root.busMonitorAudioBusId !== busId)
             root.stopBusMonitorAudio()
 
         if (meterAudio) {
             for (const label of audioLabels)
                 if (root.meteredLabels.indexOf(label) < 0) root.toggleAudioMeter(label)
-            root.busMonitorAudioBus = busIndex
+            root.busMonitorAudioBusId = busId
             root.busMonitorAudioLabels = audioLabels
         }
         if (needsVideo && String(video.kind) === "media") {
             // A file has no tap to start: the card plays it itself and meters it (videoMeterTargets).
-            root.busMonitorVideoBus = busIndex
+            root.busMonitorVideoBusId = busId
             root.busMonitorVideoLabel = videoLabel
             root.busMonitorVideoKind = "media"
         } else if (needsVideo) {
@@ -421,10 +476,10 @@ Item {
                     return
                 }
             }
-            root.busMonitorVideoBus = busIndex
+            root.busMonitorVideoBusId = busId
             root.busMonitorVideoLabel = videoLabel
         }
-        console.log("[BUSMON] opened bus=" + busIndex + " type=" + type
+        console.log("[BUSMON] opened bus=" + busIndex + " id=" + busId + " type=" + type
                     + " audioTaps=" + root.busMonitorAudioLabels.length
                     + " video=" + (videoLabel === "" ? "-" : videoLabel))
     }
@@ -601,6 +656,9 @@ Item {
 
             delegate: MediaTile {
                 required property var modelData
+                // The grab/click hook the card-preview scenario addresses this file's own card by
+                // (cp_grid.png): the path IS the name, so no index binding can go stale.
+                objectName: "selfTestMediaTile:" + modelData.path
                 // LAYOUT PROBE (VGR_LAYOUT_TEST): how many tiles the grid built, and how
                 // many it threw away.
                 Component.onCompleted: root.gridRowBuilds++
@@ -754,12 +812,37 @@ Item {
                             readonly property bool busCard: kind === "bus"
                             readonly property bool audioCard: kind === "audio"
                             readonly property bool videoCard: kind === "video"
+                            // THE BUS THIS CARD STANDS FOR, as a stable id rather than its row (see
+                            // root.busMonitorVideoBusId) — every hold below is compared through this.
+                            readonly property int busStableId: {
+                                void root.modelsRev
+                                return busCard ? root.busStableIdAt(index) : -1
+                            }
+                            // THE SOURCE THIS CARD IS ACTUALLY SHOWING. toggleBusMonitorPreview previews the
+                            // first HEALTHY routed source, which is not always routedVideoSources[0] — while
+                            // the card asked for [0] regardless, so it fetched frames under a label nothing
+                            // had started: the warm-up ring span forever and the thumbnail never appeared,
+                            // with the tap plainly running. Follow the monitor when this bus holds one.
                             readonly property int busVideoSourceIndex: {
                                 if (!busCard) return -1
                                 void root.modelsRev
+                                void root.busMonitorVideoBusId
+                                void root.busMonitorVideoLabel
                                 const b = BusListModel.getBus(index)
-                                return b.routedVideoSources && b.routedVideoSources.length > 0
-                                    ? b.routedVideoSources[0] : -1
+                                const routed = b.routedVideoSources || []
+                                const held = card.busStableId >= 0
+                                             && root.busMonitorVideoBusId === card.busStableId
+                                             ? String(root.busMonitorVideoLabel).trim() : ""
+                                if (held !== "") {
+                                    for (const r of routed) {
+                                        const s = VideoSourceListModel.getSource(r)
+                                        const label = s && s.sublabel !== undefined
+                                                      ? String(s.sublabel).trim() : ""
+                                        if (label === held)
+                                            return r
+                                    }
+                                }
+                                return routed.length > 0 ? routed[0] : -1
                             }
                             readonly property var busVideoSource: {
                                 if (busVideoSourceIndex < 0) return ({})
@@ -769,13 +852,25 @@ Item {
                                 ? String(busVideoSource.sublabel).trim() : ""
                             readonly property bool busVideoPreviewing: {
                                 void LiveOutputService.inputRev
-                                return busCard && busType !== "audio" && busVideoLabel !== ""
-                                    && (LiveOutputService.cardPreviews.indexOf(busVideoLabel) >= 0
+                                void root.busMonitorVideoBusId
+                                void root.busMonitorVideoLabel
+                                return busCard && busType !== "audio" && card.heldVideoLabel !== ""
+                                    && (LiveOutputService.cardPreviews.indexOf(card.heldVideoLabel) >= 0
                                         || card.busMediaPlaying)
                             }
+                            // A DEVICE TAP, NOT A MEDIA FILE. The window's videopreview image can only
+                            // draw a camera / screen / NDI tap. A file playing in that window is drawn by
+                            // the LiveMediaSurface under it; asking the provider for a tap under the
+                            // file's path logged "preview requested … but no tap was started" and painted
+                            // nothing over the picture that was already there.
+                            readonly property bool busVideoDevicePreviewing: busCard && busType !== "audio"
+                                && card.heldVideoLabel !== ""
+                                && LiveOutputService.cardPreviews.indexOf(card.heldVideoLabel) >= 0
                             // A MEDIA file held by this bus card: it plays in the window and is metered.
                             readonly property bool busMediaPlaying: busCard && busType !== "audio"
-                                && root.busMonitorVideoBus === index && root.busMonitorVideoKind === "media"
+                                && card.busStableId >= 0
+                                && root.busMonitorVideoBusId === card.busStableId
+                                && root.busMonitorVideoKind === "media"
                                 && busVideoLabel !== ""
                             readonly property string sub: {
                                 void root.modelsRev
@@ -797,7 +892,18 @@ Item {
                                                           && (LiveOutputService.inputLabel === sub
                                                               || (LiveOutputService.mediaOnAir
                                                                   && LiveOutputService.mediaPath === sub))
-                            readonly property string heldVideoLabel: busCard ? busVideoLabel : sub
+                            // A BUS CARD SHOWS THE SOURCE THE MONITOR OPENED for it (see busVideoSourceIndex);
+                            // the first routed source is only the stand-in when nothing is being monitored.
+                            readonly property string heldVideoLabel: {
+                                void root.busMonitorVideoBusId
+                                void root.busMonitorVideoLabel
+                                if (!busCard)
+                                    return sub
+                                const held = card.busStableId >= 0
+                                             && root.busMonitorVideoBusId === card.busStableId
+                                             ? String(root.busMonitorVideoLabel).trim() : ""
+                                return held !== "" ? held : busVideoLabel
+                            }
                             // ---- THE BUS STATUS: one fact, three states ----
                             readonly property string busStatus: {
                                 void root.modelsRev
@@ -877,6 +983,12 @@ Item {
                                 return audioCard && root.meteredLabels.indexOf(sub) >= 0
                             }
                             readonly property bool holding: taken || previewing || metering || busVideoPreviewing
+                            // What a CLICK on this bus does (see toggleBusMonitorPreview). Until it is clicked
+                            // the bus is monitoring NOTHING, and it must not look as if it is: the live-audio
+                            // pair below appears only while held (or hovered, so it can still be found).
+                            readonly property bool busHeld: busCard && card.busStableId >= 0
+                                && (root.busMonitorAudioBusId === card.busStableId
+                                    || root.busMonitorVideoBusId === card.busStableId)
                             // BUS: the window shows open/muted; the click
                             // toggles mute (the bus's only live truth).
                             readonly property bool busMuted: {
@@ -894,8 +1006,9 @@ Item {
                                 void root.meterList
                                 void root.modelsRev
                                 if (!busCard) return [0, 0]
-                                if (root.busMonitorAudioBus !== index
-                                        && root.busMonitorVideoBus !== index)
+                                if (card.busStableId < 0
+                                        || (root.busMonitorAudioBusId !== card.busStableId
+                                            && root.busMonitorVideoBusId !== card.busStableId))
                                     return [0, 0]
                                 const b = BusListModel.getBus(index)
                                 const mix = [0, 0]
@@ -941,7 +1054,9 @@ Item {
                                 void root.devicesRev
                                 void LiveOutputService.inputRev
                                 if (busCard)
-                                    return !card.busVideoPreviewing
+                                    // Health is a DEVICE question — a media file has no tap to be
+                                    // "healthy" about, and asking about its path read as a dead source.
+                                    return !card.busVideoDevicePreviewing
                                         || LiveOutputService.inputHealthy(card.busVideoLabel,
                                                                          card.busVideoSource.kind || "")
                                 if (audioCard)
@@ -991,10 +1106,28 @@ Item {
                                     } else if (audioCard) {
                                         root.toggleAudioMeter(sub)
                                     } else if (busCard) {
-                                        root.toggleBusMonitorPreview(index)
+                                        // Preview opens after the double-click interval (see busClickBusId):
+                                        // a press that turns out to be a take must not start one.
+                                        root.busClickBusId = card.busStableId
+                                        busClickTimer.restart()
                                     }
                                 }
                                 onDoubleClicked: {
+                                    // TAKING THE CARD ON AIR REPLACES ITS PREVIEW, it does not add to it: the
+                                    // pending single press is cancelled and whatever this card was monitoring
+                                    // is released, decoder and taps together. That is the resource saving the
+                                    // interaction is for — and a card left holding a monitor kept its L/R pair
+                                    // animating after it went on air, with nothing on screen saying why.
+                                    if (busCard) {
+                                        root.busClickBusId = -1
+                                        busClickTimer.stop()
+                                        if (card.busStableId >= 0
+                                                && root.busMonitorVideoBusId === card.busStableId)
+                                            root.stopBusMonitorVideo()
+                                        if (card.busStableId >= 0
+                                                && root.busMonitorAudioBusId === card.busStableId)
+                                            root.stopBusMonitorAudio()
+                                    }
                                     if (videoCard) {
                                         root.toggleVideoSourcePreview(index)
                                     } else if (busCard && card.busVideoSourceIndex >= 0) {
@@ -1004,11 +1137,14 @@ Item {
                                         if (root.meteredLabels.indexOf(sub) < 0)
                                             root.toggleAudioMeter(sub)
                                     } else if (busCard) {
+                                        // The bus is the picture now; its own inputs need no separate tap. This
+                                        // used to START one per routed input on every double click and never
+                                        // release it, so an audio input kept metering behind a taken card.
                                         const b = BusListModel.getBus(index)
-                                        for (const r of b.routedAudioInputs) {
+                                        for (const r of (b.routedAudioInputs || [])) {
                                             const data = AudioInputListModel.getInput(r)
                                             const label = data && data.sublabel !== undefined ? data.sublabel : ""
-                                            if (label !== "" && root.meteredLabels.indexOf(label) < 0)
+                                            if (label !== "" && root.meteredLabels.indexOf(label) >= 0)
                                                 root.toggleAudioMeter(label)
                                         }
                                     }
@@ -1068,11 +1204,16 @@ Item {
                                 Image {
                                     id: stateWinImage
                                     anchors.fill: parent
+                                    // THE PICTURE FOLLOWS THE PREVIEW. It used to ALSO require inputProducing(),
+                                    // a second and stricter test than "this label is previewing": when the two
+                                    // disagreed a single click started the tap, spun the warm-up ring and showed
+                                    // no thumbnail at all. The provider simply paints nothing until its first
+                                    // frame arrives; the ring already says that is what is happening.
                                     visible: {
                                         void LiveOutputService.inputRev
                                         return (videoCard && card.holding
-                                                || busCard && card.busVideoPreviewing)
-                                            && LiveOutputService.inputProducing(card.heldVideoLabel)
+                                                || busCard && card.busVideoDevicePreviewing)
+                                            && card.heldVideoLabel !== ""
                                     }
                                     source: visible
                                         ? "image://videopreview/" + encodeURIComponent(card.heldVideoLabel)
@@ -1081,11 +1222,17 @@ Item {
                                     cache: false
                                     asynchronous: false
                                 }
-                                // A media FILE held by a bus card plays right here.
-                                Loader {
+                                // A media FILE held by a bus card plays right here — through the SAME shared
+                                // surface the monitor tiles and the Stage use: the one player the take
+                                // started, not a second decode of the same file inside this card.
+                                LiveMediaSurface {
                                     anchors.fill: parent
+                                    visible: card.busMediaPlaying
                                     active: card.busMediaPlaying
-                                    sourceComponent: MediaCardPlayer { path: card.busVideoLabel }
+                                            && LiveOutputService.mediaIsVideo
+                                            && LiveOutputService.mediaPath === String(card.heldVideoLabel)
+                                    fit: LiveOutputService.mediaFit
+                                    sizeToItem: false
                                 }
                                 Item {
                                     id: busDot
@@ -1293,6 +1440,12 @@ Item {
                                 Row {
                                     id: busAudioRow
                                     visible: busCard
+                                    // INERT UNTIL CLICKED: the pair is the bus's live-audio control and its
+                                    // monitor switch (see toggleBusMonitorPreview), so an untouched bus
+                                    // sits dim and silent — full strength only while this bus is held (or
+                                    // hovered, so it can be found). Nothing reads a level before the click.
+                                    opacity: (card.busHeld || cardHover.hovered) ? 1 : 0.4
+                                    Behavior on opacity { NumberAnimation { duration: Theme.hoverFade } }
                                     readonly property bool centred: card.busType === "audio"
                                     width: implicitWidth
                                     height: implicitHeight

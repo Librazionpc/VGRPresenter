@@ -1,20 +1,18 @@
 #pragma once
 
 #include "platform/PlatformAccessors.hpp"
-#include "platform/common/Filesystem.hpp"
+#include "platform/PlatformServices.hpp"
 #include "platform/common/Timer.hpp"
-#include "platform/windows/WindowsPaths.hpp"
 #include "platform/windows/WindowsThreading.hpp"
 #include "platform/windows/WindowsProcess.hpp"
-#include "platform/windows/WindowsLibrary.hpp"
 #include "platform/windows/WindowsMonitor.hpp"
 #include "platform/windows/WindowsAudio.hpp"
 #include "platform/windows/WindowsVideo.hpp"
 #include "platform/windows/WindowsNetwork.hpp"
 #include "platform/windows/WindowsPower.hpp"
-#include "platform/windows/WindowsClipboard.hpp"
+#include "platform/qt/QtClipboard.hpp"
+#include "platform/qt/QtComposed.hpp"
 #include "platform/windows/WindowsEnvironment.hpp"
-#include "platform/windows/WindowsLocale.hpp"
 #include "platform/windows/WindowsSocket.hpp"
 #include "platform/windows/WindowsInput.hpp"
 #include "platform/windows/WindowsDialogs.hpp"
@@ -37,6 +35,7 @@ public:
     std::string OsName() const override { return "Windows"; }
     std::string OsVersion() const override;
     std::string Arch() const override;
+    PlatformCapabilities Capabilities() const override;
 
     Snapshot Sample() override;
     std::vector<OsEvent> PollChanges() override;
@@ -48,23 +47,32 @@ public:
     static constexpr int kDeviceFingerprintRefreshMs = 5000;
 
 private:
-    FilesystemImpl filesystem_;
-    WindowsPaths paths_;
+    // THE PLATFORM SERVICES (docs/platform/qt_first_platform.md): Qt serves
+    // all five — ONE implementation on every OS. The native threading adapter
+    // remains only for what Qt has no API for (naming the calling thread,
+    // affinity, priority); no per-OS paths/locale/library class exists any more.
+    PlatformPaths paths_;
+    WindowsThreading nativeThreading_;
+    PlatformThreading threading_{nativeThreading_};
+    PlatformFilesystem filesystem_;
+    PlatformLibrary library_;
+    PlatformLocale locale_;
     TimerImpl timer_;
-    WindowsThreading threading_;
     WindowsProcess process_;
-    WindowsLibrary library_;
     WindowsMonitor monitor_;
     WindowsAudio audio_;
     WindowsVideo video_;
-    WindowsNetwork network_;
+    WindowsNetwork nativeNetwork_;
+    QtNetwork network_{nativeNetwork_};
     WindowsPower power_;
-    WindowsClipboard clipboard_;
-    WindowsEnvironment environment_;
-    WindowsLocale locale_;
-    WindowsInput input_;
+    QtClipboard clipboard_;   // QClipboard (same class on every OS)
+    WindowsEnvironment nativeEnvironment_;
+    QtEnvironment environment_{nativeEnvironment_};
+    WindowsInput nativeInput_;
+    QtInput input_{nativeInput_};
     WindowsDialogs dialogs_;
-    WindowsNotifications notifications_;
+    WindowsNotifications nativeNotifications_;
+    QtNotifications notifications_{nativeNotifications_};
     WindowsSocketFactory sockets_;
 
     std::string lastMonitorIds_;

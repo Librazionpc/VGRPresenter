@@ -1,3 +1,4 @@
+#include "core/common/LocalTime.hpp"
 #include "core/task_scheduler/TaskScheduler.hpp"
 
 #include "core/logging/Logger.hpp"
@@ -287,12 +288,7 @@ EngineTime TaskScheduler::NextCronFire(const CronSpec& spec, EngineTime from) {
     auto sys = std::chrono::system_clock::now() +
                std::chrono::duration_cast<std::chrono::system_clock::duration>(offset);
     std::time_t t0 = std::chrono::system_clock::to_time_t(sys);
-    std::tm tmv{};
-#if defined(_WIN32)
-    localtime_s(&tmv, &t0);
-#else
-    localtime_r(&t0, &tmv);
-#endif
+    std::tm tmv = bps::LocalTime(t0);
 
     auto normalize = [](std::tm& tm) { return std::mktime(&tm); };
 

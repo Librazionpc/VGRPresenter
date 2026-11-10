@@ -1,3 +1,4 @@
+#include "core/common/LocalTime.hpp"
 #include "modules/adaptive/Learning.hpp"
 
 #include "core/database/DatabaseManager.hpp"
@@ -12,12 +13,7 @@ int TodayWeekday() {
     // 0=Sunday .. 6=Saturday (matches the scheduler's convention).
     auto now = std::chrono::system_clock::now();
     std::time_t t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    localtime_s(&tm, &t);
-#else
-    localtime_r(&t, &tm);
-#endif
+    const std::tm tm = bps::LocalTime(t);
     return tm.tm_wday;
 }
 } // namespace

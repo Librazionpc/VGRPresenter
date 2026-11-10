@@ -150,6 +150,10 @@ std::vector<SettingDef> BuildDefinitions() {
     }, "The shape for a picture whose own file does not name one."));
 
     // ---- The reading step (Alt+Down / Alt+Up) ----
+    // CURSOR FREQUENCY: how many lines one press moves (Alt+Down / Alt+Up, the wall's ‹ ›, the next-timer). 1 is the old
+    // one-line-at-a-time walk; a higher number reads faster per press (a step never carries across a page turn).
+    d.push_back(IntRange("reading.stepLines", "reading", "Cursor frequency", 1, 1, 20,
+                         "How many lines one press of the arrow moves. 1 walks a line at a time; raise it to read faster with fewer presses."));
     d.push_back(IntRange("reading.stepMs", "reading", "Reading step speed", 190, 60, 600,
                          "How long one line takes to travel, in milliseconds. Slower is calmer to read along with. Shown beside the tab's own slide options."));
     // MOTION is the ease. "Smooth" is the default: it leaves the key press at a
@@ -194,11 +198,21 @@ std::vector<SettingDef> BuildDefinitions() {
     d.push_back(Text("scripture.scrollWalk", "scripture", "Scroll the passage"));
     d.push_back(Text("table.scrollWalk", "table", "Scroll the passage"));
     d.push_back(Text("shows.scrollWalk", "shows", "Scroll the passage"));
+    // WHICH show advances by itself, using that show's own per-slide times (the wall's NEXT TIMER popover
+    // writes them into the show). Recorded per show on purpose: turning the timer on for one show must not
+    // make every other show slide by itself.
+    d.push_back(Text("shows.timedShow", "shows", "Show that advances by itself"));
 
     // ---- What the app remembers between runs (not shown as settings) ----
     d.push_back(Text("session.scriptureBible", "session", "Last Bible"));
     d.push_back(Text("session.scriptureParallelBibles", "session", "Parallel Bible versions"));
     d.push_back(Text("session.lastProject", "session", "Last project"));
+    // What this machine demonstrated it can carry as an NDI feed ("<n> Mpx/s · <detail>"), written by the
+    // feed as it sustains a rate and read back by the GO LIVE load check. App-managed, not a preference.
+    d.push_back(Text("outputs.ndi.sustainedLoad", "outputs", "NDI load this machine sustained"));
+    // Per OUTPUT, because the machine's total cannot say which output is the one asking for too much:
+    // "<name>|<W>x<H>@<fps>;<name>|..." — what each output actually held, written as it sustains a rate.
+    d.push_back(Text("outputs.ndi.sustainedPerOutput", "outputs", "NDI load each output sustained"));
     d.push_back(Text("session.lastShowPath", "session", "Last show"));
     d.push_back(Text("session.lastView", "session", "Last screen"));
     d.push_back(Text("session.lastSettingsSection", "session", "Last settings page"));

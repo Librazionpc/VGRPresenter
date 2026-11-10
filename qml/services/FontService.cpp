@@ -53,7 +53,10 @@ QString FontService::defaultFamily() const
 
 QString FontService::defaultContentFamily()
 {
-    return QStringLiteral("Cambria");
+    // This OS's own slide serif (Windows: Cambria; elsewhere the bundled Source Serif 4 or the OS's serif) —
+    // the engine owns the per-OS list so the preview and the output agree.
+    return QString::fromStdString(
+        bps::rendering::RenderEngine::Instance().Fonts().PlatformContentFamily());
 }
 
 QString FontService::monoFamily() const
@@ -61,10 +64,10 @@ QString FontService::monoFamily() const
     const QString key = QStringLiteral("\x01mono");
     if (const auto it = cache_.constFind(key); it != cache_.constEnd())
         return it.value();
-    // Qt's own answer for "the platform's fixed-width font"; empty only if the
+    // This OS's own fixed-width face (the engine's per-OS list, Qt's fixed font as the last resort); empty only if the
     // platform has none, in which case the caller keeps Qt's default.
-    const QString answer =
-        QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
+    const QString answer = QString::fromStdString(
+        bps::rendering::RenderEngine::Instance().Fonts().PlatformMonoFamily());
     cache_.insert(key, answer);
     return answer;
 }

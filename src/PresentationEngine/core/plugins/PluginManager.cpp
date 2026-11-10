@@ -83,7 +83,7 @@ Result<void> PluginManager::Discover(std::string_view searchPath) {
 
 std::shared_ptr<IPlugin> PluginManager::OpenLibrary(const PluginManifest& m, void** handleOut) {
     // All library access goes through the PAL (Phase 2): dlopen/dlsym/dlclose
-    // live in platform/linux/LinuxLibrary.cpp, never here.
+    // live in platform/qt/QtLibrary.cpp, never here.
     auto libShared = platform::PlatformAccessor::Shared();
     if (!libShared) {
         Logger::Instance().Error("PluginManager: PAL unavailable — cannot load plugins");

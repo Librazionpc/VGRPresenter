@@ -113,6 +113,17 @@ Item {
                 source: root.pictureUrl(-1)
             }
 
+            // THE FILE ON AIR, DRAWN THE WAY THE MONITOR TILES DRAW IT: the one shared surface, fed by the
+            // player the take started — never a thumbnail and never a second decode of the same file. So a
+            // card that is playing shows the moving picture here (the poster stays underneath for the
+            // moment before the first frame arrives).
+            LiveMediaSurface {
+                anchors.fill: parent
+                active: root.onAir && !LiveOutputService.mediaIsAudio
+                fit: root.fit !== "" ? root.fit : LiveOutputService.mediaFit
+                sizeToItem: true
+            }
+
             // The moving frame under the pointer, over the poster. It keeps showing the previous
             // frame while the next one loads, so scrubbing does not flicker to the poster.
             Image {

@@ -174,6 +174,26 @@ std::string WindowsPlatform::OsVersion() const { return environment_.Current().o
 
 std::string WindowsPlatform::Arch() const { return environment_.Current().arch; }
 
+PlatformCapabilities WindowsPlatform::Capabilities() const {
+    PlatformCapabilities c;
+    c.audioDeviceDiscovery = true;
+    c.audioInputCapture = true;
+    c.audioOutputPlayback = true;
+    c.audioLoopbackCapture = true;
+    c.audioStreamTaps = true;
+    c.videoDeviceDiscovery = true;
+    c.videoCapture = true;
+    c.screenCapture = true;
+    c.audioRecording = true;
+    c.videoRecording = true;
+    c.displayEnumeration = true;
+    c.batteryTelemetry = true;
+    c.desktopNotifications = true;
+    c.nativeDialogs = true;
+    c.clipboardImages = true;
+    return c;
+}
+
 SystemInfo WindowsPlatform::Info() {
     const EnvironmentInfo e = environment_.Current();
     SystemInfo info;

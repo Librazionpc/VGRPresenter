@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.21)
-project(VGRPresenterUI VERSION 0.1.2 LANGUAGES CXX)
+
+# THE app version has ONE source: kAppVersion in qml/services/SettingsService.cpp (the same line the
+# installer scripts read on every OS). The project version, the Windows file-properties resource and the
+# macOS bundle all take it from there — they used to repeat the literal, and a release bump had four
+# places to forget. A bump re-runs CMake by itself (CMAKE_CONFIGURE_DEPENDS below).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/qml/services/SettingsService.cpp" _bps_version_line
+     REGEX "kAppVersion = \"[0-9]+\\.[0-9]+\\.[0-9]+\"" LIMIT_COUNT 1)
+string(REGEX REPLACE ".*kAppVersion = \"([0-9]+\\.[0-9]+\\.[0-9]+)\".*" "\\1" BPS_APP_VERSION "${_bps_version_line}")
+if(NOT BPS_APP_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "cannot read kAppVersion from qml/services/SettingsService.cpp")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/qml/services/SettingsService.cpp")
+project(VGRPresenterUI VERSION ${BPS_APP_VERSION} LANGUAGES CXX)
+string(REPLACE "." "," BPS_RC_VERSION "${BPS_APP_VERSION}")
+set(BPS_RC_VERSION "${BPS_RC_VERSION},0")
 
 # C++23 project-wide — the Qt app and the engine (src/PresentationEngine/)
 # build as one project now, one CMakeLists.txt, so they share one dialect
@@ -71,7 +85,7 @@ endif()
 # (qml/shaders/slidefilter.frag) into the .qsb package a Qt 6 ShaderEffect
 # requires — Qt 6 dropped inline GLSL source strings, so the effect has to be
 # built at build time like every other shader in a Qt 6 app.
-find_package(Qt6 6.11 REQUIRED COMPONENTS Gui Quick QuickControls2 QuickShapes QuickEffects Multimedia ShaderTools)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui GuiPrivate Quick QuickControls2 QuickShapes QuickEffects Multimedia Network ShaderTools)
 
 qt_standard_project_setup(REQUIRES 6.11)
 
@@ -83,10 +97,10 @@ qt_standard_project_setup(REQUIRES 6.11)
 # Threads dependency) still live under src/PresentationEngine/cmake/ and are
 # included below, just from this file instead of that one.
 #
-# Cross-platform by design: the platform PAL sources branch WIN32/APPLE/
-# linux below, all three fully implemented (not stubs) — this app ships on
-# every platform Qt6 does, not just Windows, so nothing here assumes
-# otherwise.
+# The shared engine and Qt-backed generic services are platform-independent.
+# Windows is the production target; Linux has a PAL backend, and macOS now
+# configures with Apple-native services. Media capture/playback parity is still
+# reported per platform through IPlatform::Capabilities().
 # =============================================================================
 
 include(src/PresentationEngine/cmake/Warnings.cmake)
@@ -126,7 +140,6 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/core/ipc/IpcClient.cpp
     ${BPS_ROOT}/platform/Platform.cpp
     ${BPS_ROOT}/platform/PlatformAccessor.cpp
-    ${BPS_ROOT}/platform/common/Filesystem.cpp
     ${BPS_ROOT}/platform/common/Timer.cpp
     ${BPS_ROOT}/modules/presentation/PresentationModule.cpp
     ${BPS_ROOT}/modules/songs/SongsModule.cpp
@@ -173,6 +186,9 @@ set(BPS_CORE_SOURCES
     # (the whole file is _WIN32-gated; elsewhere the factory returns nullptr and the
     # engine keeps the software backend). Links d3d11 + d3dcompiler on Windows only.
     ${BPS_ROOT}/modules/rendering/D3D11Backend.cpp
+    ${BPS_ROOT}/platform/qt/QtRhiBackend.cpp
+    ${BPS_ROOT}/platform/qt/QtClipboard.cpp   # QClipboard: one clipboard class on every OS
+    ${BPS_ROOT}/platform/qt/QtComposed.cpp    # Qt-first network / environment / input / notifications
     # The scale filter both picture paths share (ImageScale.hpp): the rasterizer's
     # scaled blits and the per-output frame resize.
     ${BPS_ROOT}/modules/rendering/ImageScale.cpp
@@ -271,10 +287,7 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/audio/AudioEngine.cpp
     # Recording, Replay & Media Capture Engine (Phase 16, docs/specs/28)
     ${BPS_ROOT}/modules/recording/RecordingEngine.cpp
-    ${BPS_ROOT}/modules/recording/MediaFoundationMp4.cpp
-    ${BPS_ROOT}/modules/recording/MediaFoundationEncode.cpp
-    ${BPS_ROOT}/modules/recording/MatroskaContainer.cpp
-    ${BPS_ROOT}/modules/recording/AudioFileContainer.cpp
+    ${BPS_ROOT}/modules/recording/WaveAudioContainer.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastEngine.cpp
     ${BPS_ROOT}/modules/broadcast/BroadcastProviders.cpp
     # Project & Data System (Phase 4, docs/specs/15)
@@ -305,52 +318,89 @@ set(BPS_CORE_SOURCES
     ${BPS_ROOT}/modules/project/DataManager.cpp
 )
 
+# Qt-backed PAL implementations are compiled once and shared by each native
+# platform composition. They depend only on the platform contracts and Qt Core.
+set(BPS_QT_PLATFORM_SOURCES
+    ${BPS_ROOT}/platform/qt/QtFilesystem.cpp
+    ${BPS_ROOT}/platform/qt/QtPaths.cpp
+    ${BPS_ROOT}/platform/qt/QtThreading.cpp
+    ${BPS_ROOT}/platform/qt/QtLibrary.cpp
+    ${BPS_ROOT}/platform/qt/QtLocale.cpp)
+set(BPS_QT_MEDIA_SOURCES
+    ${BPS_ROOT}/platform/qt/QtMediaDevices.cpp
+    ${BPS_ROOT}/platform/qt/QtFrameSource.cpp
+    ${BPS_ROOT}/platform/qt/QtRecordingContainer.cpp
+    ${BPS_ROOT}/platform/qt/QtDialogs.cpp
+    ${BPS_ROOT}/platform/qt/QtAudio.cpp)
+
 # Platform-specific PAL backends (headers live under platform/include — added
 # to the include path below; .cpp files stay in their backend directory).
 if(WIN32)
     list(APPEND BPS_CORE_SOURCES
+        # These recording containers and encoders are Media Foundation based.
+        # Keep them out of non-Windows builds; other platforms must register
+        # their own video providers before advertising video recording.
+        ${BPS_ROOT}/modules/recording/MediaFoundationMp4.cpp
+        ${BPS_ROOT}/modules/recording/MediaFoundationEncode.cpp
+        ${BPS_ROOT}/modules/recording/MatroskaContainer.cpp
+        ${BPS_ROOT}/modules/recording/AudioFileContainer.cpp
         ${BPS_ROOT}/platform/windows/WindowsPlatform.cpp
         ${BPS_ROOT}/platform/windows/WindowsGpu.cpp
-        ${BPS_ROOT}/platform/windows/WindowsPaths.cpp
         ${BPS_ROOT}/platform/windows/WindowsThreading.cpp
         ${BPS_ROOT}/platform/windows/WindowsProcess.cpp
-        ${BPS_ROOT}/platform/windows/WindowsLibrary.cpp
         ${BPS_ROOT}/platform/windows/WindowsMonitor.cpp
         ${BPS_ROOT}/platform/windows/WindowsAudio.cpp
         ${BPS_ROOT}/platform/windows/WindowsVideo.cpp
         ${BPS_ROOT}/platform/windows/WindowsNetwork.cpp
         ${BPS_ROOT}/platform/windows/WindowsPower.cpp
-        ${BPS_ROOT}/platform/windows/WindowsClipboard.cpp
         ${BPS_ROOT}/platform/windows/WindowsEnvironment.cpp
-        ${BPS_ROOT}/platform/windows/WindowsLocale.cpp
         ${BPS_ROOT}/platform/windows/WindowsSocket.cpp
         ${BPS_ROOT}/platform/windows/WindowsInput.cpp
         ${BPS_ROOT}/platform/windows/WindowsDialogs.cpp
         ${BPS_ROOT}/platform/windows/WindowsNotifications.cpp)
-elseif(APPLE)
-    list(APPEND BPS_CORE_SOURCES ${BPS_ROOT}/platform/macos/MacOSPlatform.cpp)
-else()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    enable_language(OBJCXX)
     list(APPEND BPS_CORE_SOURCES
+        ${BPS_ROOT}/platform/common/PosixProcess.cpp
+        ${BPS_ROOT}/platform/common/PosixSocket.cpp
+        ${BPS_ROOT}/platform/macos/MacOSPlatform.mm)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND BPS_CORE_SOURCES
+        ${BPS_ROOT}/platform/common/PosixProcess.cpp
         ${BPS_ROOT}/platform/linux/LinuxPlatform.cpp
-        ${BPS_ROOT}/platform/linux/LinuxPaths.cpp
         ${BPS_ROOT}/platform/linux/LinuxThreading.cpp
-        ${BPS_ROOT}/platform/linux/LinuxProcess.cpp
-        ${BPS_ROOT}/platform/linux/LinuxLibrary.cpp
         ${BPS_ROOT}/platform/linux/LinuxMonitor.cpp
-        ${BPS_ROOT}/platform/linux/LinuxAudio.cpp
         ${BPS_ROOT}/platform/linux/LinuxNetwork.cpp
         ${BPS_ROOT}/platform/linux/LinuxPower.cpp
-        ${BPS_ROOT}/platform/linux/LinuxClipboard.cpp
         ${BPS_ROOT}/platform/linux/LinuxEnvironment.cpp
-        ${BPS_ROOT}/platform/linux/LinuxLocale.cpp
         ${BPS_ROOT}/platform/linux/LinuxInput.cpp
         ${BPS_ROOT}/platform/linux/LinuxDialogs.cpp
         ${BPS_ROOT}/platform/linux/LinuxNotifications.cpp
         ${BPS_ROOT}/platform/linux/LinuxExec.cpp
         ${BPS_ROOT}/platform/common/PosixSocket.cpp)
+else()
+    message(FATAL_ERROR
+        "VGR Presenter supports Windows, Linux, and macOS; "
+        "CMAKE_SYSTEM_NAME='${CMAKE_SYSTEM_NAME}' is not supported.")
 endif()
 
 add_library(engine_core STATIC ${BPS_CORE_SOURCES})
+add_library(platform_qt_services STATIC ${BPS_QT_PLATFORM_SOURCES})
+target_include_directories(platform_qt_services PUBLIC ${BPS_ROOT}
+    ${BPS_ROOT}/core/include ${BPS_ROOT}/modules/include
+    ${BPS_ROOT}/interfaces/include ${BPS_ROOT}/platform/include)
+target_link_libraries(platform_qt_services PUBLIC Threads::Threads Qt6::Core)
+bps_enable_warnings(platform_qt_services)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(platform_qt_media STATIC ${BPS_QT_MEDIA_SOURCES})
+    target_include_directories(platform_qt_media PUBLIC ${BPS_ROOT}
+        ${BPS_ROOT}/core/include ${BPS_ROOT}/modules/include
+        ${BPS_ROOT}/interfaces/include ${BPS_ROOT}/platform/include)
+    # QtDialogs reaches the platform theme's dialog helpers (Qt's semi-public QPA API: private Gui headers).
+    target_link_libraries(platform_qt_media PUBLIC Qt6::Multimedia PRIVATE Qt6::GuiPrivate)
+    set_source_files_properties(${BPS_ROOT}/platform/qt/QtDialogs.cpp PROPERTIES COMPILE_OPTIONS "-Wno-pedantic")
+    bps_enable_warnings(platform_qt_media)
+endif()
 if(BPS_ENGINE_FALLBACK_OPT)
     target_compile_options(engine_core PRIVATE ${BPS_ENGINE_FALLBACK_OPT})
 endif()
@@ -366,10 +416,33 @@ target_include_directories(engine_core PUBLIC ${BPS_ROOT}
                                                 ${BPS_ROOT}/modules/include
                                                 ${BPS_ROOT}/interfaces/include
                                                 ${BPS_ROOT}/platform/include)
-target_link_libraries(engine_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS} Qt6::Gui)
+# The engine's shared Qt-backed PAL services use Qt Core. Linux and macOS also
+# link Qt Multimedia adapters for audio I/O and camera preview; Windows keeps
+# its existing native WASAPI and Media Foundation paths.
+#
+# Qt6::Gui is the ENGINE's own dependency, separate from the platform services: the text engine
+# (rendering/TextEngine, presentation/SceneBuilder) lays out text with QFont/QTextLayout/QImage, and the
+# image loaders use QImage. It was linked here before the platform services were split out; dropping it
+# left engine_core with only Qt Core's include path ("QFont: No such file or directory"). The recorded
+# Qt-header sites in tools/platform_boundary_baseline.json are exactly these.
+target_link_libraries(engine_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS}
+    Qt6::Gui Qt6::Network platform_qt_services)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(engine_core PUBLIC platform_qt_media)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set_property(TARGET engine_core PROPERTY OBJCXX_STANDARD 23)
+    set_property(TARGET engine_core PROPERTY OBJCXX_STANDARD_REQUIRED ON)
+    find_library(BPS_APPKIT_FRAMEWORK AppKit REQUIRED)
+    find_library(BPS_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+    find_library(BPS_IOKIT_FRAMEWORK IOKit REQUIRED)
+    target_link_libraries(engine_core PUBLIC
+        ${BPS_APPKIT_FRAMEWORK} ${BPS_COREGRAPHICS_FRAMEWORK} ${BPS_IOKIT_FRAMEWORK})
+endif()
+
 # zlib powers the DeflateCompressor (AssetCompressor) when available; the
 # compressor degrades to Stored/RLE on hosts without zlib. zlib is the one
-# deliberate hard link in the engine (NDI, libasound and libdrm are
+# deliberate hard link in the engine (NDI and libdrm are
 # runtime-loaded through the PAL ILibrary seam) — it is near-universal,
 # header-only on our side, and required for the deflate backend; everything
 # optional stays runtime-loaded.
@@ -412,6 +485,26 @@ if(WIN32)
     target_compile_definitions(engine_core PUBLIC _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 endif()
 bps_enable_warnings(engine_core)
+
+# ---- The cross-platform GPU backend (QRhi) --------------------------------------------------------
+# One implementation of the engine's draw commands over Qt's rendering hardware interface: Direct3D 11
+# on Windows, Metal on macOS, Vulkan / OpenGL on Linux (platform/qt/QtRhiBackend.cpp). Its shaders are
+# GLSL, compiled by Qt Shader Tools into one .qsb per stage that carries every API's format, and embedded
+# in the engine (loaded as :/bps/shaders/engine.{vert,frag}.qsb). QRhi is Qt's semi-public API: it needs
+# the private Gui headers, so the build must use the same Qt it runs against (always true here).
+# Off = the backend answers "unavailable" and the engine falls back to the software rasterizer.
+option(BPS_ENABLE_RHI "Build the QRhi GPU backend (Metal / Vulkan / OpenGL / Direct3D 11 through Qt)" ON)
+if(BPS_ENABLE_RHI)
+    target_compile_definitions(engine_core PRIVATE BPS_HAVE_RHI=1)
+    target_link_libraries(engine_core PRIVATE Qt6::GuiPrivate)
+    qt_add_shaders(engine_core "bps_rhi_shaders"
+        PREFIX "/bps/shaders"
+        BASE "${BPS_ROOT}/platform/qt/shaders"
+        FILES
+            ${BPS_ROOT}/platform/qt/shaders/engine.vert
+            ${BPS_ROOT}/platform/qt/shaders/engine.frag
+    )
+endif()
 
 # ---- CLI demo app (apps/cli) ----
 add_executable(bps_cli ${BPS_ROOT}/apps/cli/main.cpp)
@@ -459,17 +552,25 @@ set(BPS_UNIT_TEST_SOURCES
     ${BPS_ROOT}/tests/unit/tests_song.cpp
     ${BPS_ROOT}/tests/unit/tests_flow.cpp
     ${BPS_ROOT}/tests/unit/tests_production.cpp
-    ${BPS_ROOT}/tests/unit/tests_recording.cpp
     ${BPS_ROOT}/tests/unit/tests_broadcast.cpp
     ${BPS_ROOT}/tests/unit/tests_thetable.cpp
     ${BPS_ROOT}/tests/unit/tests_telemetry.cpp
+    ${BPS_ROOT}/tests/unit/tests_platform.cpp
+    ${BPS_ROOT}/tests/unit/tests_platform_contract.cpp
 )
+if(WIN32)
+    list(APPEND BPS_UNIT_TEST_SOURCES ${BPS_ROOT}/tests/unit/tests_recording.cpp)
+endif()
 add_executable(bps_unit_tests ${BPS_UNIT_TEST_SOURCES})
 target_link_libraries(bps_unit_tests PRIVATE engine_core)
 bps_enable_warnings(bps_unit_tests)
 add_test(NAME unit COMMAND bps_unit_tests)
-foreach(phase core cams modules notify project adaptive rendering display
-              presentation search media library settings import vgr scene bible song flow production recording broadcast styles)
+set(BPS_TEST_PHASES core cams modules notify project adaptive rendering display
+    presentation search media library settings import vgr scene bible song flow production broadcast styles platform)
+if(WIN32)
+    list(APPEND BPS_TEST_PHASES recording)
+endif()
+foreach(phase IN LISTS BPS_TEST_PHASES)
     add_test(NAME unit_${phase} COMMAND bps_unit_tests ${phase})
 endforeach()
 
@@ -660,6 +761,15 @@ set_target_properties(appVGRPresenterUI PROPERTIES
     # with "0-bit reloc in dll" and the generated import library is unused.
     ENABLE_EXPORTS FALSE
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set_target_properties(appVGRPresenterUI PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/assets/Info-macos.plist.in"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.vgr.presenter"
+        MACOSX_BUNDLE_BUNDLE_NAME "VGR Presenter"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${BPS_APP_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${BPS_APP_VERSION}")
+endif()
 
 if(WIN32)
     # ${APP_ICON} inside the .rc must be an absolute path (windres runs with an
@@ -983,6 +1093,37 @@ if(BPS_ENABLE_SETTINGS_KEYS_CHECK)
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(settings_keys PROPERTIES
         LABELS "settings-keys"
+        TIMEOUT 120)
+endif()
+
+# ============================================================================
+# Platform boundary guard (tools/check_platform_boundary.mjs) — default build
+# ============================================================================
+# The cage (docs/platform/qt_first_platform.md) is only real if it is enforced:
+# an OS header belongs in platform/ and nowhere else, and the production engine
+# (core / modules / interfaces) may not reach for Qt either — it asks the PAL.
+# A NEW violation fails the build; the sites that predate the rule are listed in
+# tools/platform_boundary_baseline.json with the reason they still exist.
+# Independent of the other guards: it keeps running when one of them is turned off.
+if(NOT BPS_NODE_EXE)
+    find_program(BPS_NODE_EXE
+        NAMES node node.exe
+        HINTS ENV NODE_BIN
+        DOC "node runtime used by the build guards")
+endif()
+if(BPS_NODE_EXE)
+    add_custom_target(platform_boundary_check ALL
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_platform_boundary.mjs"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "check_platform_boundary: OS/Qt headers outside the platform cage"
+        VERBATIM)
+    add_dependencies(appVGRPresenterUI platform_boundary_check)
+    add_dependencies(bps_unit_tests platform_boundary_check)
+    add_test(NAME platform_boundary
+        COMMAND "${BPS_NODE_EXE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_platform_boundary.mjs"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(platform_boundary PROPERTIES
+        LABELS "platform"
         TIMEOUT 120)
 endif()
 

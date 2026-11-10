@@ -252,5 +252,6 @@ private:
     // Library scan state (GUI-thread owned): one filesystem pass at a time, and
     // a rescan that arrives while one is in flight runs after it.
     bool refreshBusy_ = false;
+    bool cachedListPending_ = false;   // the persisted index was loaded and not yet shown
     bool refreshPending_ = false;
 };

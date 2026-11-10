@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QSet>
 #include <QStringList>
+#include <algorithm>
 #include "modules/presentation/CompositorState.hpp"
 #include "modules/presentation/LineWalk.hpp"
 #include "modules/presentation/LiveOutputController.hpp"
@@ -217,6 +218,24 @@ LiveOutputService::MediaPreflight LiveOutputService::preflightMediaTake(const QS
     return pre;
 }
 
+void LiveOutputService::attachMediaSink(QVideoSink *sink)
+{
+    if (!sink)
+        return;
+    std::lock_guard<std::mutex> mirrors(mediaMirrorMutex_);
+    for (const QPointer<QVideoSink> &have : mediaMirrorSinks_)
+        if (have == sink)
+            return;
+    mediaMirrorSinks_.erase(std::remove_if(mediaMirrorSinks_.begin(), mediaMirrorSinks_.end(),
+                                           [](const QPointer<QVideoSink> &p) { return p.isNull(); }),
+                            mediaMirrorSinks_.end());
+    mediaMirrorSinks_.emplace_back(sink);
+    // A tile that never got here is a tile that can only show the engine's frame — the black-until-GO-LIVE
+    // picture. This line says whether the surface that complained is wired to the decoder at all.
+    qInfo("LiveOutputService: a media surface attached (%d attached)",
+          static_cast<int>(mediaMirrorSinks_.size()));
+}
+
 void LiveOutputService::takeMediaAtLevel(const QString &path, const QString &name, qreal levelPercent,
                                          bool muted)
 {
@@ -257,6 +276,19 @@ void LiveOutputService::setMediaLevel(qreal levelPercent, bool muted)
 
 void LiveOutputService::takeMedia(const QString &path, const QString &name)
 {
+    // ---- REFUSED UP FRONT, NOT STOPPED AFTERWARDS -------------------------------------------
+    // Nothing starts when no enabled video output can receive it: no decode, no audio, no frames pushed
+    // at outputs the board says are not wired. Two exceptions stay: a session with no video output at
+    // all (the library still previews a file) and the self-tests, which take files to prove this very
+    // path works. takeMediaAtLevel comes through here too, so sources are covered by the same rule.
+    if (!qEnvironmentVariableIsSet("VGR_SELFTEST")) {
+        RoutingService *routing = RoutingService::instance();
+        if (routing && routing->hasEnabledVideoOutput() && !routing->mediaCanReachAnyOutput()) {
+            qInfo("LiveOutputService: takeMedia refused — no enabled video output can receive media");
+            emit mediaTakeBlocked(path, name);
+            return;
+        }
+    }
     const quint64 token = ++mediaTakeToken_;
     vgr::EngineWorker::instance().runOffThread([this, token, path, name] {
         MediaPreflight pre = preflightMediaTake(path, name);
@@ -381,6 +413,21 @@ void LiveOutputService::EnsureMediaPlayer()
             if (image.isNull())
                 return;
             mediaFramesDecoded_.fetch_add(1, std::memory_order_relaxed);
+            int mirrorsFed = 0;
+            {   // every VideoOutput showing the media (monitor tiles) gets the decoded frame as is
+                std::lock_guard<std::mutex> mirrors(mediaMirrorMutex_);
+                for (const QPointer<QVideoSink> &sink : mediaMirrorSinks_)
+                    if (sink) {
+                        sink->setVideoFrame(f);
+                        ++mirrorsFed;
+                    }
+            }
+            // Every ~4 s at 30 fps: how many surfaces the decoder is actually feeding. Zero attached while a
+            // file is on air means the tiles are asking for frames nobody is delivering.
+            const qulonglong decodedNow = mediaFramesDecoded_.load(std::memory_order_relaxed);
+            if (decodedNow % 120 == 1)
+                qInfo("LiveOutputService: media frame %llu decoded, drawn on %d attached surface(s)",
+                      static_cast<unsigned long long>(decodedNow), mirrorsFed);
             mediaFrameShared_.store(std::make_shared<const QImage>(image));   // what the providers read
             pushMediaFrameToCompositor(image);                                 // the engine: every frame
             if (!mediaGuiUpdatePending_.exchange(true)) {

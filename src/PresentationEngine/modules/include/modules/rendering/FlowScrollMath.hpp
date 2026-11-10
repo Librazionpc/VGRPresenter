@@ -48,6 +48,32 @@ inline double LineForChar(const Starts& starts, double charAt) {
     return std::min(line, static_cast<double>(starts.size() - 1));
 }
 
+// The line a screen shows while a step glides from `fromChar` to `toChar` (the characters the walk's
+// two rest positions fall on). A screen that wraps the passage differently from the reference cannot
+// rest ON the word — it rests on the whole line that holds it — so the glide runs between the two
+// whole lines of THIS table, at the progress the shared character has made between them. Outside a
+// step (no span, or a character beyond it: a pick, a window move, a slide) the answer is the plain
+// LineForChar, as before. The result is an integer at rest after a step, on every screen, with no
+// line of any table cut or re-wrapped.
+template <class Starts>
+inline double SnappedLineForChar(const Starts& starts, double charAt, double fromChar, double toChar) {
+    if (starts.empty() || charAt < 0.0)
+        return charAt;
+    const double last = static_cast<double>(starts.size() - 1);
+    if (fromChar < 0.0 || toChar < 0.0)
+        return LineForChar(starts, charAt);
+    const double lo = std::min(fromChar, toChar);
+    const double hi = std::max(fromChar, toChar);
+    if (charAt < lo - 0.5 || charAt > hi + 0.5)
+        return LineForChar(starts, charAt);
+    const double fromLine = static_cast<double>(LineIndexOf(starts, static_cast<int>(std::floor(fromChar))));
+    const double toLine = static_cast<double>(LineIndexOf(starts, static_cast<int>(std::floor(toChar))));
+    if (toChar == fromChar)
+        return std::min(toLine, last);
+    const double progress = std::clamp((charAt - fromChar) / (toChar - fromChar), 0.0, 1.0);
+    return std::min(fromLine + (toLine - fromLine) * progress, last);
+}
+
 // Fractional line -> character position (the inverse of LineForChar).
 template <class Starts>
 inline double CharForLine(const Starts& starts, double lines) {

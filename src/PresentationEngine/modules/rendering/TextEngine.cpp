@@ -423,6 +423,67 @@ std::string FontManager::SubstituteFamily(std::string_view family) const {
     return resolved;
 }
 
+namespace {
+// ---- THE FACES EACH OS DRAWS WITH, written down here --------------------------------------------------
+// One ordered list per OS and role; the first one that is installed wins. Nothing asks one OS for another's
+// font: Windows names its own (Segoe UI, Cambria, Consolas), macOS its own (SF Pro, Georgia, Menlo), Linux
+// the common free families — and the bundled Source Serif 4 (registered at start-up from the resources)
+// is the serif everywhere Cambria does not exist, so slide text looks the same on a machine with none of
+// the system serifs. (Qt's own "system font" stays as the last resort.)
+#if defined(_WIN32)
+constexpr std::initializer_list<const char*> kUiChain = {"Segoe UI", "Segoe UI Variable Text", "Tahoma", "Arial"};
+constexpr std::initializer_list<const char*> kContentChain = {"Cambria", "Source Serif 4", "Georgia", "Times New Roman"};
+constexpr std::initializer_list<const char*> kMonoChain = {"Cascadia Mono", "Consolas", "Courier New"};
+#elif defined(__APPLE__)
+constexpr std::initializer_list<const char*> kUiChain = {"SF Pro Text", "Helvetica Neue", "Helvetica", "Arial"};
+constexpr std::initializer_list<const char*> kContentChain = {"Source Serif 4", "Georgia", "Times New Roman"};
+constexpr std::initializer_list<const char*> kMonoChain = {"SF Mono", "Menlo", "Monaco", "Courier New"};
+#else
+constexpr std::initializer_list<const char*> kUiChain = {"Inter", "Noto Sans", "Cantarell", "Ubuntu", "DejaVu Sans",
+                                                          "Liberation Sans", "FreeSans"};
+constexpr std::initializer_list<const char*> kContentChain = {"Source Serif 4", "Noto Serif", "DejaVu Serif",
+                                                               "Liberation Serif", "FreeSerif"};
+constexpr std::initializer_list<const char*> kMonoChain = {"JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono",
+                                                            "Noto Sans Mono", "FreeMono"};
+#endif
+} // namespace
+
+std::string FontManager::PlatformContentFamily() const {
+    {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        if (platformContentResolved_) return platformContentFamily_;
+    }
+    std::string family;
+    for (const char* candidate : kContentChain)
+        if (HasSystemFont(candidate)) { family = candidate; break; }
+    if (family.empty()) family = SystemUiFamily();   // nothing of the list is installed: the UI face, never an empty name
+    if (family.empty()) family = *kContentChain.begin();   // not even the app yet: this OS's own first choice, by name
+    if (QGuiApplication::instance()) {   // only a real answer is remembered (before the app exists HasSystemFont says no)
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        platformContentFamily_ = family;
+        platformContentResolved_ = true;
+    }
+    return family;
+}
+
+std::string FontManager::PlatformMonoFamily() const {
+    {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        if (platformMonoResolved_) return platformMonoFamily_;
+    }
+    std::string family;
+    for (const char* candidate : kMonoChain)
+        if (HasSystemFont(candidate)) { family = candidate; break; }
+    if (family.empty() && QGuiApplication::instance())
+        family = QFontDatabase::systemFont(QFontDatabase::FixedFont).family().toUtf8().toStdString();
+    if (QGuiApplication::instance()) {
+        std::lock_guard<std::mutex> lock(substituteMutex_);
+        platformMonoFamily_ = family;
+        platformMonoResolved_ = true;
+    }
+    return family;
+}
+
 std::string FontManager::SystemUiFamily() const {
     {
         std::lock_guard<std::mutex> lock(substituteMutex_);
@@ -431,7 +492,10 @@ std::string FontManager::SystemUiFamily() const {
     // Asked OUTSIDE the cache lock: it is a system query (and a font-set probe),
     // not map work.
     std::string family;
-    if (QGuiApplication::instance())
+    for (const char* candidate : kUiChain)
+        if (HasSystemFont(candidate)) { family = candidate; break; }
+    // None of this OS's own list is installed: Qt's idea of the system font is the last resort.
+    if (family.empty() && QGuiApplication::instance())
         family = QGuiApplication::font().family().toUtf8().toStdString();
     if (!family.empty() && !HasSystemFont(family)) family.clear();
     {

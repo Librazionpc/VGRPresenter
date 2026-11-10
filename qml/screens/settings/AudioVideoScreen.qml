@@ -211,6 +211,10 @@ Item {
                 return
             labels.push(label)
         }
+        // A page that is not on screen holds no taps at all (every settings page is built at startup;
+        // see RoutingScreen.syncMeters).
+        if (!root.visible)
+            return labels
         for (let r = 0; r < AudioInputListModel.rowCount(); ++r) {
             // ON SCREEN ONLY (see rowsInView): a row's meter is the reason its
             // device is open, so a row scrolled off the board gives it back.
@@ -231,7 +235,8 @@ Item {
     // reflection of what the rest of the app meters).
     property var heldAudioMeters: []
     function syncAudioMeters() {
-        const wanted = root.audioMeterTargets
+        const wanted = EngineBridge.platformCapabilities.audioInputCapture === true
+                     ? root.audioMeterTargets : []
         const held = root.heldAudioMeters
         const next = []
         for (const label of held)
@@ -245,6 +250,13 @@ Item {
         root.heldAudioMeters = next
     }
     onAudioMeterTargetsChanged: root.syncAudioMeters()
+    Connections {
+        target: EngineBridge
+        function onDevicesChanged() {
+            root.syncAudioMeters()
+            root.syncVideoMeters()
+        }
+    }
     Component.onCompleted: {
         root.syncAudioMeters()
         root.syncVideoMeters()   // the screen's first stream-meter reconcile
@@ -262,6 +274,8 @@ Item {
                 if (out[i].label === l) return
             out.push({ label: l, kind: kind })
         }
+        if (!root.visible)      // a hidden page holds no stream meters either
+            return out
         for (let r = 0; r < VideoSourceListModel.rowCount(); ++r) {
             if (!root.rowInView("video", r))
                 continue
@@ -278,7 +292,9 @@ Item {
     // reflection of what the rest of the app meters).
     property var heldVideoMeters: []
     function syncVideoMeters() {
-        root.heldVideoMeters = ScreenHelpers.syncVideoMeters(root.videoMeterTargets,
+        const wanted = EngineBridge.platformCapabilities.audioStreamTaps === true
+                     ? root.videoMeterTargets : []
+        root.heldVideoMeters = ScreenHelpers.syncVideoMeters(wanted,
                                                              root.heldVideoMeters)
     }
     onVideoMeterTargetsChanged: root.syncVideoMeters()
@@ -523,7 +539,7 @@ Item {
         "640x360p29.97"
     ]
 
-    // Real video-capture roster from the engine (Media Foundation).
+    // Real video-capture roster from the engine (the platform's capture stack).
     readonly property var engineVideoDevices: EngineBridge.videoDevices
     function videoDevice(name) {
         if (!name) return null
@@ -695,7 +711,7 @@ Item {
         root.editVideoMode = data.mode !== undefined ? data.mode : ""
         root.editVideoMuted = data.muted
         root.editVideoLevel = data.level
-        // Ask for a current roster; Media Foundation probing runs off-thread.
+        // Ask for a current roster; the platform's device probing runs off-thread.
         EngineBridge.refreshDevices()
     }
     function saveEditVideo() {
@@ -1407,9 +1423,20 @@ Item {
                             const b = BusListModel.getBus(connector.modelData.busIndex)
                             return !!b && b.muted === true
                         }
+                        // An audio wire flows whenever its input is delivering ANY signal (a hair above silence), not only
+                        // once it is loud: the dots used to appear only past a 1% level, so a quiet voice or a distant mic
+                        // showed a dead wire. How strongly they read follows the level (see dotColor / dotWidth).
                         readonly property bool flows: !connector.busMuted
-                            && (connector.isAudio ? connector.srcLevel > 0.01
+                            && (connector.isAudio ? connector.srcLevel > 0.0008
                                                   : root.videoLive(connector.modelData.srcIndex))
+                        // 0 (barely there) .. 1 (loud). The meter is perceptual, so a gentle gain already reads well.
+                        readonly property real strength: connector.isAudio ? Math.min(1, connector.srcLevel * 5) : 1
+                        // Low level = a faint but VISIBLE dot (never below ~38% alpha), full brightness when loud.
+                        readonly property color dotColor: {
+                            const base = Qt.lighter(connector.modelData.color, 1.55)
+                            return Qt.rgba(base.r, base.g, base.b, 0.38 + 0.62 * connector.strength)
+                        }
+                        readonly property real dotWidth: connector.isAudio ? 2.6 + 1.4 * connector.strength : 2.2
                         readonly property real period: connector.isAudio ? 3.6 : 10
                         readonly property int cycleMs: connector.isAudio ? 800 : 700
 
@@ -1431,8 +1458,8 @@ Item {
                         }
 
                         ShapePath {
-                            strokeColor: connector.flows ? Qt.lighter(connector.modelData.color, 1.55) : "transparent"
-                            strokeWidth: connector.isAudio ? 3 : 2.2
+                            strokeColor: connector.flows ? connector.dotColor : "transparent"
+                            strokeWidth: connector.dotWidth
                             fillColor: "transparent"
                             capStyle: ShapePath.RoundCap
                             strokeStyle: ShapePath.DashLine
@@ -2035,7 +2062,7 @@ Text {
                                     target: vidThumb
                                     onInViewChanged: {
                                         root.setRowInView("video", vidRow.index, vidProbe.inView)
-                                        vidThumb.syncTap()
+                                        vidThumb.recomputeLiveCam()
                                     }
                                 }
 
@@ -2051,12 +2078,26 @@ Text {
                                                                        : Image.PreserveAspectCrop
                                     cache: false
                                 }
-                                readonly property bool liveCam:
-                                    (vidRow.kind === "camera" || vidRow.kind === "screen"
-                                     || vidRow.kind === "ndi")
-                                    && vidRow.sublabel !== ""
-                                    && (vidRow.kind === "ndi" || !vidRow.muted)
-                                    && vidProbe.inView
+                                // WHETHER THIS ROW HOLDS A LIVE TAP. It used to be a binding over the row's kind,
+                                // sublabel, mute, the platform capabilities and the in-view probe, and QML kept
+                                // reporting "Binding loop detected for property liveCam": the probe's change
+                                // handler, the tap start and the model's own change signals all read it back
+                                // while it was being re-evaluated. A plain property that is recomputed
+                                // explicitly (below) on exactly those changes cannot loop.
+                                property bool liveCam: false
+                                function recomputeLiveCam() {
+                                    const kind = vidRow.kind
+                                    const caps = EngineBridge.platformCapabilities
+                                    const want = (kind === "camera" || kind === "screen" || kind === "ndi")
+                                        && vidRow.sublabel !== ""
+                                        && (kind === "ndi"
+                                            || (kind === "camera" && caps.videoCapture === true)
+                                            || (kind === "screen" && caps.screenCapture === true))
+                                        && (kind === "ndi" || !vidRow.muted)
+                                        && vidProbe.inView
+                                    if (vidThumb.liveCam !== want)
+                                        vidThumb.liveCam = want
+                                }
                                 readonly property bool thumbLive:
                                     frameImg.status === Image.Ready && frameImg.sourceSize.width > 1
                                 readonly property string tapFailure: {
@@ -2102,7 +2143,10 @@ Text {
                                 }
                                 Connections {
                                     target: EngineBridge
-                                    function onDevicesChanged() { vidThumb.syncTap() }
+                                    function onDevicesChanged() {
+                                        vidThumb.recomputeLiveCam()   // the capabilities arrive with the device roster
+                                        Qt.callLater(vidThumb.syncTap)
+                                    }
                                 }
                                 Timer {
                                     interval: 125   // 8 fps thumbnail pump
@@ -2110,13 +2154,21 @@ Text {
                                     running: vidThumb.liveCam && root.visible
                                     onTriggered: vidThumb.thumbNonce++
                                 }
-                                Component.onCompleted: vidThumb.syncTap()
+                                Component.onCompleted: {
+                                    vidThumb.recomputeLiveCam()
+                                    vidThumb.syncTap()
+                                }
                                 onLiveCamChanged: vidThumb.syncTap()
-                                // sublabel lives on the delegate (vidRow), not
-                                // on this Rectangle — observe it explicitly.
+                                // kind / sublabel / muted live on the delegate (vidRow), not on this
+                                // Rectangle — observe them explicitly.
                                 Connections {
                                     target: vidRow
-                                    function onSublabelChanged() { vidThumb.syncTap() }
+                                    function onKindChanged() { vidThumb.recomputeLiveCam() }
+                                    function onSublabelChanged() {
+                                        vidThumb.recomputeLiveCam()
+                                        Qt.callLater(vidThumb.syncTap)   // a re-pointed row keeps liveCam but changes its tap
+                                    }
+                                    function onMutedChanged() { vidThumb.recomputeLiveCam() }
                                 }
 
                                 // Camera — a lens ring + center dot (warm-up only).
@@ -2220,11 +2272,26 @@ Text {
                                     color: Theme.textSecondary
                                     font.family: Theme.fontFamily; font.pixelSize: 8
                                 }
-                                // Media — a play triangle (Shapes is already
-                                // imported for the connector lines).
+                                // Media — the file's own picture (the same engine-made thumbnail the Media pane
+                                // shows: a frame from the video / the still itself), loaded off the interface thread
+                                // and only while the row is on screen. The play triangle below is what a file with no
+                                // picture yet (still being made, or unreadable) shows.
+                                Image {
+                                    id: mediaImg
+                                    anchors.fill: parent
+                                    asynchronous: true
+                                    cache: true
+                                    fillMode: Image.PreserveAspectCrop
+                                    source: vidRow.kind === "media" && vidRow.sublabel !== "" && vidProbe.inView
+                                            ? "image://mediathumb/250/-1/" + encodeURIComponent(vidRow.sublabel) : ""
+                                    // The provider answers "no picture" with a 1x1 transparent image.
+                                    visible: vidRow.kind === "media" && status === Image.Ready && sourceSize.width > 1
+                                }
+                                // Media with no picture — a play triangle (Shapes is already imported for the
+                                // connector lines).
                                 Shape {
                                     anchors.centerIn: parent
-                                    visible: vidRow.kind === "media"
+                                    visible: vidRow.kind === "media" && !mediaImg.visible
                                     width: 14; height: 16
                                     preferredRendererType: Shape.CurveRenderer
 

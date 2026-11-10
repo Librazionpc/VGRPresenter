@@ -110,6 +110,10 @@ class EngineBridge : public QObject
     // before boot, or when the PAL has no monitor backend — callers fall back to
     // Qt's Screen then.
     Q_PROPERTY(QVariantMap primaryDisplay READ primaryDisplay NOTIFY devicesChanged)
+    // Runtime PAL feature flags. Device discovery may be present while capture
+    // or real-time playback is not; controls must use this map before offering
+    // those operations instead of waiting for an Unsupported error.
+    Q_PROPERTY(QVariantMap platformCapabilities READ platformCapabilities NOTIFY devicesChanged)
     // Real video-capture devices (Media Foundation on Windows): each entry
     // { id, label, value, modes: ["1080p60", …], maxFps } — modes are the
     // device's actual capability list and maxFps the device-wide ceiling
@@ -144,7 +148,7 @@ class EngineBridge : public QObject
     Q_PROPERTY(QString sdiStatus READ sdiStatus NOTIFY devicesChanged)
     Q_PROPERTY(QVariantList sdiDevices READ sdiDevices NOTIFY devicesChanged)
     // LIVE audio input metering — real per-channel peak/RMS from the PAL's
-    // WASAPI capture tap (a roster card's mic/line-in metered end-to-end).
+    // capture tap (a roster card's mic/line-in metered end-to-end).
     // Entries: { deviceId, label, channelCount, layout, sampleRateHz,
     // framesCaptured, peaks: [..], rms: [..] } — layout is "mono" | "stereo"
     // | "multi" (1/2/N channels of the endpoint's live mix format, engine
@@ -237,6 +241,7 @@ public:
     // The primary display's real pixel size (see the primaryDisplay property).
     // Never empty once the platform layer enumerated a display.
     Q_INVOKABLE QVariantMap primaryDisplay() const;
+    Q_INVOKABLE QVariantMap platformCapabilities() const;
     // Re-enumerate the platform's audio + display devices (QML-invokable so
     // a screen can force a refresh when it opens). Safe before boot — yields
     // empty lists when the PAL has no backend installed.
@@ -797,6 +802,7 @@ private:
     QVariantList audioDevices_;
     QVariantList screenDevices_;
     QVariantList videoDevices_;
+    QVariantMap platformCapabilities_;
     QVariantList ndiSources_;
     bool sdiAvailable_ = false;
     QString sdiStatus_;
@@ -841,9 +847,8 @@ private:
     // The 50 ms meter pump the device taps ride — created once, started whenever
     // anything holds a meter.
     void ensureMeterPump();
-    // Resolve a roster DEVICE label to its PAL wavein number (the one place that
-    // walks the cached roster): false when the label names no input device on
-    // this machine, or the id is not a WASAPI wavein number at all.
+    // Resolve a roster DEVICE label to its PAL numeric input key (the one place
+    // that walks the cached roster): false when the label names no input device.
     bool resolveDeviceTap(const QString &deviceLabel, uint32_t *deviceId) const;
 
     // ---- Video/NDI row audio: the stream taps behind the inputLevels list --
@@ -909,6 +914,9 @@ private:
     // decode works end to end) and the per-label no-tap warning.
     QSet<QString> previewFirstFrameLogged_;
     QSet<QString> previewNoTapWarned_;
+    // Every label a tap was EVER started for this session: a request for one of these that finds its tap gone is a
+    // late image request after a stop (a tile still holding the old URL, or the app closing), not a wiring bug.
+    QSet<QString> previewEverStarted_;
     QSet<QString> previewServedLogged_;   // per-label frame-served confirmation
     // HOLD-LAST-FRAME (see heldPreviewFrame in the .cpp): per tap key — the
     // device id for camera/screen taps, the NDI source name for receivers —

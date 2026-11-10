@@ -216,7 +216,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
         // A CLEAR CARRIER OWNS NO COMPOSITOR LAYERS (see ComposeSlide): the
         // blackout is "nothing on screen", the feed included.
         if (!slide.clearStage) {
-            AddCompositorLayers(engine, sceneId, size, style.showOverlay);   // same cache-hit refresh as BuildSlideScene
+            AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.showMedia);   // same cache-hit refresh as BuildSlideScene
             RefreshBusPlanes(engine, sceneId);   // ...and the bus windows' frames (none recorded for a refused scene)
         }
         return sceneId;
@@ -257,7 +257,7 @@ Result<std::string> SceneBuilder::BuildGatedSlideScene(const Presentation& prese
         }
     }
     if (!slide.clearStage)
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.showMedia);
     Logger::Instance().Debug(std::format("Gated scene built: {} (family refused by style '{}')",
                                         sceneId, style.name), "SceneBuilder");
     return sceneId;
@@ -383,7 +383,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
 
     if (engine.GetScene(sceneId).ok()) {
         if (!slide.clearStage) {
-            AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+            AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.showMedia);
             RefreshBusPlanes(engine, sceneId);   // bus windows keep flowing on a cache hit (see BusPlane)
         }
         return sceneId;
@@ -452,7 +452,7 @@ Result<std::string> SceneBuilder::BuildSlideScene(const Presentation& presentati
     }
 
     if (comp.source != SlideComposition::Source::Cleared) {
-        AddCompositorLayers(engine, sceneId, size, style.showOverlay);
+        AddCompositorLayers(engine, sceneId, size, style.showOverlay, style.showMedia);
 
         RecordBusPlanes(sceneId,
                         comp.source == SlideComposition::Source::SlideBlocks ? slide.blocks

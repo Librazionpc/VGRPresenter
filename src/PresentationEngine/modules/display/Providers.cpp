@@ -206,6 +206,31 @@ DisplayProviderCapabilities PhysicalDisplayProvider::Capabilities() const noexce
 // ---------------------------------------------------------------------------
 // NdiDisplayProvider
 // ---------------------------------------------------------------------------
+namespace {
+} // namespace
+
+// One shared copy per rendered buffer. Color::Pack is 0xAABBGGRR, which is RGBA byte order in memory.
+void ConvertToNdiRgba(const uint32_t* pixels, int width, int height, NdiRgbaFrame& target)
+{
+    if (!pixels || width <= 0 || height <= 0)
+        return;
+    const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+    if (target.bytes.size() != bytes)
+        target.bytes.resize(bytes);   // only on a size change: a steady tick never reallocates
+    target.width = width;
+    target.height = height;
+    std::memcpy(target.bytes.data(), pixels, bytes);
+}
+
+std::shared_ptr<const NdiRgbaFrame> MakeNdiRgbaFrame(const uint32_t* pixels, int width, int height)
+{
+    if (!pixels || width <= 0 || height <= 0)
+        return {};
+    auto frame = std::make_shared<NdiRgbaFrame>();
+    ConvertToNdiRgba(pixels, width, height, *frame);
+    return frame;
+}
+
 NdiDisplayProvider::NdiDisplayProvider() {
     DisplayDevice ndi;
     ndi.id = "ndi-program";
@@ -244,7 +269,16 @@ DisplayProviderCapabilities NdiDisplayProvider::Capabilities() const noexcept {
 }
 
 Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
-    if (!frame.pixels || frame.width <= 0 || frame.height <= 0)
+    float fps = 30.0f;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fps = frameRate_;
+    }
+    return SendRgbaFrame(MakeNdiRgbaFrame(frame.pixels, frame.width, frame.height), fps);
+}
+
+Result<void> NdiDisplayProvider::SendRgbaFrame(std::shared_ptr<const NdiRgbaFrame> frame, float fps) {
+    if (!frame || frame->bytes.empty() || frame->width <= 0 || frame->height <= 0)
         return Error::Make(Err::InvalidArgument, "NdiDisplayProvider", "empty frame");
 
     auto& bc = broadcast::BroadcastEngine::Instance();
@@ -252,14 +286,17 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
     std::unique_lock<std::mutex> sendLock(sendMutex_);
 
     std::string senderName;
-    float frameRate = 30.0f;
     std::string senderId;
+    // The frame handed to the PREVIOUS async send is still being read until this one hands over a new one,
+    // so it is kept alive here and released only once the runtime has this frame instead.
+    std::shared_ptr<const NdiRgbaFrame> previous;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         senderName = senderName_;
-        frameRate = frameRate_;
         senderId = senderId_;
+        previous = lastShared_;
     }
+    const float frameRate = AcceptedOutputFrameRate(fps);
 
     // Lazy sender creation on first use (idempotent). The SDK call runs with
     // no state lock held.
@@ -267,6 +304,10 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
         auto r = bc.Initialize();   // no-op if already initialized
         if (!r.ok()) return r;
         broadcast::NdiSenderConfig cfg;
+        // WE PACE THE SEND OURSELVES — a frame is handed over at the output's own fps — so the SDK's
+        // clock would only hold each frame back to its internal tick: latency added to every frame,
+        // which the receiver shows as a stream that is always a beat behind.
+        cfg.clockVideo = false;
         auto id = bc.CreateNdiSender(senderName, cfg);
         if (!id.ok()) return id.error();
         {
@@ -276,20 +317,58 @@ Result<void> NdiDisplayProvider::SendFrame(const RenderFrameView& frame) {
         }
     }
 
-    broadcast::VideoFrameInfo info;
-    info.width = static_cast<uint32_t>(frame.width);
-    info.height = static_cast<uint32_t>(frame.height);
-    info.fourCC = 0x41424752;   // 'RGBA' — the engine's native layout, byte for byte
-    info.fps = frameRate;       // the caller's real cadence (SetFrameRate)
-    const size_t count = static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height);
-    sendBuffer_.assign(frame.pixels, frame.pixels + count);
+    // RGBA carries the template's alpha channel; UYVY would flatten transparent pixels to black.
+    const size_t rgbaBytes = frame->bytes.size();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastShared_ = frame;
+    }
 
-    const size_t bytes = count * 4u;
-    auto r = bc.SendVideoFrame(senderId, info, sendBuffer_.data(), bytes);   // SDK send, no state lock
+    broadcast::VideoFrameInfo info;
+    info.width = static_cast<uint32_t>(frame->width);
+    info.height = static_cast<uint32_t>(frame->height);
+    info.fourCC = 0x41424752;   // 'RGBA' — preserve per-pixel alpha for downstream compositing
+    info.fps = frameRate;       // the caller's real cadence
+    auto r = bc.SendVideoFrame(senderId, info, frame->bytes.data(), rgbaBytes);   // async: returns at once
     if (r.ok()) {
         framesSent_.fetch_add(1);
         sendFailStreak_ = 0;
+
+        // ---- ONE LINE PER SECOND: WHAT THIS SENDER IS ACTUALLY DOING --------------------------
+        // Payload is measured, not assumed: it is the RGBA bytes handed to the SDK at this fps. The shortfall
+        // is the honest drop signal on this side — frames the output cadence asked for that never
+        // reached the SDK, which is what the far machine shows as stutter and drift. A sender that is
+        // keeping up logs ~target fps and 0 short; lagging ones show the gap directly.
+        const auto tickNow = std::chrono::steady_clock::now();
+        if (sendWindowStart_ == std::chrono::steady_clock::time_point{})
+            sendWindowStart_ = tickNow;
+        sendWindowFrames_ += 1;
+        sendWindowBytes_ += rgbaBytes;
+        const double windowSec = std::chrono::duration<double>(tickNow - sendWindowStart_).count();
+        if (windowSec >= 1.0) {
+            const double fps = static_cast<double>(sendWindowFrames_) / windowSec;
+            const double mbit = static_cast<double>(sendWindowBytes_) * 8.0 / windowSec / 1.0e6;
+            const double target = static_cast<double>(frameRate);
+            const double wanted = (target - fps) * windowSec;   // frames the cadence asked for
+            const long long short_ = wanted > 0.0 ? static_cast<long long>(std::lround(wanted)) : 0LL;
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                          "%.1f fps, %.1f Mbit/s to the SDK, %.2f MB/frame (RGBA), %lld short of %.1f fps",
+                          fps, mbit, static_cast<double>(rgbaBytes) / (1024.0 * 1024.0), short_, target);
+            Logger::Instance().Info("NdiSender '" + senderName + "': " + line, "Display");
+            sendWindowStart_ = tickNow;
+            sendWindowFrames_ = 0;
+            sendWindowBytes_ = 0;
+        }
         return r;
+    }
+
+    // A FAILED SEND NEVER HANDED THE RUNTIME THIS FRAME: it is still reading the previous one, so that one
+    // goes back rather than being freed under it.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lastShared_ == frame)
+            lastShared_ = previous;
     }
 
     // ---- SELF-HEAL: "NDI stays at zero until the app is restarted" ----------

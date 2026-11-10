@@ -1042,8 +1042,12 @@ bp::ShowLibrary *ShowService::library()
     // only once the engine has booted.
     if (!EngineBridge::instance().booted())
         return nullptr;
-    if (!library_)
+    if (!library_) {
         library_ = std::make_shared<bp::ShowLibrary>(libraryPath_.toStdString());
+        // The last scan's result, from one small file: the list can be shown NOW, while the scan that
+        // validates it runs. (Without it the pane stays empty until every show file has been read.)
+        cachedListPending_ = library_->LoadCachedIndex() > 0;
+    }
     return library_.get();
 }
 
@@ -1069,6 +1073,7 @@ void ShowService::setLibraryPath(const QString &path)
         return;
     libraryPath_ = p;
     library_.reset();   // recreated on next use against the new folder
+    cachedListPending_ = false;
     refreshLibrary();
 }
 
@@ -1084,6 +1089,13 @@ void ShowService::refreshLibrary()
         return;
     }
     refreshBusy_ = true;
+    if (cachedListPending_) {
+        cachedListPending_ = false;
+        publishLibrary();   // the persisted list goes up before the scan starts
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("Library"),
+                            QStringLiteral("Show library: %1 show(s) listed from the saved index while the scan validates it")
+                                .arg(shows_.size()));
+    }
     std::shared_ptr<bp::ShowLibrary> keep = library_;   // alive past a path change
     QPointer<ShowService> guard(this);
     QThreadPool::globalInstance()->start([guard, keep]() {

@@ -8,6 +8,7 @@
 #include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/rendering/RenderEngine.hpp"
+#include "platform/IAudio.hpp"
 
 #include <QAbstractItemModel>
 #include <QDebug>
@@ -21,7 +22,7 @@
 //   1. The WORKER never reads a model. QAbstractListModel belongs to the
 //      interface thread, so every job below carries a snapshot (RowSpec) built
 //      on that thread, and the only thing that crosses back is plain data.
-//   2. The INTERFACE thread never reads the graph. busRowForOutput() answers
+//   2. The INTERFACE thread never reads the graph. Every accessor below answers
 //      from the published snapshot, so drawing a wire set cannot race the
 //      worker filling it, and no QML binding can block on the engine.
 
@@ -166,11 +167,13 @@ constexpr uint32_t kNoAudioDevice = 0xFFFFFFFFu;
 uint32_t AudioDeviceNumber(const QString &id)
 {
     static const QString prefix = QStringLiteral("waveout:");
-    if (!id.startsWith(prefix, Qt::CaseInsensitive))
-        return kNoAudioDevice;
-    bool ok = false;
-    const uint32_t number = id.mid(prefix.size()).toUInt(&ok);
-    return ok ? number : kNoAudioDevice;
+    if (id.startsWith(prefix, Qt::CaseInsensitive)) {
+        bool ok = false;
+        const uint32_t number = id.mid(prefix.size()).toUInt(&ok);
+        return ok ? number : kNoAudioDevice;
+    }
+    return id.isEmpty() ? kNoAudioDevice
+        : bps::platform::IAudio::StableDeviceNumber(id.toStdString());
 }
 
 // ---------------------------------------------------------------------------
@@ -422,28 +425,79 @@ void RoutingService::publishRoutedVideoBuses()
     outputs->setRoutedVideoBuses(byRow, wiredByRow);
 }
 
-int RoutingService::busRowForOutput(int outputRow, const QString &kind) const
+QString RoutingService::mediaRouteState(int outputRow) const
 {
-    const bool audio = kind.compare(QLatin1String("audio"), Qt::CaseInsensitive) == 0;
-    // The system row: its "row" is -1 everywhere (it has no roster row), so it
-    // is answered from the speaker endpoint's published feed list.
-    if (outputRow < 0) {
-        const QVector<int> buses = audioBuses_.value(QString::fromLatin1(kSpeakersNodeId));
-        return audio && !buses.isEmpty() ? buses.first() : -1;
+    if (outputRow < 0)
+        return QStringLiteral("ok");     // not a roster output (a library preview, the speakers row)
+
+    for (const QVariant &value : rows_) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("row")).toInt() != outputRow)
+            continue;
+        if (!row.value(QStringLiteral("acceptsVideo")).toBool()
+            || !row.value(QStringLiteral("enabled")).toBool())
+            return QStringLiteral("ok"); // not a video output / switched off: not media's business
+        // AN OUTPUT NEEDS ONLY THE MEDIA LAYER — its own M switch on the board (Settings · Routing).
+        // No bus has to be wired into an output for the file to reach its picture: a BUS is what needs
+        // a source AND the media layer, and that rule belongs to the bus's own preview, never here.
+        // (The engine is gated per output on this same switch, so M is also what decides WHICH outputs
+        // carry the file — a monitor that never had it routed cannot pick it up from another one.)
+        if (row.value(QStringLiteral("showMedia")).toBool())
+            return QStringLiteral("ok");
+        return QStringLiteral("media");
     }
+    // NOT PUBLISHED YET IS NOT A YES. The board is rebuilt after the roster loads, and the media can
+    // be taken before that finishes; answering "ok" there let the picture through a gate that had no
+    // idea whether the route existed. Unknown fails CLOSED, so media never appears on a black route.
+    return QStringLiteral("media");
+}
 
-    auto *outputs = OutputListModel::instance();
-    if (!outputs || outputRow >= outputs->rowCount())
-        return -1;
+QString RoutingService::mediaRouteStateForName(const QString &name) const
+{
+    for (const QVariant &value : rows_) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("name")).toString() != name)
+            continue;
+        return mediaRouteState(row.value(QStringLiteral("row")).toInt());
+    }
+    return QStringLiteral("media");   // an output the board does not know is not routed: fail closed
+}
 
-    const QModelIndex index = outputs->index(outputRow);
-    const QString node = nodeIdFor(outputs->data(index, OutputListModel::IdRole).toString(),
-                                   outputs->data(index, OutputListModel::KindRole).toString());
-    if (node.isEmpty())
-        return -1;
+bool RoutingService::outputShowsOverlaysForName(const QString &name) const
+{
+    for (const QVariant &value : rows_) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("name")).toString() != name)
+            continue;
+        return row.value(QStringLiteral("showOverlay")).toBool();
+    }
+    return true;                      // an unknown output: the switch is not known, hide nothing
+}
 
-    const QPair<QString, QString> assignment = assignments_.value(node);
-    return busRowFromNode(audio ? assignment.second : assignment.first);
+bool RoutingService::hasEnabledVideoOutput() const
+{
+    for (const QVariant &value : rows_) {
+        const QVariantMap row = value.toMap();
+        if (row.value(QStringLiteral("acceptsVideo")).toBool()
+            && row.value(QStringLiteral("enabled")).toBool())
+            return true;
+    }
+    return false;
+}
+
+bool RoutingService::mediaCanReachAnyOutput() const
+{
+    // Same rule the picture is gated on (mediaRouteState), asked for the whole board at once: if every
+    // enabled video output says the route is missing, the take has nowhere to go.
+    for (const QVariant &value : rows_) {
+        const QVariantMap row = value.toMap();
+        if (!row.value(QStringLiteral("acceptsVideo")).toBool()
+            || !row.value(QStringLiteral("enabled")).toBool())
+            continue;
+        if (mediaRouteState(row.value(QStringLiteral("row")).toInt()) == QLatin1String("ok"))
+            return true;
+    }
+    return false;
 }
 
 bool RoutingService::acceptsSignal(int outputRow, const QString &kind) const

@@ -1,3 +1,4 @@
+#include "core/common/LocalTime.hpp"
 #include "core/common/StageTiming.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 
@@ -7,7 +8,8 @@
 #include "core/resources/ResourceManager.hpp"
 #include "modules/adaptive/AdaptiveRuntime.hpp"
 #include "modules/content/ContentManager.hpp"
-#include "modules/rendering/D3D11Backend.hpp"   // the GPU backend's factory (no D3D11 type in it)
+#include "modules/rendering/D3D11Backend.hpp"   // Windows' GPU backend's factory (no D3D11 type in it)
+#include "modules/rendering/RhiBackend.hpp"     // the cross-platform GPU backend's factory (no Qt type in it)
 
 #include <algorithm>
 #include <chrono>
@@ -29,8 +31,10 @@ RenderEngine& RenderEngine::Instance() {
 namespace {
 constexpr const char *kDefaultRenderBackend = "software";
 
-// The GPU path, named the way the setting, the log and the docs all name it.
-constexpr const char *kHardwareRenderBackend = "directx11";
+// The GPU path the "hardware acceleration" switch asks for: "the best GPU backend this OS has" — not an
+// API's name, so the same setting means the same thing on Windows, macOS and Linux. SelectBackend
+// resolves it: Direct3D 11 where it exists, the QRhi backend (Metal / Vulkan / OpenGL) everywhere else.
+constexpr const char *kHardwareRenderBackend = "gpu";
 
 constexpr const char *kHardwarePreferenceKey = "render.hardwareAcceleration";
 
@@ -90,6 +94,8 @@ Result<void> RenderEngine::Shutdown() {
     // The D3D11 device goes with it: a shutdown that left the device alive would
     // hand the next Initialize a stale one (and keep the GPU's memory booked).
     d3d11Backend_.reset();
+    rhiBackend_.reset();
+    rhiTried_ = false;
     softwareBackend_.reset();
     nullBackend_.reset();
     loggedBackendOnce_ = false;
@@ -162,51 +168,86 @@ std::string RenderEngine::ConfiguredBackendName() {
 
 Result<void> RenderEngine::SelectBackend(std::string_view requested) {
     const std::string name(requested.empty() ? "auto" : requested);
-    const bool gpuWanted = (name == kD3D11BackendName || name == "d3d11" || name == "auto");
-    IGraphicsBackend* const before = backend_;
+    // Three ways to ask for the GPU: a specific API ("directx11" / "d3d11", or "rhi" for the Qt one),
+    // or "gpu"/"auto" for whichever this OS does best.
+    const bool wantsD3D11 = (name == kD3D11BackendName || name == "d3d11");
+    const bool wantsRhi = (name == kRhiBackendName);
+    const bool wantsAnyGpu = (name == kHardwareRenderBackend || name == "auto");
+    const bool gpuWanted = wantsD3D11 || wantsRhi || wantsAnyGpu;
 
-    if (gpuWanted && !d3d11Backend_) {
+    // ONE switch at a time. Bringing a GPU device up is slow, so it happens here, BEFORE the frame lock:
+    // the live loop keeps drawing on the current backend while the new one is built.
+    std::lock_guard<std::mutex> selecting(selectMutex_);
+
+    if ((wantsD3D11 || wantsAnyGpu) && !d3d11Backend_) {
         std::string why;
         d3d11Backend_ = CreateD3D11Backend(&why);
-        if (!d3d11Backend_)
+        if (!d3d11Backend_ && !why.empty())   // a build with no D3D11 at all has nothing to report
             Logger::Instance().Info(
-                std::format("no D3D11 device ({}): frames are drawn by the software rasterizer",
+                std::format("no D3D11 device ({}){}", why,
+                            wantsD3D11 ? ": frames are drawn by the software rasterizer" : ""),
+                "RenderEngine");
+    }
+    // The QRhi backend is the GPU path where there is no Direct3D 11 (Linux, macOS), and the fallback
+    // where it failed; asked for by name it is built regardless (to run the same path on Windows too).
+    if ((wantsRhi || (wantsAnyGpu && !d3d11Backend_)) && !rhiBackend_ && !rhiTried_) {
+        rhiTried_ = true;
+        std::string why;
+        rhiBackend_ = CreateRhiBackend(&why);
+        if (!rhiBackend_)
+            Logger::Instance().Info(
+                std::format("no QRhi GPU backend ({}): frames are drawn by the software rasterizer",
                             why.empty() ? "unavailable" : why),
                 "RenderEngine");
     }
 
+    IGraphicsBackend* chosen = nullptr;
     if (name == "null") {
-        backend_ = nullBackend_.get();
+        chosen = nullBackend_.get();
     } else if (name == "software") {
-        backend_ = softwareBackend_.get();
-    } else if (gpuWanted && d3d11Backend_) {
-        backend_ = d3d11Backend_.get();
+        chosen = softwareBackend_.get();
+    } else if (wantsRhi && rhiBackend_) {
+        chosen = rhiBackend_.get();
+    } else if ((wantsD3D11 || wantsAnyGpu) && d3d11Backend_) {
+        chosen = d3d11Backend_.get();
+    } else if (wantsAnyGpu && rhiBackend_) {
+        chosen = rhiBackend_.get();
     } else if (gpuWanted) {
-        // The GPU was asked for (explicitly or by "auto") and this machine has
+        // The GPU was asked for (explicitly or by "gpu"/"auto") and this machine has
         // none: the software rasterizer is the fallback, never a failed boot.
-        backend_ = softwareBackend_.get();
+        chosen = softwareBackend_.get();
     } else {
         return Error::Make(Err::Render_BackendUnavailable, "Render",
                            "backend '" + name + "' unavailable");
     }
+    const auto textureBudget = adaptive::AdaptiveRuntime::Instance().GetTextureBudget();   // read before the frame lock
+    const std::string activeName = chosen->Capabilities().name;
 
-    gpu_.BindBackend(backend_);
-    uploader_.BindGpu(&gpu_);
-    gpu_.SetTextureBudget(adaptive::AdaptiveRuntime::Instance().GetTextureBudget());
-    if (before != backend_) {
-        cache_.Clear();
+    // THE SWAP, under the frame lock. It used to run unlocked: a frame in flight on the old backend then
+    // saw backend_, the bound GPU resources and the texture cache change under it (the intermittent
+    // crash when "hardware rendering" was switched on while the output was live). Render holds this
+    // same lock for a whole frame, so the swap lands between two frames.
+    {
+        std::lock_guard<std::mutex> frameLock(renderMutex_);
+        IGraphicsBackend* const before = backend_;
+        backend_ = chosen;
+        gpu_.BindBackend(backend_);
+        uploader_.BindGpu(&gpu_);
+        gpu_.SetTextureBudget(textureBudget);
+        if (before != backend_) {
+            cache_.Clear();
+        }
     }
     {
         std::lock_guard<std::mutex> lock(backendNameMutex_);
         requestedBackendName_ = name;
-        activeBackendName_ = backend_->Capabilities().name;
+        activeBackendName_ = activeName;
     }
     if (loggedBackend_ != name || !loggedBackendOnce_) {
         loggedBackend_ = name;
         loggedBackendOnce_ = true;
         Logger::Instance().Info(
-            std::format("render backend: requested '{}' -> active '{}'", name,
-                        backend_->Capabilities().name),
+            std::format("render backend: requested '{}' -> active '{}'", name, activeName),
             "RenderEngine");
     }
     return Ok();
@@ -578,12 +619,7 @@ void RenderEngine::DrawObject(RenderObject* obj, std::vector<DrawCommand>& cmds)
             auto* style = cl->FindComponent<TextStyleComponent>();
             auto now = std::chrono::system_clock::now();
             std::time_t t = std::chrono::system_clock::to_time_t(now);
-            std::tm tm{};
-#if defined(_WIN32)
-            localtime_s(&tm, &t);
-#else
-            localtime_r(&t, &tm);
-#endif
+            const std::tm tm = bps::LocalTime(t);
             TextObject tmp("__clock", "clock",
                            std::format("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min,
                                        tm.tm_sec));
@@ -686,7 +722,11 @@ void RenderEngine::DrawTextObject(TextObject* obj, std::vector<DrawCommand>& cmd
     const float scrollChars = !flowing ? 0.0f
                              : contentScrollFromScene_ ? obj->FlowCharAt()
                                                        : contentScrollChars_;
-    const float scrollLines = flowing ? obj->FlowLineForChar(scrollChars) : 0.0f;
+    // (a scene's own resting position carries no step: contentScrollFromScene_ has no span)
+    const float scrollLines = flowing
+        ? obj->FlowLineForChar(scrollChars, contentScrollFromScene_ ? -1.0f : contentScrollFrom_,
+                               contentScrollFromScene_ ? -1.0f : contentScrollTo_)
+        : 0.0f;
     const float scrollPx = scrollLines * lineHeight;
 
     // WHERE THE PAGE SITS — the top edge of the reading window.
@@ -931,6 +971,8 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     const auto tCmds = std::chrono::steady_clock::now();
     auto objects = CollectObjects(sceneId);
     contentScrollChars_ = opts.contentScrollChars;
+    contentScrollFrom_ = opts.contentScrollFrom;
+    contentScrollTo_ = opts.contentScrollTo;
     contentScrollFromScene_ = opts.contentScrollFromScene;
     const auto layers = scene.value()->LayersSorted();
     std::vector<ElementCost> costs;
@@ -967,6 +1009,7 @@ Result<RgbaImage> RenderEngine::Render(std::string_view sceneId, const RenderOpt
     // The scroll is over for this frame: nothing outside the draw loop may see a
     // scene drawn at an offset (see the member's comment in the header).
     contentScrollChars_ = 0.0f;
+    contentScrollFrom_ = contentScrollTo_ = -1.0f;
     contentScrollFromScene_ = false;
 
     {

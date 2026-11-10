@@ -8,6 +8,10 @@ Window {
 
     required    property int outputIndex
     property bool outputEnabled: false
+    // SELF-TEST ONLY: show this window with no display attached and no live session, so a scenario can
+    // grab it (an output window is otherwise only up when an output is live on a real screen). Nothing
+    // in the app sets this; only the card-preview/the-output-window scenarios do.
+    property bool selfTestForceVisible: false
     property bool onAirOnly: false
     property string outputScreenName: ""
     property string ownBuffer: ""
@@ -41,7 +45,10 @@ Window {
     }
 
     property bool dismissed: false
-    onOutputEnabledChanged: if (root.outputEnabled) root.dismissed = false
+    onOutputEnabledChanged: {
+        if (root.outputEnabled)
+            root.dismissed = false
+    }   // a switched-off output draws no file: the gate takes `outputEnabled` (see OutputGateState)
     onOutputScreenNameChanged: root.dismissed = false
     Connections {
         target: LiveOutputService
@@ -78,14 +85,15 @@ Window {
         root.width = root.targetGeometry.width
         root.height = root.targetGeometry.height
     }
-    visible: root.outputEnabled && root.hasDisplay && !root.onAirOnly
-             && !root.dismissed && LiveOutputService.live
+    visible: root.selfTestForceVisible
+             || (root.outputEnabled && root.hasDisplay && !root.onAirOnly
+                 && !root.dismissed && LiveOutputService.live)
 
     readonly property bool hasFrame: LiveOutputService.live && LiveOutputService.frameRev > 0
     readonly property url frameSource: root.hasFrame
         ? (root.ownBuffer !== ""
             ? "image://livepreview/" + root.ownBuffer + "?v=" + LiveOutputService.frameRev
-            : "image://livepreview?v=" + LiveOutputService.frameRev)
+            : "image://livepreview/__live_preview__?v=" + LiveOutputService.frameRev)
         : ""
 
     property int stylePulse: 0
@@ -177,25 +185,68 @@ Window {
                                             && onAirSlide.blocks
                                             && onAirSlide.blocks.length > 0
 
+    // WHICH BLOCKS THE ENGINE PUTS BEHIND THE VIDEO (its own backdrop pass). While a file is on air those
+    // are the style's background, and the layer order here draws the file ABOVE this window's slide — so
+    // they must be marked, or the slide's background paints over the picture and a live output window
+    // showing media reads as black until the engine's frame (a taken camera) replaces the whole composition.
+    readonly property var blocksForPreview: {
+        const bs = root.onAirSlide.blocks ?? []
+        if (bs.length === 0 || typeof EngineBridge === "undefined")
+            return bs
+        const under = EngineBridge.backdropBlockIndexes(bs)
+        if (!under || under.length === 0)
+            return bs
+        const out = []
+        for (let i = 0; i < bs.length; ++i)
+            out.push(under.indexOf(i) >= 0 ? Object.assign({}, bs[i], { underVideo: true }) : bs[i])
+        return out
+    }
+
     readonly property bool blacked: LiveOutputService.blackedOut
     readonly property bool inputTaken: !root.blacked && LiveOutputService.inputLabel !== ""
-    // The ENGINE already composes this output's picture — the video AND this output's slide, exactly
-    // what the NDI feed sends. While a video is on air and that frame is flowing, this window shows it
-    // instead of rebuilding it here: the raw video image (a JPEG decode on the interface thread for a
-    // camera, an image copy per frame for a file), the slide composed over it, and the overlays drawn a
-    // second time. Same pixels as NDI, and the interface thread does none of that work.
-    readonly property bool engineComposed: !root.blacked && root.hasFrame
-                                           && (root.inputTaken
-                                               || (LiveOutputService.mediaOnAir
-                                                   && !LiveOutputService.mediaIsAudio))
+    // The ENGINE already composes this output's picture when a CAMERA is taken — the video AND this
+    // output's slide, exactly what the NDI feed sends. While that frame is flowing, this window shows it
+    // instead of rebuilding it here: the raw video image (a JPEG decode on the interface thread), the
+    // slide composed over it, and the overlays drawn a second time. Same pixels as NDI, and the
+    // interface thread does none of that work. A MEDIA FILE is drawn by the shared LiveMediaSurface
+    // instead (the file's own frames from the one player, slide composed over it here), so it never
+    // waits on the output's preview feed.
+    // The full-resolution HDMI window uses the camera's newest preview frame directly; the small
+    // monitor tile may use the engine-composited copy, but that copy visibly lagged on HDMI.
+    readonly property bool engineComposed: false
     readonly property url inputSource: inputTaken && !engineComposed
         ? "image://videopreview/" + encodeURIComponent(LiveOutputService.inputLabel)
           + "?n=" + LiveOutputService.inputRev : ""
 
-    readonly property bool mediaOnAir: !root.blacked && LiveOutputService.mediaOnAir
-                                       && !root.inputTaken
-    readonly property url mediaSource: mediaOnAir && !LiveOutputService.mediaIsAudio && !engineComposed
-        ? "image://mediaplay?v=" + LiveOutputService.mediaRev : ""
+    // THE MEDIA-ON-AIR GATE, FROM ITS ONE HOME (OutputGateState) — the rule the monitor tile also uses.
+    // This window needs the ANSWER, not just LiveMediaSurface's obedience: the tile's mediaOnAir counts an
+    // unrouted output as *nothing composed* and draws the checkerboard, while a window that asked only "is
+    // a file on air in the app" painted a black frame (the style's colour) beside it.
+    OutputGateState {
+        id: gate
+        outputName: root.routeOutputName
+        outputEnabled: root.outputEnabled
+        blacked: root.blacked
+        inputTaken: root.inputTaken
+    }
+    readonly property bool mediaGateOpen: gate.mediaOpen
+    readonly property bool mediaOnAir: gate.mediaOnAir
+    // THE GATE'S NAME, FROM THE OUTPUT MODEL, RE-READ ON THE STYLE PULSE. Two traps here, both found by
+    // grabbing this window: the board-row lookup this used to make was keyed by the BOARD's row number,
+    // which is not the output index (the buses take the first rows) — so each window asked the gate about
+    // a bus, and a bus with a wired source answers "ok"; and it was read once at bind time, before the
+    // roster had published, which answers "". Either way the gate opened for every window and the window
+    // drew the program's file whatever its own route said (two windows grabbed byte-identical). The
+    // output's NAME is what the tiles pass, from the same model.
+    readonly property string routeOutputName: {
+        void root.stylePulse
+        const output = OutputListModel.getOutput(root.outputIndex)
+        return output && output.name !== undefined ? String(output.name) : ""
+    }
+    // THE OVERLAY GATE, FROM THE SAME HOME: an output whose O switch is off paints no overlays, whatever
+    // the show layer is doing. Asked BY NAME like the tile (the board's rows are not the output indexes —
+    // the buses take the first rows, so the row-keyed version asked about a bus every time).
+    readonly property bool overlaysOn: gate.overlaysOn
 
     readonly property string effectiveFit: root.onAirSlide.mediaFit || "contain"
     readonly property int effectiveFillMode: effectiveFit === "cover" ? Image.PreserveAspectCrop
@@ -205,49 +256,99 @@ Window {
     readonly property bool framePriority: root.hasFrame
                                            && root.onAirSlide.framePriority === true
 
+    // ---- THIS OUTPUT'S EMPTY-STATE RULE (see EmptyFrameState.qml) ----
+    // The window must say what the monitor tile says, so the rule has one home and both feed it their own
+    // facts: what counts as composed, what a cleared frame is, what a painted frame's colour is, and when
+    // the style's own background image is the picture. Neither side can drift from the other again — and
+    // this window's `mediaOnAir` already carries ITS route gate, which is what the rule must be told
+    // (asking only whether a file was on air in the app is what once painted this window black beside a
+    // checkerboard tile).
+    EmptyFrameState {
+        id: frameState
+        enabled: root.outputEnabled
+        blacked: root.blacked
+        styleId: root.outputStyleId
+        slide: root.onAirSlide
+        hasSlidePreview: root.hasSlidePreview
+        mediaOnAir: root.mediaOnAir
+        inputTaken: root.inputTaken
+        engineComposed: root.engineComposed
+        hasFrame: root.hasFrame
+    }
+    Connections {
+        target: StyleListModel
+        function onRosterChanged() { root.stylePulse++ }   // the slide composition re-reads with it
+    }
+
+    // A frame that paints nothing is TRANSPARENT — cleared, switched off, a transparent style, or nothing
+    // composed on a style that paints nothing — and this app draws transparency as the checkerboard.
+    readonly property bool frameClear: frameState.frameClear
+
+    // The transparency convention sits at the BOTTOM, as on the tile: whatever paints covers it.
     Checkerboard {
         anchors.fill: parent
+        // Checkerboard is for preview/diagnostics; painting it for frameClear made transparent template
+        // pixels opaque on the actual HDMI output window.
         visible: root.alphaInspect
     }
 
+    // The colour the output paints: the composition's when there is a slide, otherwise the style's own
+    // background, and black when neither paints a colour. Hidden for a clear frame, so the checkers (or
+    // the window's own alpha) show through.
     Rectangle {
         anchors.fill: parent
-        visible: !root.blacked && root.onAirSlide.styleColor !== ""
-                 && root.onAirSlide.styleColor !== "transparent"
-        color: root.onAirSlide.styleColor
+        visible: !root.frameClear
+        color: frameState.frameColor
     }
+    // The style's background IMAGE — from the composition when there is a slide (it steps aside for
+    // clearBackgroundOnText), otherwise the roster's own, so an output whose style owns a background
+    // image paints it with no slide on it instead of a black frame.
     Image {
         anchors.fill: parent
-        visible: !root.blacked && root.onAirSlide.styleImagePainted === true
-        source: root.onAirSlide.styleImagePainted === true
-                ? "file:///" + root.onAirSlide.styleImage : ""
+        readonly property bool rosterImage: frameState.rosterStyleImage
+        visible: frameState.styleImageVisible
+        source: frameState.styleImageSource
         fillMode: Image.PreserveAspectCrop
     }
 
+    // A taken camera/screen: the GPU surface (the tap's own frames, no JPEG) — see LiveInputSurface. The
+    // image path below is only the fallback for a scene with no GPU.
+    LiveInputSurface {
+        id: inputSurface
+        anchors.fill: parent
+        active: root.inputTaken
+    }
+    // THE FALLBACK IS A SYNCHRONOUS Image, like the monitor tile's: the `videopreview` provider reads the
+    // interface thread's own tap table, so an ASYNCHRONOUS load (what a LiveFrameImage does) is served from
+    // the loader thread, comes back as the 1x1 "no frame yet" placeholder, and is only retried after
+    // 150 ms — which is why a camera on HDMI lagged while the tile beside it did not.
     Image {
         anchors.fill: parent
-        visible: root.inputTaken && !root.engineComposed
-        source: root.inputSource
+        visible: root.inputTaken && !inputSurface.pathGpu
+        source: inputSurface.pathGpu ? "" : root.inputSource
         fillMode: Image.PreserveAspectCrop
-        cache: false
+        cache: false   // every rev IS a new frame
         // gui-ok: the camera/NDI tap map the provider reads is interface-thread state (only while an input is taken)
         asynchronous: false
     }
 
-    // Taken media file on air — same convention as the input layer above, but loaded off the interface thread.
-    LiveFrameImage {
+    // Taken media file on air — the shared surface (see OutputMonitorTile/LiveMediaSurface): the file's
+    // own frames on the GPU, with the provider path inside it for a machine with no GPU.
+    LiveMediaSurface {
         anchors.fill: parent
-        visible: root.mediaOnAir && !LiveOutputService.mediaIsAudio && !root.engineComposed
-        source: root.mediaSource
-        fillMode: root.effectiveFillMode   // the file's own fill, else this output's
-        sizeToItem: false                  // the provider stretches to a requested size; keep the file's aspect
+        // the gate asks BY NAME (see LiveMediaSurface), re-resolved when the board republishes
+        outputName: root.routeOutputName
+        active: root.mediaOnAir && !LiveOutputService.mediaIsAudio && !root.engineComposed
+        fit: root.effectiveFit             // the file's own fill, else this output's
+        sizeToItem: false                  // keep the file's own aspect on the provider path
     }
 
     // Overlays, UNDER-SLIDE group.
     OverlayLayer {
         underSlide: true
         blacked: root.blacked
-        visible: !root.engineComposed   // the engine's frame already carries the overlays
+        // the engine's frame already carries the overlays; the gate decides whether they belong
+        visible: !root.engineComposed && root.overlaysOn
     }
 
     DesignPreview {
@@ -260,16 +361,22 @@ Window {
                         ? String(root.outputStyleId) : ""
         showBindPlaceholders: false
         showCheckerboard: false
-        backgroundImage: root.onAirSlide.styleImagePainted === true
-            ? root.onAirSlide.styleImage : ""
-        blocks: root.onAirSlide.blocks ?? []
-        background: root.onAirSlide.frameTransparent === true
+        // The style's background (colour AND image) belongs UNDER the file, where the engine puts it: this
+        // layer is above LiveMediaSurface, so painting it here is a picture hidden behind a slide.
+        backgroundImage: (root.mediaOnAir || root.inputTaken || root.onAirSlide.frameTransparent === true)
+            ? "" : (root.onAirSlide.styleImagePainted === true ? root.onAirSlide.styleImage : "")
+        blocks: root.blocksForPreview
+        background: (root.mediaOnAir || root.inputTaken || root.onAirSlide.frameTransparent === true)
                     ? "transparent" : (root.onAirSlide.background ?? "transparent")
     }
 
     LiveFrameImage {
         anchors.fill: parent
-        visible: !root.blacked && root.hasFrame
+        // NEVER OVER A CLEARED FRAME: the engine's preview buffer exists for every output the moment the
+        // session goes live, and for an output that composes nothing it holds an empty frame whose alpha
+        // the image path flattens — so GO LIVE painted this window flat black over the checkerboard that
+        // says the output is empty. frameClear already knows there is nothing here; keep the layer off it.
+        visible: !root.blacked && root.hasFrame && !root.frameClear
                  && (root.engineComposed
                      || (root.framePriority && !root.mediaOnAir && !root.inputTaken)
                      || (!root.hasSlidePreview && !root.mediaOnAir && !root.inputTaken))
@@ -281,7 +388,7 @@ Window {
     // own text (FreeShow's own overlays-above-text order).
     OverlayLayer {
         blacked: root.blacked
-        visible: !root.engineComposed   // the engine's frame already carries the overlays
+        visible: !root.engineComposed && root.overlaysOn
     }
 
     Item {
