@@ -95,7 +95,14 @@ run_case() {
     echo "   pick cost (ms) in this case:"
     tail -n +"$start" "$BUILD/logs/engine.log" | grep -a -F "[PickCost] " | sed "s/.*PickCost] /      /"
     pickReset=$(tail -n +"$start" "$BUILD/logs/engine.log" | sed -n '/TWGRAB.*phase=pick3$/,/TWGRAB.*phase=pick3done/p' | grep -a -c "resting at 0.00")
-    echo "   after the double-click: engine told \"resting at 0.00\" $pickReset time(s) (want 0)"
+    if [ "$name" = bible ]; then
+        # The Bible case double-clicks ROW 0 (verse 1: the passage start), so "resting at 0.00" is the right answer
+        # there — counting it made this check report a reset that was the correct position.
+        echo "   after the double-click: engine told \"resting at 0.00\" $pickReset time(s) (the pick IS the start: expected)"
+        pickReset=0
+    else
+        echo "   after the double-click: engine told \"resting at 0.00\" $pickReset time(s) (want 0)"
+    fi
     TOTAL_RESET=$((TOTAL_RESET + pickReset))
     local differs
     differs=$(tail -n +"$start" "$BUILD/logs/engine.log" | grep -a -c "ReadingBreaks.*DIFFERS")

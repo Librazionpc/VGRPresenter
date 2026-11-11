@@ -1155,7 +1155,20 @@ ApplicationWindow {
     readonly property string twQueryFull: (typeof SelfTestTableWalkQuery !== "undefined")
                                       ? String(SelfTestTableWalkQuery) : "47-1100X"
     readonly property bool twBack: window.twQueryFull.endsWith("~back")
-    readonly property string twQueryRaw: window.twBack ? window.twQueryFull.slice(0, -5) : window.twQueryFull
+    // "~click": after the double-click pick is on air, ONE plain click on another row must move the output
+    // (preferences.singleClickLive) — logs `clicklive before=… after=…` and quits.
+    readonly property bool twClick: window.twQueryFull.endsWith("~click")
+    // "~preview": a SINGLE click on a row (nothing staged) must size the pane's preview exactly as the
+    // double-click does — logs `previewfit single=… double=…`.
+    readonly property bool twPreview: window.twQueryFull.endsWith("~preview")
+    // "~fit" (use live:): after the first double-click is on air, double-click ANOTHER row and photograph the tiles every
+    // ~200 ms for ~1.4 s (tw_fit<N>_<tile>.png): the passage must never flash small or blank-then-jump — it is at its real
+    // size from the first frame it appears.
+    readonly property bool twFit: window.twQueryFull.endsWith("~fit")
+    readonly property string twQueryRaw: window.twBack ? window.twQueryFull.slice(0, -5)
+                                        : window.twClick ? window.twQueryFull.slice(0, -6)
+                                        : window.twPreview ? window.twQueryFull.slice(0, -8)
+        : window.twFit ? window.twQueryFull.slice(0, -4) : window.twQueryFull
     readonly property bool twGoLive: window.twQueryRaw.indexOf("live:") === 0
     // "live:swap:<table query>" = after the Table pick is on air, change to a Bible pick, show it, and
     // go off air (the user's stall report), timing every step with a GUI-gap heartbeat.
@@ -1295,6 +1308,10 @@ ApplicationWindow {
             if (!window.setReadingScrollMode(true, "tablewalk"))
                 console.log("[SELFTEST-TABLEWALK] FAIL not-scroll — the walk needs Scroll mode")
             pane.playPicked()
+            if (window.twPreview) {
+                twPreviewCheck.restart()   // single click vs double click: the pane preview's size (nothing live)
+                return
+            }
             if (window.twGoLive)
                 LiveOutputService.goLive()
             window.twRewound = 0
@@ -1418,9 +1435,95 @@ ApplicationWindow {
         }
     }
     Timer {
+        id: twPreviewCheck
+        interval: 2500
+        property int stage: 0
+        property real single: 0
+        repeat: true
+        function previewFit() {
+            const dp = SelfTest.findItem("selfTestPanePreviewtable")
+            return dp ? Number(dp.readingFitSize) : -1
+        }
+        onTriggered: {
+            const pane = window.twPane()
+            if (!pane) { console.log("[SELFTEST-TABLEWALK] previewfit FAIL no-pane"); twPreviewCheck.stop(); SelfTest.quit(); return }
+            if (stage === 0) {
+                // NOTHING STAGED: the pick that opened the pane is cleared, so the click below is a bare selection
+                LiveOutputService.stageSlideSet("", [], 0)
+                stage = 1
+                return
+            }
+            if (stage === 1) {
+                console.log("[SELFTEST-TABLEWALK] previewfit live=" + LiveOutputService.live + " scroll=" + LiveOutputService.scrollMode
+                            + " budgetFitBefore=" + LiveOutputService.readingBudgetFitActive
+                            + " clicked=" + pane.selfTestClickRow(5))
+                stage = 2
+                return
+            }
+            if (stage === 2) {
+                single = previewFit()
+                console.log("[SELFTEST-TABLEWALK] previewfit single=" + single.toFixed(2)
+                            + " budgetFit=" + LiveOutputService.readingBudgetFitActive)
+                pane.selfTestDoubleClickRow(5)
+                stage = 3
+                return
+            }
+            const dbl = previewFit()
+            console.log("[SELFTEST-TABLEWALK] previewfit double=" + dbl.toFixed(2) + " single=" + single.toFixed(2)
+                        + " same=" + (Math.abs(dbl - single) < 0.6) + " budgetFit=" + LiveOutputService.readingBudgetFitActive)
+            twPreviewCheck.stop()
+            SelfTest.quit()
+        }
+    }
+    Timer {
+        id: twFitShots
+        interval: 200
+        repeat: true
+        property int n: 0
+        onTriggered: {
+            window.twGrab("fit" + n)
+            if (++n >= 8) { twFitShots.stop(); SelfTest.quit() }
+        }
+    }
+    Timer {
+        id: twClickCheck
+        interval: 2500
+        property string before: ""
+        property int stage: 0
+        repeat: true
+        onTriggered: {
+            const pane = window.twPane()
+            if (stage === 0) {
+                window.twGrab("clickpre")   // the tiles as the FIRST double-click left them: must already be at the real size
+                before = String(LiveOutputService.readingPassageChar())
+                console.log("[SELFTEST-TABLEWALK] clicklive live=" + LiveOutputService.live + " passageChar=" + before
+                            + " singleClickLive=" + (pane ? pane.singleClickLive : "nopane"))
+                console.log("[SELFTEST-TABLEWALK] clicklive clicked=" + (pane ? pane.selfTestClickRow(2) : false))
+                stage = 1
+                return
+            }
+            console.log("[SELFTEST-TABLEWALK] clicklive after=" + String(LiveOutputService.readingPassageChar())
+                        + " moved=" + (String(LiveOutputService.readingPassageChar()) !== before)
+                        + " ref=" + String(pane ? pane.lineStepOwnerRef : ""))
+            twClickCheck.stop()
+            SelfTest.quit()
+        }
+    }
+    Timer {
         id: twAfterPick
         interval: 9000
         onTriggered: {
+            if (window.twClick) {
+                twClickCheck.restart()
+                return
+            }
+            if (window.twFit) {
+                twFitShots.n = 0
+                const fitPane = window.twPane()
+                if (fitPane) fitPane.selfTestDoubleClickRow(2)
+                twFitShots.restart()
+                return
+            }
             window.twGrab("afterpick")      // the tiles, right after the pick has settled
             const listPane = window.twPane()
             if (listPane)

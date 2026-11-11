@@ -230,6 +230,15 @@ Item {
         return true
     }
 
+    // HARNESS: a real single click on a row (the click only — what a finger does while something is on air).
+    function selfTestClickRow(index) {
+        const row = versesFlick.itemAtIndex(index)
+        if (!row)
+            return false
+        row.rowSource.activated(0)
+        return true
+    }
+
     function revealRow(index) {
         if (index < 0 || index >= root.mainRows.length)
             return
@@ -923,6 +932,34 @@ Item {
     function stageSubpart(number, partIndex) {
         root.selectSubpart(number, partIndex)
         root.stageOutputPart(number, partIndex)
+    }
+
+    // ONCE ONE OF THIS LIST'S ROWS IS ON AIR, A SINGLE CLICK ON ANOTHER PUTS IT ON AIR (no double-click per verse or
+    // paragraph: faster under pressure). Only while the output is live with this pane's own pick; Ctrl/Shift clicks
+    // stay selection-only, and the setting turns the whole thing off.
+    readonly property bool singleClickLive: SettingsService.values["preferences.singleClickLive"] !== false
+        && root.book !== null && root.book !== undefined
+        && !!root.adapter && !!root.adapter.liveIsOurs
+        && root.adapter.liveIsOurs(root.lineStepOwnerRef !== "" ? root.lineStepOwnerRef : root.referenceText)
+    property string lastRowPick: ""
+    property double lastRowPickAt: 0
+    // The one way a row goes on air (a double-click, or a single click while live). A double-click is two clicks, so
+    // the same row twice inside the double-click time is one pick, not two.
+    function pickRow(number, partIndex, isSplit) {
+        const key = number + "|" + partIndex
+        const now = Date.now()
+        if (key === root.lastRowPick && now - root.lastRowPickAt < 450)
+            return
+        root.lastRowPick = key
+        if (isSplit) {
+            root.stageSubpart(number, partIndex)
+        } else {
+            root.selectVerse(number, false, false)
+            root.stageOutputPart(number, partIndex)
+        }
+        // Stamped when the pick is DONE: a pick can take longer than the double-click time (measured: 470 ms on a
+        // real passage), and the second click of the double-click is only delivered afterwards.
+        root.lastRowPickAt = Date.now()
     }
 
     property bool followSelectorMoves: true
@@ -2846,6 +2883,9 @@ Item {
                         } else {
                             pane.selectVerse(verseRow.verseNumber, (mods & Qt.ControlModifier) !== 0, (mods & Qt.ShiftModifier) !== 0)
                         }
+                        // Already on air from this list: a plain click moves the output to this row too.
+                        if (pane.singleClickLive && (mods & (Qt.ControlModifier | Qt.ShiftModifier)) === 0)
+                            pane.pickRow(verseRow.verseNumber, verseRow.partIndex, verseRow.isSplit)
                     }
                     onOpened: {
                         if (typeof verseSource === "undefined" || !verseSource)
@@ -2858,12 +2898,7 @@ Item {
                                 "number=" + verseRow.verseNumber
                                 + " partIndex=" + verseRow.partIndex
                                 + " split=" + verseRow.isSplit)
-                        if (verseRow.isSplit) {
-                            pane.stageSubpart(verseRow.verseNumber, verseRow.partIndex)
-                            return
-                        }
-                        pane.selectVerse(verseRow.verseNumber, false, false)
-                        pane.stageOutputPart(verseRow.verseNumber, verseRow.partIndex)
+                        pane.pickRow(verseRow.verseNumber, verseRow.partIndex, verseRow.isSplit)
                     }
                 }
                 Item {
@@ -3765,7 +3800,11 @@ Item {
                             // wrap, and turns the shared character position into ITS line the way the
                             // outputs and the engine do (flowscroll::LineForChar). Unnamed, it borrowed
                             // the reference output's line numbers and moved by lines that were not its own.
-                            readingStyleId: "reference-pane"
+                            // (One key PER PANE: Scripture and The Table each keep a preview of their own box, and a
+                            // column is seated from the box that asks — two panes sharing one key reseated it back
+                            // and forth, a re-measure and a restage for every swap.)
+                            readingStyleId: "reference-pane:" + root.adapter.optionsPrefix
+                            objectName: "selfTestPanePreview" + root.adapter.optionsPrefix
                         }
                         Text {
                             visible: root.selected.length === 0

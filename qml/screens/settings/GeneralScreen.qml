@@ -938,6 +938,7 @@ Item {
                 PrefRow { key: "preferences.startMinimized" }
                 PrefRow { key: "preferences.restoreLastSession" }
                 PrefRow { key: "preferences.closeToTray" }
+                PrefRow { key: "preferences.singleClickLive" }
                 PrefRow { key: "preferences.hardwareAcceleration"
                           sub: root.hardwareRenderingNote(); last: true }
             }

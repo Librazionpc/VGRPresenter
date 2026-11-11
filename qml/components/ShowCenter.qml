@@ -461,7 +461,26 @@ Item {
         return slide.text ? [{ blockId: "@slide_text", text: String(slide.text) }] : []
     }
 
+    // ONCE THIS SHOW IS ON AIR, A SINGLE CLICK ON ANOTHER SLIDE PUTS IT ON AIR (no double-click per slide: faster
+    // under pressure). Only while the output is live with THIS show's slides; otherwise a click just selects.
+    readonly property bool singleClickLive: SettingsService.values["preferences.singleClickLive"] !== false
+        && LiveOutputService.live && root.item !== null && root.item !== undefined
+        && LiveOutputService.onAirTitle === String(root.item.name ?? "")
+    function slideTapped(index, slide, styledPreview) {
+        if (root.selectedSlide === index || root.singleClickLive)
+            root.takeSlideLive(index, slide, styledPreview)
+        else
+            root.selectedSlide = index
+    }
+    property int lastTakenSlide: -1
+    property double lastTakenAt: 0
     function takeSlideLive(index, slide, styledPreview) {
+        // a double-click is two taps: the second one must not pay for the same slide twice
+        const now = Date.now()
+        if (index === root.lastTakenSlide && now - root.lastTakenAt < 450)
+            return
+        root.lastTakenSlide = index
+        root.lastTakenAt = now
         root.selectedSlide = index
         const pickT0 = Date.now()
         const wordsPerScreen = Number(SettingsService.value("shows.wordsPerSlide"))
@@ -705,12 +724,7 @@ Item {
                     HoverHandler { id: cellHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
-                        onTapped: {
-                            if (root.selectedSlide === cell.index)
-                                root.takeSlideLive(cell.index, cell.modelData, cell.styled)
-                            else
-                                root.selectedSlide = cell.index
-                        }
+                        onTapped: root.slideTapped(cell.index, cell.modelData, cell.styled)
                         onDoubleTapped: root.takeSlideLive(cell.index, cell.modelData, cell.styled)
                     }
                     TapHandler {
@@ -826,12 +840,7 @@ Item {
                     HoverHandler { id: listHover; cursorShape: Qt.PointingHandCursor }
                     TapHandler {
                         acceptedButtons: Qt.LeftButton
-                        onTapped: {
-                            if (root.selectedSlide === listRow.index)
-                                root.takeSlideLive(listRow.index, listRow.modelData, listRow.styled)
-                            else
-                                root.selectedSlide = listRow.index
-                        }
+                        onTapped: root.slideTapped(listRow.index, listRow.modelData, listRow.styled)
                         onDoubleTapped: root.takeSlideLive(listRow.index, listRow.modelData, listRow.styled)
                     }
                     TapHandler {

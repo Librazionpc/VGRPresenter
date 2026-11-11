@@ -54,6 +54,13 @@ Rectangle {
         } while (root.onAirSlidePending)
         root.onAirSlideBusy = false
     }
+    function composeFromSlides() {
+        const stagedRaw = LiveOutputService.stagedSlideRaw
+        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+            ? stagedRaw : LiveOutputService.onAirSlideRaw
+        return LiveOutputService.previewWithStyle(
+            (raw && typeof raw === "object") ? raw : ({}), root.styleId)
+    }
     function refreshOnAirSlideOnce() {
         // The key first, and only from scalars: a hit must not touch the slide (reading it
         // converts the whole passage into JS, once per handler, on the thread that draws).
@@ -73,11 +80,11 @@ Rectangle {
             root.onAirSlide = memo.value
             return
         }
-        const stagedRaw = LiveOutputService.stagedSlideRaw
-        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
-            ? stagedRaw : LiveOutputService.onAirSlideRaw
-        const composed = LiveOutputService.previewWithStyle(
-            (raw && typeof raw === "object") ? raw : ({}), root.styleId)
+        // A WALKING PICTURE IS COMPOSED ONCE PER STYLE, FOR EVERY SURFACE OF IT (see composedForStyle): the key is
+        // the picture's scalars alone — the style id is the cache's own, and the style roster invalidates it.
+        const composed = walking
+            ? LiveOutputService.composedForStyle(root.styleId, key.slice(("walk|" + root.styleId + "|" + root.stylePulse + "|").length))
+            : root.composeFromSlides()
         EngineBridge.log("trace", "RefreshOnAirSlide",
             "tile=" + root.objectName + " recomposed key=" + key.slice(0, 60)
             + " blocks0Text=" + String((composed.blocks && composed.blocks[0]
@@ -213,7 +220,7 @@ Rectangle {
     property int stylePulse: 0
     Connections {
         target: OutputListModel
-        function onActiveStyleChanged() { root.stylePulse++ }
+        function onActiveStyleChanged() { LiveOutputService.invalidateComposed(); root.stylePulse++ }
     }
 
     function familyLabel(type) {
@@ -258,7 +265,7 @@ Rectangle {
     readonly property bool styleBackgroundPaints: frameState.styleBackgroundPaints
     Connections {
         target: StyleListModel
-        function onRosterChanged() { root.stylePulse++ }   // the slide composition re-reads with it
+        function onRosterChanged() { LiveOutputService.invalidateComposed(); root.stylePulse++ }   // the slide composition re-reads with it
     }
 
     // WHAT AN EMPTY TILE PAINTS (see previewPane): switched off, cleared, a transparent style — or

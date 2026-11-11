@@ -99,8 +99,8 @@ Window {
     property int stylePulse: 0
     Connections {
         target: OutputListModel
-        function onActiveStyleChanged() { root.stylePulse++ }
-        function onDataChanged() { root.stylePulse++ }
+        function onActiveStyleChanged() { LiveOutputService.invalidateComposed(); root.stylePulse++ }
+        function onDataChanged() { LiveOutputService.invalidateComposed(); root.stylePulse++ }
     }
 
     property bool outputActive: false
@@ -128,6 +128,13 @@ Window {
     }
     // Same memo as the monitor tile (OutputMonitorTile.qml): decide from scalars, and only
     // read the slide for a picture this window has not composed yet.
+    function composeFromSlides() {
+        const stagedRaw = LiveOutputService.stagedSlideRaw
+        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
+            ? stagedRaw : LiveOutputService.onAirSlideRaw
+        return LiveOutputService.previewWithStyle(
+            (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
+    }
     function refreshOnAirSlideOnce() {
         const walking = LiveOutputService.stagedHasFlow || LiveOutputService.onAirHasFlow
         const key = walking
@@ -142,11 +149,10 @@ Window {
             root.onAirSlide = memo.value
             return
         }
-        const stagedRaw = LiveOutputService.stagedSlideRaw
-        const raw = (stagedRaw && Object.keys(stagedRaw).length > 0)
-            ? stagedRaw : LiveOutputService.onAirSlideRaw
-        const composed = LiveOutputService.previewWithStyle(
-            (raw && typeof raw === "object") ? raw : ({}), root.outputStyleId)
+        // (composed once per style for every surface of it — see LiveOutputService.composedForStyle)
+        const composed = walking
+            ? LiveOutputService.composedForStyle(root.outputStyleId, key.slice(("walk|" + root.outputStyleId + "|").length))
+            : root.composeFromSlides()
         memo.key = key
         memo.value = composed
         root.onAirSlide = composed
@@ -277,7 +283,7 @@ Window {
     }
     Connections {
         target: StyleListModel
-        function onRosterChanged() { root.stylePulse++ }   // the slide composition re-reads with it
+        function onRosterChanged() { LiveOutputService.invalidateComposed(); root.stylePulse++ }   // the slide composition re-reads with it
     }
 
     // A frame that paints nothing is TRANSPARENT — cleared, switched off, a transparent style, or nothing

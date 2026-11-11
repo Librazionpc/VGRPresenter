@@ -92,6 +92,8 @@ public:
     // One chapter (paragraphs in order); error when the book/chapter is unknown.
     Result<TheTableChapter> GetChapter(std::string_view bookId, int chapter) const;
     size_t VerseCount() const;
+    // Whether there is any text at all: stops at the first paragraph (VerseCount walks every chapter of every year).
+    bool HasVerses() const;
 
     Result<std::vector<TheTableSearchHit>> Search(std::string_view query, size_t limit = 60,
                                                  bool exactWords = false,

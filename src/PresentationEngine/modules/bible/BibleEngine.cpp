@@ -928,9 +928,14 @@ Result<BibleVersion> BibleEngine::GetBible(std::string_view bibleId) const {
 }
 
 Result<BibleBook> BibleEngine::GetBook(std::string_view bibleId, std::string_view bookId) const {
-    auto bible = GetBible(bibleId);
-    if (!bible.ok()) return bible.error();
-    for (const auto& b : bible.value().books)
+    // THE BOOK ALONE, UNDER THE LOCK: this used to copy the WHOLE Bible (every chapter and every verse, twice over)
+    // to hand back one book's name — measured as the bulk of a scripture pick on the interface thread.
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bibles_.find(std::string(bibleId));
+    if (it == bibles_.end())
+        return Error::Make(Err::Bible_NotFound, "BibleEngine",
+                           "bible not found: " + std::string(bibleId));
+    for (const auto& b : it->second.books)
         if (b.id == bookId) return b;
     return Error::Make(Err::Bible_NotFound, "BibleEngine",
                        "book not found: " + std::string(bookId));
@@ -1025,20 +1030,23 @@ Result<BibleChapter> BibleEngine::GetChapter(std::string_view bibleId, std::stri
 }
 
 Result<size_t> BibleEngine::VerseCount(std::string_view bibleId) const {
-    auto bible = GetBible(bibleId);
-    if (!bible.ok()) return bible.error();
-    return bible.value().verses.size();
+    std::lock_guard<std::mutex> lock(mutex_);   // (a count, not a copy of the whole Bible)
+    auto it = bibles_.find(std::string(bibleId));
+    if (it == bibles_.end())
+        return Error::Make(Err::Bible_NotFound, "BibleEngine", "bible not found: " + std::string(bibleId));
+    return it->second.verses.size();
 }
 
 // ---------------------------------------------------------------------------
 // Reference resolution
 // ---------------------------------------------------------------------------
 std::vector<BibleBook> BibleEngine::BooksFor(std::string_view bibleId) const {
-    if (!bibleId.empty()) {
-        if (auto bible = GetBible(bibleId); bible.ok())
-            return bible.value().books;
-    }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!bibleId.empty()) {
+        const auto it = bibles_.find(std::string(bibleId));
+        if (it != bibles_.end())
+            return it->second.books;   // (the books only: not a copy of every verse first)
+    }
     if (!bibles_.empty()) return bibles_.begin()->second.books;
     return {};
 }

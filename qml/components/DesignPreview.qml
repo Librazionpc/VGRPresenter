@@ -62,15 +62,40 @@ Item {
         const style = String(root.readingStyleId)
         let tableLines = 0
         try { tableLines = LiveOutputService.readingRunLineCount(style) } catch (e) { return }
-        if (tableLines <= 0)
-            return           // table not measured yet
+        if (tableLines <= 0 || !LiveOutputService.readingColumnTableMeasured(style))
+            return           // table not measured yet (or still the pre-seat stand-in: nothing to agree with)
         const label = (root.objectName !== "" ? root.objectName : (style === "" ? "(ref)" : style.slice(0, 8)))
+        // THE TABLE IS THE WALK'S PASSAGE'S. A surface showing anything else (the staged preview of another
+        // pick, the reference pane, a page mid-swap) has no business agreeing with it: comparing its line
+        // count to this table reported "DIFFERS" for text that was never the walk's — noise that hid real
+        // disagreements. Only a surface whose text IS the walk's passage (or a slice cut from it) is checked.
+        const passage = String(LiveOutputService.readingFlowText ?? "")
+        const flowText = String(flow.text ?? "")
+        const showsWalk = flow.sliced === true ? passage.indexOf(flowText) >= 0 : flowText === passage
+        if (!showsWalk)
+            return
+        // ONLY A SURFACE THAT IS IN STEP WITH ITS COLUMN CAN DISAGREE WITH IT. The table is measured at the
+        // column's solved size; a surface that is hidden, not yet laid out, or still drawing at another
+        // size (the column unsolved — colPx -1 — or a stage/preview copy drawn at its own fit) wraps
+        // differently by construction. Counting those as "DIFFERS" buried the real ones, so they are skipped.
+        const columnPx = Number(LiveOutputService.readingColumnPxFor(style))
+        const inStep = root.visible && root.width > 0 && columnPx > 0
+                       && columnPx === Math.floor(Number(flow.font.pixelSize))
+        if (!inStep)
+            return
         // (QML Text cannot say where it broke a line — positionAt exists only on TextEdit — so
         // the check is the line COUNT: one differently-placed break nearly always moves it.)
         // (a slice carries only its own lines: the table's lines in that range, not all of them)
         const expected = flow.sliced === true ? root.sliceLines : tableLines
         const verdict = flow.lineCount !== expected
             ? "DIFFERS in line count: text=" + flow.lineCount + " table=" + expected
+              + " sliced=" + (flow.sliced === true) + " first=" + root.sliceFirst
+              + " flowW=" + (flow.width - flow.leftPadding - flow.rightPadding).toFixed(1)
+              + " px=" + Number(flow.font.pixelSize).toFixed(2)
+              + " colPx=" + Number(LiveOutputService.readingColumnPxFor(style)).toFixed(2)
+              + " box=" + block.width + "x" + block.height + " chars=" + flowText.length
+              + " sliceStyle=" + String(root.sliceStyle).slice(0, 8) + " sliceTable=" + root.sliceTable
+              + " tableNow=" + tableLines + " stage=" + root.sliceStage + "/" + LiveOutputService.readingStageSerial
             : "agrees lines=" + expected
         const sig = label + "|" + verdict + "|" + flow.text.length
         if (root.breakCheckLogged === sig)
@@ -123,6 +148,9 @@ Item {
     property var sliceStage: -1
     property string sliceStyle: ""
     property int sliceVisible: -1
+    property int sliceTable: -1
+    // The slice is a bounded stand-in (no line table for this style yet): valid until the table's tell changes `sliceTable`.
+    property bool sliceProvisional: false
     // WHEN THIS SURFACE RE-SLICES, STAGGERED. Every surface (each monitor tile, the pane) re-slices at the same line, and
     // a new slice is a justified re-layout of ~3 screens of text on EACH of them, inside ONE tick: ~35 ms on a real
     // passage — a hitch every few lines on the tiles while the engine output stayed smooth (a short passage never
@@ -142,7 +170,17 @@ Item {
     // THE ONE THING A TELL MAY TOUCH IS THE WINDOW, NEVER THE GLYPHS. `sliceText` is the
     // surface's passage text; a scroll tick that stays inside the current window leaves it
     // alone, so the justified Text is not laid out again (which is what a tell used to cost).
+    // A SURFACE NOBODY CAN SEE DOES NOT LAY THE PASSAGE OUT. Every DesignPreview in the app re-sliced on every stage
+    // tell (the hidden panes and tabs and off-screen cards too), and each cut is a justified layout of the
+    // passage: 15-40 ms, a dozen of them inside one pick was ~300 ms of the interface thread. A hidden or
+    // zero-size surface only remembers that it is behind; it re-slices the moment it can be seen.
+    property bool sliceBehind: false
     function refreshSlice() {
+        if (!root.visible || root.width <= 0) {
+            root.sliceBehind = true
+            return
+        }
+        root.sliceBehind = false
         if (!root.animateLineSteps || LiveOutputService.readingBudgetFitActive !== true) {
             const flow = String(LiveOutputService.readingFlowText ?? "")   // (only this branch needs the whole text)
             root.sliceWhole = true
@@ -158,6 +196,12 @@ Item {
         const visible = Math.max(3, LiveOutputService.readingVisibleLinesFor(style))
         const first = Math.max(0, Math.floor(root.stepLine))
         const stage = LiveOutputService.readingStageSerial
+        // THE TABLE THE SLICE WAS CUT FROM. A style's line table lands (or is replaced by the column solving
+        // at another size) after the stage serial has already moved, so a slice cut against the old table — or
+        // against none, which hands back the whole passage — kept laying out the wrong lines until the walk
+        // happened to leave it. Its line count is one number: when it changes, the slice is cut again.
+        let table = 0
+        try { table = LiveOutputService.readingRunLineCount(style) } catch (e) { table = -1 }
         const roomBelow = root.sliceFirst + root.sliceLines - (first + visible)
         // THE PER-TICK PATH COSTS NUMBERS, NOT THE PASSAGE. This check runs on EVERY surface on EVERY tick of
         // every glide (twice: the position change and the service's tell). It used to build its key from the
@@ -167,26 +211,28 @@ Item {
         // so the surfaces had to be throttled to a few frames a second (they read as a jitter next to the
         // engine's own smooth output). The stage serial already says "the passage changed"; the text is only
         // fetched when it (or the style / size / window) did.
-        if (stage === root.sliceStage && style === root.sliceStyle
+        if (stage === root.sliceStage && style === root.sliceStyle && table === root.sliceTable
                 && visible === root.sliceVisible && first >= root.sliceFirst
-                && (root.sliceWhole || roomBelow >= 2 + root.shiftSkew || root.sliceAtEnd))
+                && (root.sliceWhole || root.sliceProvisional || roomBelow >= 2 + root.shiftSkew || root.sliceAtEnd))
             return                      // still comfortably inside the slice
         const flowText = String(LiveOutputService.readingFlowText ?? "")
         const key = stage + "|" + flowText.length + "|" + flowText.slice(0, 24)
-                    + "|" + style + "|" + visible
+                    + "|" + style + "|" + visible + "|" + table
         if (key === root.sliceKey && first >= root.sliceFirst
-                && (root.sliceWhole || roomBelow >= 2 + root.shiftSkew || root.sliceAtEnd)) {
-            root.sliceStage = stage; root.sliceStyle = style; root.sliceVisible = visible
+                && (root.sliceWhole || root.sliceProvisional || roomBelow >= 2 + root.shiftSkew || root.sliceAtEnd)) {
+            root.sliceStage = stage; root.sliceStyle = style; root.sliceVisible = visible; root.sliceTable = table
             return                      // the same passage after all (a serial moved, the text did not)
         }
-        root.sliceStage = stage; root.sliceStyle = style; root.sliceVisible = visible
+        root.sliceStage = stage; root.sliceStyle = style; root.sliceVisible = visible; root.sliceTable = table
         const slice = LiveOutputService.readingFlowSliceFor(style, Math.max(0, first - visible), visible * 3)
         // A new random margin for THIS slice (0 .. visible-4 lines earlier than the bare minimum), so the surfaces' next
         // shifts are spread over different ticks. The new slice leaves `visible` lines of room, so the margin can
         // never exceed what it holds.
         root.shiftSkew = Math.floor(Math.random() * Math.max(1, visible - 3))
         root.sliceKey = key
-        root.sliceFirst = slice.first
+        root.sliceProvisional = slice.provisional === true
+        // (a provisional slice begins AT the walk: its first line is where the walk is, so it sits at the box's top)
+        root.sliceFirst = root.sliceProvisional ? first : slice.first
         root.sliceLines = slice.lines
         root.sliceWhole = slice.whole === true
         root.sliceAtEnd = slice.atEnd === true
@@ -197,6 +243,8 @@ Item {
     onStepLineChanged: root.refreshSlice()
     onReadingStyleIdChanged: root.refreshSlice()
     onAnimateLineStepsChanged: root.refreshSlice()
+    onVisibleChanged: if (root.visible && root.sliceBehind) root.refreshSlice()
+    onWidthChanged: if (root.sliceBehind && root.width > 0) root.refreshSlice()
     Connections {
         target: LiveOutputService
         function onReadingStageChanged() { root.refreshSlice() }
@@ -208,6 +256,10 @@ Item {
     Component.onCompleted: root.refreshSlice()
     property string readingFitKey: ""
     property real readingFitSize: 0
+    // The last size the walk's COLUMN itself gave this surface (never a fit of the whole text, never the block's own
+    // font size): what it keeps drawing at while the next pick's size is solved off-thread, so a new pick does not
+    // flash tiny and then correct itself.
+    property real columnFitSize: 0
     readonly property int stepTextLength: {
         const bs = root.blocks !== undefined && root.blocks !== null ? root.blocks : []
         let longest = 0
@@ -389,15 +441,23 @@ Item {
                         parts.push(el.meta.fontSize ?? 16)
                     return parts.join("|")
                 }
-                readonly property int scrollBudget: (el.readingBlock && root.animateLineSteps
-                                                     && LiveOutputService.readingBudgetFitActive)
+                // A SCROLL SURFACE SIZES ITS WORDS BY THE BUDGET'S WORDS — ALWAYS, NOT ONLY ONCE SOMETHING IS STAGED.
+                // Before this, a pane's preview (a single click only selects: nothing is staged, so the walk's budget
+                // fit is not active yet) fitted the WHOLE selected paragraph into its box — a long one came out tiny —
+                // and only a double-click (the stage) brought the real size. Now the preview fits the same first
+                // `budget` words of its own text that the staged column will be fitted on, so a click, the ‹ ›, Enter
+                // and a double-click all show the same size.
+                readonly property bool budgetFitOn: LiveOutputService.readingBudgetFitActive === true
+                readonly property int scrollBudget: (el.readingBlock && root.animateLineSteps)
                                                     ? Math.max(3, Number(LiveOutputService.readingWordBudget ?? 40)) : 0
                 readonly property string scrollProbe: {
                     if (el.scrollBudget <= 0)
                         return ""
                     // A word with the break that FOLLOWS it (a paragraph's new line
                     // included), so the probe takes the lines the real page takes.
-                    const words = String(LiveOutputService.readingFlowText ?? "").match(/\S+\s*/g) || []
+                    const source = el.budgetFitOn ? String(LiveOutputService.readingFlowText ?? "")
+                                                  : String(fitText.text ?? "")
+                    const words = source.match(/\S+\s*/g) || []
                     if (words.length === 0)
                         return ""
                     const probe = []
@@ -416,11 +476,37 @@ Item {
                     MetadataFields.oneLine(el.meta), el.style.padding ?? 0
                 ]
                 property bool scrollColumnPending: false
+                // THE PASSAGE IS NOT SHOWN AT A PLACEHOLDER SIZE. The column's size is solved off the interface
+                // thread, so the first ask after a pick is answered "not yet" and the surface drew the passage at the
+                // block's own font size (16 — a fraction of the real one) until the answer came; and because the
+                // surface only asked again on the NEXT stage change, a cold first pick stayed that small until the
+                // second double-click. Now: (1) the answer's arrival (the service's tell) re-asks at once, and (2) the
+                // passage waits, hidden, for the real size — with a failsafe so a size that never comes still shows.
+                readonly property bool fitWaiting: el.scrollColumnPending && root.columnFitSize <= 0 && !el.fitWaitGaveUp
+                property bool fitWaitGaveUp: false
+                Timer {
+                    id: fitWaitTimer
+                    interval: 1500
+                    onTriggered: el.fitWaitGaveUp = true
+                }
+                onScrollColumnPendingChanged: {
+                    if (el.scrollColumnPending) {
+                        el.fitWaitGaveUp = false
+                        fitWaitTimer.restart()
+                    } else {
+                        fitWaitTimer.stop()
+                        el.fitWaitGaveUp = false
+                    }
+                }
                 Connections {
                     target: LiveOutputService
-                    // (not on readingScrollChanged: the fit belongs to the PAGE the walk is
-                    // on, which moves with readingStageChanged, not with every tick)
                     function onReadingStageChanged() { el.maybeResolveScroll() }
+                    // The solved size is announced with readingScrollChanged (the surfaces that asked get to ask
+                    // again). Only a surface still WAITING answers it: a glide's every tick is not a fit.
+                    function onReadingScrollChanged() {
+                        if (el.scrollColumnPending)
+                            el.maybeResolveScroll()
+                    }
                 }
                 function maybeResolveScroll() {
                     const active = LiveOutputService.readingBudgetFitActive === true
@@ -450,7 +536,31 @@ Item {
                     else
                         Qt.callLater(el.solveFit)
                 }
+                // A SURFACE NOBODY CAN SEE DOES NOT BISECT ITS FONT SIZE. The fit is eleven text layouts; every hidden
+                // surface (the wall's other page, closed panes, off-screen cards) ran it on every pick — about twenty of
+                // them, 8-60 ms each, ~300 ms of the interface thread inside one pick. The one hidden surface that
+                // MUST still answer is a reading block once the walk's column is active: that answer is the column's
+                // size, asked of the service (solved off-thread, no layout here) and it is what seats the output's
+                // column. Everything else waits until it is shown (fitBehind).
+                property bool fitBehind: false
                 function solveFit() {
+                    const columnAnswer = el.readingBlock && root.animateLineSteps
+                                         && LiveOutputService.readingBudgetFitActive === true
+                    if ((!root.visible || el.width <= 0) && !columnAnswer) {
+                        el.fitBehind = true
+                        return
+                    }
+                    el.fitBehind = false
+                    el.solveFitInner()
+                }
+                Connections {
+                    target: root
+                    function onVisibleChanged() {
+                        if (root.visible && el.fitBehind)
+                            el.solveFit()
+                    }
+                }
+                function solveFitInner() {
                     if (fitSolving)
                         return
                     fitSolving = true
@@ -461,16 +571,18 @@ Item {
                             && LiveOutputService.readingBudgetFitActive === true) {
                         if (root.readingFitSize > 0 && root.readingFitKey === el.readingFitKey) {
                             fitAnswer = root.readingFitSize
+                            root.columnFitSize = root.readingFitSize   // (the key carries the budget flag: this IS a column answer)
                         } else {
                             const columnSize = Number(LiveOutputService.scrollColumnSize(
                                                           root.readingStyleId, el.modelData))
                             if (columnSize > 0) {
                                 root.readingFitKey = el.readingFitKey
                                 root.readingFitSize = columnSize
+                                root.columnFitSize = columnSize
                                 fitAnswer = columnSize
                                 el.scrollColumnPending = false
                             } else {
-                                fitAnswer = el.meta.fontSize ?? 16
+                                fitAnswer = root.columnFitSize > 0 ? root.columnFitSize : (el.meta.fontSize ?? 16)
                                 el.scrollColumnPending = true
                             }
                         }
@@ -597,7 +709,7 @@ Item {
                 // ---- THE READING PASSAGE (the Alt+Down / Alt+Up step) ------
                 Item {
                     id: flowWindow
-                    visible: el.drawsFlow
+                    visible: el.drawsFlow && !el.fitWaiting
                     x: 0
                     y: LiveOutputService.readingBudgetFitActive
                        ? (el.style.padding ?? 0) : el.pageTop

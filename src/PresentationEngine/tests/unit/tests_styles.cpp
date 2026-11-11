@@ -3527,6 +3527,18 @@ void TestFlowScrollMath() {
     // Past the passage it rests on the last line instead of running off blank.
     CHECK(fs::LineForChar(narrow, 5000.0) <= static_cast<double>(narrow.size() - 1));
     CHECK(fs::LineForChar(std::vector<int>{}, 7.5) == 7.5);   // no table: already lines
+
+    // A STEP GLIDES BETWEEN WHOLE LINES OF EACH WRAP. Main steps from char 40 to 80 (reference lines 1 -> 2);
+    // the narrow wrap holds char 40 on line 2 (37..59) and char 80 on line 4 (79..99): it rests on those
+    // whole lines — never between them — and passes through the middle at the middle.
+    CHECK(fs::SnappedLineForChar(narrow, 40.0, 40.0, 80.0) == 2.0);
+    CHECK(fs::SnappedLineForChar(narrow, 80.0, 40.0, 80.0) == 4.0);
+    CHECK(std::abs(fs::SnappedLineForChar(narrow, 60.0, 40.0, 80.0) - 3.0) < 1e-9);
+    // ...the same going back (to < from), landing on whole lines again.
+    CHECK(fs::SnappedLineForChar(narrow, 40.0, 80.0, 40.0) == 2.0);
+    // Outside a step (no span, or a character beyond it) it is the plain fractional line, as before.
+    CHECK(fs::SnappedLineForChar(narrow, 45.0, -1.0, -1.0) == fs::LineForChar(narrow, 45.0));
+    CHECK(fs::SnappedLineForChar(narrow, 150.0, 40.0, 80.0) == fs::LineForChar(narrow, 150.0));
 }
 
 void TestReadingFlowWindowRefresh() {

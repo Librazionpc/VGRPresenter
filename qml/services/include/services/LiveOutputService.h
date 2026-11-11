@@ -328,7 +328,7 @@ public:
     int readingJumpSerial() const { return readingJumpSerial_; }
     int readingWordBudget() const { return readingWordBudget_; }
     bool readingBudgetFitActive() const { return readingBudgetFitActive_; }
-    qreal readingColumnPxFor(const QString &styleId) const;
+    Q_INVOKABLE qreal readingColumnPxFor(const QString &styleId) const;
     // What the screens are handed of the passage: the passage and the char the walk is at, with the line
     // breaks each output style cuts it into (cut once at the stage's own size; see readingBreaksFor).
     void attachReadingFlow(QVariantMap &slide, qreal lines) const;
@@ -411,6 +411,9 @@ public:
     Q_INVOKABLE QVariantList readingRunLineStarts(const QString &styleId) const;
     // Just the count (the diagnostics asked for the whole table to read its length).
     Q_INVOKABLE int readingRunLineCount(const QString &styleId) const;
+    // True once this style's table is the budget COLUMN's measured one (the table the outputs and the tiles
+    // are drawn from during the walk), not the pre-seat grid stand-in. The break check only judges then.
+    Q_INVOKABLE bool readingColumnTableMeasured(const QString &styleId) const;
     Q_INVOKABLE int readingFlowCharStart() const { return readingTextWindowCharStart_; }
     Q_INVOKABLE qreal readingRunSizeForStyle(const QString &styleId) const;
     Q_INVOKABLE int readingCharOffset() const;
@@ -418,6 +421,17 @@ public:
     // Compose a staged slide with one output's own saved style, for its local
     // monitor tile (the tile must not borrow the currently active output style).
     Q_INVOKABLE QVariantMap previewWithStyle(const QVariantMap &slide, const QString &styleId) const;
+    // THE STAGED/ON-AIR SLIDE AS ONE OUTPUT STYLE DRAWS IT, composed once per (style, picture) and shared by every
+    // surface of that style. A staged change used to recompose it in EACH of them (five output windows, two sets of
+    // monitor tiles: fourteen compositions of the same four pictures, 5-40 ms apiece, all inside the one pick), and
+    // each surface also pulled the whole slide into JS and back to ask. `pictureKey` is the surfaces' own scalar key
+    // for "what is on the picture" (staged revision, stage serial, page, live, media, input); the style roster and the
+    // output styles invalidate the cache here. Chooses the slide the way the surfaces do: staged if there is one,
+    // else on air.
+    Q_INVOKABLE QVariantMap composedForStyle(const QString &styleId, const QString &pictureKey);
+    // A surface that is about to re-read after a style change calls this FIRST, so it can never be answered from a
+    // composition made under the old styles whatever order the style signals reach the receivers in.
+    Q_INVOKABLE void invalidateComposed() { composedCache_.clear(); composedLru_.clear(); }
 
     // The taken media's last decoded frame (the mediaplay provider reads it;
     // empty when nothing is on air / not yet decoded).
@@ -683,8 +697,19 @@ private:
     // two characters the glide runs between; each screen turns them into whole lines of ITS OWN table and
     // glides between those (flowscroll::SnappedLineForChar), so Main, the Lower Third and the engine's
     // outputs all move by whole lines with their breaks where they were.
+    QHash<QString, QVariantMap> composedCache_;   // composedForStyle: by style|pictureKey (cleared with the styles)
+    QStringList composedLru_;
+    bool composedInvalidationConnected_ = false;
+    void connectComposedInvalidation();
     qreal readingSpanFrom_ = -1.0;
     qreal readingSpanTo_ = -1.0;
+    void prewarmReadingFonts();       // boot-time font warm-up, one output style per event-loop turn
+    QStringList readingPrewarmQueue_;
+    QElapsedTimer readingPrewarmClock_;
+    bool readingPrewarmed_ = false;
+    QSet<QString> inlineSlowStyles_;   // styles whose inline column-size solve was slow: they solve on a worker
+    bool unnamedSeatOpen_ = false;    // the grace period for an unnamed ask to seat a vacant column is over
+    bool unnamedSeatArmed_ = false;   // ...and its timer is running (see scrollColumnSize)
     QHash<QString, qreal> scrollSizeBySig_;   // block + pick + budget -> solved size
     QSet<QString> scrollSizePending_;          // sigs being solved on a worker (QML retries on readingScrollChanged)
     mutable QHash<QString, double> readingRunSizeForStyle_;

@@ -1861,6 +1861,15 @@ std::string TheTableLibrary::CitationLocked(std::string_view bookId, int chapter
     return {};
 }
 
+bool TheTableLibrary::HasVerses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const TheTableBook& book : books_)
+        for (const TheTableChapter& ch : book.chapters)
+            if (!ch.verses.empty())
+                return true;
+    return false;
+}
+
 size_t TheTableLibrary::VerseCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     size_t n = 0;

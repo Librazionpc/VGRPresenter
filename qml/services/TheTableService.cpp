@@ -702,7 +702,7 @@ void TheTableService::searchAsync(const QString &text, int limit, int token, boo
 QVariantList TheTableService::sources() const
 {
     QVariantList out;
-    if (library_ && EngineBridge::instance().booted() && tableLibrary(library_)->VerseCount() > 0)
+    if (library_ && EngineBridge::instance().booted() && tableLibrary(library_)->HasVerses())
         out.append(QVariantMap{ { QStringLiteral("id"), QStringLiteral("the-table") },
                                 { QStringLiteral("name"), QStringLiteral("The Table") } });
     return out;

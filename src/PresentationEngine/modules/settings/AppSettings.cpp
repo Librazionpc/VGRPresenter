@@ -115,6 +115,9 @@ std::vector<SettingDef> BuildDefinitions() {
                      "Opens back to the screen and show you left, instead of the home screen."));
     d.push_back(Bool("preferences.closeToTray", "preferences", "Close to tray", false,
                      "Keeps running in the system tray instead of quitting."));
+    d.push_back(Bool("preferences.singleClickLive", "preferences", "Single click puts the next on air", true,
+                     "Once a verse, paragraph or slide is on air, a single click on another one in the same list "
+                     "puts that on air too — no double-click needed. Off: every one needs a double-click."));
     d.push_back(Bool("preferences.hardwareAcceleration", "preferences", "Hardware rendering (GPU)", false,
                      "Off by default — the GPU path is still being finished."));
 

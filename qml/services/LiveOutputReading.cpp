@@ -909,6 +909,13 @@ const LiveOutputService::StyleRunLines &LiveOutputService::styleRunLinesForText(
                                            + QString::number(qHash(text), 16);
             if (const StyleRunLines *hit = CachedStyleRunLines(columnCacheKey))
                 return *hit;
+            // ONLY THE ACTIVE (REFERENCE) STYLE'S TABLE IS NEEDED THIS INSTANT: the walk, the step and the restage
+            // read it. Every other output's table is only read by surfaces that cope with "not yet" (a tile shows the
+            // whole text, the engine wraps itself, both re-cut the moment it lands), and the measure for it is already
+            // queued off-thread above — measuring it here as well, on the interface thread, doubled the work and was
+            // ~50-100 ms per extra style inside the first pick of every passage.
+            if (lineSourceTextOnly_ && columnKey != ScrollColumnKey(QString()))
+                return none;
             const QVector<VisualSpan> spans = visualLinesOfTextAtSize(text, column->block, column->size);
             return CacheStyleRunLines(columnCacheKey, SpansToRunLines(text, spans));
         }
@@ -1268,13 +1275,41 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
                     FontService::instance().resolve(meta.value(QStringLiteral("fontFamily")).toString()));
         meta.insert(QStringLiteral("fontFamilyResolved"), true);
         grown.insert(QStringLiteral("meta"), meta);
-        scrollSizePending_.insert(sig);
         const QString probeText = probe.trimmed();
         const QString styleLabel = rawStyleId.isEmpty() ? QStringLiteral("(ref)") : rawStyleId.left(8);
         const QString pickLabel = lineSetName_.left(24);
         const double boxW = block.value(QStringLiteral("width")).toDouble();
         const double boxH = block.value(QStringLiteral("height")).toDouble();
         const double pad = blockPadding(block);
+        // THE SOLVE RUNS RIGHT HERE, ON THE INTERFACE THREAD, unless this style has proved slow. A worker thread has cold
+        // font caches (Qt keeps them per thread): off-thread, every pick waited 0.3-0.8 s for its size (the passage hidden
+        // or at a stale size meanwhile), while on the interface thread — whose fonts the tiles already drew with — the
+        // same bisection measured 9-27 ms per style. The size is therefore exact from the first frame of every pick.
+        // The answer is cached by (pick, budget, box shape), so N surfaces of one style cost one solve; a style whose
+        // inline solve ever took longer than kInlineSlowMs (a huge box or an exotic font) goes back to the worker.
+        const auto *solveModel = OutputListModel::instance();
+        const QString solveKey = !rawStyleId.isEmpty() && rawStyleId != QLatin1String("undefined")
+                                 && rawStyleId != QLatin1String("null")
+            ? rawStyleId : (solveModel ? solveModel->activeStyleId() : QString());
+        constexpr qint64 kInlineSlowMs = 120;
+        if (!inlineSlowStyles_.contains(solveKey)) {
+            QElapsedTimer inlineClock;
+            inlineClock.start();
+            const double solved = fittedPixelSize(probeText, grown);
+            if (inlineClock.elapsed() > kInlineSlowMs)
+                inlineSlowStyles_.insert(solveKey);
+            if (scrollSizeBySig_.size() >= 64)
+                scrollSizeBySig_.clear();
+            scrollSizeBySig_.insert(sig, solved);
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("ScrollColumn"),
+                                QStringLiteral("style=%1 pick='%2' budget=%3 size=%4 box=%5x%6 pad=%7 "
+                                               "(solved inline in %8 ms)")
+                                    .arg(styleLabel).arg(pickLabel).arg(budget)
+                                    .arg(solved, 0, 'f', 2).arg(boxW).arg(boxH).arg(pad)
+                                    .arg(inlineClock.elapsed()));
+            size = solved;
+        } else {
+        scrollSizePending_.insert(sig);
         QPointer<LiveOutputService> guard(this);
         QThreadPool::globalInstance()->start(
             [guard, sig, probeText, grown, budget, styleLabel, pickLabel, boxW, boxH, pad]() {
@@ -1299,6 +1334,7 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
                 }, Qt::QueuedConnection);
             });
         return 0.0;
+        }
     }
 
     const auto *styleModel = OutputListModel::instance();
@@ -1310,6 +1346,23 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
         return size;
     const auto seated = scrollColumns_.constFind(key);
     const bool vacant = seated == scrollColumns_.constEnd();
+    // AN UNNAMED ASK DOES NOT SEAT A VACANT COLUMN AT ONCE. The reference pane's preview asks without naming a
+    // style, and it asks first (its box is the pane's, not the output's): seating the active style's column from
+    // it gave that style a table wrapped at the wrong width for as long as its own surface took to solve its
+    // size — and every output was handed those forced breaks (a flash of wrong line breaks after a pick).
+    // The style's own surface names itself within a moment; only if none does (no tile or output shows this
+    // style) does the unnamed ask seat it, after a grace period.
+    if (!named && vacant && !unnamedSeatOpen_) {
+        if (!unnamedSeatArmed_) {
+            unnamedSeatArmed_ = true;
+            QTimer::singleShot(1500, this, [this]() {
+                unnamedSeatArmed_ = false;
+                unnamedSeatOpen_ = true;
+                emit readingScrollChanged();   // the surfaces ask again; a vacant column is seated then
+            });
+        }
+        return size;
+    }
     if ((named || vacant) && (vacant || seated->sig != sig)) {
         const qreal previousChar = readingCharForScroll(readingScroll_);
         const int preserveChar = lineSourceTextOnly_
@@ -1322,6 +1375,13 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
         column.size = size;
         column.sig = sig;
         scrollColumns_.insert(key, column);
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("ScrollSeat"),
+                            QStringLiteral("column=%1 asked-as=%2 size=%3 box=%4x%5 reseated=%6")
+                                .arg(key.left(8), named ? rawStyleId.left(8) : QStringLiteral("(unnamed)"))
+                                .arg(size, 0, 'f', 2)
+                                .arg(block.value(QStringLiteral("width")).toDouble())
+                                .arg(block.value(QStringLiteral("height")).toDouble())
+                                .arg(!vacant));
         QTimer::singleShot(0, this, [this]() {
             if (auto *outputs = OutputListModel::instance())
                 outputs->repushEngineStyles();
@@ -1359,6 +1419,7 @@ qreal LiveOutputService::scrollColumnSize(const QString &rawStyleId, const QVari
     } else if (key == active && lineSourceTextOnly_) {
         readingTextSourceInitialPositionPending_ = false;
     }
+    unnamedSeatOpen_ = false;   // the grace period served this ask; the next vacancy waits again
     return size;
 }
 
@@ -1386,6 +1447,29 @@ QVariantMap LiveOutputService::readingFlowSliceFor(const QString &styleId, int f
     QVariantMap out;
     const QVector<int> &starts = styleRunLines(styleId).charStarts;
     const int total = static_cast<int>(starts.size());
+    // NO TABLE YET FOR THIS STYLE (its measure is still running off-thread): the surface used to be handed the WHOLE
+    // passage and lay all of it out, justified — four to six surfaces at 3-6k characters each, ~50 ms apiece, which was
+    // most of the stall after a pick — only to cut it down the moment the table landed. A bounded stretch from the
+    // walk's own position is enough to draw the screen it can show until then (the table's tell re-cuts it exactly).
+    constexpr int kProvisionalChars = 1500;
+    if (total == 0 && lineSourceTextOnly_ && readingBudgetFitActive_ && lineCount > 0
+            && readingFlowText_.size() > 2 * kProvisionalChars) {
+        const int size = static_cast<int>(readingFlowText_.size());
+        const int at = qBound(0, static_cast<int>(std::floor(readingCharForScroll(readingScroll_))), size - 1);
+        int from = at;
+        while (from > 0 && !readingFlowText_.at(from - 1).isSpace())
+            --from;                       // begin on a word
+        int to = qMin(size, from + kProvisionalChars);
+        while (to < size && !readingFlowText_.at(to - 1).isSpace())
+            ++to;                         // end on a word
+        out.insert(QStringLiteral("text"), readingFlowText_.mid(from, to - from));
+        out.insert(QStringLiteral("first"), 0);
+        out.insert(QStringLiteral("lines"), 0);
+        out.insert(QStringLiteral("whole"), false);
+        out.insert(QStringLiteral("atEnd"), to >= size);
+        out.insert(QStringLiteral("provisional"), true);
+        return out;
+    }
     if (total == 0 || readingFlowText_.isEmpty() || lineCount <= 0) {
         out.insert(QStringLiteral("text"), readingFlowText_);
         out.insert(QStringLiteral("first"), 0);
@@ -1505,6 +1589,19 @@ QVariantList LiveOutputService::readingRunLineStarts(const QString &styleId) con
 int LiveOutputService::readingRunLineCount(const QString &styleId) const
 {
     return static_cast<int>(styleRunLines(styleId).charStarts.size());   // no table copy, no QVariantList
+}
+
+bool LiveOutputService::readingColumnTableMeasured(const QString &styleId) const
+{
+    if (!readingBudgetFitActive_ || readingFlowText_.isEmpty())
+        return false;
+    const QString columnKey = ScrollColumnKey(styleId);
+    const auto column = scrollColumns_.constFind(columnKey);
+    if (column == scrollColumns_.constEnd() || column->size <= 0.0)
+        return false;
+    const QString cacheKey = QStringLiteral("c#") + columnKey + QLatin1Char('#')
+                             + QString::number(qHash(readingFlowText_), 16);
+    return readingRunLinesCache_.contains(cacheKey);   // (no LRU touch: this is a question, not a use)
 }
 
 qreal LiveOutputService::readingLineForStyle(const QString &styleId, qreal charAt) const
@@ -1777,7 +1874,72 @@ void LiveOutputService::connectReadingBasis()
         readingBasisConnected_ = true;
         connect(model, &OutputListModel::activeStyleChanged,
                 this, &LiveOutputService::reseadReadingWalk);
+        // READY BEFORE THE FIRST PICK: see prewarmReadingFonts.
+        QTimer::singleShot(2500, this, &LiveOutputService::prewarmReadingFonts);
     }
+}
+
+// THE READING FONTS, LOADED AT BOOT INSTEAD OF AT THE FIRST DOUBLE-CLICK. The first pick of a session paid for the
+// first-ever layout of the output styles' reading fonts (the font files opened, their tables read, the shaping caches
+// filled): measured 0.6 s of the interface thread inside that pick, against 0.05-0.2 s for every later one. A short
+// passage laid out once per output style, right after the interface is up, moves that cost to idle time. One style per
+// turn of the event loop, so no frame waits on more than one font.
+void LiveOutputService::prewarmReadingFonts()
+{
+    if (readingPrewarmQueue_.isEmpty()) {
+        if (readingPrewarmed_)
+            return;
+        readingPrewarmed_ = true;
+        const auto *outputs = OutputListModel::instance();
+        if (!outputs)
+            return;
+        QStringList ids;
+        for (int i = 0; i < outputs->rowCount(); ++i) {
+            const QString id = outputs->getOutput(i).value(QStringLiteral("styleId")).toString();
+            if (!id.isEmpty() && !ids.contains(id))
+                ids.append(id);
+        }
+        const QString active = outputs->activeStyleId();
+        if (!active.isEmpty() && !ids.contains(active))
+            ids.append(active);
+        readingPrewarmQueue_ = ids;
+        readingPrewarmClock_.start();
+    }
+    if (readingPrewarmQueue_.isEmpty())
+        return;
+    const QString styleId = readingPrewarmQueue_.takeFirst();
+    QElapsedTimer clock;
+    clock.start();
+    static const QString sample = QStringLiteral(
+        "5 And God called the light Day, and the darkness He called Night. “Let there be light”—and there "
+        "was light. 1 2 3 4 5 6 7 8 9 0 [Brother Bosworth gives a solo—Ed.] My, that was very fine.");
+    // A passage-shaped slide, composed by the style: its text blocks carry the fonts, sizes and boxes the picks will use.
+    QVariantMap slide;
+    slide.insert(QStringLiteral("contentType"), QStringLiteral("scripture"));
+    slide.insert(QStringLiteral("line1"), QStringLiteral("Genesis 1:5"));
+    slide.insert(QStringLiteral("line2"), sample);
+    slide.insert(QStringLiteral("body"), sample);
+    const QVariantMap composed = previewWithStyle(slide, styleId);
+    int blocks = 0;
+    for (const QVariant &value : composed.value(QStringLiteral("blocks")).toList()) {
+        const QVariantMap block = value.toMap();
+        const QVariantMap meta = block.value(QStringLiteral("meta")).toMap();
+        if (block.value(QStringLiteral("kind")).toString() != QLatin1String("text")
+                || meta.value(QStringLiteral("fontFamily")).toString().isEmpty())
+            continue;
+        for (const double size : { 24.0, 44.0 })
+            (void)visualLinesOfTextAtSize(sample, block, size);
+        ++blocks;
+    }
+    EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadingWarm"),
+                        QStringLiteral("style=%1 blocks=%2 text blocks warmed=%3 in %4 ms (fonts loaded before the first pick)")
+                            .arg(styleId.left(8)).arg(composed.value(QStringLiteral("blocks")).toList().size())
+                            .arg(blocks).arg(clock.elapsed()));
+    if (!readingPrewarmQueue_.isEmpty())
+        QTimer::singleShot(40, this, &LiveOutputService::prewarmReadingFonts);   // the next style: its own turn
+    else
+        EngineBridge::write(QStringLiteral("info"), QStringLiteral("ReadingWarm"),
+                            QStringLiteral("done in %1 ms").arg(readingPrewarmClock_.elapsed()));
 }
 
 void LiveOutputService::applyReadingScroll(qreal lines, bool notify)

@@ -2,6 +2,13 @@
 
 ## New in the upcoming update
 
+- **Single click puts the next one on air.** Once a verse, paragraph or slide is on air, a single click on another one in the same list puts it on air too — no double-click each time. Ctrl and Shift clicks still just select. Turn it off in Settings · General · Preferences ("Single click puts the next on air").
+- **Cursor frequency.** A new +/− setting in the reading options sets how many lines one arrow press moves (1–20), next to the reading speed.
+- **One shared platform layer for Windows, macOS and Linux.** Files, paths, clipboard, notifications, network, environment, input, dialogs, video sources and recording now run on the same Qt code on every system instead of separate per-system versions, so a fix lands everywhere at once. Linux and macOS also gain video recording and output level meters. (The Linux and macOS builds of these parts have not been run on those systems yet.)
+- **Shared GPU renderer (Windows, macOS, Linux).** A single GPU drawing path replaces the Windows-only one; it is opt-in while it is finished.
+- **Each system picks its own default fonts**, chosen in the app, so text looks right on every system without a font that is missing on it.
+- **Stalls are always traced.** If the interface freezes for more than about a tenth of a second, the log now records where, on every system, so slowdowns can be found without a special build.
+
 # VGRPresenter 0.1.2
 
 ## What's new
@@ -33,6 +40,20 @@
 - UI Fixes
 
 ## Fixed in the upcoming update
+
+- **Scrolling Scripture and The Table is smoother.** Long passages glide more evenly, with far fewer small hitches.
+- **The Lower Third (and every other output size) moves exactly like Main Output.** Wider or smaller outputs no longer re-flow their lines on each press or show short cut-off lines at the top, going forward or back. Each output keeps its own line breaks and moves by whole lines.
+- **No more brief wrong line breaks right after a pick.** The outputs used to be handed the wrong line layout for about half a second after choosing a passage.
+- **Words fit correctly from the first click.** A single click used to show the preview text tiny until a double-click; the preview now uses the same size as what goes on air, whether you click, press Enter, or use ‹ ›.
+- **A double-click no longer picks twice.**
+- **Faster picks.** Choosing a verse or paragraph is noticeably quicker: hidden panels and cards no longer do text layout work during a pick.
+- **Camera and HDMI sources no longer make the app act strangely or lag**, and NDI no longer redoes work when nothing changed.
+- **The Shows list appears right away** (from a saved index) instead of staying empty while the library is scanned.
+- **A show's media row now shows a live thumbnail**, and a media file or The Table is no longer reported as "Not connected this time" when it is not a camera.
+- **Removed the false "no tap was started" warning** and a binding-loop error on the Audio & Video board.
+- **Audio level dots stay faintly visible at low volume** instead of disappearing.
+- **The reference-pane previews stop fighting over their text size**, which used to re-measure again and again.
+- **Settings → General** gets a switch for single-click-on-air (above).
 
 ## Windows downloads
 

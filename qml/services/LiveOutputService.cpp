@@ -30,6 +30,7 @@
 #include "services/EngineWorker.h"
 #include "services/EventBus.h"
 #include "models/OutputListModel.h"
+#include "models/StyleListModel.h"
 #include "models/GroupListModel.h"
 #include "models/BusListModel.h"
 #include "models/VideoSourceListModel.h"
@@ -1048,6 +1049,45 @@ QVariantMap LiveOutputService::previewWithStyle(const QVariantMap &slide,
     timing.Add("compose", bps::timing::MsSince(started));
     timing.EndUnit();
     return result;
+}
+
+void LiveOutputService::connectComposedInvalidation()
+{
+    if (composedInvalidationConnected_)
+        return;
+    const auto clear = [this]() { composedCache_.clear(); composedLru_.clear(); };
+    auto *outputs = OutputListModel::instance();
+    auto *styles = StyleListModel::instance();
+    if (!outputs || !styles)
+        return;   // retried on the next ask: a cache wired to only one of them would go stale
+    connect(outputs, &OutputListModel::activeStyleChanged, this, clear);
+    connect(outputs, &OutputListModel::outputRosterChanged, this, clear);
+    connect(outputs, &QAbstractItemModel::dataChanged, this, clear);
+    connect(outputs, &QAbstractItemModel::modelReset, this, clear);
+    connect(styles, &StyleListModel::rosterChanged, this, clear);
+    composedInvalidationConnected_ = true;
+}
+
+QVariantMap LiveOutputService::composedForStyle(const QString &styleId, const QString &pictureKey)
+{
+    connectComposedInvalidation();
+    const QString cacheKey = styleId + QLatin1Char('|') + pictureKey;
+    if (composedInvalidationConnected_) {
+        const auto hit = composedCache_.constFind(cacheKey);
+        if (hit != composedCache_.constEnd())
+            return hit.value();
+    }
+    const QVariantMap stagedRaw = stagedSlideRaw();
+    const QVariantMap raw = stagedRaw.isEmpty() ? onAirSlideRaw() : stagedRaw;
+    const QVariantMap composed = previewWithStyle(raw, styleId);
+    if (composedInvalidationConnected_) {
+        constexpr int kComposedCap = 24;
+        while (composedCache_.size() >= kComposedCap && !composedLru_.isEmpty())
+            composedCache_.remove(composedLru_.takeFirst());
+        composedCache_.insert(cacheKey, composed);
+        composedLru_.append(cacheKey);
+    }
+    return composed;
 }
 
 // ---------------------------------------------------------------------------
