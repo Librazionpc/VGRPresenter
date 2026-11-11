@@ -148,6 +148,11 @@ QVariantMap slideToVariantMap(const pl::Slide *slide, const pl::OutputStyleSpec 
         const QVariantMap meta = ShowConverter::metaOf(*slide);
         composed.insert(QStringLiteral("showCategory"), meta.value(QStringLiteral("showCategory")).toString());
         composed.insert(QStringLiteral("templateOverride"), meta.value(QStringLiteral("templateOverride")).toBool());
+        // The reference label's source: a style's label block binds to the slide's meta "ref" (and only falls back to the
+        // TITLE when there is none). The reading walk moves that value verse by verse (LiveOutputService::setWalkReference);
+        // a later composition of this map must see it, or it would draw the pick's own title again.
+        if (const QString ref = meta.value(QStringLiteral("ref")).toString(); !ref.isEmpty())
+            composed.insert(QStringLiteral("ref"), ref);
         if (!slide->tags.empty())
             composed.insert(QStringLiteral("tag"), QString::fromStdString(slide->tags.front()));
     }

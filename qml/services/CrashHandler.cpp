@@ -2,6 +2,7 @@
 #include "services/CrashHandler.h"
 #include "services/DataRoot.h"
 #include "services/EngineBridge.h"
+#include "modules/presentation/LiveOutputController.hpp"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -24,6 +25,7 @@
 #include <exception>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>    // CreateProcess needs a mutable argv buffer
 
 #if defined(_WIN32)
@@ -656,6 +658,93 @@ std::string DescribeFrame(unsigned long long address)
 #endif
 
 } // namespace
+
+void StartLoopProfiler()
+{
+#if defined(_WIN32)
+    static std::atomic<bool> started{false};
+    static std::atomic<unsigned long> loopTid{0};
+    if (started.exchange(true))
+        return;
+    bps::live::LiveOutputController::SetLoopStartHook([] { loopTid.store(GetCurrentThreadId()); });
+    std::thread([] {
+        constexpr int kFrames = 14;
+        std::unordered_map<std::string, int> counts;
+        std::string key;
+        HANDLE handle = nullptr;
+        unsigned long handleFor = 0;
+        int total = 0, idle = 0;
+        auto lastReport = std::chrono::steady_clock::now();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            const unsigned long tid = loopTid.load();
+            if (tid != 0) {
+                if (handleFor != tid) {
+                    if (handle) CloseHandle(handle);
+                    handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+                    handleFor = tid;
+                }
+                unsigned long long frames[kFrames];
+                int count = 0;
+                if (handle && SuspendThread(handle) != static_cast<DWORD>(-1)) {
+                    CONTEXT ctx = {};
+                    ctx.ContextFlags = CONTEXT_FULL;
+                    if (GetThreadContext(handle, &ctx)) {
+                        for (; count < kFrames && ctx.Rip != 0; ++count) {
+                            frames[count] = ctx.Rip;
+                            DWORD64 imageBase = 0;
+                            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(ctx.Rip, &imageBase, nullptr);
+                            if (!entry) {
+                                ctx.Rip = *reinterpret_cast<DWORD64 *>(ctx.Rsp);
+                                ctx.Rsp += 8;
+                            } else {
+                                PVOID handlerData = nullptr;
+                                DWORD64 establisher = 0;
+                                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, ctx.Rip, entry, &ctx, &handlerData,
+                                                 &establisher, nullptr);
+                            }
+                        }
+                    }
+                    ResumeThread(handle);
+                }
+                if (count > 0) {
+                    ++total;
+                    key.clear();
+                    char buf[24];
+                    for (int i = 0; i < count; ++i) {
+                        std::snprintf(buf, sizeof buf, "%llx ", frames[i]);
+                        key += buf;
+                    }
+                    ++counts[key];
+                }
+            }
+            if (std::chrono::steady_clock::now() - lastReport >= std::chrono::seconds(15) && total > 0) {
+                lastReport = std::chrono::steady_clock::now();
+                std::vector<std::pair<int, std::string>> top;
+                for (const auto &kv : counts) top.emplace_back(kv.second, kv.first);
+                std::sort(top.begin(), top.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+                qInfo("LiveProf: %d samples in 15 s (every ~3 ms); %d distinct stacks", total, static_cast<int>(top.size()));
+                for (size_t i = 0; i < top.size() && i < 30; ++i) {
+                    std::string line;
+                    unsigned long long addr;
+                    const char *p = top[i].second.c_str();
+                    int shown = 0;
+                    while (*p && shown < 10) {
+                        addr = std::strtoull(p, nullptr, 16);
+                        line += DescribeFrame(addr);
+                        while (*p && *p != ' ') ++p;
+                        while (*p == ' ') ++p;
+                        ++shown;
+                    }
+                    qInfo("LiveProf: %5d x%s", top[i].first, line.c_str());
+                }
+                counts.clear();
+                total = idle = 0;
+            }
+        }
+    }).detach();
+#endif
+}
 
 void StartGuiStallSampler(int thresholdMs)
 {

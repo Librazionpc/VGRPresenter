@@ -2,13 +2,49 @@
 
 #include "core/config/Json.hpp"
 
+#include <array>
+#include <mutex>
+
 namespace bps::presentation::SlideRules {
+// THE CONTENT TYPE IS READ OFF THE SLIDE'S META JSON — which for a reading slide carries the passage itself (line1/line2
+// are the verse text, several KB). Every frame of the live loop asks for it several times per scene (the scene id, the
+// family slot, the composer, the table check) for the program and for each output's own pass, and each ask parsed the
+// whole document: a profile of the audience render thread put roughly half of its busy time in that parser. The answer
+// depends only on the text of the JSON, so the last few distinct documents are remembered (compared by value: a few KB
+// of memcmp against a parse of every character). One process-wide cache behind a mutex — not thread_local: this runs on
+// the live loop AND the interface thread, and a thread_local holding strings runs its destructor at thread exit, which
+// on this toolchain corrupted the heap when a worker thread ended. The storage is deliberately never destroyed.
 std::string ContentType(const Slide& slide) {
+    struct Entry {
+        std::string meta;
+        std::string type;
+        bool used = false;
+    };
+    struct Cache {
+        std::mutex mutex;
+        std::array<Entry, 8> entries;
+        std::size_t next = 0;
+    };
+    static Cache* const cache = new Cache;
+    {
+        std::lock_guard<std::mutex> lock(cache->mutex);
+        for (const Entry& e : cache->entries)
+            if (e.used && e.meta == slide.metaJson)
+                return e.type;
+    }
+    std::string type;
     if (auto meta = json::Parse(slide.metaJson); meta.ok())
         if (const json::Value* v = meta.value().Find("contentType");
             v && v->type() == json::Value::Type::String)
-            return std::string(v->asString());
-    return {};
+            type = std::string(v->asString());
+    {
+        std::lock_guard<std::mutex> lock(cache->mutex);
+        Entry& slot = cache->entries[cache->next++ % cache->entries.size()];
+        slot.meta = slide.metaJson;
+        slot.type = type;
+        slot.used = true;
+    }
+    return type;
 }
 
 std::size_t FamilyTemplateSlot(const std::string& contentType) {

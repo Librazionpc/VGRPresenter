@@ -101,6 +101,11 @@ private:
     LiveOutputController() = default;
 
     void Loop();
+public:
+    // Called once on the compose thread as its loop starts: lets the app (not the engine, which stays OS-free) learn which
+    // thread that is, for the opt-in render-thread profiler (BPS_LIVE_PROFILE).
+    static void SetLoopStartHook(std::function<void()> hook);
+private:
     bool RepresentLastFrame(rendering::RenderEngine& render);
     void ApplyPendingLiveContent();
     void ApplyPendingReadingSlide();

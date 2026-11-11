@@ -588,6 +588,86 @@ void LiveOutputService::noteOperatorJump()
     emit readingStageChanged();
 }
 
+// The slide's reference label: the meta "ref" the style's label block binds to, plus the text of the block bound to "ref"
+// the slide itself carries. True when anything changed.
+static bool setReferenceLabel(QVariantMap &slide, const QString &reference)
+{
+    bool changed = false;
+    QVariantList blocks = slide.value(QStringLiteral("blocks")).toList();
+    for (int i = 0; i < blocks.size(); ++i) {
+        QVariantMap block = blocks.at(i).toMap();
+        if (block.value(QStringLiteral("bind")).toString() != QLatin1String("ref")
+                || block.value(QStringLiteral("text")).toString() == reference)
+            continue;
+        block.insert(QStringLiteral("text"), reference);
+        blocks[i] = block;
+        changed = true;
+    }
+    if (changed)
+        slide.insert(QStringLiteral("blocks"), blocks);
+    // THE LABEL'S REAL SOURCE: a style's label block is bound to "ref", which composes to the slide's meta "ref" — and,
+    // when the slide has none, to its TITLE (the pick's name, fixed). So the walk's reference has to be that meta value.
+    if (slide.value(QStringLiteral("ref")).toString() != reference) {
+        slide.insert(QStringLiteral("ref"), reference);
+        changed = true;
+    }
+    // ...and the slide's "fill" (the meta fields a later composition re-reads — see ShowConverter::fillFromMeta). It is
+    // inserted into the meta AFTER the slide's own "ref", so a stale "ref" in it silently wins: keep its reference
+    // fields in step. (One verse or paragraph: the full and last references are the same text.)
+    QVariantMap fill = slide.value(QStringLiteral("fill")).toMap();
+    bool fillChanged = false;
+    for (const char *key : { "ref", "refFull", "refLast" }) {
+        const QString k = QString::fromLatin1(key);
+        if (fill.contains(k) && fill.value(k).toString() != reference) {
+            fill.insert(k, reference);
+            fillChanged = true;
+        }
+    }
+    if (fillChanged) {
+        slide.insert(QStringLiteral("fill"), fill);
+        changed = true;
+    }
+    return changed;
+}
+
+void LiveOutputService::setWalkReference(const QString &reference)
+{
+    if (reference.isEmpty() || reference == walkReference_ || !scrollMode_ || !lineSourceTextOnly_)
+        return;
+    if (live_) {
+        const QVariantList current = onAirSlidesRaw();
+        if (current.isEmpty())
+            return;
+        QVariantMap shown = current.first().toMap();
+        walkReference_ = reference;
+        if (!setReferenceLabel(shown, reference))
+            return;
+        attachReadingFlow(shown, readingScroll_);
+        updateReadingPick(onAirTitle_, shown);   // the engine keeps the pick and moves only the label
+        // The surfaces compose from this copy until the engine's snapshot comes back (within a poll tick): move it now,
+        // and let them know, so a tile does not keep the old label.
+        setReferenceLabel(onAirSlideRaw_, reference);
+        // ...and the staged copy of the SAME pick, when there is one: the surfaces draw the staged slide in preference to
+        // the on-air one, so a stale label there would be what they show.
+        if (!stagedSlidesRaw_.isEmpty()) {
+            QVariantMap staged = stagedSlidesRaw_.first().toMap();
+            if (setReferenceLabel(staged, reference)) {
+                stagedSlidesRaw_ = QVariantList{staged};
+                stagedSlide_ = readingStagedPreview(staged);
+            }
+        }
+        BumpStaged();
+    } else if (!stagedSlidesRaw_.isEmpty()) {
+        QVariantMap shown = stagedSlidesRaw_.first().toMap();
+        walkReference_ = reference;
+        if (!setReferenceLabel(shown, reference))
+            return;
+        stagedSlidesRaw_ = QVariantList{shown};
+        stagedSlide_ = readingStagedPreview(shown);
+        BumpStaged();
+    }
+}
+
 void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &slides, int index)
 {
     VGR_CALL_TRACE("LiveOutputService.stageSlideSet");
@@ -605,6 +685,7 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
         return;
     }
     ++readingStageSerial_;
+    walkReference_.clear();   // a new pick: its own label again
     if (!quietStage_)
         emit readingStageChanged();
     const int at = qBound(0, index, static_cast<int>(slides.size()) - 1);
@@ -709,6 +790,7 @@ void LiveOutputService::activatePendingTextSource()
     readingTextSourceInitialPositionPending_ = true;
     lineSourceTextOnly_ = true;
     readingBudgetFitActive_ = true;
+    walkReference_.clear();   // a new pick: its own label again
     lineSlideIndex_ = 0;
     pendingTextSourceName_.clear();
     pendingTextSourcePages_.clear();

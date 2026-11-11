@@ -1,6 +1,7 @@
 #include "core/common/StageTiming.hpp"
 #include "modules/presentation/LiveOutputController.hpp"
 
+#include "core/config/Json.hpp"
 #include "core/logging/Logger.hpp"
 #include "modules/presentation/CompositorState.hpp"
 #include "modules/presentation/PresentationDocument.hpp"
@@ -65,14 +66,37 @@ uint64_t HashSlideContent(const bps::presentation::Slide& s) {
     return h;
 }
 
+// The slide's meta WITHOUT its "ref" fields: the reference label ("Genesis 1:5") follows the walk from verse to verse while the
+// pick stays the same pick, so a label change alone must not be mistaken for a new pick.
+std::string MetaApartFromRef(const std::string& metaJson) {
+    auto parsed = json::Parse(metaJson);
+    if (!parsed.ok() || !parsed.value().asObject())
+        return metaJson;
+    json::Value::Object object = *parsed.value().asObject();
+    object.erase("ref");
+    object.erase("refFull");   // (the label's other forms move with it)
+    object.erase("refLast");
+    return json::Value(std::move(object)).ToString();
+}
+
+// The blocks with the reference label's text blanked: the label (a block bound to "ref") changes with the walk too.
+std::vector<bps::presentation::ContentBlock> BlocksApartFromRef(std::vector<bps::presentation::ContentBlock> blocks) {
+    for (auto& block : blocks)
+        if (block.bind == "ref")
+            block.text.clear();
+    return blocks;
+}
+
 bool SamePickApartFromReading(const bps::presentation::Slide& a,
                               const bps::presentation::Slide& b) {
     return a.title == b.title && a.text == b.text && a.notes == b.notes
         && a.tags == b.tags && a.sections == b.sections && a.assetIds == b.assetIds
         && a.hidden == b.hidden && a.transitionIn == b.transitionIn
         && a.transitionMs == b.transitionMs && a.durationMs == b.durationMs
-        && a.blocks == b.blocks && a.background == b.background
-        && a.filters == b.filters && a.metaJson == b.metaJson
+        && (a.blocks == b.blocks || BlocksApartFromRef(a.blocks) == BlocksApartFromRef(b.blocks))
+        && a.background == b.background
+        && a.filters == b.filters
+        && (a.metaJson == b.metaJson || MetaApartFromRef(a.metaJson) == MetaApartFromRef(b.metaJson))
         && a.categoryId == b.categoryId && a.clearStage == b.clearStage;
 }
 
@@ -348,6 +372,8 @@ void LiveOutputController::ApplyPendingReadingSlide() {
                 onAir->flowText = pending->slide.flowText;
                 onAir->flowChar = pending->slide.flowChar;
                 onAir->flowBreaks = pending->slide.flowBreaks;   // cut together with the text
+                onAir->metaJson = pending->slide.metaJson;       // (the reference label may have moved with the walk)
+                onAir->blocks = pending->slide.blocks;           // ...and it is a block bound to "ref"
                 lastRenderedScene_.clear();
                 commitWhole = false;
                 PublishOnAirSnapshot();
@@ -442,7 +468,14 @@ Result<void> LiveOutputController::StopLiveTail() {
 // ---------------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------------
+namespace {
+std::function<void()>& LoopStartHook() { static std::function<void()> hook; return hook; }
+}
+void LiveOutputController::SetLoopStartHook(std::function<void()> hook) { LoopStartHook() = std::move(hook); }
+
 void LiveOutputController::Loop() {
+    if (const auto& hook = LoopStartHook(); hook)
+        hook();
     // The thread that composes what goes to air. Above normal, so a busy machine (a browser, a
     // build, the interface itself) delays the interface's own work before it delays the picture.
     if (platform::PlatformAccessor::Installed())
@@ -894,6 +927,7 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, float
     const presentation::Slide* slide = pres_->CurrentSlide();
 
     rendering::RenderEngine &engine = rendering::RenderEngine::Instance();
+    std::vector<std::pair<std::string, std::shared_ptr<const rendering::Frame>>> renderedThisPass;
     for (size_t i = 0; i < specs.size() && i < buffers.size(); ++i) {
         auto out = engine.GetOutput(buffers[i]);
         if (!out.ok()) {
@@ -945,6 +979,23 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, float
             sharedOutputCopies_.fetch_add(1);
             continue;
         }
+        // ---- TWO OUTPUTS THAT DRAW THE SAME SCENE ARE ONE RASTERISATION -----------------------------------
+        // The scene id carries the style, the size and the gating, so an equal id is an equal picture: the
+        // Lower Third, the streaming and the recording output are all that one scene, and each used to be
+        // rasterised (and read back, ~8 MB) on its own — about two thirds of the per-output cost of a frame.
+        // The first output that draws it keeps the frame; the rest present that very frame.
+        bool sharedWithPeer = false;
+        for (const auto& drawn : renderedThisPass) {
+            if (drawn.first == sceneId.value()) {
+                fb->SetAcceptsDistributedFrames(false);
+                (void)fb->PresentShared(drawn.second);
+                sharedOutputCopies_.fetch_add(1);
+                sharedWithPeer = true;
+                break;
+            }
+        }
+        if (sharedWithPeer)
+            continue;
         fb->SetAcceptsDistributedFrames(false);
         rendering::RenderOptions passOpts;
         passOpts.distribute = false;
@@ -970,7 +1021,9 @@ void LiveOutputController::RenderPerOutputPasses(float contentScrollChars, float
             f->pixels = std::move(img.value().pixels);
             f->timestampMs = std::chrono::duration<double, std::milli>(
                                  std::chrono::system_clock::now().time_since_epoch()).count();
-            (void)fb->PresentShared(std::shared_ptr<const rendering::Frame>(std::move(f)));   // held as is when the size matches
+            std::shared_ptr<const rendering::Frame> shared(std::move(f));
+            renderedThisPass.emplace_back(sceneId.value(), shared);
+            (void)fb->PresentShared(shared);   // held as is when the size matches
         }
     }
 }

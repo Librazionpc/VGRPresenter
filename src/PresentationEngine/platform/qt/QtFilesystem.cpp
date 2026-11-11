@@ -16,6 +16,16 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+// Two kernel32 calls, declared here instead of including <windows.h>: that header #defines CreateDirectory,
+// CopyFile, DeleteFile... to their -W names and would rename this class's own members.
+extern "C" {
+// (returns BOOLEAN — ONE byte; declared wider, the rest of the register is garbage and a failure reads as success)
+__declspec(dllimport) unsigned char __stdcall CreateSymbolicLinkW(const wchar_t *link, const wchar_t *target, unsigned long flags);
+__declspec(dllimport) unsigned long __stdcall GetLastError(void);
+}
+#endif
+
 namespace bps::platform {
 namespace {
 
@@ -47,6 +57,17 @@ Error IoError(std::string_view op, std::string_view path, const QString &why = {
     if (!why.isEmpty())
         message += ": " + U(why);
     return Error::Make(Err::IoError, "Filesystem", message);
+}
+
+// An open that failed, with the OS's own reason as nativeError (Error.nativeError, DoD §19: PAL errors surface errno): a
+// file that is not there is ENOENT, anything else that stopped the open is EACCES.
+Error OpenError(std::string_view op, std::string_view path, const QFile &file)
+{
+    Error e = IoError(op, path, file.errorString());
+    e.nativeError = QFileInfo(file.fileName()).exists()
+        ? static_cast<int>(std::errc::permission_denied)
+        : static_cast<int>(std::errc::no_such_file_or_directory);
+    return e;
 }
 
 Error FsError(std::string_view op, std::string_view path, const std::error_code &ec)
@@ -206,7 +227,7 @@ Result<std::string> QtFilesystem::ReadText(std::string_view path) const
     const QString p = Q(path);
     QFile in(p);
     if (!in.open(QIODevice::ReadOnly))
-        return IoError("read", path, in.errorString());
+        return OpenError("read", path, in);
     QByteArray data = in.readAll();
     if (in.error() != QFileDevice::NoError)
         return IoError("read", path, in.errorString());
@@ -218,7 +239,7 @@ Result<std::vector<uint8_t>> QtFilesystem::ReadBinary(std::string_view path) con
     const QString p = Q(path);
     QFile in(p);
     if (!in.open(QIODevice::ReadOnly))
-        return IoError("read", path, in.errorString());
+        return OpenError("read", path, in);
     const QByteArray data = in.readAll();
     if (in.error() != QFileDevice::NoError)
         return IoError("read", path, in.errorString());
@@ -526,22 +547,41 @@ Result<std::vector<std::string>> QtFilesystem::FindFiles(std::string_view dir,
 
 Result<void> QtFilesystem::CreateSymlink(std::string_view target, std::string_view linkPath)
 {
-    // Qt has no "create a symbolic link" API (QFile::link writes a .lnk shell
-    // shortcut on Windows, a different object). std is the portable primitive.
+    // Qt has no "create a symbolic link" API (QFile::link writes a .lnk shell shortcut on Windows, a different
+    // object). std is the portable primitive — except on Windows, where this toolchain's std::filesystem reports
+    // create_symlink as "function not implemented"; there it is the OS call itself, with the OS's own error.
+#if defined(_WIN32)
+    const std::wstring wtarget = Q(target).toStdWString();
+    const std::wstring wlink = Q(linkPath).toStdWString();
+    const bool targetIsDir = QFileInfo(Q(target)).isDir();
+    // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (0x2): works without elevation when Developer Mode is on.
+    const unsigned long flags = (targetIsDir ? 0x1ul /* SYMBOLIC_LINK_FLAG_DIRECTORY */ : 0ul) | 0x2ul;
+    if (!CreateSymbolicLinkW(wlink.c_str(), wtarget.c_str(), flags)) {
+        Error e = IoError("create_symlink", linkPath);
+        e.nativeError = static_cast<int>(GetLastError());   // 1314 = ERROR_PRIVILEGE_NOT_HELD
+        return e;
+    }
+    return Ok();
+#else
     std::error_code ec;
     fs::create_symlink(FsPath(target), FsPath(linkPath), ec);
     if (ec)
         return FsError("create_symlink", linkPath, ec);
     return Ok();
+#endif
 }
 
 Result<std::string> QtFilesystem::ReadSymlink(std::string_view linkPath) const
 {
-    std::error_code ec;
-    const fs::path target = fs::read_symlink(FsPath(linkPath), ec);
-    if (ec)
-        return FsError("read_symlink", linkPath, ec);
-    return FromFsPath(target);
+    // Qt reads a link on every OS (an NTFS symbolic link included); std's read_symlink is "not implemented" on the
+    // Windows toolchain. An empty answer is "not a link".
+    const QFileInfo info(Q(linkPath));
+    if (!info.isSymLink()) {
+        Error e = IoError("read_symlink", linkPath, QStringLiteral("not a symbolic link"));
+        e.nativeError = static_cast<int>(std::errc::invalid_argument);
+        return e;
+    }
+    return U(info.symLinkTarget());
 }
 
 Result<std::vector<std::string>> QtFilesystem::Enumerate(std::string_view dir) const

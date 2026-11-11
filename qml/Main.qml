@@ -1212,6 +1212,7 @@ ApplicationWindow {
             + " refTop=" + JSON.stringify(window.twStyleView(String(OutputListModel.activeStyleId)).words)
             + " ref=" + JSON.stringify(String(pane.referenceText))
             + " para=" + window.twRefPara(pane.referenceText)
+            + " outRef=" + JSON.stringify(String(((((LiveOutputService.live ? LiveOutputService.onAirSlideRaw : LiveOutputService.stagedSlideRaw) || {}).blocks || []).filter((b) => b.bind === "ref")[0] || {}).text ?? ""))
             + " selected=" + JSON.stringify(pane.selected)
             + " previewIndex=" + pane.previewSlideIndex
             + " ownerRef=" + JSON.stringify(String(pane.lineStepOwnerRef))
@@ -1771,6 +1772,9 @@ ApplicationWindow {
             out.push("[SELFTEST-TABLEWALK] press=" + press + " tile=" + i
                      + " stale=" + (window.lsCompSig(tile.onAirSlide) !== window.lsCompSig(fresh))
                      + " flow=" + (tileText !== "" && flow.indexOf(tileText) >= 0)
+                     + " rawRef=" + JSON.stringify(String((raw && raw.ref) ?? "")) + " stagedEmpty=" + !(stagedRaw && Object.keys(stagedRaw).length > 0)
+                     + " freshBlocks=" + JSON.stringify(((fresh || {}).blocks || []).map((b) => (b.bind ?? "") + ":" + String(b.text ?? "").slice(0, 14)))
+                     + " tileBlocks=" + JSON.stringify(((tile.onAirSlide || {}).blocks || []).map((b) => (b.bind ?? "") + ":" + String(b.text ?? "").slice(0, 14)))
                      + " tileText=" + JSON.stringify(tileText.slice(0, 28))
                      + " freshText=" + JSON.stringify(freshText.slice(0, 28))
                      + " style=" + String(tile.styleId).slice(0, 8)

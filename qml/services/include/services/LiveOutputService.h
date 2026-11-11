@@ -344,6 +344,11 @@ public:
     // The operator's own stage (a click, the arrows, a search pick): the walk may
     // then re-solve its column for the page it lands on. Called from QML only.
     Q_INVOKABLE void noteOperatorJump();
+    // THE REFERENCE LABEL FOLLOWS THE WALK. The output's label ("Genesis 1:5", "47-1100X - Fellowship 2") is the pick's own
+    // reference, fixed when the pick was made — so it stayed "Genesis 1:1" while the passage scrolled on to verse 5 and 6.
+    // The pane that owns the pick tells the service which piece the walk is on; the on-air (or staged) slide's reference
+    // moves with it, on every output, without being a new pick. A new pick starts again from its own label.
+    Q_INVOKABLE void setWalkReference(const QString &reference);
     int lineStepSerial() const { return lineStepSerial_; }
     int lineStepDirection() const { return lineStepDirection_; }
     Q_INVOKABLE void clearStaged();
@@ -707,6 +712,7 @@ private:
     QStringList readingPrewarmQueue_;
     QElapsedTimer readingPrewarmClock_;
     bool readingPrewarmed_ = false;
+    QString walkReference_;   // setWalkReference: the label the walk last moved the pick's reference to
     QSet<QString> inlineSlowStyles_;   // styles whose inline column-size solve was slow: they solve on a worker
     bool unnamedSeatOpen_ = false;    // the grace period for an unnamed ask to seat a vacant column is over
     bool unnamedSeatArmed_ = false;   // ...and its timer is running (see scrollColumnSize)

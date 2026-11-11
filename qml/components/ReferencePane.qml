@@ -2313,6 +2313,21 @@ Item {
         root.selected = [piece.number]
         root.anchorVerse = piece.number
         root.centerRow(piece.number, piece.partIndex)
+        root.followOutputReference(piece.number)
+    }
+
+    // THE OUTPUTS' REFERENCE LABEL MOVES WITH THE WALK ("Genesis 1:5" when the screen is on verse 5, not the pick's "1:1"):
+    // only while this pane's own pick is the one on air or staged.
+    function followOutputReference(number) {
+        if (!root.book || !root.adapter || root.lineStepOwnerRef === "")
+            return
+        const ours = (root.adapter.liveIsOurs && root.adapter.liveIsOurs(root.lineStepOwnerRef))
+                  || (root.adapter.stagedIsOurs && root.adapter.stagedIsOurs(root.lineStepOwnerRef))
+        if (!ours)
+            return
+        const ref = String(root.adapter.reference(root.book.name, root.chapterNumber, [Number(number)]) || "")
+        if (ref !== "")
+            LiveOutputService.setWalkReference(ref)
     }
 
     function playSlideAt(index) {

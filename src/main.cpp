@@ -853,6 +853,8 @@ int main(int argc, char *argv[])
     calltrace::installHangWatchdog(5);
     if (stallHuntMs > 0)
         StartGuiStallSampler(stallHuntMs);
+    if (qEnvironmentVariableIsSet("BPS_LIVE_PROFILE"))
+        StartLoopProfiler();
     // Env-gated (VGR_CALLTRACE_SELFTEST=1): proves the breadcrumb wiring on a
     // real run — an annotated warning and a reported exception in engine.log.
     calltrace::runEnvSelfTest();
