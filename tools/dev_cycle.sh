@@ -213,7 +213,9 @@ LOG_BEFORE=0
 echo "== launching (CWD=$BUILD_DIR, health check in ${HEALTH_SECS}s) =="
 (
     cd "$BUILD_DIR" || exit 1
-    PATH="$MINGW_BIN:$QT_BIN:$PATH" nohup "./$APP" >/dev/null 2>&1 \
+    # VGR_DEPLOY=0: a developer launch keeps the full log, the stall sampler and the technical toasts
+    # (the shipped app runs in deployment mode, see qml/services/include/services/DeploymentMode.h).
+    VGR_DEPLOY=0 PATH="$MINGW_BIN:$QT_BIN:$PATH" nohup "./$APP" >/dev/null 2>&1 \
         < /dev/null &
     disown
 ) >/dev/null 2>&1

@@ -369,6 +369,12 @@ public:
     Q_INVOKABLE void restoreCleared();
     // The runtime's Next()/Previous() while live.
     Q_INVOKABLE bool next();
+    // THE ONE FORWARD / BACKWARD COMMAND. The Next and Prev hotkeys (Main.qml's runEffect), the wall's
+    // buttons, the auto-advance timer and the reading walk all take this: in Scroll mode it steps a line,
+    // otherwise it takes the next slide. One implementation, so a timer reaching its time moves exactly
+    // like a keypress, and a new scroll implementation is written here once instead of per caller.
+    Q_INVOKABLE bool stepForward();
+    Q_INVOKABLE bool stepBackward();
     Q_INVOKABLE bool previous();
     Q_INVOKABLE bool jumpTo(int index);
     Q_INVOKABLE bool jumpToGroup(const QString &tag);
@@ -384,6 +390,12 @@ public:
     Q_INVOKABLE void toggleAutoAdvance();
     // Push the record at the engine: on only for the recorded show, while it is the one on air.
     void applyTimedAdvance();
+    // The centre page's NEXT TIMER is written to the SHOW, while the set on air holds its own copy of the
+    // slides — so a timer set after GO LIVE never reached the wall's pace. This adopts the show's timers
+    // into the on-air pace (recording the show as timed while any slide carries one), then re-arms.
+    void adoptShowNextTimers();
+    // A slide's next timer (ms) as the SHOW has it now, by slide id: 0 when the show does not know the slide.
+    double showNextTimerMsFor(const QString &slideId) const;
     // THE SET the timer is recorded against — the SHOW's name, not the title of the slide showing at the
     // moment of the press (onAirTitle_ follows the slide, and comparing against it disarmed the timer on
     // the first step: the reported "the timer isn't moving the slide").

@@ -2,6 +2,7 @@
 
 #include "core/config/Json.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <format>
 
@@ -66,6 +67,7 @@ js::Value BlockToJson(const ContentBlock& b) {
     js::Value::Object style;
     style["padding"] = js::Value::Number(b.style.padding);
     style["backgroundColor"] = Str(b.style.backgroundColor);
+    style["opacity"] = js::Value::Number(b.style.opacity);
     style["cornerRadius"] = js::Value::Number(b.style.cornerRadius);
     style["borderEnabled"] = js::Value::Bool(b.style.borderEnabled);
     style["borderWidth"] = js::Value::Number(b.style.borderWidth);
@@ -107,6 +109,9 @@ ContentBlock BlockFromJson(const js::Value& o, size_t index) {
     if (const js::Value* s = o.Find("style"); s && s->asObject()) {
         b.style.padding = GetNum(*s, "padding", 0);
         b.style.backgroundColor = GetStr(*s, "backgroundColor", "transparent");
+        // Absent (an older file, or a block the canvas never gave an opacity) is fully opaque,
+        // which is what those files have always drawn.
+        b.style.opacity = std::clamp(GetNum(*s, "opacity", 1.0), 0.0, 1.0);
         b.style.cornerRadius = GetNum(*s, "cornerRadius", 0);
         b.style.borderEnabled = GetBool(*s, "borderEnabled", false);
         b.style.borderWidth = GetNum(*s, "borderWidth", 2);

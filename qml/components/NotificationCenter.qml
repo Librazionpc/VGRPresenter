@@ -35,6 +35,21 @@ Item {
             delete root.actions[id]
     }
 
+    // Topics that narrate the engine to a developer. Shown in a developer build, logged and hidden in deployment mode.
+    readonly property var technicalTopics: [
+        "engine.log", "engine.kernel.state_changed", "engine.system.health_changed", "engine.resource.pressure_high",
+        "render.error", "render.gpu_out_of_memory", "recording.dropped_frames", "content.validation_failed",
+        "production.bus_changed", "production.restored", "engine.boot"
+    ]
+    function isTechnical(topic, payload) {
+        const t = String(topic || "")
+        if (t.indexOf("log.") === 0 || root.technicalTopics.indexOf(t) >= 0)
+            return true
+        if (payload && (payload.level === "debug" || payload.level === "trace"))
+            return true
+        // A title of the form "Engine · <module>" is the engine log relay's own; no operator-facing notice uses it.
+        return !!(payload && String(payload.title || "").indexOf("Engine · ") === 0)
+    }
     function groupKeyOf(level, title, message) {
         return (level || "info") + "\u001f" + (title || "") + "\u001f" + message
     }
@@ -84,6 +99,13 @@ Item {
         target: EventBus
         function onEventPosted(topic, payload) {
             if (!payload || !payload.message)
+                return
+            // Deployment mode: a technical notice is for the log file, never for the operator's screen. That is a raw
+            // engine / Qt / QML warning relayed from the log, and the engine's own housekeeping events (kernel state,
+            // health and pressure readings, render / GPU internals, dropped frames, validation detail, bus changes).
+            // Notices written for the operator — saved, imported, recording failed or recovered, an output not sending,
+            // a missing device, a crash recovery — carry other topics and still show.
+            if (EngineBridge.deploymentMode && root.isTechnical(topic, payload))
                 return
             // Settings > General > Notifications (and Lock In Mode): switched off, only errors still interrupt.
             const settings = SettingsService.values

@@ -926,8 +926,17 @@ bool LiveOutputService::refreshReadingTextWindow(int passageChar)
             && passageChar <= currentEnd - kWindowMargin)
         return false;
 
-    const int desiredStart = qBound(0, passageChar, qMax(0, size - kWindowChars));
+    // THE POSITION GOES IN THE MIDDLE OF THE NEW WINDOW. It used to be the window's FIRST character, which is inside
+    // the 1200-character edge margin, so the very next press found the position "near the edge" again and cut a new
+    // window — on EVERY press, for any pick deep in a long text: a 6000-character layout of every column (30-45 ms of
+    // DWrite on the interface thread), a stall of 100-190 ms, and the outputs told "resting at 0" each time, which is
+    // how Main Output ended up a line behind the reference pane. Centred, the next cut is ~1800 characters of walking
+    // away. (A passage near the start of a text never hit this, because the window already begins at 0 there.)
+    const int desiredStart = qBound(0, passageChar - kWindowChars / 2, qMax(0, size - kWindowChars));
     int start = desiredStart;
+    // Begin on a word, not inside one (the window's first line is read by nobody, but it must lay out like text).
+    while (start > 0 && start < passageChar && !readingTextSourceText_.at(start - 1).isSpace())
+        ++start;
     int end = qMin(size, desiredStart + kWindowChars);
     while (end < size && end > start && !readingTextSourceText_.at(end - 1).isSpace())
         --end;

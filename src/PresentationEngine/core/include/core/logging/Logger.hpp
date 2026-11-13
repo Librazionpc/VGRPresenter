@@ -149,6 +149,11 @@ public:
     Result<void> AddSink(std::shared_ptr<ISink> sink);
     Result<void> RemoveSink(std::string_view name);
     void SetGlobalLevel(LogLevel level) { globalLevel_.store(level); }
+    // A floor under EVERY level setting (the global gate, a sink's own minimum, the stored preference, a
+    // developer override): nothing below it is ever recorded. The shipped app raises it to Warning (deployment
+    // mode) so a user's machine keeps the problems, not the narration. Trace by default = no floor.
+    void SetLevelFloor(LogLevel level) { levelFloor_.store(level); }
+    LogLevel LevelFloor() const noexcept { return levelFloor_.load(); }
     void SetCategoryLevel(std::string_view category, LogLevel level);
     LogLevel GlobalLevel() const noexcept { return globalLevel_.load(); }
 
@@ -208,6 +213,7 @@ private:
     std::atomic<bool> shutdownRequested_{false};
     std::atomic<bool> idle_{true};   // pump finished writing the last batch
     std::atomic<LogLevel> globalLevel_{LogLevel::Trace};
+    std::atomic<LogLevel> levelFloor_{LogLevel::Trace};
     std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> emitted_{0};
     std::atomic<uint64_t> writeTimeNs_{0};   // cumulative sink write time

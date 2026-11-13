@@ -177,6 +177,16 @@ void OutputListModel::reloadFromStore()
                 item.refresh.clear();
             }
         }
+        // A ROSTER SAVED BEFORE "ONE SCREEN, ONE OUTPUT" can carry two rows on the same display — the
+        // state that opened two windows at one x/y and drew one picture over the other. The first claim
+        // keeps the screen; a later row is released here instead of fighting it every session.
+        if (!item.screenName.isEmpty() && rowHoldingScreen(item.screenName, -1) >= 0) {
+            qInfo("OutputListModel: '%s' released screen '%s' (already an output's own)",
+                  qUtf8Printable(item.name), qUtf8Printable(item.screenName));
+            item.screenName.clear();
+            item.res.clear();
+            item.refresh.clear();
+        }
         sawActive = sawActive || item.active;
         m_outputs.append(item);
     }
@@ -504,6 +514,10 @@ void OutputListModel::addScreen(const QString &name, const QString &type,
     item.isEnabled = true;
     item.styleId = QStringLiteral();
     item.onAirOnly = type == QLatin1String("NDI");
+    // An HDMI row is a window on a PHYSICAL SCREEN, and two windows on one screen draw over each other.
+    // A new row takes the first screen no other row holds, so a second HDMI output is a second picture.
+    if (!item.onAirOnly)
+        item.screenName = freeScreenName(-1, QString());
     item.content = defaultContent();
     m_outputs.append(item);
     endInsertRows();
@@ -528,6 +542,16 @@ void OutputListModel::duplicateOutput(int index)
     copy.badge = QStringLiteral("OUT %1").arg(m_outputs.size() + 1);
     copy.active = false; // a duplicate starts dark, never fighting the original
     copy.isEnabled = true; // a duplicate always starts usable
+    // A DUPLICATE IS A SECOND OUTPUT, NOT A SECOND WINDOW ON THE SAME SCREEN. It used to inherit the
+    // source's screenName, so both windows opened at the same x/y and size and their pictures drew over
+    // each other ("Main Output" and "Main Output 2" showing one HDMI). A copy takes the first screen
+    // nothing else claims, or none at all — the operator assigns one in Settings · Outputs.
+    copy.screenName = copy.kind == QLatin1String("NDI") ? QString()
+                                                        : freeScreenName(-1, QString());
+    if (copy.screenName.isEmpty()) {
+        copy.res.clear();
+        copy.refresh.clear();
+    }
     beginInsertRows(QModelIndex(), index + 1, index + 1);
     m_outputs.insert(index + 1, copy);
     endInsertRows();
@@ -848,6 +872,30 @@ void OutputListModel::screensChangedNow()
     emit screensChanged();
 }
 
+int OutputListModel::rowHoldingScreen(const QString &screenName, int exceptRow) const
+{
+    if (screenName.isEmpty())
+        return -1;
+    for (int i = 0; i < m_outputs.size(); ++i) {
+        if (i != exceptRow && m_outputs.at(i).screenName == screenName)
+            return i;
+    }
+    return -1;
+}
+
+QString OutputListModel::freeScreenName(int exceptRow, const QString &preferred) const
+{
+    if (!qobject_cast<QGuiApplication *>(QCoreApplication::instance()))
+        return QString();   // no GUI: there are no screens to place a window on
+    if (!preferred.isEmpty() && rowHoldingScreen(preferred, exceptRow) < 0)
+        return preferred;
+    for (const QScreen *screen : QGuiApplication::screens()) {
+        if (screen && rowHoldingScreen(screen->name(), exceptRow) < 0)
+            return screen->name();
+    }
+    return QString();   // every screen is already an output: no window at all beats two on one screen
+}
+
 void OutputListModel::setScreenName(int index, const QString &screenName)
 {
     if (index < 0 || index >= m_outputs.size())
@@ -856,6 +904,23 @@ void OutputListModel::setScreenName(int index, const QString &screenName)
         return;
     if (m_outputs[index].screenName == screenName)
         return;
+
+    // ONE SCREEN, ONE OUTPUT: assigning a display MOVES it to this output. Without this, two rows could
+    // hold the same screenName and both windows opened fullscreen at the same x/y — one picture drawn
+    // over the other, which reads as "both outputs are going to the same HDMI".
+    if (const int holder = rowHoldingScreen(screenName, index); holder >= 0) {
+        const QString holderName = m_outputs.at(holder).name;
+        m_outputs[holder].screenName.clear();
+        m_outputs[holder].res.clear();
+        m_outputs[holder].refresh.clear();
+        m_outputs[holder].active = false;   // a window with no screen is not on air
+        const QModelIndex released = this->index(holder);
+        emit dataChanged(released, released,
+                         { ScreenNameRole, ResRole, RefreshRole, ActiveRole });
+        qInfo("OutputListModel: screen '%s' moved from '%s' to '%s' — a display shows one output",
+              qUtf8Printable(screenName), qUtf8Printable(holderName),
+              qUtf8Printable(m_outputs[index].name));
+    }
 
     m_outputs[index].screenName = screenName;
 
@@ -1426,6 +1491,8 @@ QVariantMap OutputListModel::getOutput(int index) const
         { "presetId", item.presetId },
         { "onAirOnly", item.onAirOnly },
         { "styleName", styleName },
+        // What the style does to a slide (the same line the StyleLayoutRole carries), for readers of the map.
+        { "styleLayout", styleLayoutNote(item.styleId) },
         { "content", content },
     };
 }

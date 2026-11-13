@@ -45,6 +45,9 @@ uint64_t HashBlocks(const std::vector<ContentBlock>& blocks) {
         mixCoord(b.width);
         mixCoord(b.height);
         mixStr(b.style.backgroundColor);
+        // The item's opacity repaints the block, so it belongs in the fingerprint: without it a
+        // cached scene kept the old alpha after the slider moved.
+        mixCoord(b.style.opacity);
         mix(b.style.borderEnabled ? 1ull : 0ull);
         mixCoord(b.style.padding);
         mixCoord(b.style.cornerRadius);

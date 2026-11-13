@@ -544,6 +544,11 @@ Item {
                 // column. Everything else waits until it is shown (fitBehind).
                 property bool fitBehind: false
                 function solveFit() {
+                    // Run through Qt.callLater, so it can fire AFTER the preview that asked has been torn down (a pick
+                    // replaces surfaces): the host id then reads undefined and every line below threw "Cannot read
+                    // property 'animateLineSteps' / 'visible' of undefined" into the log.
+                    if (typeof root === "undefined" || root === null)
+                        return
                     const columnAnswer = el.readingBlock && root.animateLineSteps
                                          && LiveOutputService.readingBudgetFitActive === true
                     if ((!root.visible || el.width <= 0) && !columnAnswer) {

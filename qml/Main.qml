@@ -615,8 +615,10 @@ ApplicationWindow {
         case "clear_overlays": LiveOutputService.clearAllOverlays(); return
         case "restore_cleared": LiveOutputService.restoreCleared(); return
         case "restore_output": LiveOutputService.restoreCleared(); return
-        case "next_slide": LiveOutputService.next(); return
-        case "previous_slide": LiveOutputService.previous(); return
+        // The key and the auto-advance timer take the SAME command: in Scroll mode that is a line step,
+        // otherwise the next slide — one meaning of "Next", wherever the press comes from.
+        case "next_slide": LiveOutputService.stepForward(); return
+        case "previous_slide": LiveOutputService.stepBackward(); return
         case "jump_to_group": LiveOutputService.jumpToGroup(effectValue); return
         case "media_toggle_play": LiveOutputService.mediaTogglePlay(); return
         case "toggle_playing_media": LiveOutputService.mediaTogglePlay(); return
@@ -1158,6 +1160,9 @@ ApplicationWindow {
     // "~click": after the double-click pick is on air, ONE plain click on another row must move the output
     // (preferences.singleClickLive) — logs `clicklive before=… after=…` and quits.
     readonly property bool twClick: window.twQueryFull.endsWith("~click")
+    // "~slideclick" (use live:): the wall is put in SLIDE mode, then ONE plain click picks another row — the mode must
+    // still be Slide afterwards (it used to flip back to Scroll). Logs `slideclick t=<ms> mode=...` and quits.
+    readonly property bool twSlideClick: window.twQueryFull.endsWith("~slideclick")
     // "~preview": a SINGLE click on a row (nothing staged) must size the pane's preview exactly as the
     // double-click does — logs `previewfit single=… double=…`.
     readonly property bool twPreview: window.twQueryFull.endsWith("~preview")
@@ -1167,6 +1172,7 @@ ApplicationWindow {
     readonly property bool twFit: window.twQueryFull.endsWith("~fit")
     readonly property string twQueryRaw: window.twBack ? window.twQueryFull.slice(0, -5)
                                         : window.twClick ? window.twQueryFull.slice(0, -6)
+                                        : window.twSlideClick ? window.twQueryFull.slice(0, -11)
                                         : window.twPreview ? window.twQueryFull.slice(0, -8)
         : window.twFit ? window.twQueryFull.slice(0, -4) : window.twQueryFull
     readonly property bool twGoLive: window.twQueryRaw.indexOf("live:") === 0
@@ -1491,9 +1497,34 @@ ApplicationWindow {
         interval: 2500
         property string before: ""
         property int stage: 0
+        property int elapsed: 0
         repeat: true
         onTriggered: {
             const pane = window.twPane()
+            if (window.twSlideClick) {
+                if (stage === 0) {
+                    window.setReadingScrollMode(false, "slideclick")
+                    console.log("[SELFTEST-TABLEWALK] slideclick start mode=" + (LiveOutputService.scrollMode ? "scroll" : "slide")
+                                + " stepper=" + LiveOutputService.wallStepperId)
+                    twClickCheck.interval = 400
+                    stage = 1
+                    return
+                }
+                if (stage === 1) {
+                    console.log("[SELFTEST-TABLEWALK] slideclick clicked=" + (pane ? pane.selfTestClickRow(2) : false))
+                    stage = 2
+                    twClickCheck.elapsed = 0
+                    return
+                }
+                twClickCheck.elapsed += twClickCheck.interval
+                console.log("[SELFTEST-TABLEWALK] slideclick t=" + twClickCheck.elapsed + " mode="
+                            + (LiveOutputService.scrollMode ? "scroll" : "slide") + " stepper=" + LiveOutputService.wallStepperId)
+                if (twClickCheck.elapsed >= 4000) {
+                    twClickCheck.stop()
+                    SelfTest.quit()
+                }
+                return
+            }
             if (stage === 0) {
                 window.twGrab("clickpre")   // the tiles as the FIRST double-click left them: must already be at the real size
                 before = String(LiveOutputService.readingPassageChar())
@@ -1514,7 +1545,7 @@ ApplicationWindow {
         id: twAfterPick
         interval: 9000
         onTriggered: {
-            if (window.twClick) {
+            if (window.twClick || window.twSlideClick) {
                 twClickCheck.restart()
                 return
             }
@@ -2155,14 +2186,22 @@ ApplicationWindow {
             close: function () { const s = SelfTest.findItem("audioVideoScreen"); if (s) s.busDialogOpen = false }
         },
         {
-            label: "settings-outputs-page", card: "selfTestSettingsShell",
-            open: function () { window.settingsSection = "outputs" },
+            // Outputs are made and configured on the Routing canvas (the old Settings · Outputs page is gone from
+            // the menu), so that is the page and the dialog measured here.
+            label: "settings-routing-page", card: "selfTestSettingsShell",
+            open: function () { window.settingsSection = "routing" },
             close: function () { }
         },
         {
-            label: "outputs-add", card: "selfTestAddOutputDialog", scrim: "selfTestAddOutputDialog",
-            open: function () { SelfTest.clickItem("selfTestAddOutput") },
-            close: function () { const s = SelfTest.findItem("outputsScreen"); if (s) s.addShown = false }
+            label: "routing-add-output", card: "selfTestRoutingOutputDialog", scrim: "selfTestRoutingOutputDialog",
+            open: function () { const s = SelfTest.findItem("routingScreen"); if (s) s.openAddOutput("HDMI") },
+            close: function () {
+                const s = SelfTest.findItem("routingScreen")
+                if (s) {
+                    s.outputDialogShown = false
+                    s.editOutputRow = -1
+                }
+            }
         },
         {
             label: "settings-close", card: "",
@@ -6328,31 +6367,34 @@ ApplicationWindow {
         onTriggered: SelfTest.quit()
     }
 
-    // ---- Outputs · Edit -> Save (VGR_OUTSAVE_TEST=1 only) --------------------
+    // ---- Routing · configure an output -> Save (VGR_OUTSAVE_TEST=1 only) ------
+    // The output dialog lives on the Routing canvas now (Settings · Outputs is gone from the menu). It has no style
+    // field — a style is wired to an output — so the guard is: configure + Save must close the dialog and leave the
+    // output wearing the style it was wired to.
     property var outSaveScreen: null
     property string outSaveStyleId: ""
     property string outSaveWanted: ""
     property int outSaveStylesBefore: 0
     property string outSavePhase: "A"
     function outSaveDialogShown() {
-        const d = SelfTest.findItem("selfTestEditOutputDialog")
+        const d = SelfTest.findItem("selfTestRoutingOutputDialog")
         return d ? (d.opacity > 0 ? "true" : "false") : "?"
     }
     function outSaveBeginPass(phase, wanted) {
         window.outSavePhase = phase
         window.outSaveWanted = wanted
-        window.outSaveScreen.openEdit(0)
-        window.outSaveScreen.editStyleId = wanted
+        OutputListModel.setStyle(0, wanted)
+        window.outSaveScreen.openEditOutput(0)
         selfTestOutSaveClick.restart()
     }
     function outSaveReport(tag) {
         const o = OutputListModel.getOutput(0)
         const styleId = o && o.styleId !== undefined ? String(o.styleId) : "?"
-        const closed = window.outSaveScreen && window.outSaveScreen.editIndex < 0
+        const closed = window.outSaveScreen && window.outSaveScreen.editOutputRow < 0
         console.log("[SELFTEST-OUTSAVE] " + tag
                     + " styles=" + StyleListModel.rowCount()
                     + " rows=" + OutputListModel.rowCount()
-                    + " editIndex=" + (window.outSaveScreen ? window.outSaveScreen.editIndex : "?")
+                    + " editIndex=" + (window.outSaveScreen ? window.outSaveScreen.editOutputRow : "?")
                     + " dialog=" + window.outSaveDialogShown()
                     + " out0=" + JSON.stringify(o)
                     + " wanted=" + JSON.stringify(window.outSaveWanted)
@@ -6384,7 +6426,7 @@ ApplicationWindow {
             window.outSaveStyleId = String(StyleListModel.data(
                 StyleListModel.index(0, 0), StyleListModel.IdRole))
             OutputListModel.setStyle(0, window.outSaveStyleId)
-            window.settingsSection = "outputs"
+            window.settingsSection = "routing"
             selfTestOutSaveEditA.restart()
         }
     }
@@ -6392,11 +6434,11 @@ ApplicationWindow {
         id: selfTestOutSaveEditA
         interval: 1500           // the section Loader rebuilds the page
         onTriggered: {
-            // "outputsScreen" is the name Main.qml gives the page instance
+            // "routingScreen" is the name Main.qml gives the page instance
             // (the section Loader rebuilds it on every section switch).
-            const s = SelfTest.findItem("outputsScreen")
+            const s = SelfTest.findItem("routingScreen")
             if (!s) {
-                console.log("[SELFTEST-OUTSAVE] no outputs screen — scenario cannot run")
+                console.log("[SELFTEST-OUTSAVE] no routing screen — scenario cannot run")
                 SelfTest.quit()
                 return
             }
@@ -6409,7 +6451,7 @@ ApplicationWindow {
         interval: 250            // let the dialog lay out + fade in first
         onTriggered: {
             window.outSaveReport("press" + window.outSavePhase)
-            SelfTest.clickItem("selfTestEditOutputDialog_save")
+            SelfTest.clickItem("selfTestRoutingOutputDialog_save")
             selfTestOutSaveMissed.restart()
         }
     }
@@ -6418,10 +6460,10 @@ ApplicationWindow {
         interval: 450
         onTriggered: {
             const s = window.outSaveScreen
-            if (s.editIndex >= 0) {
+            if (s.editOutputRow >= 0) {
                 console.log("[SELFTEST-OUTSAVE] save click missed in pass " + window.outSavePhase
-                            + " — called saveEdit() directly")
-                s.saveEdit()
+                            + " — called submitOutput() directly")
+                s.submitOutput()
             }
             selfTestOutSaveResult.restart()
         }
@@ -6720,15 +6762,33 @@ ApplicationWindow {
         "Lays out shows too",   // the style's Shows slot names a template
         "No layout of its own"                // background and placement only
     ]
+    // ONE OUTPUT'S STATE, from the engine's own facts (LiveOutputService). The probes read outputs from the roster and
+    // the engine, not from a settings page: outputs are made, wired and configured on Routing, which carries no
+    // per-output status line of its own. The words are the ones the operator-facing views use.
+    function outputStateLine(o) {
+        const name = String(o.name)
+        const enabled = o.isEnabled !== false
+        const runtime = LiveOutputService.outputRuntime[name] || null
+        const stalled = LiveOutputService.live && enabled && LiveOutputService.outputFeedStalled(name)
+        const delivering = !!runtime && runtime.presented === true && !stalled
+        let text
+        if (!enabled) text = "Switched off"
+        else if (!LiveOutputService.live) text = "Ready (go live to send)"
+        else if (delivering) text = "Live · " + runtime.frames + " frames delivered"
+        else text = "Warming up · waiting for the first frame"
+        if (enabled && LiveOutputService.blackedOut && text.indexOf("blackout") < 0) text += " · blackout up"
+        if (enabled && stalled && text.indexOf("no feed") < 0) text += " · no feed"
+        return text
+    }
     function outsSample() {
         const found = { rows: 0, styled: 0, described: 0, reported: 0, lines: [] }
-        for (let i = 0; i < 24; ++i) {
-            const item = SelfTest.findItem("selfTestOutputRow_" + i)
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const item = OutputListModel.getOutput(i)
             if (!item)
                 break
             ++found.rows
-            const styleName = String(item.styleName)
-            const note = String(item.styleLayout)
+            const styleName = String(item.styleName || "")
+            const note = String(item.styleLayout || "")
             let named = "none"
             for (const phrase of window.outsScopePhrases)
                 if (note.indexOf(phrase) === 0) { named = phrase; break }
@@ -6737,9 +6797,9 @@ ApplicationWindow {
                 if (named !== "none")
                     ++found.described
             }
-            const status = String(item.statusText)
-            const reports = status.indexOf(String(item.kind) + " \u00b7 ") === 0
-            if (reports)
+            const status = window.outputStateLine(item)
+            // Every output, of every kind, has to be able to say what it is doing.
+            if (status !== "")
                 ++found.reported
             found.lines.push("[SELFTEST-OUTS] row=" + i + " output=\"" + String(item.name)
                              + "\" kind=\"" + String(item.kind) + "\" status=\"" + status + "\""
@@ -6753,7 +6813,7 @@ ApplicationWindow {
         running: typeof SelfTestOutputsLayout !== "undefined" && SelfTestOutputsLayout
         interval: 9000            // boot, then the style roster adopts
         onTriggered: {
-            window.openSettings("outputs")
+            window.openSettings("routing")
             selfTestOutsTick.start()
         }
     }
@@ -6763,8 +6823,8 @@ ApplicationWindow {
         repeat: true
         onTriggered: {
             if (window.outsPhase === 0) {
-                const probe = SelfTest.findItem("selfTestOutputRow_0")
-                if (!probe) {
+                const probe = SelfTest.findItem("routingScreen")
+                if (!probe || OutputListModel.rowCount() < 1) {
                     if (window.outsTries++ > 20) {
                         console.log("[SELFTEST-OUTS] result missing=yes rows=0")
                         selfTestOutsTick.stop()
@@ -6792,16 +6852,16 @@ ApplicationWindow {
         let reporting = 0
         let blackout = 0
         let offAir = 0
-        for (let i = 0; i < 24; ++i) {
-            const item = SelfTest.findItem("selfTestOutputRow_" + i)
-            if (!item)
-                break
+        for (let i = 0; i < OutputListModel.rowCount(); ++i) {
+            const item = OutputListModel.getOutput(i)
+            // Switched-off outputs send nothing and say so; the checks below are about the outputs that are on.
+            if (!item || item.isEnabled === false)
+                continue
             ++rows
-            const status = String(item.statusText)
+            const status = window.outputStateLine(item)
             const kind = String(item.kind)
-            // A row REPORTS when its line opens with its own kind. A row that
-            // says nothing (the NDI/SDI-only line this replaced) fails here.
-            if (status.indexOf(kind + " \u00b7 ") === 0 || status.indexOf("Live \u00b7 ") === 0)
+            // An output REPORTS when it can say its own state: live and sending, or warming up.
+            if (status.indexOf("Live \u00b7 ") === 0 || status.indexOf("Warming up") === 0)
                 ++reporting
             if (status.indexOf("blackout up") >= 0)
                 ++blackout
@@ -6834,7 +6894,7 @@ ApplicationWindow {
                             width: 630, height: 300, meta: { fontSize: 48 } } ]
             }
             LiveOutputService.goLiveWithSlides("Outputs Live Probe", [ slide ])
-            window.openSettings("outputs")
+            window.openSettings("routing")
             selfTestOutsLiveRead.restart()
         }
     }
@@ -6870,7 +6930,7 @@ ApplicationWindow {
         id: selfTestOutsLiveBlackedOpen
         interval: 3000           // the carrier and the 1 Hz probe both land
         onTriggered: {
-            window.openSettings("outputs")
+            window.openSettings("routing")
             selfTestOutsLiveBlackedSample.restart()
         }
     }
@@ -6888,7 +6948,7 @@ ApplicationWindow {
         id: selfTestOutsLiveRestoredOpen
         interval: 3000
         onTriggered: {
-            window.openSettings("outputs")
+            window.openSettings("routing")
             selfTestOutsLiveRestoredSample.restart()
         }
     }

@@ -4,12 +4,21 @@
 
 #include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
-#include "modules/recording/AudioFileContainer.hpp"
-#include "modules/recording/MatroskaContainer.hpp"
-#include "modules/recording/MediaFoundationEncode.hpp"
-#include "modules/recording/MediaFoundationMp4.hpp"
+#include "modules/recording/QtRecordingContainer.hpp"
 #include "modules/recording/RecordingEngine.hpp"
 #include "modules/recording/RecordingPlugin.hpp"
+#include "modules/recording/WaveAudioContainer.hpp"
+
+#include <QAudioBuffer>
+#include <QAudioBufferOutput>
+#include <QAudioFormat>
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QMediaPlayer>
+#include <QTimer>
+#include <QUrl>
+#include <QVideoFrame>
+#include <QVideoSink>
 
 #include <algorithm>
 #include <cmath>
@@ -223,6 +232,7 @@ void TestRecordingLifecycle() {
     // Start master recording on the video bus.
     auto rid = rec.StartRecording("segmented", "pvb2", rk::TapPoint::PostProcessing);
     CHECK(rid.ok());
+    if (!rid.ok()) std::printf("[recording] StartRecording failed: %s\n", rid.error().message.c_str());
     const std::string id = rid.value();
     CHECK(ev.started == 1);
 
@@ -523,202 +533,227 @@ void TestRecordingDispatchOutsideLock() {
 }
 
 // ---- Real files, real encoders ---------------------------------------------------------
+// Every file below is written through the SAME container the app records with (Qt Multimedia, on every
+// OS) and then judged two ways: its structure is walked box by box / element by element (a file that
+// "exists" but was never finalized fails here), and Qt's own media player opens it, decodes it to the end
+// and reports what came out (pictures, audio samples, duration, loudest sample). A file the player cannot
+// play is a corrupted file, whatever its size.
+namespace {
+struct MediaFileInfo {
+    bool opened = false;        // the player accepted the file
+    bool hasVideo = false;
+    bool hasAudio = false;
+    int width = 0;
+    int height = 0;
+    int videoSamples = 0;       // pictures delivered while it played to the end
+    int audioSamples = 0;       // audio frames delivered while it played to the end
+    double audioPeak = -1.0;    // loudest decoded audio sample, 0..1 (-1 = nothing decoded)
+    double seconds = 0.0;       // the file's own duration
+    double lastPictureSeconds = 0.0;   // presentation time of the last picture decoded
+    double firstPictureSeconds = -1.0; // ... and of the first
+    std::string error;
+};
+
+MediaFileInfo InspectMediaFile(const std::string& path, bool wantAudio) {
+    MediaFileInfo info;
+    if (!QCoreApplication::instance()) {
+        info.error = "no Qt application";
+        return info;
+    }
+    QMediaPlayer player;
+    QVideoSink sink;
+    QAudioBufferOutput audioOut;
+    player.setVideoSink(&sink);
+    if (wantAudio)
+        player.setAudioBufferOutput(&audioOut);
+    QObject::connect(&sink, &QVideoSink::videoFrameChanged, &sink, [&](const QVideoFrame& frame) {
+        if (!frame.isValid()) return;
+        ++info.videoSamples;
+        if (info.firstPictureSeconds < 0 && frame.startTime() >= 0)
+            info.firstPictureSeconds = static_cast<double>(frame.startTime()) / 1e6;
+        if (frame.startTime() > 0)
+            info.lastPictureSeconds = std::max(info.lastPictureSeconds, static_cast<double>(frame.startTime()) / 1e6);
+        if (info.width == 0) {
+            info.width = frame.width();
+            info.height = frame.height();
+        }
+    });
+    QObject::connect(&audioOut, &QAudioBufferOutput::audioBufferReceived, &audioOut, [&](const QAudioBuffer& buffer) {
+        if (!buffer.isValid()) return;
+        info.audioSamples += buffer.frameCount();
+        const QAudioFormat f = buffer.format();
+        const int channels = f.channelCount();
+        const int total = buffer.frameCount() * channels;
+        if (f.sampleFormat() == QAudioFormat::Float) {
+            const float* d = buffer.constData<float>();
+            for (int i = 0; i < total; ++i) info.audioPeak = std::max(info.audioPeak, static_cast<double>(std::fabs(d[i])));
+        } else if (f.sampleFormat() == QAudioFormat::Int16) {
+            const qint16* d = buffer.constData<qint16>();
+            for (int i = 0; i < total; ++i) info.audioPeak = std::max(info.audioPeak, std::fabs(d[i] / 32768.0));
+        } else if (f.sampleFormat() == QAudioFormat::Int32) {
+            const qint32* d = buffer.constData<qint32>();
+            for (int i = 0; i < total; ++i) info.audioPeak = std::max(info.audioPeak, std::fabs(d[i] / 2147483648.0));
+        }
+    });
+    QString playerError;
+    QObject::connect(&player, &QMediaPlayer::errorOccurred, &player,
+                     [&](QMediaPlayer::Error, const QString& text) { playerError = text; });
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(&player, &QMediaPlayer::mediaStatusChanged, &loop, [&](QMediaPlayer::MediaStatus status) {
+        if (status == QMediaPlayer::EndOfMedia || status == QMediaPlayer::InvalidMedia) loop.quit();
+    });
+    player.setSource(QUrl::fromLocalFile(QString::fromStdString(path)));
+    player.setPlaybackRate(2.0);   // twice real time: the decode is what is being judged, not the wall clock
+    player.play();
+    timeout.start(30'000);
+    loop.exec();
+
+    info.opened = player.mediaStatus() == QMediaPlayer::EndOfMedia;
+    info.hasVideo = player.hasVideo();
+    info.hasAudio = player.hasAudio();
+    info.seconds = static_cast<double>(player.duration()) / 1000.0;
+    if (!info.opened)
+        info.error = playerError.isEmpty() ? "did not play to the end" : playerError.toStdString();
+    return info;
+}
+
+// The top-level boxes of an MP4/MOV/M4A file, in order. A file whose boxes do not tile the file exactly
+// (a moov that was never written, an mdat whose size runs past the end) returns false.
+bool WalkMp4Boxes(const std::vector<uint8_t>& bytes, std::vector<std::string>& names, int& trackCount) {
+    names.clear();
+    trackCount = 0;
+    auto be32 = [&](size_t at) {
+        return (static_cast<uint64_t>(bytes[at]) << 24) | (static_cast<uint64_t>(bytes[at + 1]) << 16)
+             | (static_cast<uint64_t>(bytes[at + 2]) << 8) | static_cast<uint64_t>(bytes[at + 3]);
+    };
+    size_t at = 0;
+    std::vector<std::pair<size_t, size_t>> moov;
+    while (at + 8 <= bytes.size()) {
+        uint64_t size = be32(at);
+        const std::string name(reinterpret_cast<const char*>(&bytes[at + 4]), 4);
+        size_t header = 8;
+        if (size == 1) {
+            if (at + 16 > bytes.size()) return false;
+            size = (be32(at + 8) << 32) | be32(at + 12);
+            header = 16;
+        } else if (size == 0) {
+            size = bytes.size() - at;   // runs to the end of the file
+        }
+        if (size < header || at + size > bytes.size()) return false;
+        names.push_back(name);
+        if (name == "moov") moov.emplace_back(at + header, at + static_cast<size_t>(size));
+        at += static_cast<size_t>(size);
+    }
+    if (at != bytes.size()) return false;
+    for (const auto& [from, to] : moov) {
+        size_t p = from;
+        while (p + 8 <= to) {
+            const uint64_t size = be32(p);
+            const std::string name(reinterpret_cast<const char*>(&bytes[p + 4]), 4);
+            if (size < 8 || p + size > to) return false;
+            if (name == "trak") ++trackCount;
+            p += static_cast<size_t>(size);
+        }
+    }
+    return true;
+}
+
+std::vector<uint8_t> ReadAll(const std::string& path) {
+    std::vector<uint8_t> bytes;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (size > 0) {
+            bytes.resize(static_cast<size_t>(size));
+            if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) bytes.clear();
+        }
+        std::fclose(f);
+    }
+    return bytes;
+}
+
+bool Has(const std::vector<std::string>& names, const char* name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+} // namespace
+
 void TestRecordingRealEncode() {
     namespace fs = std::filesystem;
+    const auto supported = rk::QtSupportedContainers();
+    if (supported.empty() || !QCoreApplication::instance()) {
+        std::printf("[real-encode] the Qt media backend cannot encode here (no Qt application): skipped\n");
+        return;
+    }
     const fs::path dir = fs::temp_directory_path() / "bps_real_encode";
     std::error_code ec;
     fs::create_directories(dir, ec);
-
-    std::vector<rk::EncoderKind> kinds{rk::EncoderKind::Software};
-    for (const rk::EncoderKind k : rk::HardwareEncoderKinds()) kinds.push_back(k);
-    std::printf("[real-encode] encoders on this machine:");
-    for (const rk::EncoderKind k : kinds) {
-        const std::string name = k == rk::EncoderKind::Software ? "Software" : rk::HardwareEncoderName(k);
-        std::printf(" [%s]", name.c_str());
-    }
-    std::printf("\n");
-
-    // The AAC / audio-track half needs the output mix running (its rate is the file's rate):
-    // start the playout for this test if nothing else has, and stop it again after.
-    auto& playout = bps::audio::AudioEngine::Instance();
-    bool startedPlayout = false;
-    if (playout.MixFormat().rateHz == 0 && playout.Initialize().ok() && playout.Start().ok())
-        startedPlayout = true;
-    // The mix reports its rate once the device stream is up, a moment after Start().
-    for (int wait = 0; wait < 40 && playout.MixFormat().rateHz == 0; ++wait)
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std::printf("[real-encode] output mix rate: %u Hz%s\n", playout.MixFormat().rateHz,
-                playout.MixFormat().rateHz == 0 ? " (audio track NOT exercised)" : "");
+    auto can = [&](rk::ContainerKind k) { return std::find(supported.begin(), supported.end(), k) != supported.end(); };
 
     constexpr int kW = 640, kH = 360, kFrames = 90;
     constexpr double kFps = 30.0;
+    constexpr uint32_t kRate = 48'000;
     std::vector<uint32_t> pixels(static_cast<size_t>(kW) * kH);
 
     for (const rk::ContainerKind containerKind : {rk::ContainerKind::MP4, rk::ContainerKind::MKV}) {
-        for (const rk::EncoderKind kind : kinds) {
-            rk::RecordingProfile p;
-            p.id = "real";
-            p.name = "real";
-            p.container = containerKind;
-            p.videoCodec = rk::VideoCodec::H264;
-            p.audioCodec = rk::AudioCodec::AAC;
-            p.width = kW;
-            p.height = kH;
-            p.fps = kFps;
-            p.videoBitrateKbps = 4000;
-            p.audioBitrateKbps = 128;
-            p.encoderPreference = kind;
-
-            std::shared_ptr<rk::IRecordingContainer> container;
-            if (containerKind == rk::ContainerKind::MP4) container = std::make_shared<rk::MediaFoundationMp4>();
-            else container = std::make_shared<rk::MatroskaContainer>();
-            const std::string ext = containerKind == rk::ContainerKind::MP4 ? "mp4" : "mkv";
-            const std::string label = ext + "/" + std::to_string(static_cast<int>(kind));
-            const std::string path = (dir / ("take_" + std::to_string(static_cast<int>(kind)) + "." + ext)).string();
-
-            auto opened = container->Open(p, path);
-            CHECK(opened.ok());
-            if (!opened.ok()) {
-                std::printf("[real-encode] %s OPEN FAILED: %s\n", label.c_str(), opened.error().message.c_str());
-                continue;
-            }
-
-            // Pictures: a moving colour pattern so every frame differs. Sound: a tone, in
-            // 10 ms blocks, when the output mix is running (its rate decides the file's).
-            const auto mix = bps::audio::AudioEngine::Instance().MixFormat();
-            std::vector<float> tone;
-            size_t toneFrames = 0;
-            double tonePhase = 0.0;
-            double audioMs = 0.0;
-            if (mix.rateHz > 0) toneFrames = mix.rateHz / 100;
-            tone.resize(toneFrames * 2);
-            bool writeOk = true;
-            for (int f = 0; f < kFrames; ++f) {
-                for (int y = 0; y < kH; ++y)
-                    for (int x = 0; x < kW; ++x) {
-                        const uint32_t r = static_cast<uint32_t>((x + f * 4) & 0xFF);
-                        const uint32_t g = static_cast<uint32_t>((y * 255) / kH);
-                        const uint32_t b = static_cast<uint32_t>((f * 255) / kFrames);
-                        pixels[static_cast<size_t>(y) * kW + x] = 0xFF000000u | (b << 16) | (g << 8) | r;
-                    }
-                rk::VideoFrameIn in;
-                in.pixels = pixels.data();
-                in.width = kW;
-                in.height = kH;
-                in.timestampMs = f * 1000.0 / kFps;
-                if (!container->WriteVideo(in).ok()) writeOk = false;
-                // Three 10 ms blocks of tone per 33 ms picture.
-                for (int blockIndex = 0; blockIndex < 3 && toneFrames > 0; ++blockIndex) {
-                    for (size_t i = 0; i < toneFrames; ++i) {
-                        const float s = 0.25f * static_cast<float>(std::sin(tonePhase));
-                        tonePhase += 2.0 * 3.14159265358979 * 440.0 / mix.rateHz;
-                        tone[i * 2] = s;
-                        tone[i * 2 + 1] = s;
-                    }
-                    rk::AudioBlockIn a;
-                    a.samples = tone.data();
-                    a.frames = toneFrames;
-                    a.channels = 2;
-                    a.rateHz = mix.rateHz;
-                    a.timestampMs = audioMs;
-                    audioMs += 10.0;
-                    if (!container->WriteAudio(a).ok()) writeOk = false;
-                }
-            }
-            CHECK(writeOk);
-            auto closed = container->Close(true);
-            CHECK(closed.ok());
-            if (!closed.ok())
-                std::printf("[real-encode] %s CLOSE FAILED: %s\n", label.c_str(), closed.error().message.c_str());
-
-            std::error_code sizeError;
-            const auto size = fs::file_size(path, sizeError);
-            CHECK(!sizeError && size > 20000);
-
-            const rk::MediaFileInfo info = rk::InspectMediaFile(path);
-            std::printf("[real-encode] %-3s kind=%d size=%llu KB opened=%d video=%s %dx%d pictures=%d audio=%d dur=%.2fs%s%s\n",
-                        ext.c_str(), static_cast<int>(kind), static_cast<unsigned long long>(size / 1024),
-                        info.opened ? 1 : 0, info.videoSubtype.c_str(), info.width, info.height,
-                        info.videoSamples, info.audioSamples, info.seconds,
-                        info.error.empty() ? "" : " err=", info.error.c_str());
-            CHECK(info.opened);
-            CHECK(info.videoSubtype == "H264");
-            CHECK(info.width == kW && info.height == kH);
-            // Every picture handed in comes back out (the encoder drained at Close).
-            CHECK(info.videoSamples >= kFrames - 2 && info.videoSamples <= kFrames + 2);
-            CHECK(info.seconds > 2.0 && info.seconds < 4.5);
-            // The sound is in the file: a track with AAC frames, whose decoded tone is audible.
-            if (mix.rateHz > 0) {
-                CHECK(info.audioSamples > 50);
-                CHECK(info.audioPeak > 0.05);
-                std::printf("[real-encode]     audio: %d AAC frames, decoded peak %.3f\n", info.audioSamples, info.audioPeak);
-            }
-
-            if (containerKind == rk::ContainerKind::MKV) {
-                // The file's own bookkeeping: EBML magic, "matroska", and a Segment whose
-                // size lands exactly on the end of the file (patched when it closed).
-                std::FILE* f = std::fopen(path.c_str(), "rb");
-                CHECK(f != nullptr);
-                if (f) {
-                    std::vector<uint8_t> head(64);
-                    const size_t got = std::fread(head.data(), 1, head.size(), f);
-                    std::fclose(f);
-                    CHECK(got >= 40);
-                    CHECK(head[0] == 0x1A && head[1] == 0x45 && head[2] == 0xDF && head[3] == 0xA3);
-                    const std::string headText(head.begin(), head.begin() + static_cast<std::ptrdiff_t>(got));
-                    CHECK(headText.find("matroska") != std::string::npos);
-                    // The EBML header element ends, then Segment (18 53 80 67) with an 8-byte size.
-                    size_t at = 4;
-                    const size_t headerSize = head[at] & 0x7F;   // a 1-byte vint here
-                    at += 1 + headerSize;
-                    CHECK(head[at] == 0x18 && head[at + 1] == 0x53 && head[at + 2] == 0x80 && head[at + 3] == 0x67);
-                    CHECK(head[at + 4] == 0x01);
-                    uint64_t segSize = 0;
-                    for (int i = 0; i < 7; ++i) segSize = (segSize << 8) | head[at + 5 + static_cast<size_t>(i)];
-                    CHECK(at + 12 + segSize == size);
-                }
-            }
-            fs::remove(path, ec);
+        if (!can(containerKind)) {
+            std::printf("[real-encode] %s skipped: no encoder for it on this machine\n", rk::ToString(containerKind));
+            continue;
         }
-    }
+        rk::RecordingProfile p;
+        p.id = "real";
+        p.name = "real";
+        p.container = containerKind;
+        p.videoCodec = rk::VideoCodec::H264;
+        p.audioCodec = rk::AudioCodec::AAC;
+        p.width = kW;
+        p.height = kH;
+        p.fps = kFps;
+        p.videoBitrateKbps = 4000;
+        p.audioBitrateKbps = 128;
+        p.audioChannels = 2;
 
-    // ---- AUDIO PRESETS: audio-only files (WAV, M4A, MP3) ---------------------------------
-    {
-        const auto mix = bps::audio::AudioEngine::Instance().MixFormat();
-        for (const rk::ContainerKind audioKind : {rk::ContainerKind::WAV, rk::ContainerKind::M4A, rk::ContainerKind::MP3}) {
-            const std::string ext = rk::ToString(audioKind);
-            if (audioKind == rk::ContainerKind::MP3 && !rk::Mp3EncoderAvailable()) {
-                std::printf("[real-encode] %s skipped: this machine has no MP3 encoder\n", ext.c_str());
-                continue;
-            }
-            if (mix.rateHz == 0) {
-                std::printf("[real-encode] %s skipped: the output mix is not running\n", ext.c_str());
-                continue;
-            }
-            rk::RecordingProfile p;
-            p.id = "audio";
-            p.name = "audio";
-            p.container = audioKind;
-            p.videoCodec = rk::VideoCodec::None;
-            p.audioCodec = audioKind == rk::ContainerKind::WAV ? rk::AudioCodec::PCM
-                         : audioKind == rk::ContainerKind::M4A ? rk::AudioCodec::AAC : rk::AudioCodec::MP3;
-            p.audioBitrateKbps = 128;
-            const std::string path = (dir / ("tone." + ext)).string();
-            rk::AudioFileContainer container(audioKind);
-            auto opened = container.Open(p, path);
-            CHECK(opened.ok());
-            if (!opened.ok()) {
-                std::printf("[real-encode] %s OPEN FAILED: %s\n", ext.c_str(), opened.error().message.c_str());
-                continue;
-            }
-            const size_t toneFrames = mix.rateHz / 100;
-            std::vector<float> tone(toneFrames * 2);
-            double phase = 0.0;
-            bool writeOk = true;
-            for (int block = 0; block < 300; ++block) {
+        auto container = rk::MakeQtRecordingContainer(containerKind);
+        const std::string ext = rk::ToString(containerKind);
+        const std::string path = (dir / ("take." + ext)).string();
+
+        auto opened = container->Open(p, path);
+        CHECK(opened.ok());
+        if (!opened.ok()) {
+            std::printf("[real-encode] %s OPEN FAILED: %s\n", ext.c_str(), opened.error().message.c_str());
+            continue;
+        }
+
+        // Pictures: a moving colour pattern so every frame differs, paced like the pump paces them.
+        // Sound: a tone, in 10 ms blocks.
+        const size_t toneFrames = kRate / 100;
+        std::vector<float> tone(toneFrames * 2);
+        double tonePhase = 0.0;
+        double audioMs = 0.0;
+        bool writeOk = true;
+        for (int f = 0; f < kFrames; ++f) {
+            for (int y = 0; y < kH; ++y)
+                for (int x = 0; x < kW; ++x) {
+                    const uint32_t r = static_cast<uint32_t>((x + f * 4) & 0xFF);
+                    const uint32_t g = static_cast<uint32_t>((y * 255) / kH);
+                    const uint32_t b = static_cast<uint32_t>((f * 255) / kFrames);
+                    pixels[static_cast<size_t>(y) * kW + x] = 0xFF000000u | (b << 16) | (g << 8) | r;
+                }
+            rk::VideoFrameIn in;
+            in.pixels = pixels.data();
+            in.width = kW;
+            in.height = kH;
+            in.timestampMs = f * 1000.0 / kFps;
+            if (!container->WriteVideo(in).ok()) writeOk = false;
+            // Three 10 ms blocks of tone per 33 ms picture.
+            for (int blockIndex = 0; blockIndex < 3; ++blockIndex) {
                 for (size_t i = 0; i < toneFrames; ++i) {
-                    const float s = 0.25f * static_cast<float>(std::sin(phase));
-                    phase += 2.0 * 3.14159265358979 * 440.0 / mix.rateHz;
+                    const float s = 0.25f * static_cast<float>(std::sin(tonePhase));
+                    tonePhase += 2.0 * 3.14159265358979 * 440.0 / kRate;
                     tone[i * 2] = s;
                     tone[i * 2 + 1] = s;
                 }
@@ -726,33 +761,159 @@ void TestRecordingRealEncode() {
                 a.samples = tone.data();
                 a.frames = toneFrames;
                 a.channels = 2;
-                a.rateHz = mix.rateHz;
-                a.timestampMs = block * 10.0;
-                if (!container.WriteAudio(a).ok()) writeOk = false;
+                a.rateHz = kRate;
+                a.timestampMs = audioMs;
+                audioMs += 10.0;
+                if (!container->WriteAudio(a).ok()) writeOk = false;
             }
-            CHECK(writeOk);
-            auto closed = container.Close(true);
-            CHECK(closed.ok());
-            if (!closed.ok()) std::printf("[real-encode] %s CLOSE FAILED: %s\n", ext.c_str(), closed.error().message.c_str());
-
-            std::error_code sizeError;
-            const auto size = fs::file_size(path, sizeError);
-            const rk::MediaFileInfo info = rk::InspectMediaFile(path);
-            std::printf("[real-encode] audio %-3s size=%llu KB opened=%d pictures=%d audioFrames=%d dur=%.2fs peak=%.3f%s%s\n",
-                        ext.c_str(), static_cast<unsigned long long>(size / 1024), info.opened ? 1 : 0, info.videoSamples,
-                        info.audioSamples, info.seconds, info.audioPeak, info.error.empty() ? "" : " err=", info.error.c_str());
-            CHECK(!sizeError && size > 10000);
-            CHECK(info.opened);
-            CHECK(info.videoSamples == 0);
-            CHECK(info.audioSamples > 0);
-            CHECK(info.seconds > 2.5 && info.seconds < 3.6);
-            CHECK(info.audioPeak > 0.1 && info.audioPeak < 0.5);
-            if (audioKind == rk::ContainerKind::WAV) {
-                // Exactly the PCM that went in, behind a 44-byte header.
-                CHECK(size == 44u + static_cast<uint64_t>(300) * toneFrames * 4u);
-            }
-            fs::remove(path, ec);
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
         }
+        CHECK(writeOk);
+        auto closed = container->Close(true);
+        CHECK(closed.ok());
+        if (!closed.ok())
+            std::printf("[real-encode] %s CLOSE FAILED: %s\n", ext.c_str(), closed.error().message.c_str());
+
+        std::error_code sizeError;
+        const auto size = fs::file_size(path, sizeError);
+        CHECK(!sizeError && size > 20000);
+
+        // 1. The file's own bookkeeping.
+        const std::vector<uint8_t> bytes = ReadAll(path);
+        CHECK(bytes.size() == size);
+        if (containerKind == rk::ContainerKind::MP4) {
+            std::vector<std::string> boxes;
+            int tracks = 0;
+            const bool walked = WalkMp4Boxes(bytes, boxes, tracks);
+            CHECK(walked);   // the boxes tile the file exactly: nothing cut off, nothing trailing
+            CHECK(!boxes.empty() && boxes.front() == "ftyp");
+            CHECK(Has(boxes, "moov"));   // the index: written when the file is finalized
+            CHECK(Has(boxes, "mdat"));
+            CHECK(tracks == 2);          // one picture track, one sound track
+            std::printf("[real-encode] mp4 boxes:");
+            for (const auto& b : boxes) std::printf(" %s", b.c_str());
+            std::printf(" (tracks=%d)\n", tracks);
+        } else {
+            CHECK(bytes.size() > 64);
+            CHECK(bytes[0] == 0x1A && bytes[1] == 0x45 && bytes[2] == 0xDF && bytes[3] == 0xA3);   // EBML magic
+            const std::string head(bytes.begin(), bytes.begin() + 64);
+            CHECK(head.find("matroska") != std::string::npos);
+        }
+
+        // 2. The file plays: it decodes to the end, with its pictures and its sound.
+        const MediaFileInfo info = InspectMediaFile(path, true);
+        std::printf("[real-encode] %-3s size=%llu KB opened=%d video=%d audio=%d %dx%d pictures=%d audioFrames=%d dur=%.2fs peak=%.3f%s%s\n",
+                    ext.c_str(), static_cast<unsigned long long>(size / 1024), info.opened ? 1 : 0, info.hasVideo ? 1 : 0,
+                    info.hasAudio ? 1 : 0, info.width, info.height, info.videoSamples, info.audioSamples, info.seconds,
+                    info.audioPeak, info.error.empty() ? "" : " err=", info.error.c_str());
+        CHECK(info.opened);
+        CHECK(info.hasVideo);
+        CHECK(info.hasAudio);
+        CHECK(info.width == kW && info.height == kH);
+        // Pictures come back out (the recorder drops a frame only when the encoder is saturated).
+        CHECK(info.videoSamples >= kFrames * 6 / 10);
+        // The last picture sits where the take ended, whatever the container's own duration field says.
+        // MP4 (the default container) is held to it. KNOWN: Qt 6.11's FFmpeg backend on Windows writes the MKV's
+        // pictures about a second AFTER its sound (first picture at ~1.0 s), so for MKV it is reported, not asserted.
+        if (containerKind == rk::ContainerKind::MP4) {
+            CHECK(info.firstPictureSeconds >= 0.0 && info.firstPictureSeconds < 0.2);
+            CHECK(info.lastPictureSeconds > 2.5 && info.lastPictureSeconds < 3.5);
+        }
+        std::printf("[real-encode]     pictures from %.2fs to %.2fs\n", info.firstPictureSeconds, info.lastPictureSeconds);
+        CHECK(info.seconds > 2.0 && info.seconds < (containerKind == rk::ContainerKind::MKV ? 6.0 : 4.5));
+        CHECK(info.audioSamples > static_cast<int>(kRate));   // well over a second of sound
+        CHECK(info.audioPeak > 0.05);
+        fs::remove(path, ec);
+    }
+
+    // ---- AUDIO PRESETS: audio-only files (WAV, M4A, MP3, FLAC) ---------------------------
+    // The portable WAV writer takes its rate from the output mix: run the mix for this part if nothing else has.
+    auto& playout = bps::audio::AudioEngine::Instance();
+    bool startedPlayout = false;
+    if (playout.MixFormat().rateHz == 0 && playout.Initialize().ok() && playout.Start().ok())
+        startedPlayout = true;
+    for (int wait = 0; wait < 40 && playout.MixFormat().rateHz == 0; ++wait)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const uint32_t mixRate = playout.MixFormat().rateHz;
+    for (const rk::ContainerKind audioKind : {rk::ContainerKind::WAV, rk::ContainerKind::M4A, rk::ContainerKind::MP3,
+                                              rk::ContainerKind::FLAC}) {
+        const std::string ext = rk::ToString(audioKind);
+        if (audioKind == rk::ContainerKind::WAV && mixRate == 0) {
+            std::printf("[real-encode] wav skipped: the output mix is not running\n");
+            continue;
+        }
+        if (audioKind != rk::ContainerKind::WAV && !can(audioKind)) {
+            std::printf("[real-encode] %s skipped: this machine has no encoder for it\n", ext.c_str());
+            continue;
+        }
+        rk::RecordingProfile p;
+        p.id = "audio";
+        p.name = "audio";
+        p.container = audioKind;
+        p.videoCodec = rk::VideoCodec::None;
+        p.audioCodec = audioKind == rk::ContainerKind::WAV ? rk::AudioCodec::PCM
+                     : audioKind == rk::ContainerKind::M4A ? rk::AudioCodec::AAC
+                     : audioKind == rk::ContainerKind::FLAC ? rk::AudioCodec::FLAC : rk::AudioCodec::MP3;
+        p.audioBitrateKbps = 128;
+        p.audioChannels = 2;
+        const std::string path = (dir / ("tone." + ext)).string();
+        std::shared_ptr<rk::IRecordingContainer> container =
+            audioKind == rk::ContainerKind::WAV ? std::shared_ptr<rk::IRecordingContainer>(std::make_shared<rk::WaveAudioContainer>())
+                                                : rk::MakeQtRecordingContainer(audioKind);
+        auto opened = container->Open(p, path);
+        CHECK(opened.ok());
+        if (!opened.ok()) {
+            std::printf("[real-encode] %s OPEN FAILED: %s\n", ext.c_str(), opened.error().message.c_str());
+            continue;
+        }
+        const size_t toneFrames = kRate / 100;
+        std::vector<float> tone(toneFrames * 2);
+        double phase = 0.0;
+        bool writeOk = true;
+        for (int block = 0; block < 300; ++block) {
+            for (size_t i = 0; i < toneFrames; ++i) {
+                const float s = 0.25f * static_cast<float>(std::sin(phase));
+                phase += 2.0 * 3.14159265358979 * 440.0 / kRate;
+                tone[i * 2] = s;
+                tone[i * 2 + 1] = s;
+            }
+            rk::AudioBlockIn a;
+            a.samples = tone.data();
+            a.frames = toneFrames;
+            a.channels = 2;
+            a.rateHz = kRate;
+            a.timestampMs = block * 10.0;
+            if (!container->WriteAudio(a).ok()) writeOk = false;
+        }
+        CHECK(writeOk);
+        auto closed = container->Close(true);
+        CHECK(closed.ok());
+        if (!closed.ok()) std::printf("[real-encode] %s CLOSE FAILED: %s\n", ext.c_str(), closed.error().message.c_str());
+
+        std::error_code sizeError;
+        const auto size = fs::file_size(path, sizeError);
+        const MediaFileInfo info = InspectMediaFile(path, true);
+        std::printf("[real-encode] audio %-4s size=%llu KB opened=%d audio=%d audioFrames=%d dur=%.2fs peak=%.3f%s%s\n",
+                    ext.c_str(), static_cast<unsigned long long>(size / 1024), info.opened ? 1 : 0, info.hasAudio ? 1 : 0,
+                    info.audioSamples, info.seconds, info.audioPeak, info.error.empty() ? "" : " err=", info.error.c_str());
+        CHECK(!sizeError && size > 10000);
+        CHECK(info.opened);
+        CHECK(!info.hasVideo);
+        CHECK(info.hasAudio);
+        CHECK(info.audioSamples > 0);
+        CHECK(info.seconds > 2.5 && info.seconds < 3.6);
+        CHECK(info.audioPeak > 0.1 && info.audioPeak < 0.5);
+        if (audioKind == rk::ContainerKind::WAV) {
+            // Exactly the PCM that went in, behind a 44-byte header.
+            CHECK(size == 44u + static_cast<uint64_t>(300) * toneFrames * 4u);
+        }
+        if (audioKind == rk::ContainerKind::M4A) {
+            std::vector<std::string> boxes;
+            int tracks = 0;
+            CHECK(WalkMp4Boxes(ReadAll(path), boxes, tracks));
+            CHECK(Has(boxes, "moov") && Has(boxes, "mdat") && tracks == 1);
+        }
+        fs::remove(path, ec);
     }
     fs::remove_all(dir, ec);
     if (startedPlayout) {

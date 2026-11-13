@@ -290,16 +290,22 @@ void TestQtFrameSourceStills() {
 // cannot encode (no application, no encoder) the test says so and asserts the matching capability
 // answer instead of failing — the contract is "what is advertised is what works".
 // ---------------------------------------------------------------------------
-#ifndef _WIN32
 #include "modules/recording/QtRecordingContainer.hpp"
 #include "platform/qt/QtRecording.hpp"
+
+#include "QtTestSupport.hpp"
+
+#include <QFileInfo>
+#include <QTemporaryDir>
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <thread>
 
-void TestQtRecordingContainer() {
+static void QtRecordingContainerBody();
+void TestQtRecordingContainer() { bpstest::RunWithEventLoop([] { QtRecordingContainerBody(); }); }
+static void QtRecordingContainerBody() {
     namespace rec = bps::recording;
     const auto supported = rec::QtSupportedContainers();
     // The capability the UI reads must agree with what the container list says.
@@ -377,4 +383,3 @@ void TestQtRecordingContainer() {
     CHECK(info.exists());
     CHECK(info.size() > 1024);   // a real file with a header and a payload, not an empty container
 }
-#endif

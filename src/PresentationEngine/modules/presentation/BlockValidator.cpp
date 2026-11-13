@@ -68,6 +68,8 @@ std::vector<BlockIssue> ValidateBlock(const ContentBlock& b, bool requireId) {
     const ContentStyle& s = b.style;
     if (!InRange(s.padding, 0, kMaxStyleValue) || !InRange(s.cornerRadius, 0, kMaxStyleValue) || !InRange(s.borderWidth, 0, kMaxStyleValue))
         bad(std::format("padding, corner radius and border width must be finite numbers from 0 to {:.0f}", kMaxStyleValue));
+    if (!InRange(s.opacity, 0, 1))
+        bad("the opacity must be a finite number from 0 to 1");
     if (!IsColorText(s.backgroundColor)) bad(std::format("'{}' is not a colour (background)", s.backgroundColor));
     if (!IsColorText(s.borderColor)) bad(std::format("'{}' is not a colour (border)", s.borderColor));
     if (s.borderStyle != "line" && s.borderStyle != "dotted" && s.borderStyle != "dashed")

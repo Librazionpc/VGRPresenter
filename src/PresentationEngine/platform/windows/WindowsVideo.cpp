@@ -292,6 +292,20 @@ struct VideoTapShared {
     std::atomic<uint64_t> frameSeq{0};
     int64_t lastStoreMs = 0;
     std::atomic<int64_t> frameIntervalMs{66}; // pane/JPEG cadence; live RGBA follows device rate
+    // When a JPEG was last READ off this tap. While live the RGBA buffer is the picture (the engine's
+    // outputs and the GPU surfaces read it), so a JPEG encode is only worth the capture thread's time
+    // when a pane is actually pulling one.
+    std::atomic<int64_t> lastJpegPullMs{0};
+    static int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    bool JpegWanted() const
+    {
+        const int64_t at = lastJpegPullMs.load(std::memory_order_relaxed);
+        return at != 0 && NowMs() - at < 1500;
+    }
 
     void Publish(std::vector<uint8_t> jpeg)
     {
@@ -300,6 +314,7 @@ struct VideoTapShared {
     }
     std::vector<uint8_t> Frame()
     {
+        lastJpegPullMs.store(NowMs(), std::memory_order_relaxed);
         const std::lock_guard<std::mutex> lock(mutex);
         return latestJpeg;
     }
@@ -441,6 +456,12 @@ void StoreSampleFrame(VideoTapShared &shared, IMFSample *sample)
                 const int64_t now = SteadyMs();
                 const int64_t intervalMs = shared.frameIntervalMs.load(std::memory_order_relaxed);
                 if (live && now - shared.lastEncodeMs < intervalMs)
+                    return;
+                // A LIVE tap with no pane reading JPEGs: the RGBA just published IS the picture for
+                // every live consumer, so encoding a full frame here would spend the capture
+                // callback's time on a buffer nobody reads — and this callback is the thread that
+                // owes Media Foundation its next ReadSample on time.
+                if (live && !shared.JpegWanted())
                     return;
                 shared.lastEncodeMs = now;
             }

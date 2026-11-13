@@ -216,6 +216,12 @@ private:
     void trackScreen(QScreen *screen);
 
     QString nextStableId() const;
+    // ---- ONE SCREEN, ONE OUTPUT -------------------------------------------------
+    // A physical display can show exactly one output: two rows carrying the same screenName opened two
+    // windows at the same x/y and size and drew over each other ("Main Output" and "Main Output 2" on
+    // one HDMI). These two keep that true: which row holds a screen, and the first screen nobody holds.
+    int rowHoldingScreen(const QString &screenName, int exceptRow) const;
+    QString freeScreenName(int exceptRow, const QString &preferred) const;
 
     int m_screensRevision = 0;
 

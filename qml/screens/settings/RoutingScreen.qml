@@ -1970,6 +1970,20 @@ Item {
     }
     // A sink's status colour, same rule: delivered frames are ordinary, a wired
     // sink with none is the warning.
+    // AN HDMI OUTPUT WITH NO SCREEN PRESENTS NOTHING (Settings · Outputs says so on the row too). The
+    // board used to read it as "silent", the same as any idle sink, which hid the one output that can
+    // never show a picture until a display is picked for it.
+    function sinkNeedsScreen(o) {
+        if (!o || o.system) return false
+        if (String(o.kind || "").toUpperCase() !== "HDMI") return false
+        if (o.enabled === false) return false
+        const row = Number(o.row)
+        if (!(row >= 0)) return false
+        void root.modelsRev   // the display is chosen in the output's own editor: follow it
+        const out = OutputListModel.getOutput(row)
+        return !!out && String(out.screenName || "") === ""
+    }
+
     function sinkStatusColor(o) {
         const wired = o.wired || root.videoBusesOf(o).length > 0
                       || root.audioBusesOf(o).length > 0
@@ -2657,7 +2671,8 @@ Item {
                         enableToggle: true
                         outputEnabled: modelData.enabled !== false
                         onOutputEnabledToggled: (hoverKey) => root.toggleOutputEnabled(Number(hoverKey.substring(4)))
-                        status: root.receivesLabel(modelData)
+                        status: root.sinkNeedsScreen(modelData) ? qsTr("no display")
+                                                              : root.receivesLabel(modelData)
                         gateChips: !modelData.system
                         overlayOn: modelData.showOverlay !== false
                         mediaOn: modelData.showMedia !== false
@@ -2665,7 +2680,8 @@ Item {
                         // Outputs say WHAT is arriving as a compact badge, so the
                         // transport line beside the name is never cut for it.
                         statusBadge: true
-                        statusColor: root.sinkStatusColor(modelData)
+                        statusColor: root.sinkNeedsScreen(modelData) ? Theme.warning
+                                                                    : root.sinkStatusColor(modelData)
                         dropValid: root.dragging && root.dragFrom !== key
                                    && root.pairOk(root.dragFrom, root.dragKind, key)
                         dropInvalid: root.dragging && root.dragFrom !== key
@@ -2970,6 +2986,7 @@ Item {
     // ---- Configure an output: the Outputs page's own form, on the canvas ----
     ModalCard {
         id: outputDialog
+        objectName: "selfTestRoutingOutputDialog"
         shown: root.outputDialogShown
         title: root.editOutputRow < 0 ? qsTr("Add output") : qsTr("Configure output")
         subtitle: root.outKind

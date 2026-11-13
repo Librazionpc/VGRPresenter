@@ -103,3 +103,17 @@ start with.
 `installer/seed-data/` is **git-ignored** — anything you drop here stays on
 this machine and is only ever baked into locally-built installers. It never
 reaches GitHub.
+
+## Shipping a curated seed (`--keep-seed`)
+
+By default every build refreshes this folder from the building machine's own data (see the table above), so
+whatever test styles, outputs or shows are on that machine ship too. To ship THIS folder exactly as it is:
+
+```bash
+tools/make_installer.sh --windows-only --keep-seed
+```
+
+Nothing is copied into `seed-data/` from the machine; only the engine's own design catalogs (`overlays.json`) are
+regenerated, because they have to match the build. Edit `local/settings.json`, `roaming/enginedata/kernel.json`
+(styles, outputs, profiles), `shows/`, `roaming/enginedata/bibles.json`, `local/the_table.json` and
+`local/templates.json` by hand first. The folder is git-ignored, so keep a copy of the curated version.

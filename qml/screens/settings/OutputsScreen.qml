@@ -322,6 +322,13 @@ Item {
                         || (card.kind !== "HDMI" && card.kind !== "NDI"
                             && card.active && LiveOutputService.live)
 
+                    // AN HDMI OUTPUT WITH NO SCREEN DRAWS NOTHING: its window has no x/y to open at (see
+                    // OutputWindow.targetGeometry). That is exactly what a row released by "one screen, one
+                    // output", or a duplicate that found every display already taken, looks like — so say
+                    // so, instead of leaving it reading "Warming up" forever.
+                    readonly property bool needsScreen: card.isEnabled && !card.onAirOnly
+                        && card.kind === "HDMI" && card.screenName === ""
+
                     // ---- THIS ROW'S OWN RUNTIME (every kind, not just NDI) --
                     readonly property var runtime: LiveOutputService.outputRuntime[card.name] || null
                     readonly property bool stalledNow: {
@@ -335,6 +342,8 @@ Item {
                         let text = ""
                         if (!card.isEnabled)
                             text = qsTr("Switched off")
+                        else if (card.needsScreen)
+                            text = qsTr("No display assigned — choose one with Edit")
                         else if (!LiveOutputService.live)
                             text = qsTr("Ready (go live to send)")
                         else if (card.delivering)
@@ -365,9 +374,10 @@ Item {
 
                     readonly property color statusColor: !card.isEnabled
                         ? Theme.textMuted
-                        : (card.stalledNow ? Theme.dangerLight
-                            : (card.ndiFeedIsThisRow || card.delivering ? "#3ddc84"
-                                : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted)))
+                        : (card.needsScreen ? Theme.warning
+                            : (card.stalledNow ? Theme.dangerLight
+                                : (card.ndiFeedIsThisRow || card.delivering ? "#3ddc84"
+                                    : (card.ndiWarmingIsThisRow ? Theme.warning : Theme.textMuted))))
 
                     width: layout.width
                     height: cardCol.height + Theme.space5 * 2

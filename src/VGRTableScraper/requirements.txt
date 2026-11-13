@@ -1,0 +1,5 @@
+# Only what main.py imports; the project venv (and a fresh one) already satisfies these.
+# Minimums rather than pins, so installing this never downgrades a working environment.
+requests>=2.31
+beautifulsoup4>=4.12
+tqdm>=4.66

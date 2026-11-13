@@ -337,13 +337,6 @@ set(BPS_QT_MEDIA_SOURCES
 # to the include path below; .cpp files stay in their backend directory).
 if(WIN32)
     list(APPEND BPS_CORE_SOURCES
-        # These recording containers and encoders are Media Foundation based.
-        # Keep them out of non-Windows builds; other platforms must register
-        # their own video providers before advertising video recording.
-        ${BPS_ROOT}/modules/recording/MediaFoundationMp4.cpp
-        ${BPS_ROOT}/modules/recording/MediaFoundationEncode.cpp
-        ${BPS_ROOT}/modules/recording/MatroskaContainer.cpp
-        ${BPS_ROOT}/modules/recording/AudioFileContainer.cpp
         ${BPS_ROOT}/platform/windows/WindowsPlatform.cpp
         ${BPS_ROOT}/platform/windows/WindowsGpu.cpp
         ${BPS_ROOT}/platform/windows/WindowsThreading.cpp
@@ -401,6 +394,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_source_files_properties(${BPS_ROOT}/platform/qt/QtDialogs.cpp PROPERTIES COMPILE_OPTIONS "-Wno-pedantic")
     bps_enable_warnings(platform_qt_media)
 endif()
+if(WIN32)
+    # Recording is Qt Multimedia on every OS (one container implementation, valid files everywhere).
+    # Windows keeps its native audio/camera paths, so only the recording container is built here.
+    add_library(platform_qt_recording STATIC ${BPS_ROOT}/platform/qt/QtRecordingContainer.cpp)
+    target_include_directories(platform_qt_recording PUBLIC ${BPS_ROOT}
+        ${BPS_ROOT}/core/include ${BPS_ROOT}/modules/include
+        ${BPS_ROOT}/interfaces/include ${BPS_ROOT}/platform/include)
+    target_link_libraries(platform_qt_recording PUBLIC Qt6::Multimedia Qt6::Gui)
+    bps_enable_warnings(platform_qt_recording)
+endif()
 if(BPS_ENGINE_FALLBACK_OPT)
     target_compile_options(engine_core PRIVATE ${BPS_ENGINE_FALLBACK_OPT})
 endif()
@@ -429,6 +432,9 @@ target_link_libraries(engine_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS}
     Qt6::Gui Qt6::Network platform_qt_services)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(engine_core PUBLIC platform_qt_media)
+endif()
+if(WIN32)
+    target_link_libraries(engine_core PUBLIC platform_qt_recording)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set_property(TARGET engine_core PROPERTY OBJCXX_STANDARD 23)
@@ -558,9 +564,7 @@ set(BPS_UNIT_TEST_SOURCES
     ${BPS_ROOT}/tests/unit/tests_platform.cpp
     ${BPS_ROOT}/tests/unit/tests_platform_contract.cpp
 )
-if(WIN32)
-    list(APPEND BPS_UNIT_TEST_SOURCES ${BPS_ROOT}/tests/unit/tests_recording.cpp)
-endif()
+list(APPEND BPS_UNIT_TEST_SOURCES ${BPS_ROOT}/tests/unit/tests_recording.cpp)
 add_executable(bps_unit_tests ${BPS_UNIT_TEST_SOURCES})
 target_link_libraries(bps_unit_tests PRIVATE engine_core)
 bps_enable_warnings(bps_unit_tests)

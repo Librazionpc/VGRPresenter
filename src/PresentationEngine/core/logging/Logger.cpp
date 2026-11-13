@@ -224,6 +224,7 @@ Result<void> Logger::Shutdown() {
 void Logger::Log(LogLevel level, std::string_view module, std::string_view category,
                  std::string_view message) {
     if (static_cast<int>(level) < static_cast<int>(globalLevel_.load())) return;
+    if (static_cast<int>(level) < static_cast<int>(levelFloor_.load())) return;
     if (!PassesFilter(level, category)) return;
 
     if (!running_.load()) {

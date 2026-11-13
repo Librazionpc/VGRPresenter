@@ -44,8 +44,8 @@ static const Suite kSuites[] = {
     {"platform", "frame-shared", TestPreviewFrameSharedContract},
 #ifndef _WIN32
     {"platform", "frame-source-stills", TestQtFrameSourceStills},
-    {"platform", "qt-recording", TestQtRecordingContainer},
 #endif
+    {"platform", "qt-recording", TestQtRecordingContainer},
     {"core", "assets", TestAssets},
     {"core", "drivers", TestDrivers},
     {"core", "database", TestDatabase},
@@ -240,9 +240,7 @@ static const Suite kSuites[] = {
     {"production", "persistence", TestProductionPersistence},
     {"production", "routing-policy", TestProductionRoutingPolicy},
     {"production", "graph-durable", TestProductionGraphSavedToDisk},
-#ifdef _WIN32
     {"recording", "recording", TestRecordingEngine},
-#endif
     {"telemetry", "telemetry", TestTelemetry},
     // The automatic stall blackout: the per-output present heartbeat and the
     // opaque black frame handed to an output whose feed stopped moving.
@@ -255,10 +253,8 @@ static const Suite kSuites[] = {
     // Dispatch scope: the lock-scope guard reads source, these three prove at
     // runtime that a bus dispatch runs with the engine lock released.
     {"production", "dispatch-scope", TestProductionDispatchOutsideLock},
-#ifdef _WIN32
     {"recording", "dispatch-scope", TestRecordingDispatchOutsideLock},
     {"recording", "real-encode", TestRecordingRealEncode},
-#endif
     {"core", "resource-dispatch-scope", TestResourceDispatchOutsideLock},
     {"core", "kernel-degrade", TestKernelDegrade},
 };
@@ -312,7 +308,9 @@ int main(int argc, char** argv) {
     int guiArgc = 1;
     static char guiArg0[] = "bps_unit_tests";
     static char* guiArgv[] = {guiArg0, nullptr};
-    if (qEnvironmentVariableIntValue("BPS_TEST_GUI") != 0)
+    // Recording is Qt Multimedia on every OS and the Qt media backend only answers inside a Qt application, so
+    // the recording suites get one by default (BPS_TEST_GUI=0 opts out).
+    if (qEnvironmentVariableIntValue("BPS_TEST_GUI") != 0 || !qEnvironmentVariableIsSet("BPS_TEST_GUI"))
         guiApp = std::make_unique<QGuiApplication>(guiArgc, guiArgv);
     size_t ran = 0;
     const char* lastPhase = "";

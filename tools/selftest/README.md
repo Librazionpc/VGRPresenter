@@ -874,7 +874,9 @@ How it fits together:
   because the sentence is the deliverable: `Imported 0 sermons · 0 already in ·
   1 failed · 7 not sermon files`, then one clause per refused file.
 
-## What each output's style does to a slide (Settings · Outputs says it)
+## What each output's style does to a slide (read from the output roster)
+
+> Outputs are made, wired and configured on **Settings · Routing**; the old Settings · Outputs page is gone from the menu. These two probes therefore read the output roster (`OutputListModel`) and the engine's own facts (`LiveOutputService`) instead of rows on a page, and open Routing as the place the operator would be. The paragraphs below describe the checks; where they say "row", read "output".
 
 `run_outputs_layout_test.sh` guards the report "scripture and The Table work,
 shows do not". A style that restyles the content tabs' designs while a show keeps
@@ -914,9 +916,9 @@ How it fits together:
   `described < styled` and fails.
 
 The same scenario also checks that EVERY row prints a runtime line of its own
-(`reported == rows`, `statusText` opening with the row's own kind), and
+(`reported == rows`: every output can state what it is doing, `Main.outputStateLine`), and
 `run_outputs_live_test.sh` takes that line through a live session: it puts one
-real slide on air, opens Settings · Outputs, and prints every row's status while
+real slide on air, opens Settings · Routing, and prints every output's state while
 live, while blacked out (a real click on the wall's Blackout control, with the
 dialog closed so the click lands on the control), and after the blackout ends.
 

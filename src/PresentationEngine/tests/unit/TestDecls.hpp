@@ -26,8 +26,8 @@ void TestPlatformPathsParity();
 void TestPreviewFrameSharedContract();
 #ifndef _WIN32
 void TestQtFrameSourceStills();
-void TestQtRecordingContainer();
 #endif
+void TestQtRecordingContainer();
 void TestAssets();
 void TestDrivers();
 void TestDatabase();
@@ -233,11 +233,9 @@ void TestProductionAudioDsp();
 void TestProductionPersistence();
 void TestProductionRoutingPolicy();
 void TestProductionGraphSavedToDisk();
-#ifdef _WIN32
 void TestRecordingEngine();
 void TestRecordingDispatchOutsideLock();
 void TestRecordingRealEncode();
-#endif
 void TestTelemetry();
 void TestBroadcastEngine();
 void TestBroadcastSenders();

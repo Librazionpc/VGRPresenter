@@ -34,11 +34,64 @@
 #   INSTALLER: PASS          exit 0
 #   INSTALLER: FAIL <stage>  exit 1
 #
+# Platform guards — so ONE command can sit in a CI matrix or a release checklist for every OS and each machine
+# only builds what it is meant to:
+#   --windows-only   build only on Windows            (the Inno Setup .exe)
+#   --linux-only     build only on Linux              (the AppImage)
+#   --unix-only      build on Linux or macOS          (the AppImage / the .dmg)
+# On any other OS the script prints "INSTALLER: SKIP ..." and exits 0 — a skip is not a failure. With no flag it
+# builds for whatever OS it runs on, as before. Anything else on the command line is passed through unchanged.
+#
+# Logging:
+#   default      a DEBUG LOGGING build (assets/debug-logging.flag is shipped): the installed app writes the full
+#                engine.log, so a test laptop's log is complete. The log is <install folder>logsengine.log.
+#   --quiet      ships deployment mode: warnings and errors only, no technical toasts. Use it for the real release.
+#
+# Seed data (Windows):
+#   default      every build REFRESHES installer/seed-data from this machine (dev-profile settings and kernel, the
+#                Shows library, Bibles, The Table, templates), so what ships is whatever is on the building machine.
+#   --keep-seed  ships installer/seed-data EXACTLY as it is: nothing is copied into it from this machine. Curate the
+#                folder by hand (remove test styles/outputs, trim the shows) and build with this flag. Only the
+#                engine's own design catalogs (overlays.json) are still regenerated, because they must match the build.
+#
 # NOTE: nothing here pushes to GitHub — publishing stays a manual decision.
 # ============================================================================
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "$0")/.." && pwd))"
+
+# ---- Platform guards (--windows-only / --linux-only / --unix-only) ----------------------------------------
+ONLY=""
+KEEP_SEED=""
+QUIET_BUILD=""
+PASS_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --keep-seed) KEEP_SEED=1 ;;
+        --quiet) QUIET_BUILD=1 ;;
+        --windows-only|--linux-only|--unix-only)
+            if [ -n "$ONLY" ] && [ "$ONLY" != "$arg" ]; then
+                echo "make_installer: $ONLY and $arg cannot be combined"
+                echo "INSTALLER: FAIL usage"
+                exit 1
+            fi
+            ONLY="$arg" ;;
+        *) PASS_ARGS+=("$arg") ;;
+    esac
+done
+set -- "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+if [ -n "$ONLY" ]; then
+    HOST_OS="$(uname -s)"
+    case "$ONLY:$HOST_OS" in
+        --windows-only:MINGW*|--windows-only:MSYS*|--windows-only:CYGWIN*) ;;
+        --linux-only:Linux*) ;;
+        --unix-only:Linux*|--unix-only:Darwin*) ;;
+        *)
+            echo "make_installer: $ONLY given, and this host is $HOST_OS — nothing to build here."
+            echo "INSTALLER: SKIP ($ONLY, host $HOST_OS)"
+            exit 0 ;;
+    esac
+fi
 
 # ONE RELEASE COMMAND ON EVERY OS. On Linux and macOS this hands over, unchanged, to the same flow for
 # that platform (release build → seed → AppImage / signed .app in a .dmg, named
@@ -101,6 +154,13 @@ fi
 SEED_RUN="$ROOT/build/.seed-dump"
 rm -rf "$SEED_RUN"
 mkdir -p "$SEED_RUN"
+# --keep-seed: the dump below rewrites seed-data/local/templates.json as the engine's EMPTY catalog; the curated
+# one is put back right after it.
+KEPT_TEMPLATES=""
+if [ -n "$KEEP_SEED" ] && [ -f "$SEED_DIR/local/templates.json" ]; then
+    KEPT_TEMPLATES="$SEED_RUN.templates.json"
+    cp "$SEED_DIR/local/templates.json" "$KEPT_TEMPLATES"
+fi
 echo "== seeding catalogs from the engine (bps_cli --dump-catalogs) =="
 if ! ( cd "$SEED_RUN" && PATH="$MINGW_BIN:$QT_BIN:$PATH" "$CLI" \
         --data "$(cygpath -m "$SEED_RUN")/data" \
@@ -111,7 +171,32 @@ if ! ( cd "$SEED_RUN" && PATH="$MINGW_BIN:$QT_BIN:$PATH" "$CLI" \
     exit 1
 fi
 rm -rf "$SEED_RUN"
+if [ -n "$KEPT_TEMPLATES" ]; then
+    cp "$KEPT_TEMPLATES" "$SEED_DIR/local/templates.json"
+    rm -f "$KEPT_TEMPLATES"
+fi
 
+if [ -n "$KEEP_SEED" ]; then
+    # The seed folder is the source of truth: nothing is copied into it from this machine.
+    echo "== --keep-seed: shipping installer/seed-data exactly as it is (settings, kernel, shows, Bibles, The Table, templates) =="
+    for need in local/settings.json roaming/enginedata/kernel.json; do
+        [ -f "$SEED_DIR/$need" ] || { echo "--keep-seed needs $SEED_DIR/$need"; echo "INSTALLER: FAIL seed"; exit 1; }
+    done
+    # WHAT WILL SHIP, by name and size — so the build log itself says whether the Table, the Bibles and the Shows are in.
+    echo "  seed-data inventory:"
+    for item in local/settings.json roaming/enginedata/kernel.json roaming/enginedata/bibles.json \
+                local/the_table.json local/templates.json local/overlays.json; do
+        if [ -f "$SEED_DIR/$item" ]; then
+            echo "    $item  $(du -h "$SEED_DIR/$item" | cut -f1)"
+        else
+            echo "    $item  MISSING — a fresh install will not have it"
+        fi
+    done
+    echo "    shows/  $(find "$SEED_DIR/shows" -type f 2>/dev/null | wc -l) file(s), $(du -sh "$SEED_DIR/shows" 2>/dev/null | cut -f1)"
+    # The shipped baselines in the app payload are made from the seed folder's own files (path-stripping is idempotent).
+    export BPS_SETTINGS_FILE="$SEED_DIR/local/settings.json"
+    export BPS_KERNEL_FILE="$SEED_DIR/roaming/enginedata/kernel.json"
+else
 echo "== bundling this machine's configuration (settings + kernel) =="
 # A development build runs against this checkout's dev-profile, so prefer that
 # active profile when creating its installer. Otherwise the installer silently
@@ -204,6 +289,22 @@ fi
 if [ -f "$LOCAL_SRC/templates.json" ]; then
     cp "$LOCAL_SRC/templates.json" "$SEED_DIR/local/templates.json"
     echo "  templates: $(du -sh "$SEED_DIR/local/templates.json" | cut -f1)"
+fi
+
+fi   # end of the "snapshot this machine" half (skipped by --keep-seed)
+
+# ---- 1d. DEBUG LOGGING FLAG ---------------------------------------------------------------------------------
+# A build that goes to another computer for testing runs in DEBUG LOGGING by default: assets/debug-logging.flag
+# next to the exe turns the app's deployment mode off (qml/services/include/services/DeploymentMode.h), so
+# engine.log comes back complete — picks, timings, stall stacks, every warning — with no environment variable
+# to set on the other machine. --quiet ships the shipped-app behaviour instead (warnings and errors only).
+mkdir -p "$DIST/assets"
+if [ -n "$QUIET_BUILD" ]; then
+    rm -f "$DIST/assets/debug-logging.flag"
+    echo "== --quiet: shipping deployment mode (the log keeps warnings and errors only) =="
+else
+    echo "debug logging build $(date '+%Y-%m-%d %H:%M')" > "$DIST/assets/debug-logging.flag"
+    echo "== DEBUG LOGGING build: engine.log will carry everything (use --quiet for the shipped-app behaviour) =="
 fi
 
 # ---- 2. clean transient state the smoke test wrote into dist/ ----------------

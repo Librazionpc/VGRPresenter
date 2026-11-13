@@ -70,12 +70,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-; START FRESH (off by default): while the app's architecture is still moving, an old settings /
-; kernel / library folder left by an earlier build can produce behaviour nobody can explain.
-; Ticking this clears that old state first (see [Code]), so the new build starts from the
-; shipped baseline plus the seed data below — exactly what a brand-new machine gets. Recordings
-; are NEVER touched. Once the app is stable this box can simply stay unticked.
-Name: "freshstart"; Description: "Start fresh: delete my old VGRPresenter settings, libraries and caches first"; GroupDescription: "Clean install:"; Flags: unchecked
+; CLEAN REINSTALL (off by default): an old settings / kernel / library / cache folder left by an earlier
+; build can make an installed app behave differently from a fresh one, in ways nobody can explain
+; (a control that works on one laptop and does nothing on another). Ticking this ERASES everything the
+; app ever stored on this computer — the old app files, settings, libraries, the media index, every
+; cache including Qt's own — and then installs from scratch, so the app starts from the shipped
+; baseline plus the seed data below: exactly what a brand-new machine gets. Recordings are NEVER
+; touched. Silent installs: /TASKS="freshstart", or simply pass /FRESH.
+Name: "freshstart"; Description: "Clean reinstall: erase ALL old VGRPresenter app files, settings, libraries and caches, then install from scratch"; GroupDescription: "If the app misbehaves after an update:"; Flags: unchecked
 
 ; ---- A CLEAN UPDATE: payload + derived state only -----------------------------
 ; Each build deploys a COMPLETE dist (tools/make_portable.sh removes the old
@@ -183,24 +185,76 @@ begin
   end;
 end;
 
+// A command-line switch present? (/FRESH on the Setup command line = a clean reinstall without the page.)
+function CmdLineSwitchPresent(const Name: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), Name) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+
+function WantFreshStart: Boolean;
+begin
+  Result := WizardIsTaskSelected('freshstart') or CmdLineSwitchPresent('/FRESH');
+end;
+
+// EVERYTHING the app stores, in every place it stores it. Recordings (the operator's own takes) are kept.
+//   %AppData%\VGR\VGRPresenter       engine data (kernel store, Bibles, crash dumps, logs)
+//   %AppData%\bps                    older builds' copy of the same
+//   %LocalAppData%\bps               settings.json, libraries, templates, the media index, caches  (except "recording")
+//   %LocalAppData%\VGR\VGRPresenter  Qt's own per-app caches (QML / shader / thumbnails) — a stale one from an
+//                                    earlier build is exactly the kind of leftover that makes one laptop differ from another
+//   {app}                            the previous install's files, so nothing an older build shipped can linger
+// The boot-time autostart entry (HKCU ...\Run) is left to the app's own Settings switch.
+procedure WipeAppState;
+begin
+  DelTree(ExpandConstant('{userappdata}\VGR\VGRPresenter'), True, True, True);
+  DelTree(ExpandConstant('{userappdata}\bps'), True, True, True);
+  DeleteAllExcept(ExpandConstant('{localappdata}\bps'), FreshKeepFolder);
+  DelTree(ExpandConstant('{localappdata}\VGR\VGRPresenter'), True, True, True);
+  if DirExists(ExpandConstant('{app}')) then
+    DeleteAllExcept(ExpandConstant('{app}'), 'unins000.exe');   // the uninstaller registration stays
+end;
+
 // Ask once, on leaving the Tasks page, before anything is deleted. A silent install
-// (/SILENT /TASKS="freshstart") is an explicit choice already and is not asked again.
+// (/SILENT /TASKS="freshstart" or /FRESH) is an explicit choice already and is not asked again.
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
   if (CurPageID = wpSelectTasks) and WizardIsTaskSelected('freshstart') and (not WizardSilent) then
-    Result := MsgBox('Start fresh will DELETE the existing VGRPresenter settings, libraries and ' +
-                     'caches on this computer before installing, so the new version starts clean.' + #13#10 + #13#10 +
-                     'Your recordings are kept.' + #13#10 + #13#10 +
+    Result := MsgBox('Clean reinstall will ERASE everything VGRPresenter stored on this computer — the old app ' +
+                     'files, your settings, libraries and caches — and then install from scratch, so the app ' +
+                     'starts exactly like a brand-new one.' + #13#10 + #13#10 +
+                     'Your recordings are kept. This cannot be undone.' + #13#10 + #13#10 +
                      'Continue?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssInstall) and WizardIsTaskSelected('freshstart') then
-  begin
-    DelTree(ExpandConstant('{userappdata}\VGR\VGRPresenter'), True, True, True);
-    DelTree(ExpandConstant('{userappdata}\bps'), True, True, True);
-    DeleteAllExcept(ExpandConstant('{localappdata}\bps'), FreshKeepFolder);
-  end;
+  if (CurStep = ssInstall) and WantFreshStart then
+    WipeAppState;
+end;
+
+// ---- UNINSTALL: offer the same erase ---------------------------------------------------------
+// An uninstall keeps the user's data by default (so a reinstall finds everything as it was). When the
+// person wants the app GONE — or wants to reinstall clean — one question removes the data too.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usUninstall) and (not UninstallSilent) then
+    if MsgBox('Also erase VGRPresenter''s settings, libraries and caches from this computer?' + #13#10 + #13#10 +
+              'Choose Yes for a completely clean removal (or before a clean reinstall). Choose No to keep ' +
+              'them for next time. Your recordings are kept either way.',
+              mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    begin
+      DelTree(ExpandConstant('{userappdata}\VGR\VGRPresenter'), True, True, True);
+      DelTree(ExpandConstant('{userappdata}\bps'), True, True, True);
+      DeleteAllExcept(ExpandConstant('{localappdata}\bps'), FreshKeepFolder);
+      DelTree(ExpandConstant('{localappdata}\VGR\VGRPresenter'), True, True, True);
+    end;
 end;

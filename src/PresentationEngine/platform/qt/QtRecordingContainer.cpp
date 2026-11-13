@@ -1,12 +1,10 @@
-// QtRecordingContainer — recording to a file through Qt Multimedia, for Linux and macOS.
+// QtRecordingContainer — recording to a file through Qt Multimedia, on every OS.
 //
-// WHY. Video recording (and the compressed audio formats) existed only on Windows, where it is
-// Media Foundation: the Recording screen on the other two OSes said "this platform does not have a
-// configured video recording provider". The recording ENGINE is already portable — frames come from
-// the render engine's on-air buffer, audio from the mixer's tap — so the only OS-specific piece is the
-// container that turns those into a file. That is IRecordingContainer, and this is its Qt implementation:
-// one class, one behaviour, for Linux and macOS alike (and available to Windows should it ever want to
-// drop Media Foundation).
+// WHY. The recording ENGINE is portable — frames come from the render engine's on-air buffer, audio from
+// the mixer's tap — so the only piece that could differ per OS is the container that turns those into a
+// file. That is IRecordingContainer, and this is its ONE implementation, on Windows, Linux and macOS alike:
+// a take recorded on one machine is the same kind of file as on any other. (Windows used to have a separate
+// Media Foundation writer; it wrote files that would not play and has been removed.)
 //
 // HOW. QMediaRecorder writes the file; frames and audio are pushed in with QVideoFrameInput and
 // QAudioBufferInput (Qt 6.8+) attached to a QMediaCaptureSession. Qt's FFmpeg backend does the encoding
@@ -64,6 +62,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace bps::recording {
@@ -71,6 +70,7 @@ namespace {
 
 constexpr const char* kModule = "QtRecording";
 constexpr int kOpenTimeoutMs = 10'000;       // the backend must report "recording" by then
+constexpr int kDrainTimeoutMs = 20'000;      // queued pictures / sound the encoder still has to take before the stop
 constexpr int kStopTimeoutMs = 30'000;       // a long take can take a while to finalize
 constexpr int kMaxQueuedVideo = 8;           // frames waiting for the encoder (more are dropped)
 constexpr int kMaxQueuedAudio = 512;         // blocks waiting for the encoder
@@ -241,8 +241,12 @@ public:
         fps_ = profile.fps > 0.0 ? profile.fps : 30.0;
         channels_ = static_cast<uint32_t>(std::clamp(profile.audioChannels, 1, 8));
         shared_ = std::make_shared<Shared>();
-        path_ = std::string(path);
-        QDir().mkpath(QFileInfo(QString::fromStdString(path_)).absolutePath());
+        // An ABSOLUTE path: the backend resolves a relative URL against its own idea of the working directory
+        // (and the engine hands over "recordings/<name>.mp4"), which on Windows ends as "cannot open the output
+        // location for writing".
+        const QFileInfo target(QString::fromUtf8(path.data(), static_cast<qsizetype>(path.size())));
+        path_ = target.absoluteFilePath().toStdString();
+        QDir().mkpath(target.absolutePath());
 
         // The file format and codecs, with a fallback to the backend's own defaults for the container.
         QMediaFormat format(FileFormatFor(kind_));
@@ -285,6 +289,15 @@ public:
         if (!thread_) return Ok();
         if (open_) {
             open_ = false;
+            // Let the encoder take everything that is still queued BEFORE stopping: a slow encoder (the MP3 one) is
+            // still working through a burst when the stop arrives, and a stop with buffers queued cuts the file short.
+            // The recording thread keeps feeding it on every readyToSend signal while this waits.
+            for (int waited = 0; waited < kDrainTimeoutMs
+                 && (shared_->queuedVideo.load() > 0 || shared_->queuedAudio.load() > 0); waited += 10) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                const std::lock_guard<std::mutex> lock(shared_->mutex);
+                if (!shared_->error.empty()) break;
+            }
             // Hand over what is still queued, then stop; the file is finalized when the state says stopped.
             (void)QMetaObject::invokeMethod(context_, [this] {
                 PumpVideo();
@@ -383,24 +396,25 @@ private:
         auto worker = std::make_unique<Worker>();
         std::shared_ptr<Shared> shared = shared_;
 
+        // The documented order: recorder on the session first, then the inputs.
+        worker->recorder = std::make_unique<QMediaRecorder>();
+        worker->session.setRecorder(worker->recorder.get());
+
         if (!audioOnly_) {
-            worker->videoIn = std::make_unique<QVideoFrameInput>(
-                QVideoFrameFormat(QSize(width_, height_), QVideoFrameFormat::Format_RGBA8888));
+            // Deliberately WITHOUT a format hint: with one, Qt 6.11's FFmpeg backend on Windows never signals
+            // readyToSendVideoFrame and the file ends up with no picture track at all (261 bytes). Without it
+            // the encoder is set up from the first frame, which works on every OS.
+            worker->videoIn = std::make_unique<QVideoFrameInput>();
             worker->session.setVideoFrameInput(worker->videoIn.get());
             QObject::connect(worker->videoIn.get(), &QVideoFrameInput::readyToSendVideoFrame, context_,
                              [this] { PumpVideo(); });
         }
-        QAudioFormat audioFormat;
-        audioFormat.setSampleRate(static_cast<int>(kRecordRate));
-        audioFormat.setChannelCount(static_cast<int>(channels_));
-        audioFormat.setSampleFormat(QAudioFormat::Float);
-        worker->audioIn = std::make_unique<QAudioBufferInput>(audioFormat);
+        // No format hint here either (see the picture input): the encoder is set up from the first buffer.
+        worker->audioIn = std::make_unique<QAudioBufferInput>();
         worker->session.setAudioBufferInput(worker->audioIn.get());
         QObject::connect(worker->audioIn.get(), &QAudioBufferInput::readyToSendAudioBuffer, context_,
                          [this] { PumpAudio(); });
 
-        worker->recorder = std::make_unique<QMediaRecorder>();
-        worker->session.setRecorder(worker->recorder.get());
         QMediaRecorder* recorder = worker->recorder.get();
         QObject::connect(recorder, &QMediaRecorder::errorOccurred, context_,
                          [shared](QMediaRecorder::Error, const QString& text) {

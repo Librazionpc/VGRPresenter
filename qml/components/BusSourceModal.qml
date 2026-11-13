@@ -35,6 +35,10 @@ Item {
         root.createBus()
     }
     onOpenChanged: {
+        // Above whatever dialog is already up: a flat z would open this BEHIND an Edit/Add card (ModalCard bumps its own
+        // z on every open), which is how the colour card appeared below the Edit Style card.
+        if (root.open)
+            root.z = ModalStack.nextZ()
         if (root.open) {
             root.selectedId = -1
             root.chosenKind = ""

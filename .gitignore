@@ -49,6 +49,9 @@ src/vgr_sermons_txt/
 src/vgr_sermons_xml/
 src/VGR_XML_JSON/
 src/download*
+# The new VGR source (table.branham.org text + branham.org M4A): ~27 GB of audio and a few
+# hundred MB of text, all regenerable by src/VGRTableScraper/main.py — never stage it.
+src/VGRTableScraper/data/
 # Keeps regenerating on its own at the repo root (just an empty
 # .claude/skills/ stub) even after deletion — some external process still
 # references the old pre-flatten path. Harmless; ignored rather than fought.

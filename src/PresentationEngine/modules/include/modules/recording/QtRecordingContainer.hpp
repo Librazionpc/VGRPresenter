@@ -13,8 +13,8 @@ namespace bps::recording {
 // running to host the media backend (a command-line tool, a bare test process).
 std::vector<ContainerKind> QtSupportedContainers();
 
-// One recording file written through QMediaRecorder, fed frame by frame: ONE implementation for Linux and
-// macOS (the Windows build keeps Media Foundation). The Qt types stay inside platform/qt/.
+// One recording file written through QMediaRecorder, fed frame by frame: ONE implementation for every OS
+// (Windows, Linux and macOS write the same files the same way). The Qt types stay inside platform/qt/.
 std::shared_ptr<IRecordingContainer> MakeQtRecordingContainer(ContainerKind kind);
 
 } // namespace bps::recording

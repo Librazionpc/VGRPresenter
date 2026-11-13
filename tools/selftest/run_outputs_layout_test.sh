@@ -110,7 +110,7 @@ if [ -z "$RESULT" ]; then
     exit 3
 fi
 if echo "$RESULT" | grep -q "missing=yes"; then
-    echo "OUTS: FAIL missing — the Outputs screen showed no row at all: $RESULT"
+    echo "OUTS: FAIL missing — the output roster was empty: $RESULT"
     exit 4
 fi
 

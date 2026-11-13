@@ -20,11 +20,11 @@
 #   1. launches the app with VGR_SELFTEST=1 + VGR_OUTSAVE_TEST=1 (stderr ->
 #      build/output_save_test.log)
 #   2. the Main.qml scenario (SelfTestOutputSave) walks the operator's own steps:
-#      add a style from Settings · Styles, open Settings · Outputs, open the first
-#      output's Edit dialog, press the REAL Save button — twice, in the two shapes
-#      the report showed: A) the output already wears the style (the pick from an
-#      earlier session, "New Style 2" in the field) and Save is a no-change save;
-#      B) the style is changed in the dialog and then saved
+#      add a style from Settings · Styles, open Settings · Routing, open the first
+#      output's configure dialog, press the REAL Save button — twice: A) the output
+#      already wears the style (wired in an earlier session) and Save is a no-change
+#      save; B) the output is wired to a different style and then saved. (Outputs are
+#      configured on the Routing canvas; the old Settings · Outputs page is gone.)
 #   3. reads the [SELFTEST-OUTSAVE] lines (pressA/resultA, pressB/resultB) and
 #      checks, for BOTH passes, that the dialog closed (closed=true), the output
 #      ended up wearing the wanted style (styled=true), and the dialog is really

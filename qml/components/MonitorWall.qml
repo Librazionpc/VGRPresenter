@@ -38,9 +38,27 @@ Item {
     readonly property alias currentPage: wall.currentPage
     property bool showClearControls: true
     readonly property bool scrollMode: LiveOutputService.scrollMode
-    readonly property string modeKey: {
+    // WHICH TAB THE WALL'S MODE BELONGS TO. Scripture, Shows and The Table each remember their own Scroll / Slide
+    // choice. The tab is the one the operator is LOOKING AT, which the host hands over (activePane). Without it the
+    // wall could only guess from the step claim (wallStepperId) — and the claim is empty until something is picked
+    // and moves for an instant during every pick. On a fresh install that guess was wrong in two ways: switching to
+    // Slide before the first pick was saved under the fallback tab (The Table), and the next verse picked then made
+    // the claim switch to Scripture, whose saved mode (the shipped default) was Scroll — so the wall jumped back to
+    // Scroll. Another pane (Media, Overlays ...) keeps the last reading tab's mode. Hosts that give no pane (the
+    // Edit screen's wall) fall back to the claim.
+    property string activePane: ""
+    property string keyTab: ""
+    readonly property var readingPanes: ["scripture", "table", "shows"]
+    onActivePaneChanged: if (root.readingPanes.indexOf(root.activePane) >= 0) root.keyTab = root.activePane
+    readonly property string claimTab: {
         const t = String(LiveOutputService.wallStepperId || "")
-        return (t === "scripture" ? "scripture" : t === "show" ? "shows" : "table") + ".scrollWalk"
+        return t === "scripture" ? "scripture" : t === "show" ? "shows" : "table"
+    }
+    readonly property string modeKey: {
+        const tab = root.readingPanes.indexOf(root.activePane) >= 0 ? root.activePane
+                  : (root.activePane !== "" && root.keyTab !== "") ? root.keyTab
+                  : root.claimTab
+        return tab + ".scrollWalk"
     }
     property string _lastModeKey: ""
     function adoptMode() {
@@ -62,7 +80,20 @@ Item {
                          + " prevKey=" + (root._lastModeKey === "" ? "none" : root._lastModeKey))
         root._lastModeKey = key
     }
-    onModeKeyChanged: root.adoptMode()
+    // THE MODE FOLLOWS THE TAB, NOT THE TAB'S CLAIM. Each tab (Scripture, Shows, The Table) remembers its own
+    // Scroll / Slide choice, and the wall adopts the remembered one when the tab changes. But the tab the ‹ ›
+    // act for (wallStepperId) is only a CLAIM, and a pick moves it for an instant: the Scripture tab withdraws
+    // while its staged copy is replaced, another tab (or nobody) holds the claim, and the key briefly names a
+    // different tab — whose remembered mode is Scroll. Adopting that on the spot threw a wall in Slide back to
+    // Scroll the moment the next verse was clicked, and the claim coming back then wrote Scroll under the right
+    // key. So a change of key is only adopted once it has HELD: a flicker that returns to the previous key is
+    // ignored, a real tab switch settles within the delay.
+    Timer {
+        id: adoptSettle
+        interval: 350
+        onTriggered: if (root.modeKey !== root._lastModeKey) root.adoptMode()
+    }
+    onModeKeyChanged: adoptSettle.restart()
     Component.onCompleted: root.adoptMode()
     Connections {
         target: LiveOutputService

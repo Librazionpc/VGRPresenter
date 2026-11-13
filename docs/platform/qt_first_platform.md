@@ -255,14 +255,18 @@ three OSes.
   still come back to the CPU through a readback, exactly as with D3D11, because the outputs, NDI and
   recording all take CPU frames.
 
-### Decision: recording and output metering on Linux/macOS (Qt)
+### Decision: recording (every OS) and output metering on Linux/macOS (Qt)
 * **Recording.** The recording engine was already portable (frames come from the render engine's on-air
-  buffer, audio from the mixer tap); only the file writer was Media Foundation. `QtRecordingContainer`
+  buffer, audio from the mixer tap); the file writer is now ONE Qt implementation on Windows, Linux and
+  macOS (the separate Media Foundation writer, which produced unplayable files, was removed). `QtRecordingContainer`
   (`platform/qt/QtRecordingContainer.cpp`) is an `IRecordingContainer` over `QMediaRecorder` fed by
   `QVideoFrameInput` / `QAudioBufferInput` (Qt 6.8+) — MP4, MKV, MOV, WebM, and M4A / MP3 / FLAC where the
   FFmpeg backend encodes them, with hardware encoders (VideoToolbox, VAAPI, NVENC) chosen by Qt. The
   containers registered are the ones the machine's backend reports it can encode, so the Recording
   screen's lists show what works; `PlatformCapabilities::videoRecording` is that same probe.
+  Deliberately no format hint on the two inputs (`QVideoFrameInput()` / `QAudioBufferInput()`): with a hint, Qt 6.11's
+  FFmpeg backend on Windows never signals ready and the file ends up with no tracks. `Close()` drains the queues before
+  stopping (a slow encoder, MP3 especially, would otherwise be cut short). The output path is made absolute.
   The Qt objects live on a private thread with an event loop; the pump's writes copy and queue, so a
   slow encoder drops frames instead of stalling the pump. Pinned by `platform / qt-recording` (a real
   one-second take; run with `BPS_TEST_GUI=1`, plus `QT_QPA_PLATFORM=offscreen` headless).

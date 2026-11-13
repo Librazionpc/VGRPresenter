@@ -1,6 +1,8 @@
 #include "services/EngineBridge.h"
 #include "services/DataRoot.h"
 #include "services/EventBus.h"
+#include "services/DeploymentMode.h"
+#include <QSet>
 
 #include "core/kernel/Kernel.hpp"
 #include "core/logging/Logger.hpp"
@@ -134,6 +136,11 @@ bool EngineBridge::canUndo() const
 bool EngineBridge::canRedo() const
 {
     return Manager().CanRedo();
+}
+
+bool EngineBridge::deploymentMode() const
+{
+    return deployment::enabled();
 }
 
 bool EngineBridge::booted() const
@@ -1773,13 +1780,20 @@ void EngineBridge::resolveAndStartMeterOffThread(const QString &deviceLabel)
         return;
     }
     uint32_t deviceId = 0;
+    // Said ONCE per missing device, until it resolves again: this is asked on every device sweep (about every half
+    // minute), and an unplugged microphone repeated the same line forever.
+    static QSet<QString> missingMeterWarned;
     if (!resolveDeviceTap(want, &deviceId)) {
         // LOUD now: the earlier silent return hid the exact failure class
         // the "meter doesn't get signal" report was (unresolvable label).
-        qWarning("EngineBridge: no input device named '%s' to meter "
-                 "(unplugged or roster drift)", qUtf8Printable(want));
+        if (!missingMeterWarned.contains(want)) {
+            missingMeterWarned.insert(want);
+            qWarning("EngineBridge: no input device named '%s' to meter "
+                     "(unplugged or roster drift)", qUtf8Printable(want));
+        }
         return;
     }
+    missingMeterWarned.remove(want);
     // Already tapped: this call is the per-enumeration / per-sync
     // re-resolution, so there is nothing new to announce.
     const bool alreadyLive = inputLabels_.contains(deviceId);
@@ -3447,7 +3461,9 @@ void EngineBridge::startRelay()
 
     // ---- Engine log lines ≥ Warning (subsystem errors, panics, subscriber
     // exceptions — everything the engine itself logged) -----------------------
-    (void)bps::Logger::Instance().AddSink(std::make_shared<EngineLogSink>(this));
+    // Deployment mode: the engine's own warnings go to the log, not to the operator as "Engine · Core ..." toasts.
+    if (!deployment::enabled())
+        (void)bps::Logger::Instance().AddSink(std::make_shared<EngineLogSink>(this));
 }
 
 void EngineBridge::stopRelay()

@@ -56,7 +56,9 @@
 #include "models/OutputListModel.h"
 #include "models/VideoSourceListModel.h"
 
+#include "services/DeploymentMode.h"
 #include "core/logging/ChangeGate.hpp"
+#include "core/logging/Logger.hpp"
 #include "core/logging/QtMessagePolicy.hpp"
 #include "modules/rendering/RenderEngine.hpp"
 #ifdef VGR_ENABLE_SELFTEST
@@ -83,6 +85,9 @@ void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const 
 {
     const QString level = LogLevelNameForQt(type);
     const bool raised = type == QtWarningMsg || type == QtCriticalMsg || type == QtFatalMsg;
+    // Deployment mode: debug / info narration (a QML console.log, a qInfo) is dropped before it is formatted.
+    if (!raised && deployment::enabled())
+        return;
 
     QString topic;
     switch (type) {
@@ -141,6 +146,9 @@ void ForwardToEventBus(QtMsgType type, const QMessageLogContext &context, const 
     if (!raised)
         return;
     if (!bps::logging::QtMessageIsUserFacing(isQml, context.category, msg.toStdString()))
+        return;
+    // Deployment mode: a raw Qt / QML warning is for the log, never for the operator's screen. A fatal still is.
+    if (deployment::enabled() && type != QtFatalMsg)
         return;
 
     // Logged, never published (see isProgress above).
@@ -531,6 +539,9 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("VGR_SANDBOX"))
         QStandardPaths::setTestModeEnabled(true);
 
+    // Deployment mode (see services/DeploymentMode.h): the log keeps warnings and errors only.
+    if (deployment::enabled())
+        bps::Logger::Instance().SetLevelFloor(bps::LogLevel::Warning);
     qInstallMessageHandler(ForwardToEventBus);
     // Windows still lists its legacy raster fonts (System, Fixedsys, Terminal ...) and DirectWrite refuses every one
     // of them: ~11 harmless "CreateFontFaceFromHDC() failed" warnings on EVERY start, each of which was also shown
@@ -539,6 +550,9 @@ int main(int argc, char *argv[])
         QLoggingCategory::setFilterRules(QStringLiteral("qt.qpa.fonts.warning=false"));
 
     GuardedApplication app(argc, argv);
+    // The application now exists, so the mode can be settled for good (a debug-logging flag file next to the exe turns
+    // deployment mode off): the log floor follows it.
+    bps::Logger::Instance().SetLevelFloor(deployment::enabled() ? bps::LogLevel::Warning : bps::LogLevel::Trace);
     calltrace::markGuiThread();   // before anything can publish from another thread
     app.setApplicationName(QStringLiteral("VGRPresenter"));
     app.setOrganizationName(QStringLiteral("VGR"));
@@ -838,13 +852,17 @@ int main(int argc, char *argv[])
                                 .arg(rootWindow && rootWindow->isVisible())
                                 .arg(rootWindow && rootWindow->isActive()));
     });
-    uiHeartbeat.start();
+    if (!deployment::enabled())   // a startup probe for developers; an operator's log has no use for it
+        uiHeartbeat.start();
 
     QTimer callTraceHeartbeat;
     // THE STALL SAMPLER IS ALWAYS ON (every OS): any time the interface thread goes silent for 100 ms the log
     // gets stack samples of where it was and a line with how long it lasted ("GuiStall:"). BPS_GUI_STALL_MS
     // changes the threshold; 0 turns it off. The tick has to be fine enough to see a stall of that size.
-    const int stallHuntMs = qEnvironmentVariableIsSet("BPS_GUI_STALL_MS")
+    // Deployment mode leaves the sampler (and its fine heartbeat tick) off: it is a developer's instrument and costs a
+    // sampling thread plus a timer every few milliseconds; the hang watchdog below stays, it is the crash safety net.
+    const int stallHuntMs = deployment::enabled() ? 0
+                          : qEnvironmentVariableIsSet("BPS_GUI_STALL_MS")
                                 ? qEnvironmentVariableIntValue("BPS_GUI_STALL_MS") : 100;
     callTraceHeartbeat.setInterval(stallHuntMs > 0 ? std::clamp(stallHuntMs / 4, 5, 250) : 250);
     QObject::connect(&callTraceHeartbeat, &QTimer::timeout, &app, [] { calltrace::heartbeat(); });

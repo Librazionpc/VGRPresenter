@@ -118,6 +118,10 @@ inline const char* ToString(CueKind k) {
 struct ContentStyle {
     double padding = 0;
     std::string backgroundColor = "transparent";   // "#aarrggbb" / "#rrggbb" / "transparent"
+    // The item's own opacity — the canvas's `style.opacity`. It applies to everything the
+    // block draws (backdrop box, text, media), so the video behind a 60% template shows through
+    // on the output exactly as it does in the editor's canvas.
+    double opacity = 1.0;
     double cornerRadius = 0;
     bool borderEnabled = false;
     double borderWidth = 2;

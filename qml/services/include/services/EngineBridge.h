@@ -54,6 +54,8 @@ class EngineBridge : public QObject
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stackChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stackChanged)
     Q_PROPERTY(bool booted READ booted NOTIFY bootedChanged)
+    // Deployment mode (services/DeploymentMode.h): the shipped app's quiet, operator-friendly behaviour.
+    Q_PROPERTY(bool deploymentMode READ deploymentMode CONSTANT)
     // The boot failure reason ("" = no failure). The boot splash gates its
     // reveal on `booted || bootError` — a FAILED boot must still bring the
     // splash down (the UI keeps working against mock data and the error
@@ -184,6 +186,7 @@ public:
     bool canUndo() const;
     bool canRedo() const;
     bool booted() const;
+    bool deploymentMode() const;
 
     // Boots the real Kernel with a sandboxed, real-world-safe configuration:
     // an isolated per-app data/log directory under the OS's standard app

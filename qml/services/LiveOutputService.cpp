@@ -5,6 +5,7 @@
 
 #include "services/FontService.h"
 #include "services/ShowConverter.h"
+#include "services/ShowService.h"
 #include "services/SettingsService.h"
 #include "services/StyleSpecBuilder.h"
 #include "services/DesignLibraryService.h"
@@ -142,6 +143,15 @@ LiveOutputService::LiveOutputService(QObject *parent)
 
     connect(&EngineBridge::instance(), &EngineBridge::previewRefused,
             this, &LiveOutputService::onPreviewRefused);
+
+    // THE SHOW CENTER'S TIMER FEATURE, ON AIR. The centre writes a show's next timers into the SHOW; the
+    // set on air keeps its own copy of the slides, so without this the wall went on arming the old pace
+    // (0 ms for a slide that had none when it was loaded) and never stepped.
+    connect(&ShowService::instance(), &ShowService::documentJobFinished,
+            this, [this](int, const QString &kind, bool ok, const QString &, const QVariantMap &) {
+                if (ok && kind == QLatin1String("timer"))
+                    adoptShowNextTimers();
+            });
 }
 
 void LiveOutputService::onPreviewRefused(const QString &label, const QString &kind)
@@ -947,6 +957,14 @@ void LiveOutputService::refreshOnAirSlide()
     onAirSlideRaw_ = slide ? slideToVariantMap(slide, pl::OutputStyleSpec{}) : QVariantMap{};
     // THIS slide's own NEXT TIMER, which is the wall's timer pace (0 = the slide waits for a hand).
     onAirDurationMs_ = slide ? slide->durationMs : 0.0;
+    // THE SHOW IS THE SOURCE OF TRUTH FOR THE PACE. The set on air holds its OWN copy of the slides, so a
+    // next timer set in the Show Center after GO LIVE never reached it — the wall armed 0 ms and the slide
+    // sat there until a hand pressed Next. The show's own nextTimer answers for this slide by id.
+    if (live_ && slide) {
+        const double fromShow = showNextTimerMsFor(QString::fromStdString(slide->id));
+        if (fromShow > 0.0)
+            onAirDurationMs_ = fromShow;
+    }
     if (slide && !slide->flowText.empty()) {
         onAirSlideRaw_.insert(QStringLiteral("flowText"), QString::fromStdString(slide->flowText));
         onAirSlideRaw_.insert(QStringLiteral("flowChar"), slide->flowChar);

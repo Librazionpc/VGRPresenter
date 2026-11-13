@@ -9,7 +9,6 @@
 
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/production/ProductionGraph.hpp"
-#include "modules/recording/MediaFoundationEncode.hpp"
 #include "modules/recording/RecordingEngine.hpp"
 #include "modules/recording/RecordingTypes.hpp"
 #include "platform/PlatformAccessor.hpp"
@@ -159,10 +158,7 @@ void RecordingService::refreshCapabilities()
     QPointer<RecordingService> guard(this);
     QThreadPool::globalInstance()->start([this, guard] {
         auto &rec = rr::RecordingEngine::Instance();
-        // The hardware encoders THIS machine has (NVENC, AMF, QuickSync) join the engine's list.
-#ifdef _WIN32
-        (void)rr::RegisterHardwareEncoders(rec);
-#endif
+        // The encoder list is the engine's own: Qt Multimedia picks a hardware encoder itself when it has one.
         QStringList encoders;
         for (const rr::EncoderKind kind : rec.DetectEncoders()) {
             switch (kind) {

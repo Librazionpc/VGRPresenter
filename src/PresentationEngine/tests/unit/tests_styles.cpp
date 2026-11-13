@@ -1159,12 +1159,16 @@ void TestBlockScenes() {
     box.kind = "box";
     box.x = 30; box.y = 30; box.width = 694; box.height = 368;
     box.style.backgroundColor = "#66000000";
+    // The item's own opacity — the canvas's `style.opacity`. The editor has always drawn the
+    // block at that alpha; the output must too, or a translucent template hides the video behind it.
+    box.style.opacity = 0.4;
     p::ContentBlock verse;
     verse.id = "b2";
     verse.kind = "text";
     verse.x = 55; verse.y = 45; verse.width = 644; verse.height = 338;
     verse.text = "For God so loved the world";
     verse.metaJson = R"({"color":"#ffffff","fontSize":80,"bold":true,"align":"left","verticalAlign":"center"})";
+    verse.style.opacity = 0.4;
     p::ContentBlock ref;
     ref.id = "b3";
     ref.kind = "text";
@@ -1193,6 +1197,7 @@ void TestBlockScenes() {
                 texts++;
                 if (t->Text() == "For God so loved the world") {
                     verseFound = true;
+                    CHECK(std::abs(t->Opacity() - 0.4f) < 0.01f);   // the block's opacity reached the text
                     // x=55/754 of 1920, y=45/428 of 1080.
                     CHECK(std::abs(t->Bounds().x - 55.0 / 754.0 * 1920.0) < 2.0f);
                     CHECK(std::abs(t->Bounds().y - 45.0 / 428.0 * 1080.0) < 2.0f);
@@ -1200,7 +1205,11 @@ void TestBlockScenes() {
                 if (t->Text() == "John 3:16") refFound = true;
             }
         } else if (dynamic_cast<const r::ShapeObject*>(obj) != nullptr) {
-            if (obj->Id() == "blk1") { shapes++; boxFound = true; }
+            if (obj->Id() == "blk1") {
+                shapes++;
+                boxFound = true;
+                CHECK(std::abs(obj->Opacity() - 0.4f) < 0.01f);   // ... and the backdrop box
+            }
         }
     }
     CHECK(texts == 2);

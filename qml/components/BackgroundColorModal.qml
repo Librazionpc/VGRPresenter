@@ -14,6 +14,10 @@ Item {
     property int hotkeyScope: 0
     function accept() { root.applied(root.withOpacity(root.selection)) }
     onOpenChanged: {
+        // Above whatever dialog is already up: a flat z would open this BEHIND an Edit/Add card (ModalCard bumps its own
+        // z on every open), which is how the colour card appeared below the Edit Style card.
+        if (root.open)
+            root.z = ModalStack.nextZ()
         if (root.open) {
             // Open on the palette that matches what is being edited, with the
             // custom field folded away — the compact starting state.

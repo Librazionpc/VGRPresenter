@@ -461,11 +461,15 @@ Item {
         return slide.text ? [{ blockId: "@slide_text", text: String(slide.text) }] : []
     }
 
-    // ONCE THIS SHOW IS ON AIR, A SINGLE CLICK ON ANOTHER SLIDE PUTS IT ON AIR (no double-click per slide: faster
-    // under pressure). Only while the output is live with THIS show's slides; otherwise a click just selects.
+    // A SINGLE CLICK ON A SLIDE TAKES IT (no double-click per slide: faster under pressure). Live, that moves
+    // the OUTPUT, so it only fires while this show is what the output shows; not live, it only STAGES the
+    // slide for the monitor preview, so any click may do it.
     readonly property bool singleClickLive: SettingsService.values["preferences.singleClickLive"] !== false
-        && LiveOutputService.live && root.item !== null && root.item !== undefined
-        && LiveOutputService.onAirTitle === String(root.item.name ?? "")
+        && root.item !== null && root.item !== undefined
+        // NOT LIVE: the click STAGES the slide (takeSlideLive -> stageSlideSet, the monitor preview),
+        // which takes nothing away from anyone. Only content that is already ON AIR needs the "this
+        // show is the one showing" gate — that is what ownsWallTile() answers.
+        && (!LiveOutputService.live || root.ownsWallTile())
     function slideTapped(index, slide, styledPreview) {
         if (root.selectedSlide === index || root.singleClickLive)
             root.takeSlideLive(index, slide, styledPreview)

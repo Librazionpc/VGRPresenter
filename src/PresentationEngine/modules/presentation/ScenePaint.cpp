@@ -19,6 +19,8 @@
 #include "platform/PlatformAccessor.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -110,6 +112,12 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
         const rendering::Rect rect = BlockRect(block, size);
         const float radiusOut = static_cast<float>(
             std::max(0.0, block.style.cornerRadius) / kBlockStageW * size.width);
+        // THE ITEM'S OWN OPACITY (the canvas's `style.opacity`). The editor has always drawn a
+        // block at that alpha (DraggableCanvasText, DesignPreview), so a template built at 60%
+        // let the video behind it show through — but the output drew every object of the block at
+        // full alpha, which is why the same slide looked opaque there. Every object this block
+        // creates takes the opacity, and RenderEngine multiplies it into fill/text/image/video.
+        const float blockOpacity = static_cast<float>(std::clamp(block.style.opacity, 0.0, 1.0));
         const bool boxKind = IsBoxKind(block);
         const bool mediaKind = (block.kind == "image" || block.kind == "video");
         const std::string underVideo = MetaBoolToken(block.metaJson, "underVideo");
@@ -129,6 +137,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 auto box = std::make_shared<rendering::ShapeObject>(boxId, boxId);
                 box->SetRectangle(boxFill, radiusOut);
                 box->SetBounds(rect);
+                box->SetOpacity(blockOpacity);
                 box->SetLayer(std::string(blockLayer));
                 (void)engine.AddObject(sceneId, box, std::string(blockLayer));
             }
@@ -163,6 +172,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                 rect.height - verticalPadding * 2.0f);
             auto text = std::make_shared<rendering::TextObject>(objId, objId, textBody);
             text->SetBounds(textBounds);
+            text->SetOpacity(blockOpacity);
             // Scroll's max-words column fills the text area with no vertical alignment.
             text->SetFlowFillsBox(isFlowBlock && readingFontPx > 0.0f);
             // Whose line breaks this block draws: a later refresh of the same scene hands it a new table.
@@ -324,12 +334,14 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                                                                       block.kind + "-blur");
                     bg->SetBounds(rect);
                     bg->SetImage(std::move(backdrop), src);
+                    bg->SetOpacity(blockOpacity);
                     bg->SetLayer(std::string(blockLayer));
                     (void)engine.AddObject(sceneId, bg, std::string(blockLayer));
                 }
                 auto image = std::make_shared<rendering::ImageObject>(objId, block.kind);
                 image->SetBounds(outBox);
                 image->SetImage(std::move(sharp), src);
+                image->SetOpacity(blockOpacity);
                 image->SetLayer(std::string(blockLayer));
                 image->SetBlendMode(rendering::ParseBlendMode(media.blend));
                 (void)engine.AddObject(sceneId, image, std::string(blockLayer));
@@ -341,6 +353,7 @@ int AddStageBlocks(rendering::RenderEngine& engine, const std::string& sceneId,
                                                     : block.style.backgroundColor),
                                 radiusOut);
             shape->SetBounds(rect);
+            shape->SetOpacity(blockOpacity);
             shape->SetLayer(std::string(blockLayer));
             (void)engine.AddObject(sceneId, shape, std::string(blockLayer));
         }
@@ -455,10 +468,36 @@ rendering::SharedRgbaImage SharedTakenFrame(const std::string& deviceId, uint64_
         if (cachedImage && cachedSeq == seq && cachedDevice == deviceId)
             return cachedImage;
     }
-    const auto frame = bps::platform::PlatformAccessor::Get().Video().PreviewFramePixels(deviceId);
-    rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, frame.rgba);
+    // THE TAP'S OWN BUFFER, SHARED — no private copy of the frame first. PreviewFramePixels() hands
+    // out a COPY of the 8 MB buffer and this used to convert that copy again, so every camera frame
+    // cost two full-frame memcpys on the render thread (a file on air costs one: the compositor
+    // converts its stored frame once). At 1080p30 that is ~480 MB/s of copying in the loop that has
+    // to compose the HDMI frame in time — the difference between a camera and a video file on air.
+    const bps::platform::IVideo::SharedFrame frame =
+        bps::platform::PlatformAccessor::Get().Video().PreviewFrameShared(deviceId);
+    if (frame.empty())
+        return nullptr;
+    const auto convertStart = std::chrono::steady_clock::now();
+    rendering::RgbaImage img = ToRgbaImage(frame.width, frame.height, *frame.rgba);
     if (img.empty())
         return nullptr;
+    // Rate-limited one-shot diagnostic: a conversion that takes real time IS the lag, and it should be
+    // visible in the log rather than guessed at.
+    {
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - convertStart).count();
+        static std::atomic<int64_t> slowLoggedAtMs{0};
+        if (ms > 8.0) {
+            const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch()).count();
+            int64_t last = slowLoggedAtMs.load(std::memory_order_relaxed);
+            if (nowMs - last > 5000 && slowLoggedAtMs.compare_exchange_strong(last, nowMs))
+                Logger::Instance().Warning(
+                    std::format("taken frame convert took {:.1f} ms ({}x{} rgba, {} bytes)", ms,
+                                frame.width, frame.height, frame.rgba->size()),
+                    "SceneBuilder");
+        }
+    }
     rendering::SharedRgbaImage shared = std::make_shared<const rendering::RgbaImage>(std::move(img));
     if (seq != 0) {
         std::lock_guard<std::mutex> lock(cacheMutex);

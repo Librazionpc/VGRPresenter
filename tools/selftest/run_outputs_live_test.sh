@@ -120,7 +120,7 @@ LIVE_OFFAIR="$(result_of live offair)"
 LIVE_BLACKOUT="$(result_of live blackout)"
 
 if [ -z "$ROWS" ] || [ "$ROWS" -lt 1 ]; then
-    echo "OUTSLIVE: FAIL missing — Settings · Outputs listed no row: $LIVE_LINE"
+    echo "OUTSLIVE: FAIL missing — the roster listed no enabled output: $LIVE_LINE"
     exit 4
 fi
 # Every row, every kind. `reporting` counts rows whose line opens with their own

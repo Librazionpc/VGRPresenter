@@ -5,14 +5,7 @@
 #include "modules/audio/AudioEngine.hpp"
 #include "modules/production/ProductionEngine.hpp"
 #include "modules/recording/WaveAudioContainer.hpp"
-#ifndef _WIN32
-#include "modules/recording/QtRecordingContainer.hpp"   // Linux/macOS: files written through Qt Multimedia
-#endif
-#ifdef _WIN32
-#include "modules/recording/AudioFileContainer.hpp"
-#include "modules/recording/MatroskaContainer.hpp"
-#include "modules/recording/MediaFoundationMp4.hpp"
-#endif
+#include "modules/recording/QtRecordingContainer.hpp"   // every OS: files written through Qt Multimedia
 #include "modules/rendering/RenderEngine.hpp"
 #include "modules/rendering/RenderOutputs.hpp"
 
@@ -61,41 +54,7 @@ struct RecordingEngine::Pump {
 namespace {
 constexpr const char* kModule = "RecordingEngine";
 
-#ifdef _WIN32
-class MediaFoundationVideoEncoder final : public IVideoEncoder {
-public:
-    const char* Codec() const noexcept override { return "H.264"; }
-    EncoderKind Kind() const noexcept override { return EncoderKind::Software; }
-    Result<void> Initialize(const RecordingProfile&) override {
-        auto probe = ProbeH264Encoder();
-        if (!probe.ok()) return probe;
-        initialized_ = true;
-        return Ok();
-    }
-    Result<void> Shutdown() override { initialized_ = false; return Ok(); }
-    bool Initialized() const { return initialized_; }
-
-private:
-    bool initialized_ = false;
-};
-
-class MediaFoundationAudioEncoder final : public IAudioEncoder {
-public:
-    const char* Codec() const noexcept override { return "AAC"; }
-    Result<void> Initialize(const RecordingProfile&) override {
-        auto probe = ProbeAacEncoder();
-        if (!probe.ok()) return probe;
-        initialized_ = true;
-        return Ok();
-    }
-    Result<void> Shutdown() override { initialized_ = false; return Ok(); }
-    bool Initialized() const { return initialized_; }
-
-private:
-    bool initialized_ = false;
-};
-#else
-// Linux and macOS: the encoding itself is Qt Multimedia's (QtRecordingContainer.cpp), so these two only
+// Every OS: the encoding itself is Qt Multimedia's (QtRecordingContainer.cpp), so these two only
 // stand for "this machine can encode" in the engine's encoder lists (SelectEncoder / DetectEncoders).
 // The software entry is always the backend's own choice: it uses a hardware encoder when it has one.
 class QtVideoEncoder final : public IVideoEncoder {
@@ -117,7 +76,6 @@ public:
     Result<void> Initialize(const RecordingProfile&) override { return Ok(); }
     Result<void> Shutdown() override { return Ok(); }
 };
-#endif
 
 const char* EncoderKindName(EncoderKind k) {
     switch (k) {
@@ -185,40 +143,12 @@ Result<void> RecordingEngine::Initialize() {
     }
     { std::error_code ec; (void)std::filesystem::create_directories(dir, ec); }
 
-#ifndef _WIN32
     // Asked BEFORE the engine lock is taken: the first answer loads Qt's media backend.
     const std::vector<ContainerKind> qtContainers = QtSupportedContainers();
-#endif
 
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (initialized_.load()) return Ok();   // lost the race; other caller finished
 
-#ifdef _WIN32
-    containers_.emplace(ContainerName(ContainerKind::MP4),
-                        []() -> std::shared_ptr<IRecordingContainer> {
-                            return std::make_shared<MediaFoundationMp4>();
-                        });
-    containers_.emplace(ContainerName(ContainerKind::MKV),
-                        []() -> std::shared_ptr<IRecordingContainer> {
-                            return std::make_shared<MatroskaContainer>();
-                        });
-    // The audio-only formats an Audio preset records to. MP3 only where the machine has an
-    // MP3 encoder, so the list a preset can pick from is the list that works.
-    for (const ContainerKind audioKind : {ContainerKind::WAV, ContainerKind::M4A, ContainerKind::MP3}) {
-        if (audioKind == ContainerKind::MP3 && !Mp3EncoderAvailable()) continue;
-        containers_.emplace(ContainerName(audioKind),
-                            [audioKind]() -> std::shared_ptr<IRecordingContainer> {
-                                return std::make_shared<AudioFileContainer>(audioKind);
-                            });
-    }
-    videoEncoders_.emplace(EncoderKindName(EncoderKind::Software),
-                           []() -> std::shared_ptr<IVideoEncoder> {
-                               return std::make_shared<MediaFoundationVideoEncoder>();
-                           });
-    audioEncoders_.emplace("AAC", []() -> std::shared_ptr<IAudioEncoder> {
-        return std::make_shared<MediaFoundationAudioEncoder>();
-    });
-#else
     containers_.emplace(ContainerName(ContainerKind::WAV),
                         []() -> std::shared_ptr<IRecordingContainer> {
                             return std::make_shared<WaveAudioContainer>();
@@ -238,7 +168,6 @@ Result<void> RecordingEngine::Initialize() {
             return std::make_shared<QtAudioEncoder>();
         });
     }
-#endif
 
     // Default master profile (docs/specs/28 §2: Output Recording Profiles).
     if (!profiles_.count("master")) {

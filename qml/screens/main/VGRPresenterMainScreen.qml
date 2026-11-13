@@ -2028,6 +2028,8 @@ Rectangle {
                 // Self-test handle (VGR_SELFTEST grabs this item to PNG for
                 // pixel-sampling the checkerboard/style-bg rendering).
                 objectName: "selfTestMonitorWall"
+                // The tab being looked at decides which Scroll / Slide choice the wall shows (see MonitorWall.activePane).
+                activePane: media_tab_bar.currentPane
 
                 x: 0
                 y: 0

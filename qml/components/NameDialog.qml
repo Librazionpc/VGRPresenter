@@ -89,6 +89,10 @@ Item {
     // focus path that reaches this item directly.
     property int hotkeyScope: 0
     onShownChanged: {
+        // Above whatever dialog is already up: a flat z would open this BEHIND an Edit/Add card (ModalCard bumps its own
+        // z on every open), which is how the colour card appeared below the Edit Style card.
+        if (root.shown)
+            root.z = ModalStack.nextZ()
         if (root.shown && root.hotkeyScope === 0) {
             root.hotkeyScope = Hotkeys.open({
                 name: root.title !== "" ? root.title : "Name dialog",

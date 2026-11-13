@@ -934,13 +934,20 @@ Item {
         root.stageOutputPart(number, partIndex)
     }
 
-    // ONCE ONE OF THIS LIST'S ROWS IS ON AIR, A SINGLE CLICK ON ANOTHER PUTS IT ON AIR (no double-click per verse or
-    // paragraph: faster under pressure). Only while the output is live with this pane's own pick; Ctrl/Shift clicks
-    // stay selection-only, and the setting turns the whole thing off.
+    // A SINGLE CLICK ON A ROW TAKES IT (no double-click per verse or paragraph: faster under pressure).
+    // Live, it moves the OUTPUT, so it only fires while this pane's own pick is what the output shows;
+    // not live, it only STAGES the pick, so any click may do it. Ctrl/Shift clicks stay selection-only,
+    // and the setting turns the whole thing off.
+    readonly property string rowPickRef: root.lineStepOwnerRef !== "" ? root.lineStepOwnerRef : root.referenceText
     readonly property bool singleClickLive: SettingsService.values["preferences.singleClickLive"] !== false
         && root.book !== null && root.book !== undefined
-        && !!root.adapter && !!root.adapter.liveIsOurs
-        && root.adapter.liveIsOurs(root.lineStepOwnerRef !== "" ? root.lineStepOwnerRef : root.referenceText)
+        // NOT LIVE: a click only STAGES this pane's pick — it lands in the monitor preview and takes
+        // nothing from anyone, so it needs no ownership gate. The gate below is about LIVE content:
+        // an accidental click in another pane must not take over what is already on air.
+        && (!LiveOutputService.live
+            || (!!root.adapter
+                && ((!!root.adapter.liveIsOurs && root.adapter.liveIsOurs(root.rowPickRef))
+                    || (!!root.adapter.stagedIsOurs && root.adapter.stagedIsOurs(root.rowPickRef)))))
     property string lastRowPick: ""
     property double lastRowPickAt: 0
     // The one way a row goes on air (a double-click, or a single click while live). A double-click is two clicks, so

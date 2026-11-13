@@ -1161,6 +1161,64 @@ void LiveOutputService::applyTimedAdvance()
           qUtf8Printable(autoAdvanceShow_));
 }
 
+// A slide's next timer as the SHOW has it, by slide id. The live content is a copy taken at GO LIVE, so
+// this is the only place a timer set afterwards can be seen from.
+double LiveOutputService::showNextTimerMsFor(const QString &slideId) const
+{
+    if (slideId.isEmpty())
+        return 0.0;
+    ShowService &shows = ShowService::instance();
+    if (!shows.hasShow())
+        return 0.0;
+    const QVariantList slides = shows.currentShow().value(QStringLiteral("slides")).toList();
+    for (const QVariant &v : slides) {
+        const QVariantMap s = v.toMap();
+        if (s.value(QStringLiteral("id")).toString() != slideId)
+            continue;
+        return qMax(0.0, s.value(QStringLiteral("nextTimer")).toDouble()) * 1000.0;
+    }
+    return 0.0;
+}
+
+// The Show Center applied its timer control: adopt the show's pace onto the set that is on air RIGHT NOW,
+// instead of waiting for the next GO LIVE. A timer IS the instruction to advance, so the on-air show is
+// recorded as the timed one; clearing every timer forgets that record again.
+void LiveOutputService::adoptShowNextTimers()
+{
+    ShowService &shows = ShowService::instance();
+    if (!live_ || !shows.hasShow())
+        return;
+    const QVariantList slides = shows.currentShow().value(QStringLiteral("slides")).toList();
+    bool anyTimer = false;
+    for (const QVariant &v : slides) {
+        if (v.toMap().value(QStringLiteral("nextTimer")).toDouble() > 0.0) {
+            anyTimer = true;
+            break;
+        }
+    }
+    const QString key = autoAdvanceShowKey();
+    if (anyTimer) {
+        if (autoAdvanceShow_ != key) {
+            autoAdvanceShow_ = key;
+            autoAdvanceLoaded_ = true;
+            lastAutoLine_ = -1.0;   // a fresh timed session: its first step has no settled predecessor
+            SettingsService::instance().setValue(QStringLiteral("shows.timedShow"), autoAdvanceShow_);
+            emit autoAdvanceChanged();
+        }
+    } else if (autoAdvanceShow_ == key) {
+        qInfo("LiveOutputService: every next timer cleared on '%s' — auto-advance forgotten",
+              qUtf8Printable(key));
+        autoAdvanceShow_.clear();
+        SettingsService::instance().setValue(QStringLiteral("shows.timedShow"), QString());
+        emit autoAdvanceChanged();
+    }
+    // Re-read the on-air slide's pace from the show and arm it: refreshOnAirSlide ends in applyTimedAdvance,
+    // which is what starts (or stops) the timer.
+    refreshOnAirSlide();
+    qInfo("LiveOutputService: next timers adopted for show '%s' while on air: advancing=%d pace=%.0f ms",
+          qUtf8Printable(key), autoAdvancing() ? 1 : 0, onAirDurationMs_);
+}
+
 void LiveOutputService::armAutoAdvanceTimer()
 {
     if (!autoAdvanceTimer_) {
@@ -1174,6 +1232,18 @@ void LiveOutputService::armAutoAdvanceTimer()
     if (!autoAdvancing() || onAirDurationMs_ <= 0.0)
         return;
     autoAdvanceTimer_->start(qMax(100, int(onAirDurationMs_)));
+}
+
+bool LiveOutputService::stepForward()
+{
+    // Scroll: the walk steps one line and hands off at the passage's end. Any other mode: the next slide
+    // (or passage). This is what the Next hotkey runs AND what the auto-advance timer runs.
+    return scrollMode() ? lineStep(1) : next();
+}
+
+bool LiveOutputService::stepBackward()
+{
+    return scrollMode() ? lineStep(-1) : previous();
 }
 
 void LiveOutputService::onAutoAdvanceTimeout()
@@ -1192,7 +1262,9 @@ void LiveOutputService::onAutoAdvanceTimeout()
     const qreal lineFrom = (lastAutoLine_ >= 0.0) ? lastAutoLine_ : lineNow;
     lastAutoLine_ = lineNow;
     const int serialFrom = lineStepSerial_;
-    const bool moved = scroll ? lineStep(1) : next();
+    // THE SAME COMMAND THE NEXT HOTKEY RUNS, not a second copy of "what next means": Scroll steps a
+    // line, Slide takes the next slide, and the timer and the key can never disagree about it.
+    const bool moved = stepForward();
     if (!moved) {
         // End of the set: stop here. Re-arming on a step that cannot move would just tick at nothing.
         qInfo("LiveOutputService: auto-advance stopped at the end of '%s' (index %d, line %.2f)",
