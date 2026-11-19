@@ -62,3 +62,12 @@ dev-profile/
 
 # Python bytecode from the scraper never belongs in git.
 __pycache__/
+
+# Large media / test artifacts — never commit (GitHub 100MB limit).
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.mp3
+*.wav
+recordings/
