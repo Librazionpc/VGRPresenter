@@ -308,7 +308,30 @@ void LiveOutputService::ndiWorkerTick()
         for (const auto &plan : plans) {
             if (!plan.provider || !plan.buffer) continue;
             if (ndiInFlight_.contains(plan.outputName)) continue;   // its previous send is still running
-            const double periodMs = 1000.0 / double(plan.fps > 0.0f ? plan.fps : 30.0f);
+            double periodMs = 1000.0 / double(plan.fps > 0.0f ? plan.fps : 30.0f);
+            // A picture that has not changed for a second is sent at the still beat (see ndiStillSince_), not at the
+            // full rate. The identity is the buffer's last frame: it is replaced whenever a frame is composed.
+            {
+                // "The same picture" is judged by a SAMPLE of its pixels (8192 spread across the frame: a moving line or
+                // a changed word touches far more than that), not by the frame object: a heartbeat re-render hands over
+                // an identical picture in a new object. The sender always sends the LATEST frame, so a change the sample
+                // misses still goes out within one still beat (67 ms).
+                const std::shared_ptr<const bps::rendering::Frame> now = plan.buffer->LastFrameSnapshot();
+                uint64_t signature = 0;
+                if (now && !now->pixels.empty()) {
+                    const size_t n = now->pixels.size();
+                    const size_t stride = std::max<size_t>(1, n / 8192);
+                    signature = 1469598103934665603ull ^ n;
+                    for (size_t i = 0; i < n; i += stride)
+                        signature = (signature ^ now->pixels[i]) * 1099511628211ull;
+                }
+                auto &seen = ndiStillSince_[plan.outputName];
+                if (seen.first != signature) {
+                    seen = { signature, nowMs };
+                } else if (nowMs - seen.second >= kNdiStillAfterMs && plan.fps > kNdiStillFps) {
+                    periodMs = 1000.0 / double(kNdiStillFps);
+                }
+            }
             auto &nextDue = ndiSendDueMs_[plan.outputName];
             // A new sender, or a stall of several frames: start from now instead of firing a catch-up
             // burst at the SDK (the far machine shows that as a stutter, not as keeping up).
@@ -838,7 +861,7 @@ void LiveOutputService::stopNdiFeed()
 
 void LiveOutputService::ensureNdiWorker()
 {
-    if (ndiThread_)
+    if (ndiThread_ || ndiShutdown_)
         return;
     if (!ndiPool_) {
         ndiPool_ = new QThreadPool(this);
@@ -916,6 +939,7 @@ void LiveOutputService::setNdiPlan(const std::vector<NdiSendPlan> &plans)
 
 void LiveOutputService::shutdownNdiWorker()
 {
+    ndiShutdown_ = true;   // from here on ensureNdiWorker() refuses to start a feed thread
     if (!ndiThread_)
         return;
     // Let the pool finish first: a job holds a frame and a provider pointer the teardown below pulls
@@ -1092,6 +1116,10 @@ QString LiveOutputService::autoAdvanceShowKey() const
     ShowService &shows = ShowService::instance();
     if (shows.hasShow())
         return shows.showName();
+    // Show Centre may have no open document; use the name captured when the timer was adopted so the
+    // recorded set stays stable across slides (onAirTitle_ changes per slide and would disarm it).
+    if (!adoptedShowName_.isEmpty())
+        return adoptedShowName_;
     return live_ ? onAirTitle_ : stagedName_;
 }
 
@@ -1167,10 +1195,15 @@ double LiveOutputService::showNextTimerMsFor(const QString &slideId) const
 {
     if (slideId.isEmpty())
         return 0.0;
-    ShowService &shows = ShowService::instance();
-    if (!shows.hasShow())
+    // Prefer the slides of the show whose timer was just adopted (Show Centre may have no open doc).
+    QVariantList slides = adoptedSlides_;
+    if (slides.isEmpty()) {
+        ShowService &shows = ShowService::instance();
+        if (shows.hasShow())
+            slides = shows.currentShow().value(QStringLiteral("slides")).toList();
+    }
+    if (slides.isEmpty())
         return 0.0;
-    const QVariantList slides = shows.currentShow().value(QStringLiteral("slides")).toList();
     for (const QVariant &v : slides) {
         const QVariantMap s = v.toMap();
         if (s.value(QStringLiteral("id")).toString() != slideId)
@@ -1183,12 +1216,26 @@ double LiveOutputService::showNextTimerMsFor(const QString &slideId) const
 // The Show Center applied its timer control: adopt the show's pace onto the set that is on air RIGHT NOW,
 // instead of waiting for the next GO LIVE. A timer IS the instruction to advance, so the on-air show is
 // recorded as the timed one; clearing every timer forgets that record again.
-void LiveOutputService::adoptShowNextTimers()
+void LiveOutputService::adoptShowNextTimers(const QVariantList &slidesIn, const QString &showNameIn)
 {
     ShowService &shows = ShowService::instance();
-    if (!live_ || !shows.hasShow())
+    if (!live_)
         return;
-    const QVariantList slides = shows.currentShow().value(QStringLiteral("slides")).toList();
+    // The slides may come from the job that just finished (passed in), so adoption works even when
+    // no show document is open in the editor — the Show Centre case, where the centre page reads
+    // shows through peekShow rather than the open document. Without this the on-air set kept its old
+    // pace (often 0 ms) and the timer "didn't move".
+    QVariantList slides = slidesIn;
+    if (slides.isEmpty() && shows.hasShow())
+        slides = shows.currentShow().value(QStringLiteral("slides")).toList();
+    if (slides.isEmpty())
+        return;
+    adoptedSlides_ = slides;
+    // Record the show's name so autoAdvanceShowKey stays stable across slides even without an open doc.
+    if (!showNameIn.isEmpty())
+        adoptedShowName_ = showNameIn;
+    else if (shows.hasShow())
+        adoptedShowName_ = shows.showName();
     bool anyTimer = false;
     for (const QVariant &v : slides) {
         if (v.toMap().value(QStringLiteral("nextTimer")).toDouble() > 0.0) {
@@ -1196,7 +1243,12 @@ void LiveOutputService::adoptShowNextTimers()
             break;
         }
     }
-    const QString key = autoAdvanceShowKey();
+    // The name the caller passed IS the set's name; autoAdvanceShowKey() can fall back to the slide
+    // title when no document is open, which would record the timer against 'Verse 1' instead of the show.
+    const QString key = adoptedShowName_.isEmpty() ? autoAdvanceShowKey() : adoptedShowName_;
+    qInfo("LiveOutputService: [ADOPT] nameIn='%s' adopted='%s' key='%s' anyTimer=%d live=%d",
+          qUtf8Printable(showNameIn), qUtf8Printable(adoptedShowName_), qUtf8Printable(key),
+          anyTimer ? 1 : 0, live_ ? 1 : 0);
     if (anyTimer) {
         if (autoAdvanceShow_ != key) {
             autoAdvanceShow_ = key;
@@ -1209,6 +1261,7 @@ void LiveOutputService::adoptShowNextTimers()
         qInfo("LiveOutputService: every next timer cleared on '%s' — auto-advance forgotten",
               qUtf8Printable(key));
         autoAdvanceShow_.clear();
+        adoptedShowName_.clear();
         SettingsService::instance().setValue(QStringLiteral("shows.timedShow"), QString());
         emit autoAdvanceChanged();
     }
@@ -1226,12 +1279,48 @@ void LiveOutputService::armAutoAdvanceTimer()
         autoAdvanceTimer_->setSingleShot(true);
         connect(autoAdvanceTimer_, &QTimer::timeout, this, &LiveOutputService::onAutoAdvanceTimeout);
     }
+    if (!timerProgressTicker_) {
+        timerProgressTicker_ = new QTimer(this);
+        timerProgressTicker_->setInterval(100);
+        connect(timerProgressTicker_, &QTimer::timeout, this, &LiveOutputService::timerProgressChanged);
+    }
     autoAdvanceTimer_->stop();
     // Not the recorded set on air, or a slide with no NEXT TIMER: it waits for a hand, and arming nothing
     // is what says so (a show with no times on its slides must never slide by itself).
-    if (!autoAdvancing() || onAirDurationMs_ <= 0.0)
+    if (!autoAdvancing() || onAirDurationMs_ <= 0.0) {
+        timerProgressTicker_->stop();
+        emit timerProgressChanged();
         return;
+    }
     autoAdvanceTimer_->start(qMax(100, int(onAirDurationMs_)));
+    timerProgressTicker_->start();
+    emit timerProgressChanged();
+}
+
+// The sliding timer bar's data: how far into the on-air slide's own next timer we are (0..1), and the
+// seconds left on it. 0 while no timer is armed, so a show with no times shows an empty bar.
+qreal LiveOutputService::timerProgress() const
+{
+    if (onAirDurationMs_ <= 0.0 || !autoAdvanceTimer_ || !autoAdvanceTimer_->isActive())
+        return 0.0;
+    const int remaining = qMax(0, autoAdvanceTimer_->remainingTime());
+    return qBound<qreal>(0.0, 1.0 - qreal(remaining) / onAirDurationMs_, 1.0);
+}
+
+qreal LiveOutputService::timerRemainingSeconds() const
+{
+    if (!autoAdvanceTimer_ || !autoAdvanceTimer_->isActive())
+        return 0.0;
+    return qMax(0, autoAdvanceTimer_->remainingTime()) / 1000.0;
+}
+
+void LiveOutputService::setShowTimerTotal(qreal seconds)
+{
+    const qreal clamped = qMax<qreal>(0.0, seconds);
+    if (qFuzzyCompare(showTimerTotalSeconds_ + 1.0, clamped + 1.0))
+        return;
+    showTimerTotalSeconds_ = clamped;
+    emit showTimerTotalChanged();
 }
 
 bool LiveOutputService::stepForward()
@@ -1262,10 +1351,20 @@ void LiveOutputService::onAutoAdvanceTimeout()
     const qreal lineFrom = (lastAutoLine_ >= 0.0) ? lastAutoLine_ : lineNow;
     lastAutoLine_ = lineNow;
     const int serialFrom = lineStepSerial_;
-    // THE SAME COMMAND THE NEXT HOTKEY RUNS, not a second copy of "what next means": Scroll steps a
-    // line, Slide takes the next slide, and the timer and the key can never disagree about it.
-    const bool moved = stepForward();
+    // A TIMED SHOW STEPS SLIDES, NOT LINES. Scroll mode is for a reading passage; a show whose slides each
+    // carry a NEXT TIMER is meant to move one slide per timer, so it takes the SAME next() the slide keys
+    // take — even while Scroll mode is the wall's mode (it was stepping lines of one slide and the slides
+    // never moved).
+    const bool timedShow = onAirDurationMs_ > 0.0;
+    const bool moved = timedShow ? next() : stepForward();
     if (!moved) {
+        if (timedShow) {
+            // The on-air set is a single pick (a Show Centre take): ask the page that owns the show to
+            // stage its next slide, exactly as the wall's › does. That re-commits and re-arms the timer.
+            qInfo("LiveOutputService: auto-advance reached the end of the on-air pick — asking for the show's next slide");
+            emit passageStepRequested(1);
+            return;
+        }
         // End of the set: stop here. Re-arming on a step that cannot move would just tick at nothing.
         qInfo("LiveOutputService: auto-advance stopped at the end of '%s' (index %d, line %.2f)",
               qUtf8Printable(autoAdvanceShow_), onAirIndex_, lineNow);

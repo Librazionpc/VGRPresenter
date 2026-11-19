@@ -1240,7 +1240,14 @@ void TestPal() {
         // File lists: only when the provider has the text/uri-list target.
         auto files = clip.SetFiles({"/tmp/bps_clip_a", "/tmp/bps_clip_b"});
         if (files.ok()) {
+            // The real system clipboard is shared: another process (a clipboard manager, a
+            // remote-desktop agent) can hold it open for a few ms right after our write, which
+            // makes one read fail. Retry briefly; a read that never works still fails the check.
             auto got = clip.GetFiles();
+            for (int tries = 0; !got.ok() && tries < 20; ++tries) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                got = clip.GetFiles();
+            }
             CHECK(got.ok());
             if (got.ok()) CHECK(!got.value().empty());
         } else {

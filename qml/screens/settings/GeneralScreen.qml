@@ -1078,7 +1078,13 @@ Item {
                 objectName: "selfTestCardLibraries"   // inset self-test grab target
                 title: qsTr("Libraries")
                 RestoreRow { label: qsTr("Restore default overlays"); service: OverlayLibraryService }
-                RestoreRow { label: qsTr("Restore default templates"); service: TemplateLibraryService; last: true }
+                RestoreRow { label: qsTr("Restore default templates"); service: TemplateLibraryService }
+                ActionRow {
+                    label: qsTr("Remove duplicate shows")
+                    buttonText: qsTr("Remove…")
+                    onActivated: dedupeShowsConfirm.pending = true
+                    last: true
+                }
             }
 
             SettingsSection {
@@ -1339,6 +1345,23 @@ Item {
             backupsBrowser.restoreCategory(row)
         }
         onDismissed: backupsBrowser.pendingRestore = null
+    }
+
+    // Shows that are in the library more than once: one copy of each stays, the rest go to the library's .deleted bin.
+    ConfirmDialog {
+        id: dedupeShowsConfirm
+        property bool pending: false
+        shown: pending
+        title: qsTr("Remove duplicate shows")
+        message: qsTr("Find shows that are in the library more than once (same name, same words) and keep one copy of each? The extra copies move to the library's .deleted bin, so they can be recovered. Shows that differ in any word are kept.")
+        confirmLabel: qsTr("Remove duplicates")
+        cancelLabel: qsTr("Cancel")
+        confirmVariant: "danger"
+        onConfirmed: {
+            pending = false
+            ShowService.removeDuplicateShows()
+        }
+        onDismissed: pending = false
     }
 
     // Delete is destructive — confirm before removing the copy. Driven off

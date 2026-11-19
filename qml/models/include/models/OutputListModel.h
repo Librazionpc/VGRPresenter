@@ -169,6 +169,11 @@ public:
     Q_INVOKABLE QVariantList displays() const;
     // The display an output is assigned to, as a display() entry ({} = none).
     Q_INVOKABLE QVariantMap displayFor(int index) const;
+    // The row, earlier in the roster, whose window already covers THIS row's display area — -1 when none. Windows
+    // MIRRORS a projector as two screens with one geometry ("AAA (1)" and "AAA (2)", both 1360x768 at 0,0), so two
+    // outputs on two differently named screens still draw over each other on the one monitor. The later row's window
+    // stays closed (OutputWindow) and the operator is told why.
+    Q_INVOKABLE int mirroredBy(int index) const;
     Q_INVOKABLE void setScreenName(int index, const QString &screenName);
     Q_INVOKABLE void setBoundsLocked(int index, bool locked);
     Q_INVOKABLE void setStayOnTop(int index, bool stayOnTop);
@@ -221,6 +226,7 @@ private:
     // windows at the same x/y and size and drew over each other ("Main Output" and "Main Output 2" on
     // one HDMI). These two keep that true: which row holds a screen, and the first screen nobody holds.
     int rowHoldingScreen(const QString &screenName, int exceptRow) const;
+    QRect screenRect(const QString &screenName) const;   // the named screen's geometry; a null rect when it is not there
     QString freeScreenName(int exceptRow, const QString &preferred) const;
 
     int m_screensRevision = 0;
@@ -233,6 +239,7 @@ private:
     QString styleIdAt(int row) const;
     QString styleNameAt(int row) const;
     QString styleLayoutNote(const QString &styleId) const;
+    QString styleLayoutNoteUncached(int row) const;
     void pushEngineStyle(const QString &styleId, const QString &slideTag = QString());
 
 public:
@@ -273,6 +280,9 @@ private:
     static QPointer<StyleListModel> s_adoptedStyleRoster;
     QMetaObject::Connection styleRosterConn_;
     bool styleRosterConnected_ = false;
+    // styleId -> the layout line. Building it bakes the style's whole spec (templates and all), and getOutput() is read for
+    // every output on every poll tick — uncached it froze the interface thread for seconds. Dropped on any roster change.
+    mutable QHash<QString, QString> styleLayoutCache_;
     // The last style push, so an identical one is skipped, and a flag so a burst of "refresh the engine
     // styles" calls (column seats, roster changes, route changes) costs ONE rebuild on the next turn.
     bool m_pushQueued = false;

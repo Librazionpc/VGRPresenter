@@ -949,6 +949,7 @@ Rectangle {
                             if (ShowService.duplicateShow(show.path))
                                 ShowService.refreshLibrary()
                         } else if (label === qsTr("Delete")) {
+                            showDeleteConfirm.confirmLabel = qsTr("Delete")
                             showDeleteConfirm.targetPath = show.path
                             showDeleteConfirm.title = qsTr("Delete show")
                             showDeleteConfirm.message = qsTr("Delete “%1”? This can be recovered from the library's .deleted bin.").arg(show.name)

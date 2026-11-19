@@ -115,6 +115,14 @@ ModalCard {
         const bonus = root.adjacencyBonus[root.queryMatchRank(result)] ?? 0
         return Math.min(100, Math.round(100 * (carried + bonus) / words.length))
     }
+    // What the row's pill SAYS. matchRating() counts how many typed words the row carries, so every row that holds all of
+    // them — the sentence itself, or the words a page apart — read "MATCH 100%". The shown figure also reflects how close
+    // together they are: the phrase itself 100, nearly the phrase (a word or two between) 92, merely present 75.
+    // (Only the label: the sort above still uses matchRating and queryMatchRank.)
+    readonly property var closenessFactor: [1.0, 0.92, 0.75, 1.0]
+    function matchDisplay(result) {
+        return Math.round(root.matchRating(result) * (root.closenessFactor[root.queryMatchRank(result)] ?? 1.0))
+    }
     function isExactWordsMatch(result) {
         const words = root.highlightSource.toLowerCase().match(/[A-Za-z0-9]+/g) || []
         if (words.length === 0)
@@ -559,7 +567,7 @@ ModalCard {
 
                     Rectangle {
                         id: ratingPill
-                        readonly property int percent: root.matchRating(entry.modelData)
+                        readonly property int percent: root.matchDisplay(entry.modelData)
                         readonly property color tone: percent >= 90 ? "#4ae0b0"
                                                      : (percent >= 60 ? "#e0b04a" : Theme.textSecondary)
                         visible: root.canHighlight && root.queryCoverage(entry.modelData) > 0

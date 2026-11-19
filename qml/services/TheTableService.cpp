@@ -32,6 +32,7 @@ namespace bl = bps::library;
 namespace {
 
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
+QString qstr(const bps::library::VerseText &t) { return QString::fromUtf8(t.data(), static_cast<qsizetype>(t.size())); }
 
 bl::TheTableLibrary *tableLibrary(void *opaque)
 {
@@ -139,7 +140,7 @@ bool sourceFor(bl::TheTableLibrary *lib, const QString &bookId, int chapter,
         const int n = v.toInt();
         for (const bl::TheTableVerse &tv : ch.value().verses) {
             if (tv.number == n) {
-                out.items.push_back({ n, tv.text });
+                out.items.push_back({ n, tv.text.str() });
                 break;
             }
         }
@@ -1174,7 +1175,7 @@ void TheTableService::startIndexing()
             indexReindex_.store(false, std::memory_order_relaxed);
             if (indexCancel_.load(std::memory_order_relaxed))
                 break;
-            const auto r = tableLibrary(library_)->IndexWithSearchEngine(&indexCancel_);
+            const auto r = tableLibrary(library_)->IndexVocabularyWithSearchEngine(&indexCancel_);
             if (indexCancel_.load(std::memory_order_relaxed))
                 break;   // quitting — no log write into a tearing-down process
             if (!r.ok())

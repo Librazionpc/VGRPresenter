@@ -64,6 +64,7 @@
 #ifdef VGR_ENABLE_SELFTEST
 #include "SelfTestDriver.h"
 #endif
+#include "HeapProfile.h"
 
 namespace {
 // A Qt message's level in the engine log's own vocabulary, so a QML console.log, a qInfo()
@@ -535,6 +536,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 int main(int argc, char *argv[])
 {
+    heapprofile::start();   // VGR_HEAP_PROFILE=1 (development builds): who owns the heap — see src/HeapProfile.cpp
     selectProfile();
     if (qEnvironmentVariableIsSet("VGR_SANDBOX"))
         QStandardPaths::setTestModeEnabled(true);
@@ -682,7 +684,8 @@ int main(int argc, char *argv[])
     }
 
     // Video preview frames for the Media tab (image://mediathumb/<path>).
-    engine.addImageProvider(QStringLiteral("mediathumb"), new MediaThumbnailProvider);
+    engine.addImageProvider(QStringLiteral("mediathumb"), new MediaThumbnailProvider(QQuickImageProvider::Image,
+                                                                                   QQuickImageProvider::ForceAsynchronousImageLoading));
 
     engine.addImageProvider(QStringLiteral("livepreview"), new LivePreviewProvider);
 
@@ -893,6 +896,15 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestLineStep"),
         QVariant(qEnvironmentVariableIsSet("VGR_LINESTEP_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The show-timer / load scenario: it opens a library show through the click path, takes a slide
+    // on air, presses the wall timer and quits, so it gets its own env var like the rest.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestShowTimer"),
+        QVariant(qEnvironmentVariableIsSet("VGR_SHOWTIMER_TEST")
+                 && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestShowTimerName"),
+        QVariant(qEnvironmentVariable("VGR_SHOWTIMER_NAME")));
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestModalFit"),
         QVariant(qEnvironmentVariableIsSet("VGR_MODALFIT_TEST")
@@ -915,6 +927,12 @@ int main(int argc, char *argv[])
         QStringLiteral("SelfTestExact"),
         QVariant(qEnvironmentVariableIsSet("VGR_EXACT_TEST")
                  && qEnvironmentVariableIsSet("VGR_SELFTEST")));
+    // The search probe: VGR_SEARCH_PROBE="<query>" runs that query in the app-wide search, loose and then locked,
+    // prints each mode's ranked sermon rows (reference, score, text) and quits.
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("SelfTestSearchProbe"),
+        qEnvironmentVariableIsSet("VGR_SEARCH_PROBE") && qEnvironmentVariableIsSet("VGR_SELFTEST")
+            ? qEnvironmentVariable("VGR_SEARCH_PROBE") : QString());
     engine.rootContext()->setContextProperty(
         QStringLiteral("SelfTestOutputsLayout"),
         QVariant(qEnvironmentVariableIsSet("VGR_OUTS_TEST")

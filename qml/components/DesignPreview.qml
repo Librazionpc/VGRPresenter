@@ -175,7 +175,18 @@ Item {
     // passage: 15-40 ms, a dozen of them inside one pick was ~300 ms of the interface thread. A hidden or
     // zero-size surface only remembers that it is behind; it re-slices the moment it can be seen.
     property bool sliceBehind: false
+    // The reference label the WALK has reached (empty = the composed label stands). Only a surface that walks draws it.
+    readonly property string walkLabel: root.animateLineSteps ? String(LiveOutputService.walkReference ?? "") : ""
     function refreshSlice() {
+        if (!EngineBridge.perfProbe) {
+            root.refreshSliceInner()
+            return
+        }
+        const t0 = EngineBridge.perfNow()
+        root.refreshSliceInner()
+        EngineBridge.perfNote("DesignPreview.refreshSlice[" + root.readingStyleId + "]", EngineBridge.perfNow() - t0)
+    }
+    function refreshSliceInner() {
         if (!root.visible || root.width <= 0) {
             root.sliceBehind = true
             return
@@ -682,7 +693,11 @@ Item {
                     anchors.fill: parent
                     leftPadding: el.style.padding ?? 0; rightPadding: el.style.padding ?? 0
                     // (a block from the canvas may carry no text at all)
-                    readonly property string ownText: (el.modelData.text ?? "") !== "" ? el.modelData.text
+                    // The walking reference label ("Genesis 1:5") comes from the service, not from the composed block:
+                    // moving it must not recompose the slide (see LiveOutputService::walkReference).
+                    readonly property bool walksLabel: String(el.modelData.bind ?? "") === "ref" && root.walkLabel !== ""
+                    readonly property string ownText: fitText.walksLabel ? root.walkLabel
+                        : (el.modelData.text ?? "") !== "" ? el.modelData.text
                         : ((root.showBindPlaceholders && (el.modelData.bind ?? "") !== "") ? "{" + el.modelData.bind + "}" : "")
                     text: TextFormatService.applyList(ownText, el.meta.list ?? "")
                     color: el.meta.color ?? "#f2f4fa"

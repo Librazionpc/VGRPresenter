@@ -11,9 +11,16 @@ Item {
     property real hostScale: 1
     property int maxCells: 40000
 
-    // The screen-space area this board covers: counter-scaled back into the
-    // host's coordinates below, it fills this item exactly.
-    readonly property real screenScale: Math.max(0.01, hostScale)
+    // THE SCALE THIS BOARD IS REALLY DRAWN AT (user call: "when the app scales the inner grid
+    // doesn't look cool enough"). `hostScale` is only what a host knew to declare (DesignPreview
+    // passes its stage→item unit); the app applies ONE more uniform scale above every pane
+    // (Main.qml's uiScale), and nothing passed that in. A board drawn for 1x under a 1.4x
+    // transform lays a 13 px lattice at 18 px on screen and its device-pixel snap is off by the
+    // same factor — the grid reads coarse and uneven. Measured from the ancestors (mapToItem
+    // folds in every transform above, the same fold AppScale.inheritedScale uses), with the
+    // declared hostScale kept as a floor for a host whose board sits outside the scaled content.
+    readonly property real measuredScale: AppScale.inheritedScale(root)
+    readonly property real screenScale: Math.max(0.01, Math.max(hostScale, measuredScale))
 
     readonly property real dpr: Screen.devicePixelRatio > 0 ? Screen.devicePixelRatio : 1
 
@@ -93,6 +100,9 @@ Item {
     onShadeBChanged: _repaint()
     onTileSizeChanged: _repaint()
     onHostScaleChanged: _repaint()
+    // The app's uiScale (and any host resize) changes what the ancestors apply: re-lay the lattice
+    // at the new scale instead of letting the old one be stretched.
+    onMeasuredScaleChanged: _repaint()
     // Moved to a display with a different scaling factor: the lattice is snapped
     // to device pixels, so the whole board is repainted at the new ratio.
     onDprChanged: _repaint()

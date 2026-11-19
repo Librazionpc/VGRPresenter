@@ -441,12 +441,9 @@ Result<size_t> BibleEngine::IndexBible(const BibleVersion& bible,
         doc.author = bible.metadata.id;
         doc.language = bible.metadata.language;
         doc.source = bible.metadata.id;
-        doc.metadata["bible"] = bible.metadata.id;
-        doc.metadata["book"] = v.bookId;
-        doc.metadata["chapter"] = std::format("{}", v.chapter);
-        doc.metadata["verse"] = std::format("{}", v.verse);
-        doc.metadata["reference"] = ref.ToString();
-        doc.tags = {"scripture", Lower(bible.metadata.id)};
+        // No metadata map and no tags: nothing reads them for a verse (the hit is built from the document id, the title
+        // and the snippet), yet every one of them was kept in the index AND tokenized — five map nodes, a vector and
+        // ~8 extra postings per verse, about 30 MB for one Bible that sat in memory all day. The reference is the title.
         auto r = search.IndexDocument(doc);
         if (!r.ok()) return r.error();
         ++indexed;

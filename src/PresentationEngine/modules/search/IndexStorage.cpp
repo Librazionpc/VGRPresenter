@@ -55,6 +55,24 @@ std::string Lower(std::string_view s) {
         out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     return out;
 }
+
+using VocabList = std::vector<std::pair<std::string, uint32_t>>;
+// First entry of a sorted word list that is not before `term`.
+VocabList::const_iterator VocabLower(const VocabList& list, std::string_view term) {
+    return std::lower_bound(list.begin(), list.end(), term,
+                            [](const auto& entry, std::string_view t) { return entry.first < t; });
+}
+// A word's document count across every vocabulary source (see IndexStorage::SetVocabulary).
+template <class Vocabulary>
+size_t VocabDf(const Vocabulary& vocabulary, std::string_view term) {
+    size_t n = 0;
+    for (const auto& [source, list] : vocabulary) {
+        (void)source;
+        const auto it = VocabLower(list, term);
+        if (it != list.end() && it->first == term) n += it->second;
+    }
+    return n;
+}
 } // namespace
 
 Result<void> IndexStorage::Initialize() {
@@ -79,31 +97,44 @@ Result<void> IndexStorage::Shutdown() {
         oldDocuments = std::make_shared<decltype(documents_)>(std::move(documents_));
         index_.clear();        // (a moved-from container is valid but unspecified: make it empty)
         documents_.clear();
+        slots_.clear();
+        freeSlots_.clear();
         totalTokens_ = 0;
+        vocabulary_.clear();
         initialized_ = false;
     }
-    std::thread([oldIndex, oldDocuments]() mutable {
-        oldIndex.reset();
-        oldDocuments.reset();
-    }).detach();
+    // NOT FREED AT ALL: Shutdown is the app quitting, and the operating system returns the whole address space a
+    // moment later. The background thread this used to start kept freeing millions of small blocks for MINUTES while
+    // the process tried to exit — it held the heap, so the exit waited behind it at ~2 cores of CPU (the zombie that
+    // lingered after "close" and slowed the next start, worst on a loaded machine). The containers are parked in a
+    // holder that is never destroyed; a test that re-initialises the engine simply keeps the old index until it exits.
+    static auto *parked = new std::vector<std::shared_ptr<void>>;
+    parked->push_back(std::move(oldIndex));
+    parked->push_back(std::move(oldDocuments));
     return Ok();
 }
 
-void IndexStorage::ErasePostingsOf(const SearchDocument& doc) {
-    const std::string_view id = doc.id;
-    for (const auto& field : AllFields(doc)) {
+void IndexStorage::ErasePostingsOf(const DocRecord& rec) {
+    const uint32_t ord = rec.ordinal;
+    for (const auto& field : AllFields(rec.doc)) {
         for (const auto& tok : Tokenize(field)) {
             const auto it = index_.find(tok);
-            if (it != index_.end())
-                it->second.erase(id);
+            if (it == index_.end()) continue;
+            auto& list = it->second;
+            const auto at = std::lower_bound(list.begin(), list.end(), ord,
+                [](const PostingEntry& e, uint32_t o) { return e.ordinal < o; });
+            if (at != list.end() && at->ordinal == ord)
+                list.erase(at);
         }
     }
+    slots_[ord] = nullptr;
+    freeSlots_.push_back(ord);
 }
 
 size_t IndexStorage::UpsertLocked(const SearchDocument& doc) {
     // Remove old postings for this doc first (incremental re-index).
     if (const auto old = documents_.find(doc.id); old != documents_.end()) {
-        ErasePostingsOf(old->second.doc);
+        ErasePostingsOf(old->second);
         totalTokens_ -= old->second.tokenCount;
     }
     // Precompute the query-time views ONCE (was: every candidate lowercased its
@@ -123,12 +154,23 @@ size_t IndexStorage::UpsertLocked(const SearchDocument& doc) {
         : std::accumulate(freqs.begin(), freqs.end(), size_t{0},
                           [](size_t a, const auto& kv) { return a + kv.second; });
     totalTokens_ += rec.tokenCount;
-    // The postings view the KEY of this entry (an unordered_map node: it never moves).
+    // A slot: the most recently freed one, else a new one at the end (a source indexed in one go appends).
+    uint32_t ord;
+    if (!freeSlots_.empty()) { ord = freeSlots_.back(); freeSlots_.pop_back(); }
+    else { ord = static_cast<uint32_t>(slots_.size()); slots_.push_back(nullptr); }
+    rec.ordinal = ord;
+    // The slot points at the KEY of this entry (an unordered_map node: it never moves).
     auto entry = documents_.try_emplace(doc.id).first;
     entry->second = std::move(rec);
-    const std::string_view stableId = entry->first;
-    for (const auto& [term, freq] : freqs)
-        index_[term][stableId] = PostingData{freq, 0};
+    slots_[ord] = &entry->first;
+    for (const auto& [term, freq] : freqs) {
+        auto& list = index_[term];
+        const PostingEntry pe{ord, static_cast<uint32_t>(std::min<size_t>(freq, 0xFFFFFFFFu))};
+        if (list.empty() || list.back().ordinal < ord) { list.push_back(pe); continue; }
+        const auto at = std::lower_bound(list.begin(), list.end(), ord,
+            [](const PostingEntry& e, uint32_t o) { return e.ordinal < o; });
+        list.insert(at, pe);
+    }
     return freqs.size();
 }
 
@@ -143,7 +185,7 @@ Result<void> IndexStorage::Remove(std::string_view docId) {
     if (it == documents_.end())
         return Error::Make(Err::Search_DocumentNotFound, "IndexStorage",
                            "document '" + std::string(docId) + "' not found");
-    ErasePostingsOf(it->second.doc);   // BEFORE the document: the postings view its id
+    ErasePostingsOf(it->second);   // BEFORE the document: its slot points at the id
     totalTokens_ -= it->second.tokenCount;
     documents_.erase(it);
     return Ok();
@@ -156,7 +198,7 @@ std::vector<Posting> IndexStorage::Lookup(std::string_view term) const {
     if (it == index_.end()) return {};
     std::vector<Posting> out;
     out.reserve(it->second.size());
-    for (const auto& [id, p] : it->second) out.push_back(Posting{std::string(id), p.frequency, p.positions});
+    for (const auto& p : it->second) out.push_back(Posting{std::string(IdOfSlot(p.ordinal)), p.frequency, 0});
     return out;
 }
 
@@ -167,7 +209,7 @@ std::vector<std::string> IndexStorage::LookupDocIds(std::string_view term) const
     if (it == index_.end()) return {};
     std::vector<std::string> out;
     out.reserve(it->second.size());
-    for (const auto& [id, _] : it->second) out.emplace_back(id);
+    for (const auto& p : it->second) out.emplace_back(IdOfSlot(p.ordinal));
     return out;
 }
 
@@ -179,14 +221,15 @@ std::vector<IndexStorage::TermTf> IndexStorage::LookupTf(std::string_view term) 
     if (it == index_.end()) return {};
     std::vector<TermTf> out;
     out.reserve(it->second.size());
-    for (const auto& [id, p] : it->second) out.push_back({std::string(id), p.frequency});
+    for (const auto& p : it->second) out.push_back({std::string(IdOfSlot(p.ordinal)), p.frequency});
     return out;
 }
 
 size_t IndexStorage::DfOf(std::string_view term) const {
     std::shared_lock lock(mutex_);
-    auto it = index_.find(Lower(term));
-    return it == index_.end() ? 0 : it->second.size();
+    const std::string key = Lower(term);
+    auto it = index_.find(key);
+    return (it == index_.end() ? 0 : it->second.size()) + VocabDf(vocabulary_, key);
 }
 
 IndexStorage::CorpusStats IndexStorage::Corpus() const {
@@ -229,6 +272,20 @@ std::vector<std::string> IndexStorage::TermsWithPrefix(std::string_view prefix, 
         out.push_back(it->first);
         ++it;
     }
+    if (vocabulary_.empty())
+        return out;
+    // The word lists join the documents' terms: the first `limit` of the sorted union, each word once.
+    for (const auto& [source, list] : vocabulary_) {
+        (void)source;
+        size_t taken = 0;
+        for (auto v = VocabLower(list, key); v != list.end() && taken < limit; ++v, ++taken) {
+            if (v->first.rfind(key, 0) != 0) break;
+            out.push_back(v->first);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    if (out.size() > limit) out.resize(limit);
     return out;
 }
 
@@ -236,7 +293,37 @@ void IndexStorage::ForEachTermWithDf(
     const std::function<bool(const std::string&, size_t)>& visit) const {
     std::shared_lock lock(mutex_);
     for (const auto& [term, postings] : index_)
-        if (!visit(term, postings.size())) return;   // callback returns false: stop
+        if (!visit(term, postings.size() + VocabDf(vocabulary_, term))) return;   // callback returns false: stop
+    // Words only a word list knows (a word in both was visited above, with both counts).
+    for (const auto& [source, list] : vocabulary_) {
+        (void)source;
+        for (const auto& [word, df] : list) {
+            if (index_.find(word) != index_.end()) continue;
+            if (!visit(word, VocabDf(vocabulary_, word))) return;
+            (void)df;
+        }
+    }
+}
+
+void IndexStorage::SetVocabulary(std::string_view source, std::vector<std::pair<std::string, uint32_t>> terms) {
+    std::sort(terms.begin(), terms.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    terms.shrink_to_fit();
+    std::unique_lock lock(mutex_);
+    vocabulary_[std::string(source)] = std::move(terms);
+}
+
+void IndexStorage::ClearVocabulary(std::string_view source) {
+    std::unique_lock lock(mutex_);
+    if (auto it = vocabulary_.find(source); it != vocabulary_.end())
+        vocabulary_.erase(it);
+}
+
+size_t IndexStorage::VocabularyTermCount() const {
+    std::shared_lock lock(mutex_);
+    size_t n = 0;
+    for (const auto& [source, list] : vocabulary_) { (void)source; n += list.size(); }
+    return n;
 }
 
 const DocRecord* IndexStorage::FindRecordLocked(std::string_view docId) const {
@@ -268,7 +355,9 @@ size_t IndexStorage::DocumentCount() const {
 
 size_t IndexStorage::TermCount() const {
     std::shared_lock lock(mutex_);
-    return index_.size();
+    size_t n = index_.size();
+    for (const auto& [source, list] : vocabulary_) { (void)source; n += list.size(); }   // (a word in both counts twice: a health figure, not a key)
+    return n;
 }
 
 size_t IndexStorage::TotalPostings() const {
@@ -325,6 +414,8 @@ Result<size_t> IndexStorage::Restore(std::string_view json) {
     std::unique_lock lock(mutex_);
     index_.clear();
     documents_.clear();
+    slots_.clear();
+    freeSlots_.clear();
     totalTokens_ = 0;
     size_t terms = 0;
     for (const auto& v : *arr) {

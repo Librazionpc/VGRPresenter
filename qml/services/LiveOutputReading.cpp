@@ -441,14 +441,38 @@ void LiveOutputService::stageSlidesWithPreview(const QString &name, const QVaria
     lineOffset_ = 0;
     readingLinesCache_.clear();
     ResetReadingPick();
-    rebuildReadingRun(0);
-    readingFlowText_ = readingRunText_;
+    // A timed show slide steps by SLIDE, never by line: building the reading run means fitting its
+    // whole text at the reference style, which was 0.2-0.6 s per step. Nothing reads that table for a
+    // timed pick, so leave it empty (resetReadingRun() also clears the window, so the next ordinary
+    // pick rebuilds normally).
+    const bool timedFixedPick = !scrollMode_ && slides.size() == 1
+            && slides.first().toMap().value(QStringLiteral("nextTimer")).toDouble() > 0.0;
+    if (timedFixedPick) {
+        resetReadingRun();
+        readingFlowText_.clear();
+    } else {
+        rebuildReadingRun(0);
+        readingFlowText_ = readingRunText_;
+    }
     AnnounceReadingScroll();
     QVariantList pick = slides;
     if (!pick.isEmpty()) {
         QVariantMap first = pick.first().toMap();
         setSlideReadingFlow(first, scrollMode_, readingFlowText_, 0.0);
         pick[0] = first;
+    }
+    if (live_ && timedFixedPick) {
+        // A TIMED SHOW STEPS BY SLIDE, AND A STEP MUST NOT COMMIT ON THE INTERFACE THREAD. Hand the slide
+        // to the engine's own queue (it replaces the content off-thread) and adopt ITS next timer, so the
+        // wall's clock keeps it at the slide's own pace with no freeze on the click.
+        (void)updateReadingPick(name, pick.first().toMap());
+        adoptShowNextTimers(pick, name);
+        stagedName_.clear();
+        stagedSlidesRaw_.clear();
+        stagedSlide_ = QVariantMap{};
+        BumpStaged();
+        announceReadingPage();
+        return;
     }
     if (live_) {
         goLiveWithSlides(name, pick);   // commit the pick to the engine now
@@ -482,6 +506,10 @@ void LiveOutputService::setScrollMode(bool on)
     if (on == scrollMode_)
         return;
     scrollMode_ = on;
+    if (!walkReference_.isEmpty()) {   // the label a walk had reached belongs to that walk, not to the next mode
+        walkReference_.clear();
+        emit walkReferenceChanged();
+    }
     if (!on) {
         pendingReadingSteps_ = 0;
         bps::live::LiveOutputController::Instance().SetFlowChar(0.0f);
@@ -634,44 +662,48 @@ void LiveOutputService::setWalkReference(const QString &reference)
 {
     if (reference.isEmpty() || reference == walkReference_ || !scrollMode_ || !lineSourceTextOnly_)
         return;
+    // NOTHING IS RECOMPOSED FOR A LABEL. The surfaces (tiles, the pane preview, the output windows) draw the label
+    // block's text from `walkReference` (DesignPreview.walkLabel), so changing it costs a few text items — not the
+    // 70-280 ms of every tile recomposing its slide that republishing the staged copy (BumpStaged) used to cost, ~30
+    // times a minute. What still has to carry the new label: the engine's own outputs (HDMI / NDI / recording frames
+    // are drawn by the engine from ITS copy of the slide) and the raw copies that any LATER recomposition starts from.
     if (live_) {
         const QVariantList current = onAirSlidesRaw();
         if (current.isEmpty())
             return;
         QVariantMap shown = current.first().toMap();
         walkReference_ = reference;
-        if (!setReferenceLabel(shown, reference))
+        if (!setReferenceLabel(shown, reference)) {
+            emit walkReferenceChanged();
             return;
+        }
         attachReadingFlow(shown, readingScroll_);
         updateReadingPick(onAirTitle_, shown);   // the engine keeps the pick and moves only the label
-        // The surfaces compose from this copy until the engine's snapshot comes back (within a poll tick): move it now,
-        // and let them know, so a tile does not keep the old label.
         setReferenceLabel(onAirSlideRaw_, reference);
-        // ...and the staged copy of the SAME pick, when there is one: the surfaces draw the staged slide in preference to
-        // the on-air one, so a stale label there would be what they show.
         if (!stagedSlidesRaw_.isEmpty()) {
             QVariantMap staged = stagedSlidesRaw_.first().toMap();
-            if (setReferenceLabel(staged, reference)) {
-                stagedSlidesRaw_ = QVariantList{staged};
-                stagedSlide_ = readingStagedPreview(staged);
-            }
+            if (setReferenceLabel(staged, reference))
+                stagedSlidesRaw_ = QVariantList{staged};   // quietly: no staged revision, no recomposition
         }
-        BumpStaged();
     } else if (!stagedSlidesRaw_.isEmpty()) {
         QVariantMap shown = stagedSlidesRaw_.first().toMap();
         walkReference_ = reference;
-        if (!setReferenceLabel(shown, reference))
-            return;
-        stagedSlidesRaw_ = QVariantList{shown};
-        stagedSlide_ = readingStagedPreview(shown);
-        BumpStaged();
+        if (setReferenceLabel(shown, reference))
+            stagedSlidesRaw_ = QVariantList{shown};
+    } else {
+        return;
     }
+    emit walkReferenceChanged();
 }
 
 void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &slides, int index)
 {
     VGR_CALL_TRACE("LiveOutputService.stageSlideSet");
     pendingReadingSteps_ = 0;
+    if (!walkReference_.isEmpty()) {   // a new pick: its own label again
+        walkReference_.clear();
+        emit walkReferenceChanged();
+    }
     if (slides.isEmpty()) {
         lineSetRaw_.clear();
         ClearReadingTextSource();
@@ -682,6 +714,16 @@ void LiveOutputService::stageSlideSet(const QString &name, const QVariantList &s
         readingLinesCache_.clear();
         resetReadingRun();
         stageSlides(name, slides);
+        return;
+    }
+    // A TIMED SHOW SLIDE IS A FIXED PICTURE: its slides advance on their NEXT TIMER, never by gliding
+    // lines, so the reading-run line table (three style fits of the slide's whole text) is pure cost —
+    // measured at 0.2-0.6 s of interface-thread silence on every step of a show like '25-0308'. The
+    // plain staging path publishes the same pick without building the table.
+    const bool timedFixedPick = !scrollMode_ && slides.size() == 1
+            && slides.first().toMap().value(QStringLiteral("nextTimer")).toDouble() > 0.0;
+    if (timedFixedPick) {
+        stageSlidesWithPreview(name, slides, {});
         return;
     }
     ++readingStageSerial_;
@@ -790,7 +832,10 @@ void LiveOutputService::activatePendingTextSource()
     readingTextSourceInitialPositionPending_ = true;
     lineSourceTextOnly_ = true;
     readingBudgetFitActive_ = true;
-    walkReference_.clear();   // a new pick: its own label again
+    if (!walkReference_.isEmpty()) {   // a new pick: its own label again
+        walkReference_.clear();
+        emit walkReferenceChanged();
+    }
     lineSlideIndex_ = 0;
     pendingTextSourceName_.clear();
     pendingTextSourcePages_.clear();
@@ -1888,6 +1933,11 @@ void LiveOutputService::CountReadingRunPageLines()
 
 void LiveOutputService::LogReadingRunShape(int first, int last)
 {
+    // A pure diagnostic, and an expensive one: it fits every page of the run and re-lays the whole text out just to print a
+    // line. Run on every Scroll -> Slide flip it froze the interface thread for 2-3 s (found by the soak), so it is opt-in.
+    static const bool wanted = qEnvironmentVariableIntValue("VGR_READRUNSHAPE") != 0;
+    if (!wanted)
+        return;
     const auto *model = OutputListModel::instance();
     const QString refStyle = model ? model->activeStyleId() : QString();
     int pageSum = 0;

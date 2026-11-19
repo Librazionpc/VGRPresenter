@@ -58,7 +58,7 @@ run_case() {
     stop_app
     rm -f "$BUILD"/tw_rest30_*.png "$BUILD"/tw_afterpick_*.png
     local start; start=$(grep -a -c . "$BUILD/logs/engine.log" 2>/dev/null || echo 0)
-    ( cd "$BUILD" && VGR_SELFTEST=1 VGR_TABLEWALK_TEST=1 VGR_TABLEWALK_QUERY="live:$query" \
+    ( cd "$BUILD" && VGR_SELFTEST=1 VGR_TABLEWALK_TEST=1 VGR_TABLEWALK_QUERY="live:$query~pickrow2" \
         "./appVGRPresenterUI.exe" > "$OUT/${name}_stdout.log" 2>&1 ) &
     local app=$!
     local got=0
@@ -95,14 +95,9 @@ run_case() {
     echo "   pick cost (ms) in this case:"
     tail -n +"$start" "$BUILD/logs/engine.log" | grep -a -F "[PickCost] " | sed "s/.*PickCost] /      /"
     pickReset=$(tail -n +"$start" "$BUILD/logs/engine.log" | sed -n '/TWGRAB.*phase=pick3$/,/TWGRAB.*phase=pick3done/p' | grep -a -c "resting at 0.00")
-    if [ "$name" = bible ]; then
-        # The Bible case double-clicks ROW 0 (verse 1: the passage start), so "resting at 0.00" is the right answer
-        # there — counting it made this check report a reset that was the correct position.
-        echo "   after the double-click: engine told \"resting at 0.00\" $pickReset time(s) (the pick IS the start: expected)"
-        pickReset=0
-    else
-        echo "   after the double-click: engine told \"resting at 0.00\" $pickReset time(s) (want 0)"
-    fi
+    # The double-click lands on ROW 2 (~pickrow2: the third paragraph / verse 3), never the passage start, so any
+    # "resting at 0.00" after it is the bug this counts. (Row 0 made that answer correct and the check meaningless.)
+    echo "   after the double-click on row 2: engine told \"resting at 0.00\" $pickReset time(s) (want 0)"
     TOTAL_RESET=$((TOTAL_RESET + pickReset))
     local differs
     differs=$(tail -n +"$start" "$BUILD/logs/engine.log" | grep -a -c "ReadingBreaks.*DIFFERS")

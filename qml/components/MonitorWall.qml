@@ -761,7 +761,9 @@ Item {
                 ToolButton {
                     width: parent.btnW; height: root.actionButtonHeight
                     icon: "timerFill"
-                    lit: LiveOutputService.autoAdvancing
+                    // Lit for a show that CARRIES a timer, live or not — the centre page reports its own
+                    // total, so the button answers the show on screen before GO LIVE as well.
+                    lit: LiveOutputService.autoAdvancing || LiveOutputService.showTimerTotalSeconds > 0
                     enabled2: root.live
                     objectName: "selfTestWallAutoAdvance"
                     onPicked: LiveOutputService.toggleAutoAdvance()
@@ -771,6 +773,32 @@ Item {
                                : (LiveOutputService.autoAdvancing
                                   ? qsTr("This show advances by itself on each slide's NEXT TIMER — press to stop")
                                   : qsTr("Let this show advance by itself, on the NEXT TIMER each slide carries"))
+                }
+            }
+
+            // ---- the sliding timer bar: the on-air slide's own next timer, filling as its time runs out ----
+            Item {
+                id: wallTimerBar
+                objectName: "selfTestWallTimerBar"
+                width: parent.width
+                height: visible ? 16 : 0
+                // A show that carries a timer shows the bar on screen OR on air; no timer, no bar.
+                visible: LiveOutputService.showTimerTotalSeconds > 0 || LiveOutputService.timerDurationSeconds > 0
+
+                Rectangle {
+                    id: wallTimerTrack
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 6; radius: 3
+                    color: Theme.inset; border.color: Theme.chip; border.width: 1
+                }
+                Rectangle {
+                    anchors.left: wallTimerTrack.left
+                    anchors.verticalCenter: wallTimerTrack.verticalCenter
+                    height: wallTimerTrack.height - 2; radius: 2
+                    color: LiveOutputService.autoAdvancing ? Theme.accent : Theme.navLabelMuted
+                    width: Math.max(0, Math.round((wallTimerTrack.width - 2) * LiveOutputService.timerProgress))
+                    Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.Linear } }
                 }
             }
 

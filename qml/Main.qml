@@ -10,12 +10,17 @@ import "screens/edit"
 ApplicationWindow {
     id: window
     // ---- the desktop this app opens on and scales to -------------------------
+    // THE WINDOW SIZES ITSELF FROM Screen's LOGICAL SIZE, NEVER THROUGH pixelRatio (QML binding
+    // loop, user-reported: "Binding loop detected for property 'pixelRatio'"). It used to divide
+    // the engine's PHYSICAL widthPx by Screen.devicePixelRatio — and that ratio belongs to the
+    // display the WINDOW is currently on, which this window's own geometry can change. Qt saw the
+    // round trip as a cycle, and desktopWidth/uiScale/headerHeight all re-entered with it. Screen's
+    // logical width already excludes the ratio, so the loop simply does not exist any more; the
+    // ratio itself is still published below for the diagnostics and the checkerboard's lattice.
     readonly property real pixelRatio: Screen.devicePixelRatio > 0 ? Screen.devicePixelRatio : 1
     readonly property var engineDisplay: EngineBridge.primaryDisplay
-    readonly property real realDisplayWidth: (engineDisplay && engineDisplay.widthPx > 0)
-                                             ? engineDisplay.widthPx / pixelRatio : 0
-    readonly property real realDisplayHeight: (engineDisplay && engineDisplay.heightPx > 0)
-                                              ? engineDisplay.heightPx / pixelRatio : 0
+    readonly property real realDisplayWidth: Screen.width > 0 ? Screen.width : window.designWidth
+    readonly property real realDisplayHeight: Screen.height > 0 ? Screen.height : window.designHeight
     readonly property real desktopWidth: realDisplayWidth > 0 ? realDisplayWidth
                                           : (Screen.width > 0 ? Screen.width : 1440)
     readonly property real desktopHeight: realDisplayHeight > 0 ? realDisplayHeight
@@ -1149,6 +1154,154 @@ ApplicationWindow {
         }
     }
 
+    // ---- SHOW TIMER / LOAD self-test (VGR_SHOWTIMER_TEST=1) ------------------
+    // 1. opens the named show through the SAME path a list click takes (centerItem)
+    // 2. writes a 2 s NEXT TIMER to every slide and re-reads the show
+    // 3. stageSlideSet + goLive (the staged-pick + GO LIVE path), then presses the wall timer
+    // 4. samples onAirIndex and grabs the centre pane and the wall before/after each advance
+    // Last line: [SELFTEST-SHOWTIMER] result=PASS|FAIL advances=N loadMs=… takeMs=…
+    readonly property string stShowName: (typeof SelfTestShowTimerName !== "undefined" && String(SelfTestShowTimerName) !== "")
+                                         ? String(SelfTestShowTimerName) : "25-0308"
+    property var stShow: null
+    property int stStep: 0
+    property int stLoadMs: -1
+    property int stTakeMs: -1
+    property int stAdvances: 0
+    property int stLastIndex: -1
+    property string stLastTitle: ""
+    property int stFirstAdvanceMs: -1
+    property real stStart: 0
+    property int stTicks: 0
+    property bool stAnyTimer: false
+
+    Timer {
+        id: selfTestShowTimerStage
+        running: typeof SelfTestShowTimer !== "undefined" && SelfTestShowTimer
+        interval: 3200
+        repeat: false
+        onTriggered: {
+            const shows = ShowService.libraryShows
+            let found = null
+            for (let i = 0; i < shows.length; ++i) {
+                const s = shows[i]
+                if (String(s.name ?? "") === window.stShowName
+                        || String(s.path ?? "").indexOf(window.stShowName) >= 0) { found = s; break }
+            }
+            if (!found) {
+                console.log("[SELFTEST-SHOWTIMER] FAIL noshow name='" + window.stShowName + "'")
+                SelfTest.quit(); return
+            }
+            window.stShow = found
+            window.stStart = Date.now()
+            console.log("[SELFTEST-SHOWTIMER] opening '" + found.name + "' path=" + found.path)
+            showScreen.centerItem = { type: "show", ref: found.path, name: found.name,
+                                      category: found.category ?? "", layout: "" }
+            selfTestShowTimerPoll.restart()
+        }
+    }
+    Timer {
+        id: selfTestShowTimerPoll
+        interval: 120
+        repeat: true
+        onTriggered: {
+            const sc = SelfTest.findItem("selfTestShowCenter")
+            if (!sc)
+                return
+            if (window.stStep === 0) {
+                if (sc.show === null || !sc.slides || sc.slides.length === 0)
+                    return
+                window.stLoadMs = Date.now() - window.stStart
+                console.log("[SELFTEST-SHOWTIMER] loaded slides=" + sc.slides.length + " loadMs=" + window.stLoadMs)
+
+                SelfTest.grab("selfTestShowCenter", "showtimer_center_loaded.png")
+                ShowService.setNextTimer(String(window.stShow.path), 2)
+                window.stStep = 1
+                selfTestShowTimerWait.restart()
+                return
+            }
+            if (window.stStep === 2) {
+                if (sc.show === null || !sc.slides || sc.slides.length === 0)
+                    return
+                window.stAnyTimer = sc.slides.some((s) => (s.nextTimer ?? 0) > 0)
+                console.log("[SELFTEST-SHOWTIMER] reloaded slides=" + sc.slides.length + " anyTimer=" + window.stAnyTimer)
+                const t0 = Date.now()
+                LiveOutputService.stageSlideSet(String(window.stShow.name), [sc.slides[0]], 0)
+                LiveOutputService.goLive()
+                window.stTakeMs = Date.now() - t0
+                console.log("[SELFTEST-SHOWTIMER] staged+goLive takeMs=" + window.stTakeMs + " live=" + LiveOutputService.live)
+                window.stStep = 3
+                return
+            }
+            if (window.stStep === 3) {
+                if (!LiveOutputService.live)
+                    return
+                window.stLastIndex = LiveOutputService.onAirIndex
+                window.stLastTitle = String(LiveOutputService.onAirTitle)
+                window.stStart = Date.now()
+                window.stTicks = 0
+                window.stAdvances = 0
+                if (!LiveOutputService.autoAdvancing)
+                    LiveOutputService.toggleAutoAdvance()
+                console.log("[SELFTEST-SHOWTIMER] armed advancing=" + LiveOutputService.autoAdvancing
+                            + " index=" + window.stLastIndex + " total=" + LiveOutputService.onAirTotal)
+                SelfTest.grab("selfTestShowCenter", "showtimer_center_live.png")
+                SelfTest.grab("selfTestMonitorWall", "showtimer_wall_0.png")
+                window.stStep = 4
+                selfTestShowTimerPoll.stop()
+                selfTestShowTimerSample.restart()
+                return
+            }
+        }
+    }
+    Timer {
+        id: selfTestShowTimerWait
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            // re-open the show so the centre reads the 2 s timers that were just written
+            showScreen.centerItem = null
+            showScreen.centerItem = { type: "show", ref: window.stShow.path, name: window.stShow.name,
+                                      category: window.stShow.category ?? "", layout: "" }
+            window.stStep = 2
+        }
+    }
+    Timer {
+        id: selfTestShowTimerSample
+        interval: 250
+        repeat: true
+        onTriggered: {
+            const idx = LiveOutputService.onAirIndex
+            const title = String(LiveOutputService.onAirTitle)
+            window.stTicks += 1
+            if (window.stTicks === 8)
+                SelfTest.grab("selfTestShowCenter", "showtimer_center_filled.png")
+            // A single on-air pick steps by REPLACING the set with the next slide, so onAirIndex stays
+            // 0..0; the change is the slide TITLE. Either signal counts as the show advancing.
+            if (title !== window.stLastTitle || idx !== window.stLastIndex) {
+                window.stAdvances += 1
+                if (window.stFirstAdvanceMs < 0)
+                    window.stFirstAdvanceMs = Date.now() - window.stStart
+                console.log("[SELFTEST-SHOWTIMER] advance " + window.stAdvances + " index="
+                            + window.stLastIndex + "->" + idx + " title='" + window.stLastTitle
+                            + "'->'" + title + "' at " + (Date.now() - window.stStart) + " ms")
+                window.stLastIndex = idx
+                window.stLastTitle = title
+                SelfTest.grab("selfTestMonitorWall", "showtimer_wall_" + window.stAdvances + ".png")
+            }
+            if (window.stTicks >= 32) {   // 8 s
+                selfTestShowTimerSample.stop()
+                const pass = window.stAdvances >= 1
+                console.log("[SELFTEST-SHOWTIMER] result=" + (pass ? "PASS" : "FAIL")
+                            + " advances=" + window.stAdvances
+                            + " firstAdvanceMs=" + window.stFirstAdvanceMs
+                            + " loadMs=" + window.stLoadMs
+                            + " takeMs=" + window.stTakeMs
+                            + " anyTimer=" + window.stAnyTimer)
+                SelfTest.quit()
+            }
+        }
+    }
+
     // ---- REAL-PASSAGE reading walk (VGR_TABLEWALK_TEST=1 only) ---------------
     // "live:" puts the pick on air; "bible:" selects a Scripture result instead of an
     // earlier Table match. The prefixes can be combined for the real-output Bible walk.
@@ -1170,7 +1323,29 @@ ApplicationWindow {
     // ~200 ms for ~1.4 s (tw_fit<N>_<tile>.png): the passage must never flash small or blank-then-jump — it is at its real
     // size from the first frame it appears.
     readonly property bool twFit: window.twQueryFull.endsWith("~fit")
-    readonly property string twQueryRaw: window.twBack ? window.twQueryFull.slice(0, -5)
+    // "~soak<minutes>" (use live:): the LONG-RUN LOAD TEST (tools/selftest/run_soak_test.sh). After the first pick it keeps
+    // working like a busy Sunday for <minutes> — a ‹ › press every 700 ms, a new pick every ~14 s, Slide/Scroll flips,
+    // blackout on/off, clear and go-live again — while a 25 ms timer measures how late the interface thread runs it.
+    // Logs `[SELFTEST-SOAK] t=.. presses=.. picks=.. lagAvg=.. lagMax=.. lag100=..` every 15 s and quits at the end.
+    // "~soakmix<minutes>" is the MIXED soak: every pick rotates through the three ways a person really picks — a row in the
+    // Table pane, a Scripture reference found through the SEARCH dialog (type, wait, click the result), and a SHOW found the
+    // same way and stepped slide by slide — and the interface thread's memory is collected (gc) every five minutes so the
+    // report can tell a leak from garbage waiting to be collected.
+    // "~soakhold<minutes>": the picture is picked and then LEFT ALONE (no press, no pick) — a lower third that sits on the
+    // screen. tools/selftest/run_ndi_still_test.sh uses it to prove a still picture still reaches a real NDI receiver.
+    readonly property var twSoakMatch: /~soak(mix|hold)?([0-9]*)$/.exec(window.twQueryFull)
+    readonly property bool twSoak: window.twSoakMatch !== null
+    readonly property bool twSoakMix: window.twSoak && window.twSoakMatch[1] === "mix"
+    readonly property bool twSoakHold: window.twSoak && window.twSoakMatch[1] === "hold"
+    readonly property int twSoakMinutes: window.twSoak ? (parseInt(window.twSoakMatch[2]) || 5) : 0
+    // "~pickrow<N>" (use live:): the double-click pick lands on row N instead of row 0 (the passage start). With row 0 a
+    // report of "the outputs were told the passage start" is the right answer, so run_scroll_frames.sh uses a row further
+    // in to prove a pick is not reset to the start.
+    readonly property var twPickRowMatch: /~pickrow([0-9]+)$/.exec(window.twQueryFull)
+    readonly property int twPickRow: window.twPickRowMatch !== null ? parseInt(window.twPickRowMatch[1]) : 0
+    readonly property string twQueryRaw: window.twPickRowMatch !== null ? window.twQueryFull.slice(0, window.twQueryFull.length - window.twPickRowMatch[0].length)
+                                        : window.twSoak ? window.twQueryFull.slice(0, window.twQueryFull.length - window.twSoakMatch[0].length)
+                                        : window.twBack ? window.twQueryFull.slice(0, -5)
                                         : window.twClick ? window.twQueryFull.slice(0, -6)
                                         : window.twSlideClick ? window.twQueryFull.slice(0, -11)
                                         : window.twPreview ? window.twQueryFull.slice(0, -8)
@@ -1432,7 +1607,7 @@ ApplicationWindow {
                 const pane = window.twPane()
                 if (pane) {
                     EngineBridge.log("info", "TWGRAB", "phase=pick3")
-                    if (!pane.selfTestDoubleClickRow(0))   // a row's real click + double-click
+                    if (!pane.selfTestDoubleClickRow(window.twPickRow))   // a row's real click + double-click
                         pane.stageSubpart(1, 0)
                     twAfterPick.restart()
                     return
@@ -1541,12 +1716,156 @@ ApplicationWindow {
             SelfTest.quit()
         }
     }
+    // ---- the soak scenario (see twSoak) ----
+    property double soakStart: 0
+    property double soakLastTick: 0
+    property int soakPresses: 0
+    property int soakPicks: 0
+    property int soakTicks: 0
+    property int soakLagCount: 0
+    property real soakLagSum: 0
+    property real soakLagMax: 0
+    property int soakLag100: 0
+    property int soakModeFlips: 0
+    property var soakPane: null   // found once: SelfTest.findItem walks the whole item tree, which is itself a cost
+    property int soakBlackouts: 0
+    Timer {
+        id: twSoakLag
+        interval: 25
+        repeat: true
+        onTriggered: {
+            const now = Date.now()
+            const lag = Math.max(0, now - window.soakLastTick - 25)
+            window.soakLastTick = now
+            window.soakLagCount++
+            window.soakLagSum += lag
+            if (lag > window.soakLagMax) window.soakLagMax = lag
+            if (lag >= 100) window.soakLag100++
+        }
+    }
+    // The way a person finds something: open the search, type, wait for the results, click the right one.
+    property string soakSearchKind: ""
+    function soakSearch(query, kind) {
+        window.soakSearchKind = kind
+        quickSearch.openSearch()
+        quickSearch.query = query
+        quickSearch.refresh()
+        twSoakSearchPick.restart()
+    }
+    Timer {
+        id: twSoakSearchPick
+        interval: 1800
+        onTriggered: {
+            const r = quickSearch.results.find((result) => result.kind === window.soakSearchKind)
+            if (!r) {
+                quickSearch.close()
+                console.log("[SELFTEST-SOAK] search found no " + window.soakSearchKind + " result")
+                return
+            }
+            quickSearch.choose(r)
+            twSoakSearchTake.restart()
+        }
+    }
+    Timer {
+        id: twSoakSearchTake
+        interval: 2500
+        onTriggered: {
+            if (window.soakSearchKind === "show") {
+                // A show is stepped slide by slide: stage its first slide, put it on air, walk with the wall's ›.
+                const showCenter = SelfTest.findItem("selfTestShowCenter")
+                window.setReadingScrollMode(false, "soak")
+                if (showCenter)
+                    showCenter.stageFirstSlide()
+                LiveOutputService.goLive()
+            } else {
+                const bible = SelfTest.findItem("selfTestScripturePane")
+                window.setReadingScrollMode(true, "soak")
+                if (bible)
+                    bible.playPicked()
+            }
+        }
+    }
+    Timer {
+        id: twSoakRun
+        interval: 700
+        repeat: true
+        onTriggered: {
+            const elapsed = Date.now() - window.soakStart
+            const t = ++window.soakTicks
+            if (elapsed >= window.twSoakMinutes * 60000) {
+                console.log("[SELFTEST-SOAK] done minutes=" + window.twSoakMinutes + " presses=" + window.soakPresses
+                            + " picks=" + window.soakPicks)
+                twSoakRun.stop(); twSoakLag.stop()
+                SelfTest.quit()
+                return
+            }
+            if (window.twSoakHold) {
+                if (t % 21 === 0)
+                    console.log("[SELFTEST-SOAK] hold t=" + Math.round(elapsed / 1000) + " live=" + LiveOutputService.live)
+                return
+            }
+            if (!window.soakPane)
+                window.soakPane = window.twPane()
+            const pane = window.soakPane
+            // A new pick roughly every 14 s, on a different row each time (the mixed soak rotates the way it picks).
+            const mixStage = window.twSoakMix ? window.soakPicks % 3 : 0
+            if (t % 20 === 0 && window.twSoakMix && mixStage !== 0) {
+                window.soakPicks++
+                if (mixStage === 1)
+                    window.soakSearch("John 3:16", "bible")
+                else
+                    window.soakSearch("teach me to wait", "show")
+            } else if (t % 20 === 0 && pane) {
+                if (window.twSoakMix)
+                    window.setReadingScrollMode(true, "soak")
+                pane.selfTestDoubleClickRow(1 + (window.soakPicks % 7))
+                window.soakPicks++
+            } else if (LiveOutputService.scrollMode) {
+                if (LiveOutputService.lineStep(1))
+                    window.soakPresses++
+                else if (pane) {                      // the walk ran out of text: pick again
+                    pane.selfTestDoubleClickRow(1 + (window.soakPicks % 7))
+                    window.soakPicks++
+                }
+            } else if (window.twSoakMix) {            // Slide mode (a show on air): the wall's ›
+                if (LiveOutputService.next())
+                    window.soakPresses++
+            }
+            if (window.twSoakMix && t % 430 === 0) {  // ~5 minutes: collect, then log what is left
+                gc()
+                console.log("[SELFTEST-SOAK] gc at t=" + Math.round(elapsed / 1000))
+            }
+            // Slide <-> Scroll every ~50 s (back after 5 beats), blackout on/off every ~70 s, clear + go live every ~3 min.
+            if (t % 70 === 0) { window.setReadingScrollMode(false, "soak"); window.soakModeFlips++ }
+            if (t % 70 === 5) window.setReadingScrollMode(true, "soak")
+            if (t % 100 === 40) { SelfTest.clickItem("selfTestWallBlackout"); window.soakBlackouts++ }
+            if (t % 100 === 44) SelfTest.clickItem("selfTestWallBlackout")
+            if (t % 260 === 130) { LiveOutputService.stop() }
+            if (t % 260 === 135) { LiveOutputService.goLive() }
+            if (t % 21 === 0) {    // every ~15 s
+                console.log("[SELFTEST-SOAK] t=" + Math.round(elapsed / 1000) + " presses=" + window.soakPresses
+                            + " picks=" + window.soakPicks + " flips=" + window.soakModeFlips
+                            + " blackouts=" + window.soakBlackouts + " live=" + LiveOutputService.live
+                            + " scroll=" + LiveOutputService.scrollMode
+                            + " lagAvg=" + (window.soakLagCount > 0 ? (window.soakLagSum / window.soakLagCount).toFixed(1) : "0")
+                            + " lagMax=" + Math.round(window.soakLagMax) + " lag100=" + window.soakLag100)
+                window.soakLagCount = 0; window.soakLagSum = 0; window.soakLagMax = 0; window.soakLag100 = 0
+            }
+        }
+    }
     Timer {
         id: twAfterPick
         interval: 9000
         onTriggered: {
             if (window.twClick || window.twSlideClick) {
                 twClickCheck.restart()
+                return
+            }
+            if (window.twSoak) {
+                window.soakStart = Date.now()
+                window.soakLastTick = Date.now()
+                twSoakLag.restart()
+                twSoakRun.restart()
                 return
             }
             if (window.twFit) {
@@ -1779,6 +2098,15 @@ ApplicationWindow {
                  pchar: (base >= 0 ? base + at : -1), span: span,
                  words: flow.slice(at, at + 30) }
     }
+    // What a walking surface DRAWS for the reference label: the service's walk label, not the text the slide was composed
+    // with (a label change recomposes nothing; DesignPreview.walkLabel). The tile check compares the drawn picture.
+    function twWithWalkLabel(slide) {
+        const label = String(LiveOutputService.walkReference ?? "")
+        if (label === "" || !slide || !slide.blocks || !LiveOutputService.scrollMode)
+            return slide
+        const blocks = slide.blocks.map((b) => String(b.bind ?? "") === "ref" ? Object.assign({}, b, { text: label }) : b)
+        return Object.assign({}, slide, { blocks: blocks })
+    }
     function twTileLines(press) {
         const wall = SelfTest.findItem("selfTestMonitorWall")
         if (!wall)
@@ -1801,7 +2129,7 @@ ApplicationWindow {
             const freshText = window.lsCompText(fresh)
             const view = window.twStyleView(String(tile.styleId))
             out.push("[SELFTEST-TABLEWALK] press=" + press + " tile=" + i
-                     + " stale=" + (window.lsCompSig(tile.onAirSlide) !== window.lsCompSig(fresh))
+                     + " stale=" + (window.lsCompSig(window.twWithWalkLabel(tile.onAirSlide)) !== window.lsCompSig(window.twWithWalkLabel(fresh)))
                      + " flow=" + (tileText !== "" && flow.indexOf(tileText) >= 0)
                      + " rawRef=" + JSON.stringify(String((raw && raw.ref) ?? "")) + " stagedEmpty=" + !(stagedRaw && Object.keys(stagedRaw).length > 0)
                      + " freshBlocks=" + JSON.stringify(((fresh || {}).blocks || []).map((b) => (b.bind ?? "") + ":" + String(b.text ?? "").slice(0, 14)))
@@ -3437,6 +3765,45 @@ ApplicationWindow {
     property int exactPhase: 0    // 0 = loose "frien", 1 = locked "frien",
                                   // 2 = locked "friend", 3 = locked "my wife"
     property int exactTries: 0
+    // ---- VGR_SEARCH_PROBE="<query>": the ranked sermon rows for one query, loose then locked (see main.cpp) ----------
+    property int probeStep: 0
+    function probeDump(tag) {
+        const rows = quickSearch.results.filter((r) => r.kind === "table")
+        console.log("[SELFTEST-SEARCHPROBE] " + tag + " exact=" + (quickSearch.exact === true) + " tableRows=" + rows.length
+                    + " all=" + quickSearch.results.length)
+        for (let i = 0; i < rows.length && i < 8; ++i) {
+            const r = rows[i]
+            const text = (typeof TheTableService !== "undefined" && r.bookId !== undefined && Number(r.verse) > 0)
+                ? TheTableService.paragraphPair(r.bookId, r.chapter, r.verse, r.spanned === true ? 2 : 1) : (r.text || "")
+            console.log("[SELFTEST-SEARCHPROBE]   #" + (i + 1) + " " + r.title + " score=" + r.score + " spanned=" + r.spanned
+                        + " | " + String(text).replace(/\s+/g, " ").substring(0, 260))
+        }
+    }
+    Timer {
+        id: selfTestSearchProbe
+        running: typeof SelfTestSearchProbe !== "undefined" && SelfTestSearchProbe !== ""
+        interval: 40000   // boot and the sermon indexing
+        repeat: true
+        onTriggered: {
+            if (window.probeStep === 0) {
+                quickSearch.openSearch()
+                if (quickSearch.exact) quickSearch.toggleExact()
+                quickSearch.query = SelfTestSearchProbe
+                quickSearch.refresh()
+                window.probeStep = 1
+                selfTestSearchProbe.interval = 6000
+            } else if (window.probeStep === 1) {
+                window.probeDump("loose")
+                quickSearch.toggleExact()
+                quickSearch.refresh()
+                window.probeStep = 2
+            } else if (window.probeStep === 2) {
+                window.probeDump("locked")
+                selfTestSearchProbe.stop()
+                SelfTest.quit()
+            }
+        }
+    }
     Timer {
         id: selfTestExactOpen
         running: typeof SelfTestExact !== "undefined" && SelfTestExact

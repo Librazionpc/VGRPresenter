@@ -68,6 +68,28 @@ Window {
     }
     readonly property bool hasDisplay: root.displayInfo.width !== undefined
 
+    // ONE PICTURE PER DISPLAY AREA. A projector Windows MIRRORS shows up as two screens with one geometry, so two
+    // outputs on two differently named screens opened two windows over each other on the one monitor (the lower third
+    // drawn on top of Main Output). The earlier output keeps the area; this one stays closed and says why.
+    readonly property int mirroredByRow: {
+        void root.outputScreenName
+        void root.outputEnabled
+        void OutputListModel.screensRevision
+        return root.outputEnabled && root.hasDisplay ? OutputListModel.mirroredBy(root.outputIndex) : -1
+    }
+    property int mirrorNoticeFor: -2
+    onMirroredByRowChanged: {
+        if (root.mirroredByRow < 0 || root.mirrorNoticeFor === root.mirroredByRow)
+            return
+        root.mirrorNoticeFor = root.mirroredByRow
+        const other = OutputListModel.getOutput(root.mirroredByRow)
+        const me = OutputListModel.getOutput(root.outputIndex)
+        EventBus.notify(qsTr("“%1” is on the same screen area as “%2” (a mirrored display), so it was not opened — two pictures cannot share one display. Extend your displays instead of duplicating them, or give it its own screen in Settings · Routing.")
+                            .arg(String(me && me.name ? me.name : ""))
+                            .arg(String(other && other.name ? other.name : "")),
+                        "warning", qsTr("Outputs"), "outputs.mirrored")
+    }
+
     readonly property var targetGeometry: root.hasDisplay
         ? { x: root.displayInfo.x, y: root.displayInfo.y,
             width: root.parsedRes ? root.parsedRes.width : root.displayInfo.width,
@@ -86,7 +108,7 @@ Window {
         root.height = root.targetGeometry.height
     }
     visible: root.selfTestForceVisible
-             || (root.outputEnabled && root.hasDisplay && !root.onAirOnly
+             || (root.outputEnabled && root.hasDisplay && !root.onAirOnly && root.mirroredByRow < 0
                  && !root.dismissed && LiveOutputService.live)
 
     readonly property bool hasFrame: LiveOutputService.live && LiveOutputService.frameRev > 0

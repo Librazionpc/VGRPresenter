@@ -657,6 +657,11 @@ ShowService::JobResult ShowService::applyEditOutcome(
     }
     r.ok = true;
     r.documentChanged = true;
+    // Publish the edited show's slides so a live on-air set can adopt the new pace
+    // (next timer) even when no show document is open in the editor (Show Centre).
+    r.payload.insert(QStringLiteral("slides"),
+                     ShowConverter::toVariant(doc->Snapshot()).value(QStringLiteral("slides")));
+    r.payload.insert(QStringLiteral("showName"), ShowConverter::toVariant(doc->Snapshot()).value(QStringLiteral("name")));
     // The WORKING show changed: a centre page showing it is reading a stale
     // snapshot now (see dropPeekForOpenPath).
     r.openDocumentEdited = true;
@@ -690,6 +695,8 @@ ShowService::JobResult ShowService::editShowOutcome(
         return r;
     }
     file.Replace(std::move(show));
+    // Keep a snapshot of the edited show's slides before saving (the file moved above).
+    bp::Presentation editedShow = file.Snapshot();
     if (auto saved = file.Save(vgrPath(path)); !saved.ok()) {
         r.error = message(saved.error());
         return r;
@@ -697,6 +704,11 @@ ShowService::JobResult ShowService::editShowOutcome(
     r.ok = true;
     r.touchedPath = cleanPath(path);
     r.libraryChanged = ctx.inLibrary(wanted);
+    // Publish the edited show's slides so a live on-air set can adopt the new pace
+    // (next timer) even when no show document is open in the editor (Show Centre).
+    r.payload.insert(QStringLiteral("slides"),
+                     ShowConverter::toVariant(editedShow).value(QStringLiteral("slides")));
+    r.payload.insert(QStringLiteral("showName"), ShowConverter::toVariant(editedShow).value(QStringLiteral("name")));
     return r;
 }
 
@@ -1557,6 +1569,56 @@ bool ShowService::emptyDeletedShows()
         return false;
     }
     return true;
+}
+
+void ShowService::removeDuplicateShows()
+{
+    VGR_CALL_TRACE("ShowService.removeDuplicateShows");
+    if (!library() || dedupeBusy_)
+        return;
+    dedupeBusy_ = true;
+    std::shared_ptr<bp::ShowLibrary> keep = library_;   // alive past a path change
+    QPointer<ShowService> guard(this);
+    // Opens only the same-named candidates (a few thousand small files at most), so it runs off the interface thread.
+    QThreadPool::globalInstance()->start([guard, keep]() {
+        auto r = keep->RemoveDuplicates();
+        const bool ok = r.ok();
+        const bp::ShowLibrary::DuplicateReport report = ok ? r.value() : bp::ShowLibrary::DuplicateReport{};
+        const QString failure = ok ? QString() : QString::fromStdString(r.error().message);
+        QMetaObject::invokeMethod(guard, [guard, ok, report, failure]() {
+            if (!guard)
+                return;
+            ShowService *self = guard.data();
+            self->dedupeBusy_ = false;
+            if (!ok) {
+                self->reportError(QStringLiteral("Couldn't remove the duplicate shows"), failure);
+                return;
+            }
+            self->publishLibrary();
+            QString msg = report.removed > 0
+                ? QStringLiteral("Moved %1 duplicate show(s) to the library's .deleted bin; one copy of each of %2 song(s) stays.")
+                      .arg(report.removed).arg(report.groups)
+                : QStringLiteral("No duplicate shows found.");
+            if (report.unreadable > 0)
+                msg += QStringLiteral(" %1 file(s) could not be read and were left alone.").arg(report.unreadable);
+            EngineBridge::write(QStringLiteral("info"), QStringLiteral("Library"), msg);
+            EventBus::instance().notify(msg, QStringLiteral("success"), QStringLiteral("Shows"), QStringLiteral("show.dedupe"));
+        }, Qt::QueuedConnection);
+    });
+}
+
+QString ShowService::findSameLibraryShow(const QString &category, const bps::presentation::Presentation &show)
+{
+    auto *lib = library();
+    if (!lib) return {};
+    return QString::fromStdString(lib->FindSameShow(category.toStdString(), show));
+}
+
+QString ShowService::numberedLibraryShowName(const QString &category, const QString &name)
+{
+    auto *lib = library();
+    if (!lib) return name;
+    return QString::fromStdString(lib->NumberedShowName(category.toStdString(), name.toStdString()));
 }
 
 QString ShowService::newLibraryShowPath(

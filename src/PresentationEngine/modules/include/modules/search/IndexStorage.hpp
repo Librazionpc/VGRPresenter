@@ -27,6 +27,7 @@ struct DocRecord {
     std::string lowerTitle;     // ready for ranking/snippets — no per-query Lower()
     std::string lowerContent;
     size_t tokenCount = 0;      // |D| for BM25 length normalization (all fields)
+    uint32_t ordinal = 0;       // this document's slot in the postings (see IndexStorage::slots_)
 };
 
 class IndexStorage {
@@ -84,6 +85,14 @@ public:
     // Stats.
     size_t TotalPostings() const;
 
+    // A WORD LIST WITHOUT DOCUMENTS. A source with a huge text (the sermon library: ~100 MB) only needs its WORDS known
+    // here — to correct a typo, split a run-together word, or offer a completion — and each word's document count.
+    // Indexing the documents themselves stored the whole text three more times plus a posting per word per document
+    // (~370 MB for the sermons). `terms` is sorted by word; setting a source again replaces its earlier list.
+    void SetVocabulary(std::string_view source, std::vector<std::pair<std::string, uint32_t>> terms);
+    void ClearVocabulary(std::string_view source);
+    size_t VocabularyTermCount() const;
+
 private:
     // MUST hold mutex_ (shared for reads, unique for writes).
     const DocRecord* FindRecordLocked(std::string_view docId) const;
@@ -91,24 +100,30 @@ private:
     size_t UpsertLocked(const SearchDocument& doc);
     // MUST hold mutex_ (unique): take a document out of the postings of the terms IT posted to
     // (the same tokenizer the index was built with) — not a sweep over every term in the index.
-    void ErasePostingsOf(const SearchDocument& doc);
+    void ErasePostingsOf(const DocRecord& rec);
 
-    // A posting's numbers. WHICH DOCUMENT it is for is the key of the list it sits in, and that key is
-    // a VIEW of the id string documents_ already owns (an unordered_map node: its key never moves). The
-    // index used to hold the id twice more for every posting — as the key and again inside the Posting —
-    // as full string copies of file paths, millions of times over: gigabytes of memory, and a window
-    // that froze for tens of seconds freeing them when the app quit.
-    struct PostingData {
-        size_t frequency = 0;
-        size_t positions = 0;
+    // A posting is 8 bytes: WHICH DOCUMENT is a small number (its slot, DocRecord::ordinal) and a term's list is a
+    // vector sorted by it. It used to be a std::map<string_view, {size_t, size_t}> per term — a 64-byte tree node
+    // (80 with the allocator's header) for every (word, document) pair: 774k of them for the Bible alone, ~47 MB
+    // where this takes ~6. Slots are handed out in increasing order, so indexing a source appends; taking a document
+    // out is a binary search and an erase.
+    struct PostingEntry {
+        uint32_t ordinal = 0;
+        uint32_t frequency = 0;
     };
-    using PostingList = std::map<std::string_view, PostingData>;
+    using PostingList = std::vector<PostingEntry>;
+    // slot -> the id string documents_ owns for it (an unordered_map node key: it never moves); null while free.
+    std::vector<const std::string*> slots_;
+    std::vector<uint32_t> freeSlots_;
+    std::string_view IdOfSlot(uint32_t ordinal) const { return *slots_[ordinal]; }
 
     mutable std::shared_mutex mutex_;
     std::map<std::string, PostingList, std::less<>> index_;
     // Owns the id strings the postings view: a document is erased only AFTER its postings are.
     std::unordered_map<std::string, DocRecord> documents_;
     size_t totalTokens_ = 0;   // Σ tokenCount over live documents (avgdl denominator)
+    // source -> its sorted (word, document count) list; see SetVocabulary.
+    std::map<std::string, std::vector<std::pair<std::string, uint32_t>>, std::less<>> vocabulary_;
     bool initialized_ = false;
 };
 } // namespace bps::search

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <source_location>
+
 #include <QElapsedTimer>
 #include <QHash>
 #include <QImage>
@@ -56,6 +58,10 @@ class LiveOutputService : public QObject {
     // (plus its style) instead of on the slide itself: deciding "same picture" must not
     // cost a read of the slide, which is a JS conversion of the whole passage per handler.
     Q_PROPERTY(int stagedRev READ stagedRev NOTIFY stagedChanged)
+    // The same for what is ON AIR: it moves once per onAirChanged, so a tile can key its composition on it. A picture
+    // that is not a reading walk had no key at all, and every one of the tile's several handlers recomposed the whole
+    // slide for one event.
+    Q_PROPERTY(int onAirRev READ onAirRev NOTIFY onAirChanged)
     // Is there a reading passage in the staged (or on-air) picture? A monitor tile needs
     // that answer to pick its memo key, and must not convert the slide to find it.
     Q_PROPERTY(bool stagedHasFlow READ stagedHasFlow NOTIFY stagedChanged)
@@ -167,6 +173,18 @@ public:
     QVariantMap onAirSlide() const { return onAirSlide_; }
     QVariantMap onAirSlideRaw() const { return onAirSlideRaw_; }
     int stagedRev() const { return stagedRev_; }
+    int onAirRev() const { return onAirRev_; }
+    // THE WALKING LABEL IS A LIVE VALUE, NOT SLIDE CONTENT. Every paragraph change used to republish the slide so each
+    // surface recomposed its whole picture just to change the label's text — 70-280 ms of interface thread, ~30 times a
+    // minute, the largest single cost in the long-run test. The surfaces now draw the label block's text from this property
+    // (DesignPreview.walkLabel); the engine's own outputs still get the new label through the cheap engine hand-off.
+    Q_PROPERTY(QString walkReference READ walkReference NOTIFY walkReferenceChanged)
+    QString walkReference() const { return walkReference_; }
+    // A walk over ONE text (Bible chapter, sermon): its "pages" are only positions in that text, so the composition
+    // does not change when the page does — the tile must not recompose (and rebuild every block delegate) per page.
+    Q_PROPERTY(bool readingTextOnly READ readingTextOnly NOTIFY readingStageChanged)
+    bool readingTextOnly() const { return lineSourceTextOnly_; }
+    void NotifyOnAirChanged(std::source_location site = std::source_location::current());   // (the site is only for the perf probe)
     bool stagedHasFlow() const;
     bool stagedValid() const { return stagedSlide_.value(QStringLiteral("valid")).toBool(); }
     bool onAirHasFlow() const;
@@ -384,6 +402,22 @@ public:
     // ---- AUTO-ADVANCE (the wall's timer button): the on-air set slides by itself ------
     Q_PROPERTY(bool autoAdvancing READ autoAdvancing NOTIFY autoAdvanceChanged)
     bool autoAdvancing() const;
+    // The sliding timer bar: the on-air slide's own next-timer progress. `autoAdvanceShow` names the show
+    // those timers belong to (the bar only fills while that show is the one on air), `timerProgress` is the
+    // elapsed fraction (0..1) of the slide's timer, and the seconds pair round it out for a countdown.
+    Q_PROPERTY(QString autoAdvanceShow READ autoAdvanceShow NOTIFY autoAdvanceChanged)
+    QString autoAdvanceShow() const { return autoAdvanceShow_; }
+    Q_PROPERTY(qreal timerProgress READ timerProgress NOTIFY timerProgressChanged)
+    Q_PROPERTY(qreal timerRemainingSeconds READ timerRemainingSeconds NOTIFY timerProgressChanged)
+    Q_PROPERTY(qreal timerDurationSeconds READ timerDurationSeconds NOTIFY timerProgressChanged)
+    qreal timerProgress() const;
+    qreal timerRemainingSeconds() const;
+    qreal timerDurationSeconds() const { return onAirDurationMs_ / 1000.0; }
+    // The timer the show ON SCREEN carries (the centre page pushes its own total here). It lets the wall
+    // light its timer and show the bar for a timed show even before GO LIVE, not only while on air.
+    Q_PROPERTY(qreal showTimerTotalSeconds READ showTimerTotalSeconds NOTIFY showTimerTotalChanged)
+    qreal showTimerTotalSeconds() const { return showTimerTotalSeconds_; }
+    Q_INVOKABLE void setShowTimerTotal(qreal seconds);
     // The timer is RECORDED WITH THE SHOW it was turned on for (shows.timedShow) and paces that show by
     // its own per-slide NEXT TIMER values (the engine advances a slide on its durationMs) — another show
     // never inherits it, and a show with no times on its slides stays manual.
@@ -393,7 +427,7 @@ public:
     // The centre page's NEXT TIMER is written to the SHOW, while the set on air holds its own copy of the
     // slides — so a timer set after GO LIVE never reached the wall's pace. This adopts the show's timers
     // into the on-air pace (recording the show as timed while any slide carries one), then re-arms.
-    void adoptShowNextTimers();
+    void adoptShowNextTimers(const QVariantList &slides = {}, const QString &showName = {});
     // A slide's next timer (ms) as the SHOW has it now, by slide id: 0 when the show does not know the slide.
     double showNextTimerMsFor(const QString &slideId) const;
     // THE SET the timer is recorded against — the SHOW's name, not the title of the slide showing at the
@@ -499,8 +533,14 @@ signals:
     // The set of tabs claiming they can step the tile's content changed (see
     // setWallStepper): the wall's ‹ › relight themselves from this.
     void wallStepperChanged();
+    // The walk's reference label moved ("Genesis 1:5"). Nothing is recomposed for it: the surfaces' label text follows this.
+    void walkReferenceChanged();
     // The wall's timer button started/stopped advancing the on-air set by itself.
     void autoAdvanceChanged();
+    // The sliding timer bar's progress moved (emitted on a short tick while a slide's timer runs).
+    void timerProgressChanged();
+    // The timer total of the show on screen changed (the centre page reports it).
+    void showTimerTotalChanged();
 
 private:
     explicit LiveOutputService(QObject *parent = nullptr);
@@ -574,8 +614,9 @@ private:
     QVariantMap stagedSlide_;
     // The revision a surface memoises on (see Q_PROPERTY stagedRev) and the ONE
     // place a staged change is announced from.
-    void BumpStaged();
+    void BumpStaged(std::source_location site = std::source_location::current());   // (the site is only for the perf probe)
     int stagedRev_ = 0;
+    int onAirRev_ = 0;
 
     // ---- the line stepper (see stageSlideSet/lineStep) --------------------
     QString lineSetName_;
@@ -1110,6 +1151,13 @@ private:
     // Feed thread: each sender's NEXT DEADLINE (ms on ndiSendClock_), advanced by exactly one period per
     // frame so a late tick delays one frame instead of shifting every later one.
     QHash<QString, double> ndiSendDueMs_;
+    // STILL PICTURES SEND AT A SLOWER BEAT. Per sender: the frame it last saw and since when it has been the same.
+    // A lower third that sits unchanged was re-sent to the SDK at the full 60 Hz (3 Gbit/s, ~2 cores of compression for
+    // one sender); the receiver gets the same picture either way. After kNdiStillAfterMs unchanged the beat drops to
+    // kNdiStillFps, and returns to the configured rate the moment the picture moves.
+    QHash<QString, std::pair<uint64_t, double>> ndiStillSince_;   // sender -> (pixel-sample signature, since ms)
+    static constexpr double kNdiStillAfterMs = 1000.0;
+    static constexpr float kNdiStillFps = 15.0f;
     // ---- The NDI feed: WHAT on the GUI thread, WHEN on the feed thread -----
     void startNdiSendClock();          // go-live: bring the feed thread up + publish
     void stopNdiSendClock();           // off air: clear the plan, stop its clock
@@ -1139,7 +1187,11 @@ private:
     bool autoAdvanceLoaded_ = false;     // shows.timedShow read once
     bool timedAdvanceApplied_ = false;   // the last value pushed at the engine
     QTimer *autoAdvanceTimer_ = nullptr;   // GUI thread: single shot per slide, re-armed on every change
+    QTimer *timerProgressTicker_ = nullptr;  // GUI thread: ticks timerProgressChanged while a slide's timer runs
+    qreal showTimerTotalSeconds_ = 0.0;      // the timer total the centre page reports for the show on screen
     double onAirDurationMs_ = 0.0;         // the on-air slide's own NEXT TIMER (0 = it waits for a hand)
+    QVariantList adoptedSlides_;            // slides of the show whose timer was just adopted (Show Centre may have no open doc)
+    QString adoptedShowName_;              // name of that show, so autoAdvanceShowKey stays stable without an open doc
     qreal lastAutoLine_ = -1.0;            // settled absolute line at the previous auto step (-1 = none)
     QTimer *ndiSendTimer_ = nullptr;   // feed thread only
 
@@ -1167,6 +1219,10 @@ private:
     // ---- The NDI feed thread --------------------------------------------------
     QThread *ndiThread_ = nullptr;
     QObject *ndiWorker_ = nullptr;     // lives on ndiThread_
+    // Set when the app is quitting: nothing may start the feed thread again after shutdownNdiWorker() has stopped it. A
+    // late plan recheck did exactly that, and the new thread was still running when Qt destroyed it —
+    // "QThread: Destroyed while thread 'ndi-send' is still running", an abort (0xc0000602) on exit.
+    bool ndiShutdown_ = false;
     bool ndiClockArmed_ = false;
     // Create the feed thread once (GUI side); the thread's own clock is
     // created on it by setNdiPlan's first published frame.

@@ -3,13 +3,16 @@
 #include "core/common/Common.hpp"
 
 #include <atomic>
+#include <concepts>
 #include <array>
 #include <functional>
 #include <map>
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bps::search {
@@ -17,9 +20,66 @@ class SearchEngine;
 }
 
 namespace bps::library {
+// A paragraph's text, READ-ONLY once made. It either owns its string, or BORROWS a view into a memory-mapped file
+// (TheTableLibrary::Load keeps the ~100 MB of sermon text in a file the operating system pages in and out, instead of
+// 225,000 private heap strings). A borrowed text holds a share of what keeps the mapping alive, so a copy of a verse
+// (GetChapter hands copies out) stays valid after the library lets go of the file; copying one is cheap either way.
+// Reads like a std::string_view; `str()` makes a std::string.
+class VerseText {
+public:
+    VerseText() = default;
+    VerseText(std::string s) {   // NOLINT: implicit on purpose — `verse.text = someString` stays valid
+        auto own = std::make_shared<const std::string>(std::move(s));
+        view_ = *own;
+        keep_ = std::move(own);
+    }
+    VerseText(const char* s) : VerseText(std::string(s ? s : "")) {}   // NOLINT
+    static VerseText Borrowed(std::string_view view, std::shared_ptr<const void> keepAlive) {
+        VerseText t;
+        t.view_ = view;
+        t.keep_ = std::move(keepAlive);
+        return t;
+    }
+
+    operator std::string_view() const noexcept { return view_; }   // NOLINT
+    std::string_view view() const noexcept { return view_; }
+    std::string str() const { return std::string(view_); }
+    const char* data() const noexcept { return view_.data(); }
+    size_t size() const noexcept { return view_.size(); }
+    size_t length() const noexcept { return view_.size(); }
+    bool empty() const noexcept { return view_.empty(); }
+    char operator[](size_t i) const noexcept { return view_[i]; }
+    auto begin() const noexcept { return view_.begin(); }
+    auto end() const noexcept { return view_.end(); }
+    size_t find(std::string_view s, size_t pos = 0) const noexcept { return view_.find(s, pos); }
+    size_t find(char c, size_t pos = 0) const noexcept { return view_.find(c, pos); }
+    // (a copy, like std::string::substr — a hit's snippet outlives the verse it was cut from)
+    std::string substr(size_t pos = 0, size_t n = std::string_view::npos) const {
+        return std::string(view_.substr(pos, n));
+    }
+    friend bool operator==(const VerseText& a, const VerseText& b) noexcept { return a.view_ == b.view_; }
+    template <class S>
+        requires(std::convertible_to<const S&, std::string_view> && !std::same_as<S, VerseText>)
+    friend bool operator==(const VerseText& a, const S& b) noexcept { return a.view_ == std::string_view(b); }
+    friend std::string operator+(std::string_view a, const VerseText& b) {
+        std::string out(a);
+        out.append(b.view_);
+        return out;
+    }
+    friend std::string operator+(const VerseText& a, std::string_view b) {
+        std::string out(a.view_);
+        out.append(b);
+        return out;
+    }
+
+private:
+    std::string_view view_;
+    std::shared_ptr<const void> keep_;   // the owned string, or whatever keeps the mapped file alive
+};
+
 struct TheTableVerse {
     int number = 0;          // 1-based paragraph index within the chapter
-    std::string text;
+    VerseText text;
     std::string heading;     // sermon title on verse 1 (display only)
 };
 
@@ -123,6 +183,9 @@ public:
     Result<bool> IsHighlighted(std::string_view bookId, int chapter, int verse) const;
 
     Result<size_t> IndexWithSearchEngine(const std::atomic<bool>* cancelled = nullptr);
+    // What the APP uses: the sermons' WORD LIST goes to the Search Engine (typo correction, completions) and the
+    // per-sermon word summaries are built, but no sermon document is stored there (a few MB, not ~370 MB).
+    Result<size_t> IndexVocabularyWithSearchEngine(const std::atomic<bool>* cancelled = nullptr);
     // Drops this library's documents ("table:*") from the Search Engine index.
     Result<void> UnindexFromSearchEngine();
 
@@ -148,6 +211,8 @@ public:
     // --- Persistence ---------------------------------------------------------------
     Result<void> Save() const;   // user-dir JSON (atomic write)
     Result<void> Load();
+    // A library file at least this big keeps its sermon text in a memory-mapped file (default 4 MB). Tests set 0 to map a tiny one.
+    static void SetMapThresholdBytes(size_t bytes);
 
 private:
     explicit TheTableLibrary(std::string filePath);
@@ -166,7 +231,10 @@ private:
     Result<void> Persist(const std::vector<TheTableBook>& books) const;
     std::string NextFilePath() const;
 
-    mutable std::mutex mutex_;
+    // A READER-WRITER LOCK: a search scans the whole library (~100 MB) for seconds, and every other reader (the book index,
+    // a chapter, a citation, the reference label) used to queue behind it on the interface thread — a freeze as long as the
+    // search (20+ s on a loaded machine; the hang watchdog caught it in TheTableLibrary::BookIndex). Readers now share.
+    mutable std::shared_mutex mutex_;
     mutable std::mutex scanMutex_;
     std::string filePath_;
     std::vector<TheTableBook> books_;
@@ -174,7 +242,6 @@ private:
     std::map<std::string, bool> highlights_;
     int64_t lastNoteMs_ = 0;
     uint32_t importSeq_ = 0;   // disambiguates same-named sermons
-    mutable std::unordered_map<std::string, std::vector<std::string>> lowerParagraphs_;
     // 16k bits keeps false positives low for a sermon with thousands of unique
     // words, while staying small enough to keep summaries for the whole library.
     using WordBloom = std::array<uint64_t, 256>;

@@ -21,7 +21,9 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <cctype>
 #include <unordered_map>
+#include <unordered_set>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -60,6 +62,55 @@ bool MightHaveWord(const std::array<uint64_t, N>& bloom, std::string_view word) 
             return false;
     }
     return true;
+}
+
+// HOW TIGHTLY A PARAGRAPH SAYS WHAT WAS TYPED. The length, in WORDS, of the shortest stretch of `words` that holds the
+// query's terms IN THE ORDER TYPED (other words may sit between them) — "i preach what paul preach" in "…if I preach to you
+// just what Paul preached…" is 8 words. When no stretch has them in order, the shortest stretch holding every term in any
+// order, plus a penalty. 0 when a term is missing. Every paragraph that holds all the words used to score the same, so a
+// sentence that really says it tied with paragraphs where the words were a page apart and the winner was whichever sermon
+// came first.
+size_t TightSpan(const std::vector<std::string_view>& words, const std::vector<std::string>& terms, bool whole) {
+    if (terms.size() < 2 || words.empty()) return 0;
+    const auto matches = [whole](std::string_view w, const std::string& t) {
+        return whole ? w == t : (w.size() >= t.size() && w.compare(0, t.size(), t) == 0);
+    };
+    size_t best = 0;
+    for (size_t s = 0; s < words.size(); ++s) {   // in the order typed: the earliest next word each time is the tightest
+        if (!matches(words[s], terms[0])) continue;
+        size_t last = s, k = 1;
+        for (size_t w = s + 1; w < words.size() && k < terms.size(); ++w)
+            if (matches(words[w], terms[k])) { ++k; last = w; }
+        if (k == terms.size()) {
+            const size_t span = last - s + 1;
+            if (best == 0 || span < best) best = span;
+        }
+    }
+    if (best != 0) return best;
+    std::vector<const std::string*> distinct;   // any order: a sliding window over the distinct terms
+    for (const std::string& t : terms)
+        if (std::none_of(distinct.begin(), distinct.end(), [&](const std::string* d) { return *d == t; }))
+            distinct.push_back(&t);
+    std::vector<int> have(distinct.size(), 0);
+    size_t covered = 0, left = 0;
+    for (size_t right = 0; right < words.size(); ++right) {
+        for (size_t d = 0; d < distinct.size(); ++d)
+            if (matches(words[right], *distinct[d]) && have[d]++ == 0) ++covered;
+        while (covered == distinct.size()) {
+            const size_t span = right - left + 1;
+            if (best == 0 || span < best) best = span;
+            for (size_t d = 0; d < distinct.size(); ++d)
+                if (matches(words[left], *distinct[d]) && --have[d] == 0) --covered;
+            ++left;
+        }
+    }
+    constexpr size_t kOutOfOrder = 8;
+    return best == 0 ? 0 : best + kOutOfOrder;
+}
+// Score points for a span: 800 for the terms side by side, falling by 8 for every extra word between them.
+int TightBonus(size_t span, size_t termCount) {
+    if (span == 0 || span < termCount) return 0;
+    return static_cast<int>(std::max<long>(0, 800L - 8L * static_cast<long>(span - termCount)));
 }
 
 size_t NearPhrasePosition(std::string_view text, const std::vector<std::string>& terms,
@@ -1365,7 +1416,7 @@ Result<void> TheTableLibrary::AddNote(std::string_view bookId, int chapter, int 
     if (text.empty())
         return Error::Make(Err::InvalidArgument, kModule, "note text is empty");
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (!VerseKnownLocked(bookId, chapter, verse))
             return Error::Make(Err::NotFound, kModule, "no such paragraph");
 
@@ -1385,7 +1436,7 @@ Result<void> TheTableLibrary::AddNote(std::string_view bookId, int chapter, int 
 
 Result<void> TheTableLibrary::RemoveNote(std::string_view bookId, int chapter, int verse) {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (notes_.erase(NoteKey(bookId, chapter, verse)) == 0)
             return Ok();   // nothing stored: already gone, nothing to write
     }
@@ -1394,7 +1445,7 @@ Result<void> TheTableLibrary::RemoveNote(std::string_view bookId, int chapter, i
 
 Result<std::vector<TableNote>> TheTableLibrary::Notes(std::string_view bookId, int chapter,
                                                       int verse) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = notes_.find(NoteKey(bookId, chapter, verse));
     if (it == notes_.end())
         return std::vector<TableNote>{};
@@ -1402,7 +1453,7 @@ Result<std::vector<TableNote>> TheTableLibrary::Notes(std::string_view bookId, i
 }
 
 Result<std::vector<TableNote>> TheTableLibrary::Notes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<TableNote> out;
     out.reserve(notes_.size());
     for (const auto& [key, note] : notes_) {
@@ -1416,19 +1467,19 @@ Result<std::vector<TableNote>> TheTableLibrary::Notes() const {
 
 Result<void> TheTableLibrary::SetHighlight(std::string_view bookId, int chapter, int verse, bool on) {
     if (on) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (!VerseKnownLocked(bookId, chapter, verse))
             return Error::Make(Err::NotFound, kModule, "no such paragraph");
         highlights_[NoteKey(bookId, chapter, verse)] = true;
     } else {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         highlights_.erase(NoteKey(bookId, chapter, verse));
     }
     return Save();
 }
 
 Result<std::vector<std::string>> TheTableLibrary::Highlights() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<std::string> out;
     out.reserve(highlights_.size());
     for (const auto& [key, on] : highlights_) {
@@ -1439,7 +1490,7 @@ Result<std::vector<std::string>> TheTableLibrary::Highlights() const {
 }
 
 Result<bool> TheTableLibrary::IsHighlighted(std::string_view bookId, int chapter, int verse) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = highlights_.find(NoteKey(bookId, chapter, verse));
     return it != highlights_.end() && it->second;
 }
@@ -1459,7 +1510,7 @@ Result<void> TheTableLibrary::Save() const {
     // Only the copy happens under the lock; serialising and writing a big library take seconds and must not hold up browsing.
     std::vector<TheTableBook> snapshot;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         snapshot = books_;
     }
     return Persist(snapshot);
@@ -1484,7 +1535,7 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
             for (const TheTableVerse& v : ch.verses) {
                 J::Object vo;
                 vo["number"] = J::Number(v.number);
-                vo["text"] = J::String(v.text);
+                vo["text"] = J::String(v.text.str());
                 if (!v.heading.empty()) vo["heading"] = J::String(v.heading);
                 vs.push_back(J(std::move(vo)));
             }
@@ -1524,104 +1575,381 @@ Result<void> TheTableLibrary::Persist(const std::vector<TheTableBook>& books) co
     return platform.Filesystem().WriteAtomic(filePath_, J(std::move(root)).ToString());
 }
 
+namespace {
+// A forward scanner over JSON text that hands out each member / element as a SLICE of the text — no tree for the whole
+// document. The library file is ~100 MB: a tree of it (hundreds of thousands of small nodes) peaked at several hundred MB
+// and the process never gave that memory back. Parsing one sermon at a time keeps the peak near the final size.
+struct JsonSlicer {
+    std::string_view s;
+    size_t p = 0;
+    bool bad = false;
+    void Ws() {
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\n' || s[p] == '\r' || s[p] == '\t')) ++p;
+    }
+    void SkipString() {   // at the opening quote
+        ++p;
+        while (p < s.size() && s[p] != '"') {
+            if (s[p] == '\\') ++p;
+            ++p;
+        }
+        if (p >= s.size()) { bad = true; return; }
+        ++p;
+    }
+    // The text of the next value (a string, a number/literal, or a whole object/array), advancing past it.
+    std::string_view Take() {
+        Ws();
+        if (p >= s.size()) { bad = true; return {}; }
+        const size_t start = p;
+        const char c = s[p];
+        if (c == '"') {
+            SkipString();
+        } else if (c == '{' || c == '[') {
+            int depth = 0;
+            while (p < s.size()) {
+                const char d = s[p];
+                if (d == '"') { SkipString(); if (bad) return {}; continue; }
+                if (d == '{' || d == '[') ++depth;
+                else if (d == '}' || d == ']') --depth;
+                ++p;
+                if (depth == 0) break;
+            }
+            if (depth != 0) { bad = true; return {}; }
+        } else {
+            while (p < s.size() && s[p] != ',' && s[p] != '}' && s[p] != ']'
+                   && s[p] != ' ' && s[p] != '\n' && s[p] != '\r' && s[p] != '\t')
+                ++p;
+        }
+        if (bad) return {};
+        return s.substr(start, p - start);
+    }
+};
+
+// f(key, valueText) for every member of the object text `obj`; false when it is not a well-formed object (or f says stop).
+template <class F>
+bool EachMember(std::string_view obj, F&& f) {
+    JsonSlicer c{obj};
+    c.Ws();
+    if (c.p >= obj.size() || obj[c.p] != '{') return false;
+    ++c.p;
+    c.Ws();
+    if (c.p < obj.size() && obj[c.p] == '}') return true;
+    for (;;) {
+        const std::string_view keyText = c.Take();
+        if (c.bad || keyText.size() < 2 || keyText.front() != '"') return false;
+        c.Ws();
+        if (c.p >= obj.size() || obj[c.p] != ':') return false;
+        ++c.p;
+        const std::string_view value = c.Take();
+        if (c.bad || value.empty()) return false;
+        std::string key;
+        if (keyText.find('\\') == std::string_view::npos) {
+            key.assign(keyText.substr(1, keyText.size() - 2));
+        } else {
+            auto k = json::Parse(keyText);
+            if (!k.ok()) return false;
+            key = std::string(k.value().asString());
+        }
+        if (!f(std::string_view(key), value)) return false;
+        c.Ws();
+        if (c.p < obj.size() && obj[c.p] == ',') { ++c.p; continue; }
+        return c.p < obj.size() && obj[c.p] == '}';
+    }
+}
+
+// f(elementText) for every element of the array text `arr`.
+template <class F>
+bool EachElement(std::string_view arr, F&& f) {
+    JsonSlicer c{arr};
+    c.Ws();
+    if (c.p >= arr.size() || arr[c.p] != '[') return false;
+    ++c.p;
+    c.Ws();
+    if (c.p < arr.size() && arr[c.p] == ']') return true;
+    for (;;) {
+        const std::string_view value = c.Take();
+        if (c.bad || value.empty()) return false;
+        if (!f(value)) return false;
+        c.Ws();
+        if (c.p < arr.size() && arr[c.p] == ',') { ++c.p; continue; }
+        return c.p < arr.size() && arr[c.p] == ']';
+    }
+}
+
+std::string TextOf(std::string_view valueText) {
+    auto v = json::Parse(valueText);
+    return v.ok() ? std::string(v.value().asString()) : std::string();
+}
+long long IntOf(std::string_view valueText) {
+    auto v = json::Parse(valueText);
+    return v.ok() ? v.value().asInt() : 0;
+}
+
+// ---- The sermon text as a memory-mapped file -----------------------------------------------------------------------
+// ~95 MB of paragraphs used to live as 225,000 private heap strings. Load writes them to one file beside the library
+// and maps it read-only: the operating system pages it in for a search or a read and out again under memory pressure,
+// and it is not private memory of the process. THE FILE IS A SWAP, NOT A SECOND COPY OF THE LIBRARY: the library file
+// stays the one source of truth, this one is rebuilt on every Load and removed with the last verse that uses it (and a
+// crash's leftovers are removed by the next Load).
+std::atomic<size_t> gMapThresholdBytes{4u << 20};   // a library file smaller than this keeps its text on the heap
+std::atomic<uint64_t> gBlobSeq{0};
+
+struct TextBlob {
+    std::shared_ptr<const platform::IMappedFile> map;
+    std::string path;
+    ~TextBlob() {
+        map.reset();   // the file cannot be removed while it is mapped
+        // (std::filesystem, not the platform accessor: this can run while the process is shutting down)
+        std::error_code ec;
+        const std::u8string p(reinterpret_cast<const char8_t*>(path.data()), path.size());
+        std::filesystem::remove(std::filesystem::path(p), ec);
+    }
+};
+
+// One sermon's tree -> the library's own structure. The paragraph text MOVES out of the tree (no copy).
+TheTableChapter ChapterFromJson(J& cv) {
+    const auto text = [](J* v, std::string_view key) {
+        J* f = v ? v->FindMut(key) : nullptr;
+        return f ? f->takeString() : std::string();
+    };
+    const auto number = [](const J* v, std::string_view key) {
+        const J* f = v ? v->Find(key) : nullptr;
+        return static_cast<int>(f ? f->asInt() : 0);
+    };
+    TheTableChapter ch;
+    ch.number = number(&cv, "number");
+    ch.title = text(&cv, "title");
+    // The code joined this schema later: older files carry none, and the title always opens with it when there is one.
+    ch.code = text(&cv, "code");
+    if (ch.code.empty()) ch.code = CodeFromTitle(ch.title);
+    if (J* vs = cv.FindMut("verses"); vs && vs->asArrayMut()) {
+        ch.verses.reserve(vs->asArrayMut()->size());
+        for (J& vv : *vs->asArrayMut()) {
+            TheTableVerse v;
+            v.number = number(&vv, "number");
+            v.text = text(&vv, "text");
+            v.heading = text(&vv, "heading");
+            // The heading is the sermon's title and only the first paragraph shows it (nothing reads it on the others):
+            // an older file repeats it on every paragraph, which was a string per paragraph (~17 MB for the library).
+            if (!ch.verses.empty() && v.heading == ch.title) v.heading.clear();
+            if (!v.text.empty()) ch.verses.push_back(std::move(v));
+        }
+        ch.verses.shrink_to_fit();
+    }
+    return ch;
+}
+} // namespace
+
+void TheTableLibrary::SetMapThresholdBytes(size_t bytes) { gMapThresholdBytes.store(bytes); }
+
 Result<void> TheTableLibrary::Load() {
     auto& platform = platform::PlatformAccessor::Get();
     auto body = platform.Filesystem().ReadText(filePath_);
 
     bool damaged = false;
     std::string damage;
-    J parsedRoot;
     const bool bodyOk = body.ok();
+    std::vector<TheTableBook> loaded;
+    std::map<std::string, TableNote> loadedNotes;
+    std::map<std::string, bool> loadedHighlights;
+
+    // The mapped text file (see TextBlob). `spans` has one (offset, length) per paragraph moved into it, in load order.
+    std::unique_ptr<platform::IFileWriteStream> blobOut;
+    std::string blobPath;
+    uint64_t blobWritten = 0;
+    bool blobFailed = false;
+    std::vector<std::pair<uint64_t, uint32_t>> spans;
+    if (bodyOk && body.value().size() >= gMapThresholdBytes.load()) {
+        const size_t cut = filePath_.find_last_of("/\\");
+        const std::string dir = cut == std::string::npos ? std::string(".") : filePath_.substr(0, cut);
+        const std::string stem = (cut == std::string::npos ? filePath_ : filePath_.substr(cut + 1)) + ".text.";
+        // A crash or a kill leaves its file behind: remove those (one still mapped by another process cannot be, and stays).
+        if (auto entries = platform.Filesystem().Enumerate(dir); entries.ok()) {
+            for (const std::string& entry : entries.value()) {
+                const size_t slash = entry.find_last_of("/\\");
+                const std::string name = slash == std::string::npos ? entry : entry.substr(slash + 1);
+                if (name.rfind(stem, 0) == 0) (void)platform.Filesystem().Remove(entry);
+            }
+        }
+        blobPath = filePath_ + ".text." + std::to_string(++gBlobSeq) + "-"
+                   + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        if (auto opened = platform.Filesystem().OpenWriteStream(blobPath); opened.ok())
+            blobOut = std::move(opened.value());
+        else
+            blobFailed = true;
+    }
+
     if (bodyOk) {
-        if (auto parsed = json::Parse(body.value()); parsed.ok()) {
-            damage = recovery::DocumentShapeProblem(parsed.value(), "books", J::Type::Array);
-            if (damage.empty())
-                parsedRoot = std::move(parsed.value());
-            else
-                damaged = true;
-        } else {
+        const std::string_view text = body.value();
+        std::string_view booksText, notesText, highlightsText;
+        const bool rootOk = EachMember(text, [&](std::string_view key, std::string_view value) {
+            if (key == "books") booksText = value;
+            else if (key == "notes") notesText = value;
+            else if (key == "highlights") highlightsText = value;
+            return true;
+        });
+        if (!rootOk) {
             damaged = true;
-            damage = parsed.error().message;
+            damage = "the library file is not a well-formed JSON object";
+        } else if (booksText.empty() || booksText.front() != '[') {
+            damaged = true;
+            damage = "\"books\" is missing or is not an array";
+        } else {
+            // THE LIBRARY IS READ ONE SERMON AT A TIME. The whole file used to be parsed into one tree and the text copied
+            // out of it: a 107 MB library peaked at several hundred MB of small allocations and the idle app kept ~450 MB
+            // of it. Now a sermon's own text is parsed, its paragraphs MOVE into the library, and its tree is gone before
+            // the next sermon starts.
+            const bool booksOk = EachElement(booksText, [&](std::string_view bookText) {
+                TheTableBook book;
+                std::string_view chaptersText;
+                const bool memberOk = EachMember(bookText, [&](std::string_view key, std::string_view value) {
+                    if (key == "id") book.id = TextOf(value);
+                    else if (key == "name") book.name = TextOf(value);
+                    else if (key == "order") book.order = static_cast<int>(IntOf(value));
+                    else if (key == "chapters") chaptersText = value;
+                    return true;
+                });
+                if (!memberOk) return false;
+                if (book.id.empty()) return true;   // a book without an id is skipped, as before
+                if (!chaptersText.empty() && chaptersText.front() == '[') {
+                    const bool chaptersOk = EachElement(chaptersText, [&](std::string_view chapterText) {
+                        auto parsed = json::Parse(chapterText);
+                        if (!parsed.ok()) {
+                            damage = parsed.error().message;
+                            return false;
+                        }
+                        TheTableChapter ch = ChapterFromJson(parsed.value());
+                        if (ch.verses.empty()) return true;
+                        if (blobOut && !blobFailed) {
+                            // This sermon's paragraphs go to the mapped file and their strings are let go right here,
+                            // so the heap never holds more than one sermon's text at a time.
+                            std::string chunk;
+                            size_t need = 0;
+                            for (const TheTableVerse& v : ch.verses) need += v.text.size();
+                            chunk.reserve(need);
+                            for (const TheTableVerse& v : ch.verses) chunk.append(v.text.view());
+                            const auto w = blobOut->Write(reinterpret_cast<const uint8_t*>(chunk.data()), chunk.size());
+                            if (w.ok() && w.value() == chunk.size()) {
+                                uint64_t at = blobWritten;
+                                for (TheTableVerse& v : ch.verses) {
+                                    spans.push_back({at, static_cast<uint32_t>(v.text.size())});
+                                    at += v.text.size();
+                                    v.text = VerseText();
+                                }
+                                blobWritten += chunk.size();
+                            } else {
+                                blobFailed = true;   // (the sermons already moved are read back from the file below)
+                            }
+                        }
+                        book.chapters.push_back(std::move(ch));
+                        return true;
+                    });
+                    if (!chaptersOk) return false;
+                }
+                book.chapters.shrink_to_fit();
+                loaded.push_back(std::move(book));
+                return true;
+            });
+            if (!booksOk) {
+                damaged = true;
+                if (damage.empty()) damage = "a book or sermon in the library file is malformed";
+            }
+        }
+        // User data (older files carry none — both sections stay empty then).
+        if (!damaged && !notesText.empty() && notesText.front() == '[') {
+            (void)EachElement(notesText, [&](std::string_view noteText) {
+                auto parsed = json::Parse(noteText);
+                if (!parsed.ok()) return true;   // skip a damaged entry, keep the rest
+                const J& nv = parsed.value();
+                TableNote note;
+                note.id = std::string(nv.Find("id") ? nv.Find("id")->asString() : "");
+                note.ref = std::string(nv.Find("ref") ? nv.Find("ref")->asString() : "");
+                note.bookId = std::string(nv.Find("bookId") ? nv.Find("bookId")->asString() : "");
+                note.chapter = static_cast<int>(nv.Find("chapter") ? nv.Find("chapter")->asInt() : 0);
+                note.verse = static_cast<int>(nv.Find("verse") ? nv.Find("verse")->asInt() : 0);
+                note.text = std::string(nv.Find("text") ? nv.Find("text")->asString() : "");
+                note.createdMs = static_cast<int64_t>(nv.Find("createdMs") ? nv.Find("createdMs")->asNumber() : 0.0);
+                note.modifiedMs = static_cast<int64_t>(nv.Find("modifiedMs") ? nv.Find("modifiedMs")->asNumber() : 0.0);
+                if (note.bookId.empty() || note.text.empty())
+                    return true;
+                loadedNotes[NoteKey(note.bookId, note.chapter, note.verse)] = std::move(note);
+                return true;
+            });
+        }
+        if (!damaged && !highlightsText.empty() && highlightsText.front() == '[') {
+            (void)EachElement(highlightsText, [&](std::string_view hlText) {
+                const std::string key = TextOf(hlText);
+                if (!key.empty()) loadedHighlights[key] = true;
+                return true;
+            });
         }
     }
     if (damaged) {
+        loaded.clear();
+        loaded.shrink_to_fit();
         (void)recovery::SetAsideDamagedDocument(filePath_, kModule, damage);
     }
 
-    // The raw ~100 MB text is dead weight once parsed: release it before the
-    // structures are built, so it never sits next to them at the memory peak.
+    // Seal the mapped text file and point the paragraphs at it.
+    if (blobOut) {
+        (void)blobOut->Close();
+        blobOut.reset();
+        const auto eachVerse = [&](const auto& fn) {
+            size_t i = 0;
+            for (TheTableBook& b : loaded)
+                for (TheTableChapter& c : b.chapters)
+                    for (TheTableVerse& v : c.verses) {
+                        if (i >= spans.size()) return;   // the rest still own their strings
+                        fn(v, spans[i++]);
+                    }
+        };
+        std::shared_ptr<const platform::IMappedFile> map;
+        if (!damaged && !spans.empty() && !blobFailed) {
+            if (auto m = platform.Filesystem().MapReadOnly(blobPath); m.ok() && m.value()->Size() == blobWritten)
+                map = m.value();
+        }
+        if (map) {
+            auto blob = std::make_shared<TextBlob>();
+            blob->map = map;
+            blob->path = blobPath;
+            const std::shared_ptr<const void> keep = blob;
+            eachVerse([&](TheTableVerse& v, const std::pair<uint64_t, uint32_t>& s) {
+                v.text = VerseText::Borrowed(std::string_view(map->Data() + s.first, s.second), keep);
+            });
+            Logger::Instance().Info(std::format("The Table text kept in a mapped file ({} paragraphs, {} MB)",
+                                                spans.size(), blobWritten >> 20), kModule);
+        } else {
+            if (!damaged && !spans.empty()) {
+                // Mapping (or a write) failed after some sermons had already moved out: give them their strings back.
+                auto bytes = platform.Filesystem().ReadBinary(blobPath);
+                if (!bytes.ok() || bytes.value().size() < blobWritten)
+                    return Error::Make(Err::IoError, kModule, "the library's text could not be kept in memory or in a file");
+                const std::vector<uint8_t>& all = bytes.value();
+                eachVerse([&](TheTableVerse& v, const std::pair<uint64_t, uint32_t>& s) {
+                    v.text = std::string(reinterpret_cast<const char*>(all.data()) + s.first, s.second);
+                });
+            }
+            std::error_code ec;
+            const std::u8string p(reinterpret_cast<const char8_t*>(blobPath.data()), blobPath.size());
+            std::filesystem::remove(std::filesystem::path(p), ec);
+        }
+    }
+
+    // The raw ~100 MB text is one big block: freeing it hands it straight back to the system.
     { auto release = std::move(body); (void)release; }
 
     std::lock_guard<std::mutex> scanLock(scanMutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     books_.clear();
-    lowerParagraphs_.clear();
     exactWordBlooms_.clear();
     exactWordBloomsReady_ = false;
     ++libraryRevision_;
 
     if (!bodyOk || damaged) return Ok();   // first run, or a store just set aside
-    const J& root = parsedRoot;
-    const J* booksArr = root.Find("books");
-    if (!booksArr || !booksArr->asArray()) return Ok();
-
-    for (const J& bv : *booksArr->asArray()) {
-        TheTableBook book;
-        book.id = std::string(bv.Find("id") ? bv.Find("id")->asString() : "");
-        book.name = std::string(bv.Find("name") ? bv.Find("name")->asString() : "");
-        book.order = static_cast<int>(bv.Find("order") ? bv.Find("order")->asInt() : 0);
-        if (book.id.empty()) continue;
-        if (const J* chs = bv.Find("chapters"); chs && chs->asArray()) {
-            for (const J& cv : *chs->asArray()) {
-                TheTableChapter ch;
-                ch.number = static_cast<int>(cv.Find("number") ? cv.Find("number")->asInt() : 0);
-                ch.title = std::string(cv.Find("title") ? cv.Find("title")->asString() : "");
-                // The code joined this schema later: older files carry none, and
-                // the title always opens with it when there is one.
-                ch.code = std::string(cv.Find("code") ? cv.Find("code")->asString() : "");
-                if (ch.code.empty()) ch.code = CodeFromTitle(ch.title);
-                if (const J* vs = cv.Find("verses"); vs && vs->asArray()) {
-                    for (const J& vv : *vs->asArray()) {
-                        TheTableVerse v;
-                        v.number = static_cast<int>(vv.Find("number") ? vv.Find("number")->asInt() : 0);
-                        v.text = std::string(vv.Find("text") ? vv.Find("text")->asString() : "");
-                        v.heading = std::string(vv.Find("heading") ? vv.Find("heading")->asString() : "");
-                        if (!v.text.empty()) ch.verses.push_back(std::move(v));
-                    }
-                }
-                if (!ch.verses.empty()) book.chapters.push_back(std::move(ch));
-            }
-        }
-        books_.push_back(std::move(book));
-    }
+    books_ = std::move(loaded);
     std::sort(books_.begin(), books_.end(),
               [](const TheTableBook& a, const TheTableBook& b) { return a.order < b.order; });
-
-    // User data (older files carry none — both sections stay empty then).
-    notes_.clear();
-    highlights_.clear();
-    if (const J* notesArr = root.Find("notes"); notesArr && notesArr->asArray()) {
-        for (const J& nv : *notesArr->asArray()) {
-            TableNote note;
-            note.id = std::string(nv.Find("id") ? nv.Find("id")->asString() : "");
-            note.ref = std::string(nv.Find("ref") ? nv.Find("ref")->asString() : "");
-            note.bookId = std::string(nv.Find("bookId") ? nv.Find("bookId")->asString() : "");
-            note.chapter = static_cast<int>(nv.Find("chapter") ? nv.Find("chapter")->asInt() : 0);
-            note.verse = static_cast<int>(nv.Find("verse") ? nv.Find("verse")->asInt() : 0);
-            note.text = std::string(nv.Find("text") ? nv.Find("text")->asString() : "");
-            note.createdMs = static_cast<int64_t>(nv.Find("createdMs") ? nv.Find("createdMs")->asNumber() : 0.0);
-            note.modifiedMs = static_cast<int64_t>(nv.Find("modifiedMs") ? nv.Find("modifiedMs")->asNumber() : 0.0);
-            if (note.bookId.empty() || note.text.empty())
-                continue;   // skip a damaged entry, keep the rest
-            notes_[NoteKey(note.bookId, note.chapter, note.verse)] = std::move(note);
-        }
-    }
-    if (const J* hlArr = root.Find("highlights"); hlArr && hlArr->asArray()) {
-        for (const J& hv : *hlArr->asArray()) {
-            std::string key(hv.asString());
-            if (!key.empty()) highlights_[key] = true;
-        }
-    }
+    notes_ = std::move(loadedNotes);
+    highlights_ = std::move(loadedHighlights);
     return Ok();
 }
 
@@ -1672,7 +2000,7 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
     size_t bookCount = 0;
     size_t total = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         snapshotRevision = libraryRevision_;
         bookCount = books_.size();
         for (const TheTableBook& book : books_)
@@ -1687,7 +2015,7 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
     auto publishBloomBatch = [&] {
         if (exactWordBlooms.empty()) return;
         std::lock_guard<std::mutex> scanLock(scanMutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (snapshotRevision != libraryRevision_) {
             exactWordBlooms.clear();
             return;
@@ -1705,7 +2033,7 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
         TheTableBook book;
         bool moved = false;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::shared_lock<std::shared_mutex> lock(mutex_);
             moved = snapshotRevision != libraryRevision_ || bookIndex >= books_.size();
             if (!moved)
                 book = books_[bookIndex];
@@ -1758,11 +2086,113 @@ Result<size_t> TheTableLibrary::IndexWithSearchEngine(const std::atomic<bool>* c
     return indexed;
 }
 
+namespace {
+// The index's own tokenizer (IndexStorage): lowercase letters/digits, UTF-8 multibyte runs kept whole.
+struct TermHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+};
+void LowerTerms(std::string_view text, std::string& lowered, std::vector<std::string_view>& terms) {
+    lowered.clear();
+    lowered.reserve(text.size());
+    for (unsigned char c : text)
+        lowered.push_back((std::isalnum(c) || c >= 0x80) ? static_cast<char>(std::tolower(c)) : ' ');
+    terms.clear();
+    size_t i = 0;
+    while (i < lowered.size()) {
+        while (i < lowered.size() && lowered[i] == ' ') ++i;
+        const size_t start = i;
+        while (i < lowered.size() && lowered[i] != ' ') ++i;
+        if (i > start) terms.emplace_back(lowered.data() + start, i - start);
+    }
+}
+} // namespace
+
+Result<size_t> TheTableLibrary::IndexVocabularyWithSearchEngine(const std::atomic<bool>* cancelled) {
+    search::SearchEngine& engine = search::SearchEngine::Instance();
+
+    // WORDS, NOT DOCUMENTS. IndexWithSearchEngine() stores every sermon in the engine (its text three more times, plus a
+    // posting per word per sermon): ~370 MB on top of the library's own ~100 MB, for an index that the sermon search
+    // never reads — it scans the library itself. What the engine needs from the sermons is the WORD LIST (typo
+    // correction, run-together words, completions) and how many sermons use each word: a few MB. The same pass builds
+    // the per-sermon word summaries (blooms) that let a locked search skip sermons.
+    uint64_t snapshotRevision = 0;
+    size_t bookCount = 0;
+    size_t total = 0;
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        snapshotRevision = libraryRevision_;
+        bookCount = books_.size();
+        for (const TheTableBook& book : books_)
+            total += book.chapters.size();
+    }
+    Logger::Instance().Info(std::format("The Table word list started ({} sermons)", total), kModule);
+
+    size_t indexed = 0;
+    std::unordered_map<std::string, uint32_t, TermHash, std::equal_to<>> df;
+    std::unordered_map<std::string, WordBloom> blooms;
+    blooms.reserve(total);
+    std::string lowered;
+    std::vector<std::string_view> terms;
+    std::unordered_set<std::string_view> seen;
+    for (size_t bookIndex = 0; bookIndex < bookCount; ++bookIndex) {
+        TheTableBook book;
+        bool moved = false;
+        {
+            std::shared_lock<std::shared_mutex> lock(mutex_);
+            moved = snapshotRevision != libraryRevision_ || bookIndex >= books_.size();
+            if (!moved)
+                book = books_[bookIndex];   // one year at a time, never the whole library
+        }
+        if (moved)
+            break;
+        for (const TheTableChapter& ch : book.chapters) {
+            if (cancelled && cancelled->load(std::memory_order_relaxed))
+                return indexed;
+            WordBloom bloom{};
+            for (const TheTableVerse& verse : ch.verses)
+                for (const std::string& word : textmatch::TokenizeWords(verse.text))
+                    AddWordBloom(bloom, word);
+            blooms.emplace(TheTableDocId(book.id, ch.number), bloom);
+            // This sermon's distinct words (its title and every paragraph), each counted once toward the word's
+            // document count — the same words the document index would have posted it under.
+            LowerTerms(TheTableContent(ch), lowered, terms);
+            seen.clear();
+            seen.insert(terms.begin(), terms.end());
+            for (std::string_view t : seen) {
+                auto it = df.find(t);
+                if (it == df.end()) df.emplace(std::string(t), 1u);
+                else ++it->second;
+            }
+            ++indexed;
+            if (indexed % 100 == 0 || indexed == total)
+                Logger::Instance().Info(std::format("The Table word list progress: {}/{}", indexed, total), kModule);
+        }
+    }
+    // A library that changed mid-pass (an import landed) ends this pass; the reload that moved it schedules its own.
+    {
+        std::lock_guard<std::mutex> scanLock(scanMutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        if (snapshotRevision != libraryRevision_)
+            return indexed;
+        for (auto& [id, bloom] : blooms)
+            exactWordBlooms_.insert_or_assign(id, bloom);
+        exactWordBloomsReady_ = true;
+    }
+    std::vector<std::pair<std::string, uint32_t>> list;
+    list.reserve(df.size());
+    for (auto& [word, n] : df) list.emplace_back(word, n);
+    df = {};
+    engine.SetVocabulary("table", std::move(list));
+    return indexed;
+}
+
 Result<void> TheTableLibrary::UnindexFromSearchEngine() {
     search::SearchEngine& engine = search::SearchEngine::Instance();
+    engine.ClearVocabulary("table");
     std::vector<TheTableBook> snapshot;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         snapshot = books_;
     }
     for (const TheTableBook& book : snapshot)
@@ -1775,12 +2205,12 @@ Result<void> TheTableLibrary::UnindexFromSearchEngine() {
 // Browsing
 // ---------------------------------------------------------------------------
 std::vector<TheTableBook> TheTableLibrary::Books() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return books_;
 }
 
 std::vector<TheTableLibrary::BookInfo> TheTableLibrary::BookIndex() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<BookInfo> out;
     out.reserve(books_.size());
     for (const TheTableBook& b : books_) {
@@ -1795,7 +2225,7 @@ std::vector<TheTableLibrary::BookInfo> TheTableLibrary::BookIndex() const {
 }
 
 Result<TheTableChapter> TheTableLibrary::GetChapter(std::string_view bookId, int chapter) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const TheTableBook& book : books_) {
         if (book.id != bookId) continue;
         for (const TheTableChapter& ch : book.chapters)
@@ -1806,7 +2236,7 @@ Result<TheTableChapter> TheTableLibrary::GetChapter(std::string_view bookId, int
 }
 
 std::string TheTableLibrary::Citation(std::string_view bookId, int chapter, int verse) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return CitationLocked(bookId, chapter, verse);
 }
 
@@ -1816,7 +2246,7 @@ std::string TheTableLibrary::CitationNeedle(std::string_view handle)
 }
 
 std::string TheTableLibrary::CitationCode(std::string_view bookId, int chapter) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const TheTableBook& book : books_) {
         if (book.id != bookId) continue;
         for (const TheTableChapter& ch : book.chapters)
@@ -1829,7 +2259,7 @@ std::string TheTableLibrary::CitationCode(std::string_view bookId, int chapter) 
 }
 
 SermonParts TheTableLibrary::Parts(std::string_view bookId, int chapter) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     SermonParts out;
     for (const TheTableBook& book : books_) {
         if (book.id != bookId) continue;
@@ -1862,7 +2292,7 @@ std::string TheTableLibrary::CitationLocked(std::string_view bookId, int chapter
 }
 
 bool TheTableLibrary::HasVerses() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const TheTableBook& book : books_)
         for (const TheTableChapter& ch : book.chapters)
             if (!ch.verses.empty())
@@ -1871,7 +2301,7 @@ bool TheTableLibrary::HasVerses() const {
 }
 
 size_t TheTableLibrary::VerseCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     size_t n = 0;
     for (const TheTableBook& book : books_)
         for (const TheTableChapter& ch : book.chapters)
@@ -1958,7 +2388,9 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     struct CodeCand { const TheTableBook* b; const TheTableChapter* ch; int score; };
     std::vector<CodeCand> codeHits;
     std::lock_guard<std::mutex> scanLock(scanMutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Shared: the scan below is long, and the library is read-only for its whole duration. A reader (the reference
+    // label, the book index, a chapter) must not wait for it.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     if (codeShaped) {
         std::vector<std::string> rawTokens;
         {
@@ -2097,21 +2529,16 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
     struct Acc { const TheTableVerse* v; const TheTableBook* b; const TheTableChapter* ch; int score; bool spanned; bool phrase; int run; int sermonRank; };
     std::vector<Acc> hits;
     auto scanChapter = [&](const TheTableBook& book, const TheTableChapter& ch, int sermonRank) {
-        const std::string key = book.id + ":" + std::to_string(ch.number);
-        auto cached = lowerParagraphs_.find(key);
-        if (cached == lowerParagraphs_.end()) {
-            std::vector<std::string> low;
-            low.reserve(ch.verses.size());
-            for (size_t i = 0; i < ch.verses.size(); ++i) {
-                if ((i & 0x3Fu) == 0 && cancelled && cancelled())
-                    return;
-                low.push_back(Lower(ch.verses[i].text));
-            }
-            if (cancelled && cancelled())
+        // The lowercase text of THIS sermon only, dropped when the scan of it ends. It used to be kept for every
+        // sermon after the first search (a second copy of the whole library: ~100 MB resident for good); lowercasing
+        // a sermon costs microseconds next to scanning it, so nothing is kept.
+        std::vector<std::string> hay;
+        hay.reserve(ch.verses.size());
+        for (size_t i = 0; i < ch.verses.size(); ++i) {
+            if ((i & 0x3Fu) == 0 && cancelled && cancelled())
                 return;
-            cached = lowerParagraphs_.emplace(std::move(key), std::move(low)).first;
+            hay.push_back(Lower(ch.verses[i].text));
         }
-        const std::vector<std::string>& hay = cached->second;
         const size_t n = ch.verses.size();
         std::vector<std::string_view> spans;
         std::string_view spanSegs[2]{};
@@ -2215,8 +2642,10 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                 if (size_t(runOf[i]) < floorRun)
                     continue;
                 const bool exactPhrase = ContainsPhrase(hay[i], terms, nullptr, true);
+                // (`spans` still holds this paragraph's words from the run test above)
+                const int tight = terms.size() > 1 ? TightBonus(TightSpan(spans, terms, true), terms.size()) : 0;
                 hits.push_back({&ch.verses[i], &book, &ch,
-                                1000 + quality(bm[i], wm[i])
+                                1000 + quality(bm[i], wm[i]) + tight
                                     + (size_t(runOf[i]) == terms.size() ? 500 : 0)
                                     + 20 * bonusOf(i, n),
                                 false, exactPhrase, runOf[i], sermonRank});
@@ -2264,8 +2693,9 @@ Result<std::vector<TheTableSearchHit>> TheTableLibrary::Search(std::string_view 
                     const bool near = terms.size() > 1
                         ? textmatch::ContainsNearPhraseWords(spans, terms, 2)
                         : phrase;
+                    const int tight = terms.size() > 1 ? TightBonus(TightSpan(spans, terms, false), terms.size()) : 0;
                     hits.push_back({&ch.verses[i], &book, &ch,
-                                    1000 + quality(bm[i], wm[i])
+                                    1000 + quality(bm[i], wm[i]) + tight
                                         + (phrase ? 500 : (near ? 300 : 0))
                                         + 20 * bonusOf(i, n)
                                         + 8 * ladderOf(i),
@@ -2550,7 +2980,7 @@ Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, con
 
     // Import mutates the topology the scan walks — same pair as Load.
     std::lock_guard<std::mutex> scanLock(scanMutex_);
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     exactWordBlooms_.clear();
     exactWordBloomsReady_ = false;
     ++libraryRevision_;
@@ -2572,7 +3002,6 @@ Result<std::string> TheTableLibrary::AddCleanText(std::string_view fileName, con
         for (TheTableChapter& existing : book.chapters) {
             if (existing.title == title && !ChapterReadable(existing)) {
                 existing.verses = std::move(ch.verses);
-                lowerParagraphs_.erase(book.id + ":" + std::to_string(existing.number));
                 return book.name + " " + std::to_string(existing.number) + ":1";
             }
         }
@@ -2616,7 +3045,7 @@ Result<TheTableLibrary::ImportReport> TheTableLibrary::ImportFolder(
         // Duplicate guard: the same year + sermon title is already in.
         const Placement place = PlacementOf(path);
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::shared_mutex> lock(mutex_);
             bool dup = false;
             for (const TheTableBook& b : books_) {
                 if (b.name != place.year) continue;

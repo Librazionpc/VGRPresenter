@@ -203,6 +203,13 @@ public:
     // One line in the engine log, stamped with who wrote it: level is "trace"|"debug"|"info"|"warning"|"error", source is the
     // subsystem ("Projects", "Import", "Show"...). QML calls this for what the user did; the C++ services use the static form.
     Q_INVOKABLE void log(const QString &level, const QString &source, const QString &message);
+    // QML PERF PROBE (BPS_PERF_PROBE=1): a place's cost on the interface thread, summed and logged every 10 s as
+    // "PerfProbe: name n= avg= max= total=" — the way to see which QML handler a slow step is made of, where the
+    // stall sampler can only show Qt internals. Off by default: perfProbe is false and the callers skip the clock.
+    Q_PROPERTY(bool perfProbe READ perfProbe CONSTANT)
+    bool perfProbe() const { return perfProbe_; }
+    Q_INVOKABLE void perfNote(const QString &name, double ms);
+    Q_INVOKABLE double perfNow() const;   // a monotonic clock in milliseconds, microsecond resolution
     static void write(const QString &level, const QString &source, const QString &message);
     Q_INVOKABLE QString bootError() const;
     Q_INVOKABLE QStringList bootLog() const;
@@ -1036,6 +1043,10 @@ private:
     QString ndiVersion_;
 
     std::vector<bps::Subscription> relaySubs_;
+    struct PerfAcc { qint64 n = 0; double total = 0.0; double max = 0.0; };
+    QHash<QString, PerfAcc> perfAcc_;
+    qint64 perfFlushedAtMs_ = 0;
+    const bool perfProbe_ = qEnvironmentVariableIsSet("BPS_PERF_PROBE");
     QVariantList recentEngineEvents_;   // ring capped at kMaxRecentEvents
     static constexpr int kMaxRecentEvents = 200;
 

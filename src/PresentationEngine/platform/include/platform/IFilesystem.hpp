@@ -9,6 +9,17 @@
 #include <vector>
 
 namespace bps::platform {
+// A file mapped read-only into the address space. Its pages are the file's (the operating system pages them in and out
+// on its own), not private memory of the process: a big read-only text can be kept this way at close to no cost in
+// resident memory. The bytes stay valid until this object is destroyed; the file cannot be replaced or deleted while it
+// is mapped (on Windows), so whoever owns it also owns removing the file afterwards.
+class IMappedFile {
+public:
+    virtual ~IMappedFile() = default;
+    virtual const char* Data() const = 0;
+    virtual size_t Size() const = 0;
+};
+
 class IFileWriteStream {
 public:
     virtual ~IFileWriteStream() = default;
@@ -37,6 +48,11 @@ public:
     // explicitly implemented.
     virtual Result<std::unique_ptr<IFileWriteStream>> OpenWriteStream(std::string_view) {
         return Error::Make(Err::Unsupported, "Filesystem", "seekable output streams are unavailable");
+    }
+
+    // Maps a whole file read-only (see IMappedFile). Unsupported on a filesystem that cannot (legacy/test ones).
+    virtual Result<std::shared_ptr<const IMappedFile>> MapReadOnly(std::string_view) const {
+        return Error::Make(Err::Unsupported, "Filesystem", "memory-mapped files are unavailable");
     }
 
     // ---- Atomic replace: the ONE way the engine saves a file it owns -------

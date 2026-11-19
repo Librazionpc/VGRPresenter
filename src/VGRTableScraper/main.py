@@ -45,6 +45,7 @@ import html
 import json
 import logging
 import re
+import shutil
 import signal
 import sys
 import threading
@@ -607,6 +608,100 @@ def run_audio(args: argparse.Namespace) -> None:
 
 
 ############################################################
+# MERGE INTO THE APP'S ONE LIBRARY
+############################################################
+
+CODE_PREFIX = re.compile(r"^(\d{3,4}[A-Za-z]?)\b")
+
+
+def chapter_code(title: str) -> str | None:
+    """'0412 Faith Is The Substance' -> '0412'; '1100X Fellowship' -> '1100X'; else None.
+
+    The engine stores the sermon's own date-code separately from the title and falls back to
+    parsing it out of the title, so writing it here keeps the merged file identical in shape to
+    the one the app already writes (compare an existing Y1947 chapter).
+    """
+    match = CODE_PREFIX.match(title.strip())
+    return match.group(1) if match else None
+
+
+def run_merge(args: argparse.Namespace) -> None:
+    """Put this source INSIDE the app's existing the_table.json instead of beside it.
+
+    User call: "don't have two libraries for the table". The scraped year books are tagged on
+    the id (Y1953V2 beside Y1953); TheTableService reads that tag to draw "The Table v2" as a
+    second Collections row over the same file. Re-running replaces the tagged books, so the
+    merge is idempotent — run it again after a fuller scrape.
+    """
+    source_path = Path(args.from_json) if args.from_json else BOOKS_DIR / "table.json"
+    library_path = Path(args.into).expanduser()
+    if not source_path.exists():
+        raise SystemExit(f"no scraped library at {source_path} — run 'books' first")
+    if not library_path.exists() and not args.force_create:
+        raise SystemExit(f"no app library at {library_path} — pass --force-create to start one")
+
+    incoming = (json.loads(source_path.read_text(encoding="utf-8")) or {}).get("books") or []
+    if not incoming:
+        raise SystemExit(f"{source_path} has no books")
+    library = {"schema": 1, "books": []}
+    if library_path.exists():
+        library = json.loads(library_path.read_text(encoding="utf-8"))
+    books = library.setdefault("books", [])
+    tag = args.tag
+
+    removed = 0
+    if args.remove:
+        keep = [b for b in books if not str(b.get("id") or "").endswith(tag)]
+        removed = len(books) - len(keep)
+        books[:] = keep
+
+    index = {str(b.get("id") or ""): i for i, b in enumerate(books)}
+    added = replaced = 0
+    chapters_total = verses_total = 0
+    for book in incoming:
+        year = str(book.get("name") or "").strip()
+        book_id = f"Y{year}{tag}" if year.isdigit() else f"{year}{tag}"
+        chapters = []
+        for chapter in book.get("chapters") or []:
+            title = str(chapter.get("title") or "")
+            verses = [{"number": v.get("number"), "text": v.get("text"),
+                       "heading": v.get("heading")} for v in chapter.get("verses") or []]
+            chapters.append({"number": chapter.get("number"), "title": title,
+                             "code": chapter_code(title), "verses": verses})
+            chapters_total += 1
+            verses_total += len(verses)
+        entry = {"id": book_id, "name": year,
+                 "order": int(year) if year.isdigit() else book.get("order") or 0,
+                 "chapters": chapters}
+        if book_id in index:
+            books[index[book_id]] = entry
+            replaced += 1
+        else:
+            index[book_id] = len(books)
+            books.append(entry)
+            added += 1
+
+    size_before = library_path.stat().st_size if library_path.exists() else 0
+    logger.info("merge: %s -> %s | %d book(s) added, %d replaced, %d removed | "
+                "%d chapter(s), %d paragraph(s) | library now %d book(s)",
+                source_path.name, library_path, added, replaced, removed,
+                chapters_total, verses_total, len(books))
+    if args.dry_run:
+        logger.info("dry run: nothing written")
+        return
+
+    if library_path.exists():
+        backup = library_path.with_suffix(library_path.suffix + ".bak")
+        shutil.copy2(library_path, backup)
+        logger.info("backup: %s (%.1f MB)", backup, backup.stat().st_size / 1e6)
+    library_path.parent.mkdir(parents=True, exist_ok=True)
+    library_path.write_text(json.dumps(library, ensure_ascii=False, separators=(",", ":")),
+                            encoding="utf-8")
+    logger.info("library written: %.1f MB -> %.1f MB",
+                size_before / 1e6, library_path.stat().st_size / 1e6)
+
+
+############################################################
 # CLI
 ############################################################
 
@@ -635,6 +730,18 @@ def build_parser() -> argparse.ArgumentParser:
     audio.add_argument("--workers", type=int, default=3)
     audio.add_argument("--delay", type=float, default=0.5)
     audio.add_argument("--force", action="store_true")
+
+    merge = sub.add_parser("merge", help="fold this source into the app's one the_table.json")
+    merge.add_argument("--into", required=True, help="path to the app's the_table.json")
+    merge.add_argument("--from", dest="from_json", default=None,
+                       help="scraped table.json (default: data/books/table.json)")
+    merge.add_argument("--tag", default="V2",
+                       help="book-id tag that marks this set (default V2 -> Y1953V2)")
+    merge.add_argument("--remove", action="store_true",
+                       help="drop the tagged books from the library instead")
+    merge.add_argument("--dry-run", action="store_true", help="report, write nothing")
+    merge.add_argument("--force-create", action="store_true",
+                       help="create the library when the path does not exist yet")
 
     both = sub.add_parser("all", help="books, then audio")
     both.add_argument("--language", default="en")
@@ -677,6 +784,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "audio":
         run_audio(args)
+        return 0
+
+    if args.command == "merge":
+        run_merge(args)
         return 0
 
     if args.command == "all":

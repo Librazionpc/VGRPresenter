@@ -13,7 +13,18 @@ Item {
 
     readonly property string type: item ? (item.type ?? "") : ""
     property int reload: 0            // bumped when the show's file changed under us (the next timer), so it is read again
-    readonly property var loaded: { root.reload; ShowService.peekRevision; return root.type === "show" ? ShowService.peekShow(item.ref) : null }
+    readonly property var loaded: {
+        root.reload
+        ShowService.peekRevision
+        if (root.type !== "show")
+            return null
+        const peekT0 = Date.now()
+        const peekAnswer = ShowService.peekShow(item.ref)
+        const peekMs = Date.now() - peekT0
+        if (peekMs >= 40)
+            console.log("[PEEKCOST] peekShow " + peekMs + " ms for " + item.ref)
+        return peekAnswer
+    }
     readonly property string imageFit: {
         const fileFit = root.type === "image" && root.item
             ? MediaLibraryService.itemFit(String(root.item.ref)) : ""
@@ -36,6 +47,13 @@ Item {
             root.templateCatalogRevision++
             templateNoticeTimer.restart()
         }
+    }
+    // The wall's timer reads the show ON SCREEN, not only the on-air set: its icon lights and its bar
+    // appears for a timed show before GO LIVE too. Report this page's own timer total whenever it changes.
+    function reportShowTimer() { LiveOutputService.setShowTimerTotal(root.timerTotal) }
+    Connections {
+        target: root
+        function onTimerTotalChanged() { root.reportShowTimer() }
     }
     readonly property string outputStyleTemplateId: {
         root.styleRevision
@@ -68,6 +86,8 @@ Item {
         ? root.outputCategoryTemplateId
         : (root.categoryTemplateOverrideId !== "" ? root.categoryTemplateOverrideId : root.outputStyleTemplateId)
     property int selectedSlide: -1
+
+
     property bool stageFirstPending: false
     // The (show, template) pairs already warned about THIS SESSION. Once is enough: closing the notice
     // is the answer, and opening the show again (or coming back to it) must not ask again. (It used to
@@ -75,6 +95,8 @@ Item {
     property var templatePrompted: ({})
     onItemChanged: { selectedSlide = -1; root.refreshWallStepper() }
     onShowChanged: {
+        // A (new or reloaded) show fills in batches; an edit only clamps — see builtSlides.
+        root.renderSlideCache = ({})
         if (stageFirstPending && show) {
             stageFirstPending = false
             Qt.callLater(() => root.stageFirstSlide())
@@ -307,6 +329,9 @@ Item {
         repeat: false
         onTriggered: root.offerTemplateForMissingText()
     }
+    // The composition for one slide is ~19 ms, so a grid of 38 resolved the same slides over and over
+    // (open, reload, edit, view switch). The cache is keyed on everything this answer depends on.
+    property var renderSlideCache: ({})
     function renderSlide(slide, forStage) {
         if (!slide || !root.show)
             return slide
@@ -316,18 +341,24 @@ Item {
         const design = designId === "" ? null : TemplateLibraryService.design(designId)
         if (!design || !design.id)
             return Object.assign({}, slide, { showCategory: String(root.item?.category ?? "") })
+        const cacheKey = String(slide.id ?? "") + "|" + designId + "|" + String(root.item?.ref ?? "")
+                       + "|" + root.styleRevision + "|" + root.templateCatalogRevision
+        if (root.renderSlideCache[cacheKey] !== undefined)
+            return root.renderSlideCache[cacheKey]
         const resolvedShow = root.resolvedShow(design)
         const resolved = ShowService.resolveSlide(resolvedShow, String(slide.id ?? ""), "")
         if (!resolved || resolved.visible === false)
             return slide
         let blocks = resolved.blocks ?? slide.blocks ?? []
         blocks = root.templateComposition(slide, resolved, design).blocks
-        return Object.assign({}, slide, {
+        const composed = Object.assign({}, slide, {
             blocks: blocks,
             background: resolved.background ?? slide.background ?? "",
             showCategory: String(root.item?.category ?? ""),
             templateOverride: !!design
         })
+        root.renderSlideCache[cacheKey] = composed
+        return composed
     }
     function renderedSlides() {
         return root.slides.map((slide) => root.renderSlide(slide, true))
@@ -540,16 +571,21 @@ Item {
     function ownsWallTile() {
         if (!root.item)
             return false
+        // Live, the tile belongs to the SET the show was taken as, whose name is readingSetName —
+        // onAirTitle is the SLIDE's title ('Verse 1'), never the show's name, so the old comparison
+        // was always false and the wall's › / the auto-advance timer could not step the show.
         return LiveOutputService.stagedIsOurs(root.item.name)
-            || (LiveOutputService.live && LiveOutputService.onAirTitle === root.item.name)
+            || (LiveOutputService.live && LiveOutputService.readingSetName === root.item.name)
     }
 
     function refreshWallStepper() {
         LiveOutputService.setWallStepper("show", root.ownsWallTile() && root.slides.length > 1)
     }
-    onSlidesChanged: root.refreshWallStepper()
+    onSlidesChanged: {
+        root.refreshWallStepper()
+    }
     onSelectedSlideChanged: root.refreshWallStepper()
-    Component.onCompleted: root.refreshWallStepper()
+    Component.onCompleted: { root.refreshWallStepper(); root.reportShowTimer() }
     Connections {
         target: LiveOutputService
         function onLiveChanged() { root.refreshWallStepper() }
@@ -568,9 +604,12 @@ Item {
         target: ShowService
         function onShowChanged() { if (root.visible && root.type === "show") root.reload++ }
     }
-    onVisibleChanged: if (visible && root.type === "show") {
-        root.reload++
-        templateNoticeTimer.restart()
+    onVisibleChanged: {
+        if (visible) root.reportShowTimer()
+        if (visible && root.type === "show") {
+            root.reload++
+            templateNoticeTimer.restart()
+        }
     }
 
     Rectangle { anchors.fill: parent; color: root.cDarkest }
@@ -633,6 +672,39 @@ Item {
         }
     }
 
+    // ---- A CELL'S PICTURE IS BUILT WHEN IT IS NEAR THE VIEW ------------------------------------
+    // Each cell used to instantiate a whole DesignPreview (every block's items) for all 38 slides at
+    // once: measured 2-3.5 s of interface-thread silence opening the show, while composing the slides
+    // at the active style costs only 22 ms for all 38. The cells are cheap frames; the picture is
+    // loaded for the rows on screen (plus one screen of margin, so scrolling stays ahead).
+    function previewOnScreen(cell) {
+        if (!grid.visible)
+            return false
+        // INDEX WINDOW, not the cell's own y: before the first layout every cell still reports y=0, so a
+        // geometry test said "all 38 are on screen" and built them all anyway. Cell height follows the
+        // column width, so the rows around the scroll offset are known without waiting for layout.
+        const perRow = Math.max(1, root.columns)
+        const rowH = StageGrid.heightForWidth(root.cellWidth - 4) + 29
+        const viewport = grid.height > 0 ? grid.height : 700
+        const firstRow = Math.max(0, Math.floor(grid.contentY / rowH))
+        const lastRow = Math.ceil((grid.contentY + viewport) / rowH)
+        return cell.index >= firstRow * perRow && cell.index < (lastRow + 1) * perRow
+    }
+    // ONE PICTURE PER TURN OF THE EVENT LOOP. A preview costs ~80 ms to instantiate, so even the cells
+    // on screen were a single freeze; metered this way the frames and titles appear at once and the
+    // pictures fill in while the window stays responsive.
+
+    Component {
+        id: slidePreviewComponent
+        DesignPreview {
+            width: parent.width
+            showBindPlaceholders: false
+            blocks: parent.styled ? (parent.styled.blocks ?? []) : []
+            background: parent.styled ? (parent.styled.background ?? "transparent") : "transparent"
+            showCheckerboard: parent.styled ? parent.styled.frameTransparent === true : false
+        }
+    }
+
     // ---- a show: its slides (grid, list or lyrics) ----
     Flickable {
         id: grid
@@ -675,6 +747,11 @@ Item {
                         void root.styleRevision
                         void root.templateCatalogRevision
                         void root.showTemplateId
+                        // A cell far from the viewport resolves no template and composes nothing: this
+                        // binding is the bulk of opening a 38-slide show. The window is the stable index
+                        // range from previewOnScreen, so it only re-evaluates when the grid scrolls.
+                        if (!root.previewOnScreen(cell))
+                            return ({})
                         return LiveOutputService.previewWithActiveStyle(root.renderSlide(cell.modelData))
                     }
                     width: root.cellWidth
@@ -691,12 +768,11 @@ Item {
                             id: thumb
                             width: parent.width; height: StageGrid.heightForWidth(width)
                             color: "#000000"; clip: true
-                            DesignPreview {
-                                width: parent.width
-                                showBindPlaceholders: false
-                                blocks: cell.styled.blocks ?? []
-                                background: cell.styled.background ?? "transparent"
-                                showCheckerboard: cell.styled.frameTransparent === true
+                            Loader {
+                                anchors.fill: parent
+                                active: root.previewOnScreen(cell)
+                                sourceComponent: slidePreviewComponent
+                                property var styled: cell.styled
                             }
                             Rectangle { anchors.fill: parent; color: Theme.hoverBg; visible: cellHover.hovered }      // the hover veil
                             // the slide's next timer
@@ -1170,6 +1246,30 @@ Item {
                 HoverHandler { id: viewHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: root.nextView() }
             }
+        }
+    }
+
+    // ---- the sliding timer bar: a show that carries timers shows its pace at a glance ----
+    // The track is there whenever the show has a next timer on any slide; the fill answers the on-air
+    // slide's OWN countdown (LiveOutputService), so it slides as each slide's time runs out. It only
+    // fills while THIS show is the one the timer was recorded for (another show on air must not move it).
+    Rectangle {
+        id: timerBar
+        objectName: "selfTestTimerBar"
+        visible: root.type === "show" && root.show !== null && root.timerTotal > 0
+        z: 3
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 4
+        color: "#33000000"
+        readonly property bool live: LiveOutputService.autoAdvancing
+            && String(LiveOutputService.autoAdvanceShow).toLowerCase() === String(root.show ? root.show.name : "").toLowerCase()
+        Rectangle {
+            width: timerBar.live ? Math.round(parent.width * LiveOutputService.timerProgress) : 0
+            height: parent.height
+            color: Theme.accent
+            Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.Linear } }
         }
     }
 

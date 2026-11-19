@@ -15,8 +15,9 @@ QImage noPicture(QSize *size)
 }
 } // namespace
 
-MediaThumbnailProvider::MediaThumbnailProvider()
-    : QQuickImageProvider(QQuickImageProvider::Image)
+MediaThumbnailProvider::MediaThumbnailProvider(QQuickImageProvider::ImageType type,
+                                              QQuickImageProvider::Flags flags)
+    : QQuickImageProvider(type, flags)
 {
 }
 

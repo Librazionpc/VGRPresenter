@@ -1235,7 +1235,7 @@ void TestShowLibraryCrud() {
     const std::string other = make("", "Sunday Morning");
     CHECK(other.find("(2)") != std::string::npos);
 
-    // Duplicate: new identity, same category, "<name> copy".
+    // Duplicate: new identity, same category, "<name> (2)", numbered like a file system numbers a copy.
     auto copy = lib.DuplicateShow(youth1);
     CHECK(copy.ok());
     if (copy.ok()) {
@@ -1243,7 +1243,7 @@ void TestShowLibraryCrud() {
         p::PresentationDocument a, b;
         CHECK(a.Open(youth1).ok() && b.Open(copy.value()).ok());
         CHECK(a.Snapshot().id != b.Snapshot().id);
-        CHECK(b.Snapshot().name == "Friday copy");
+        CHECK(b.Snapshot().name == "Friday (2)");
         CHECK(b.Snapshot().slides.size() == 1);
     }
     auto rootCopy = lib.DuplicateShow(renamed.ok() ? renamed.value() : std::string(), "Custom Name");
@@ -1259,6 +1259,99 @@ void TestShowLibraryCrud() {
     CHECK(!lib.DeleteShow(youth1).ok());                              // already gone
     CHECK(lib.EmptyDeleted().ok());
     CHECK(deleted.ok() && !fs.Exists(deleted.value()));
+
+    (void)fs.RemoveAll(root);
+}
+
+// The same song imported again must not become "Name (2)", and the copies already there must be cleared
+// (keeping one, in the recycle bin, never destroyed).
+void TestShowLibraryDuplicates() {
+    auto& fs = bps::platform::PlatformAccessor::Get().Filesystem();
+    const std::string root = "/tmp/bps_library_dupes";
+    (void)fs.RemoveAll(root);
+    p::ShowLibrary lib(root);
+    CHECK(lib.Refresh().ok());
+    CHECK(lib.CreateCategory("Hymns").ok());
+
+    // A show called `name` whose single slide says `words`, saved into `category`.
+    auto make = [&](const std::string& category, const std::string& name, const std::string& words) {
+        auto path = lib.NewShowPath(category, name);
+        CHECK(path.ok());
+        p::PresentationDocument doc;
+        doc.New(name);
+        p::Presentation m = doc.Snapshot();
+        p::Slide s;
+        s.id = "s1";
+        s.text = words;
+        m.slides.push_back(s);
+        doc.Replace(m);
+        CHECK(doc.Save(path.ok() ? path.value() : std::string()).ok());
+        return path.ok() ? path.value() : std::string();
+    };
+    const std::string original = make("", "Close To Thee", "Close to Thee, close to Thee");
+    const std::string copy2 = make("", "Close To Thee", "Close to Thee, close to Thee");     // "(2)"
+    const std::string copy3 = make("", "Close To Thee", "Close to Thee, close to Thee");     // "(3)"
+    const std::string edited = make("", "Close To Thee", "Close to Thee — and a new verse"); // a different show
+    const std::string hymnal = make("Hymns", "Close To Thee", "Close to Thee, close to Thee");
+    const std::string solo = make("", "Only One", "just me");
+    CHECK(copy2.find("(2)") != std::string::npos && copy3.find("(3)") != std::string::npos);
+    CHECK(lib.Refresh().ok());
+
+    // THE IMPORT SIDE: asking "is this show already here?" finds the same words, not a same-named other show.
+    p::PresentationDocument probeDoc;
+    probeDoc.New("Close To Thee");
+    p::Presentation probe = probeDoc.Snapshot();
+    p::Slide ps;
+    ps.id = "x";
+    ps.text = "Close to Thee, close to Thee";
+    probe.slides.push_back(ps);
+    CHECK(!lib.FindSameShow("", probe).empty());
+    CHECK(!lib.FindSameShow("Hymns", probe).empty());
+    CHECK(lib.FindSameShow("Nowhere", probe).empty());
+    probe.slides[0].text = "Different words entirely";
+    CHECK(lib.FindSameShow("", probe).empty());
+    probe.name = "Another Song";
+    probe.slides[0].text = "Close to Thee, close to Thee";
+    CHECK(lib.FindSameShow("", probe).empty());
+
+    // THE CLEANUP SIDE: one of each stays; nothing is destroyed.
+    auto report = lib.RemoveDuplicates();
+    CHECK(report.ok());
+    if (report.ok()) {
+        CHECK(report.value().groups == 1);
+        // (2) and (3) go (the original stays), and the uncategorised original goes too: the same song
+        // already lives in the Hymns folder, which is where the stray copies belong.
+        CHECK(report.value().removed == 3);
+    }
+    CHECK(!fs.Exists(copy2) && !fs.Exists(copy3) && !fs.Exists(original));
+    CHECK(fs.Exists(hymnal));       // the named folder's copy stays
+    CHECK(fs.Exists(edited));       // different words: a different show, kept
+    CHECK(fs.Exists(solo));         // a song that was never duplicated
+    CHECK(fs.IsDirectory(root + "/.deleted"));
+    // A second pass has nothing to do.
+    auto again = lib.RemoveDuplicates();
+    CHECK(again.ok() && again.value().removed == 0);
+
+    // A SECOND SHOW OF THE SAME NAME IS NUMBERED LIKE A FILE SYSTEM DOES: "Name (2)", "Name (3)"... — the show's name
+    // as well as its file, so the copies can be told apart in a list.
+    CHECK(lib.NumberedShowName("", "A Brand New Song") == "A Brand New Song");
+    CHECK(lib.NumberedShowName("", "Only One") == "Only One (2)");
+    CHECK(lib.NumberedShowName("", "Only One (2)") == "Only One (2)");
+    auto dup1 = lib.DuplicateShow(solo, "");
+    CHECK(dup1.ok());
+    auto dup2 = lib.DuplicateShow(solo, "");
+    CHECK(dup2.ok());
+    if (dup1.ok() && dup2.ok()) {
+        CHECK(dup1.value().find("Only One (2).vgr") != std::string::npos);
+        CHECK(dup2.value().find("Only One (3).vgr") != std::string::npos);
+        const auto names = lib.Shows();
+        bool two = false, three = false;
+        for (const auto& e : names) {
+            if (e.name == "Only One (2)") two = true;
+            if (e.name == "Only One (3)") three = true;
+        }
+        CHECK(two && three);
+    }
 
     (void)fs.RemoveAll(root);
 }

@@ -35,19 +35,27 @@ void TestGlyphAtlasTextureIdentity() {
         t->AddComponent(r::MakeTextStyle(ts));
         CHECK(engine.AddObject(id, t, "t").ok());
     };
+    // The atlas is rasterised at FontManager::QtPixelSize(size) (a truncation) and its
+    // texture is keyed by that same value, so the key always matches the glyphs:
+    //  - 88.42 and 88.62 are both an 88 px font -> one shared texture (delta 0);
+    //  - 89.62 is an 89 px font -> a texture of its own (delta 1). Keying by the raw or
+    //    a differently-rounded size would hand it the 88 px atlas and draw the wrong glyphs.
     makeScene("gaA", 88.42f);
     makeScene("gaB", 88.62f);
+    makeScene("gaC", 89.62f);
 
     CHECK(engine.Render("gaA").ok());
     const uint32_t afterA = engine.Stats().textureCount;
     CHECK(engine.Render("gaB").ok());
     const uint32_t afterB = engine.Stats().textureCount;
-    // The colliding size must add a texture of its own: under the old name the
-    // second render reused the first atlas and this delta was 0.
-    CHECK(afterB == afterA + 1);
+    CHECK(afterB == afterA);
+    CHECK(engine.Render("gaC").ok());
+    const uint32_t afterC = engine.Stats().textureCount;
+    CHECK(afterC == afterB + 1);
 
     CHECK(engine.DestroyScene("gaA").ok());
     CHECK(engine.DestroyScene("gaB").ok());
+    CHECK(engine.DestroyScene("gaC").ok());
 }
 void TestRenderTypes() {
     // Color pack/unpack round trip (0xAABBGGRR native little-endian).

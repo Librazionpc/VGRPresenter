@@ -13,9 +13,12 @@ ReferencePane {
         id: ad
         // The tab's wording (the shared pane is fully generic).
         readonly property string sidebarLabel: qsTr("Collections")
-        readonly property string addLabel: qsTr("New sermon")
+        // NO ADD ACTIONS (user call: "remove the add buttons since we are the ones supplying
+        // it"). The Table's collections ship with the app — the scraped source is merged into
+        // the same library — so the pane offers no Add/New sermon buttons at all: leaving the
+        // adapter without addLabel/importNew is what makes ReferencePane hide the column.
         readonly property string loadingText: qsTr("Opening the library…")
-        readonly property string emptyText: qsTr("No sermons yet — add one with \"New sermon\".")
+        readonly property string emptyText: qsTr("No sermons in this collection.")
         readonly property string searchHint: qsTr("Type words to find in the sermons, then press Enter.")
         readonly property string searchPlaceholder: qsTr("Search in the sermons")
         // The Table's options live under the "table." settings prefix (its own
@@ -53,11 +56,6 @@ ReferencePane {
         readonly property var liveIsOurs: (refText) => LiveOutputService.live
                                              && refText !== "" && LiveOutputService.onAirTitle === refText
         readonly property var stagedIsOurs: (refText) => LiveOutputService.stagedIsOurs(refText)
-        readonly property var importNew: () => TheTableService.newSermon()
-        // The bulk action: pick the sermons root once, every .pdf/.txt under
-        // it lands in the library (worker thread, live progress, dedup on).
-        readonly property string addFolderLabel: qsTr("Add sermons folder")
-        readonly property var importFolder: () => TheTableService.newSermonFolder()
         readonly property var importing: () => TheTableService.importing
         readonly property var progress: () => TheTableService.progress
         // ---- User data (notes & highlights, persisted in the library JSON) ----

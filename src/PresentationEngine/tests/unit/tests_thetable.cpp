@@ -534,7 +534,7 @@ void TestTheTableLibrary() {
             CHECK(ch.value().verses[0].number == 1);
             CHECK(ch.value().verses[0].text.find("opening carries on") != std::string::npos);
             CHECK(ch.value().verses[0].text.find("second unlabeled block") != std::string::npos);
-            CHECK(ch.value().verses[1].number == 2 && ch.value().verses[1].text.rfind("2 ", 0) == std::string::npos);
+            CHECK(ch.value().verses[1].number == 2 && ch.value().verses[1].text.view().rfind("2 ", 0) == std::string::npos);
             CHECK(ch.value().verses[2].number == 3 && ch.value().verses[2].text.find("third numbered paragraph") != std::string::npos);
         }
 
@@ -629,7 +629,7 @@ void TestTheTableRealPdfs() {
         if (!ch.ok()) continue;
         std::printf("         %zu paragraphs\n", ch.value().verses.size());
         for (size_t i = 0; i < ch.value().verses.size() && i < 4; ++i)
-            std::printf("         [%zu] %.160s\n", i + 1, ch.value().verses[i].text.c_str());
+            std::printf("         [%zu] %.160s\n", i + 1, ch.value().verses[i].text.str().c_str());
         CHECK(ch.value().verses.size() >= 5);
     }
     // The whole folder, when asked for (VGR_TABLE_FULL=1; it takes about half a minute): how many sermons convert, and what the rest say.
@@ -826,6 +826,64 @@ void TestTheTableSearchIndexing() {
     }
 }
 
+// The app indexes the sermons as a WORD LIST (no documents in the engine), and a paragraph that says the typed words
+// together outranks one where they are a page apart — even when the scattered one comes from the sermon listed first.
+void TestTheTableVocabularyAndRanking() {
+    auto& eng = s::SearchEngine::Instance();
+    CHECK(eng.Initialize().ok());
+    std::filesystem::remove_all(kRoot);
+    auto lib = lib::TheTableLibrary::Open(PathOf("vocab.json"));
+    CHECK(lib->UnindexFromSearchEngine().ok());
+
+    // Sermon 1 is read first, and holds the words scattered; sermon 2 says them together.
+    CHECK(lib->ImportSermon("downloads/1953/53_0101_Scattered.txt",
+                            "The farmer went out early and worked the fields through a very long season of rain and sun "
+                            "until at last the harvest finally came in and was carried home to the old red barn.\n\n"
+                            "A closing paragraph with nothing in it that matters, only enough words to stand on its own.").ok());
+    CHECK(lib->ImportSermon("downloads/1953/53_0102_Together.txt",
+                            "Tell me about the farmer harvest barn story, said the boy, and the old man smiled at him.\n\n"
+                            "A closing paragraph with nothing in it that matters, only enough words to stand on its own.").ok());
+
+    const size_t docsBefore = eng.DocumentCount();
+    for (const bool exact : { false, true }) {
+        auto found = lib->Search("farmer harvest barn", 10, exact);
+        // Loose finds both paragraphs; locked wants the words together, so the scattered one drops out altogether.
+        CHECK(found.ok() && found.value().size() >= (exact ? 1u : 2u));
+        if (found.ok() && !found.value().empty()) {
+            // The paragraph with the three words side by side is first — the sermon order would have put the other there.
+            CHECK(found.value().front().reference.find("0102") != std::string::npos);
+            CHECK(found.value().front().reference.find("0101") == std::string::npos);
+        }
+    }
+    // Typed out of order, the in-order paragraph still leads the scattered one (the order typed counts).
+    auto reordered = lib->Search("barn harvest farmer", 10, false);
+    CHECK(reordered.ok() && !reordered.value().empty());
+
+    // THE WORD LIST: the sermons' words reach the engine's term queries, with no sermon document stored there.
+    auto indexed = lib->IndexVocabularyWithSearchEngine();
+    CHECK(indexed.ok() && indexed.value() == 2);
+    CHECK(eng.DocumentCount() == docsBefore);                       // not one sermon became a document
+    s::SearchFilter tableOnly;
+    tableOnly.type = "table";
+    auto none = eng.Search("harvest", tableOnly);
+    CHECK(none.ok() && none.value().empty());
+    const auto prefix = eng.PrefixCandidates("farm");
+    CHECK(std::find(prefix.begin(), prefix.end(), "farmer") != prefix.end());
+    // A re-run replaces the list; unindexing clears it.
+    CHECK(lib->IndexVocabularyWithSearchEngine().ok());
+    CHECK(lib->UnindexFromSearchEngine().ok());
+    const auto gone = eng.PrefixCandidates("farm");
+    CHECK(std::find(gone.begin(), gone.end(), "farmer") == gone.end());
+
+    // A library that is saved and read back comes back whole (the loader reads one sermon at a time).
+    auto reopened = lib::TheTableLibrary::Open(PathOf("vocab.json"));
+    CHECK(reopened->BookIndex().size() == lib->BookIndex().size());
+    auto again = reopened->Search("farmer harvest barn", 10, false);
+    CHECK(again.ok() && !again.value().empty());
+
+    std::filesystem::remove_all(kRoot);
+}
+
 // ===========================================================================
 // THE TYPING TAIL (the sermon pane's own search box)
 // ===========================================================================
@@ -915,4 +973,72 @@ void TestTheTableCitationSuffixCode() {
                             "date code, still has to read as something in the library list today.")
               .ok());
     CHECK(lib->Citation("Y1955", 2, 0) == "55-0200 - 0200");
+}
+
+// The sermon text kept in a memory-mapped file (TheTableLibrary::Load): same words, same search, copies that outlive
+// the library, imports after the load, a save and reload, and the file gone once nothing uses it.
+void TestTheTableMappedText() {
+    const std::string dir = kRoot + "/mapped";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string file = dir + "/table.json";
+    const std::string para2 = "The second paragraph carries more words so it survives the length filter easily, mapped.";
+    {
+        auto lib = lib::TheTableLibrary::Open(file);
+        CHECK(lib->ImportSermon("downloads/1953/53_0217_Only_Believe.txt",
+                                "Only believe, all things are possible to them that believe.\n\n" + para2).ok());
+        CHECK(lib->ImportSermon("downloads/1954/54_0101_Second_Sermon.txt",
+                                "Another sermon begins with a different opening line of text for the mapped test.\n\n"
+                                "And a closing paragraph about believing that reads long enough to be kept as text.").ok());
+    }
+    const auto textFiles = [&] {
+        size_t n = 0;
+        for (const auto& e : std::filesystem::directory_iterator(dir))
+            if (e.path().filename().string().find(".text.") != std::string::npos) ++n;
+        return n;
+    };
+
+    lib::TheTableLibrary::SetMapThresholdBytes(0);   // map even this tiny library
+    std::vector<lib::TheTableVerse> keptCopy;
+    {
+        auto lib = lib::TheTableLibrary::Open(file);
+        CHECK(textFiles() == 1);
+        auto ch = lib->GetChapter("Y1953", 1);
+        CHECK(ch.ok());
+        CHECK(ch.value().verses.size() == 2);
+        CHECK(ch.value().verses[0].text.view().rfind("Only believe", 0) == 0);
+        CHECK(ch.value().verses[1].text == para2);
+        CHECK(ch.value().verses[0].heading == "0217 Only Believe");   // the first paragraph keeps the title
+        CHECK(ch.value().verses[1].heading.empty());
+        keptCopy = ch.value().verses;   // a copy that will outlive the library
+
+        auto hits = lib->Search("believing paragraph");
+        CHECK(hits.ok() && !hits.value().empty());
+        if (hits.ok() && !hits.value().empty())
+            CHECK(hits.value().front().fullText.find("believing") != std::string::npos);
+
+        // An import after the load adds owned text next to the mapped; both save and read back.
+        CHECK(lib->ImportSermon("downloads/1955/55_0301_Third_Sermon.txt",
+                                "A third sermon added after the load has its own paragraph of sufficient length.\n\n"
+                                "With another paragraph following it so that the chapter holds two of them.").ok());
+        CHECK(lib->Save().ok());
+    }
+    // The library is gone, but a copied verse still reads (it shares what keeps the file alive), and the file stays until it goes too.
+    CHECK(textFiles() == 1);
+    CHECK(keptCopy.size() == 2 && keptCopy[1].text == para2);
+    keptCopy.clear();
+    CHECK(textFiles() == 0);
+
+    {
+        auto lib = lib::TheTableLibrary::Open(file);   // reload from the saved JSON
+        auto books = lib->Books();
+        CHECK(books.size() == 3);
+        auto ch = lib->GetChapter("Y1955", 1);
+        CHECK(ch.ok() && ch.value().verses.size() == 2);
+        if (ch.ok() && !ch.value().verses.empty())
+            CHECK(ch.value().verses[0].text.view().rfind("A third sermon", 0) == 0);
+    }
+    lib::TheTableLibrary::SetMapThresholdBytes(4u << 20);
+    CHECK(textFiles() == 0);
+    std::filesystem::remove_all(dir);
 }

@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace bps::presentation {
+struct Presentation;
 struct ShowEntry {
     std::string path;        // absolute path of the .vgr file
     std::string id;          // the show's UUID (from its header)
@@ -61,6 +62,30 @@ public:
     // A free path for a new show called `showName` in `category` — sanitised
     // file name, never overwrites an existing file ("Name (2).vgr"...).
     Result<std::string> NewShowPath(std::string_view category, std::string_view showName) const;
+    // THE NAME A SECOND SHOW OF THE SAME NAME GETS — the way a file system numbers a copy: "Name", then "Name (2)",
+    // "Name (3)"... It returns `showName` itself when no show of that name is in `category` yet, else the first
+    // "Name (n)" (n >= 2) that is free; a name that already ends in " (k)" is numbered from its base. The SHOW's name
+    // carries the number as well as its file, so the copies can be told apart in every list.
+    std::string NumberedShowName(std::string_view category, std::string_view showName) const;
+
+    // THE SAME SHOW, ALREADY HERE. The path of a show in `category` that has this show's name AND exactly its
+    // slides (every slide's title, text and block text, in order), or "" when there is none. Importing the same
+    // file twice used to write "Name (2).vgr", "Name (3).vgr"... — a library of 1,400 songs listed more than
+    // once. The caller skips the write when this finds the show; a same-named show whose words differ is
+    // a different show and is still saved beside it.
+    std::string FindSameShow(std::string_view category, const Presentation& show) const;
+
+    // CLEARING WHAT IS ALREADY THERE. Finds shows with the same name and exactly the same words and keeps ONE of
+    // each: within a folder the original ("Name.vgr", else the lowest "(N)", else the oldest); an uncategorised
+    // copy of a show that also sits in a named folder goes too. Two NAMED folders that both hold a song are
+    // left alone — each is its own hymnal. Nothing is deleted for good: the extras move to <root>/.deleted/
+    // (the same bin DeleteShow uses), and the library is re-scanned once at the end.
+    struct DuplicateReport {
+        int groups = 0;       // songs that existed more than once
+        int removed = 0;      // copies moved to the bin
+        int unreadable = 0;   // files that could not be read (left where they are)
+    };
+    Result<DuplicateReport> RemoveDuplicates();
 
     // Turns arbitrary text into a safe file/folder name (used by NewShowPath).
     static std::string SafeName(std::string_view text);

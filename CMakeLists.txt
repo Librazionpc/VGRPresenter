@@ -814,7 +814,8 @@ target_link_libraries(appVGRPresenterUI
 # resolves). Without either, the include is skipped and the generated
 # registration code fails with "EventBus was not declared in this scope".
 if(VGR_ENABLE_SELFTEST)
-    target_sources(appVGRPresenterUI PRIVATE src/SelfTestDriver.h src/SelfTestDriver.cpp)
+    target_sources(appVGRPresenterUI PRIVATE src/SelfTestDriver.h src/SelfTestDriver.cpp
+        src/HeapProfile.h src/HeapProfile.cpp)
     target_compile_definitions(appVGRPresenterUI PRIVATE VGR_ENABLE_SELFTEST)
 endif()
 

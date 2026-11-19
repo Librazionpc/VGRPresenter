@@ -83,7 +83,7 @@ QVariantMap failure(const QString &why)
              { QStringLiteral("files"), 0 }, { QStringLiteral("warnings"), QStringList() }, { QStringLiteral("firstShow"), QString() } };
 }
 
-QString saveImportedShow(const bi::ImportedShow &imported, bool applyTemplate, const QString &libraryFolder, QString *why)
+QString saveImportedShow(const bi::ImportedShow &imported, bool applyTemplate, const QString &libraryFolder, QString *why, bool *skippedSame = nullptr)
 {
     bi::ShowBuildOptions options;
     if (applyTemplate) {
@@ -96,6 +96,15 @@ QString saveImportedShow(const bi::ImportedShow &imported, bool applyTemplate, c
 
     bps::presentation::Presentation show = bi::ShowFromImported(imported, options);
     const QString folder = !libraryFolder.isEmpty() ? libraryFolder : qstr(imported.category);
+    // THE SAME SONG AGAIN IS NOT A NEW SHOW. Importing a file twice (or a folder that overlaps an earlier import)
+    // used to write "Name (2).vgr", "Name (3).vgr"... — 1,400+ songs listed several times in a real library. A show
+    // already in this folder with the same name and the same words is the one to keep; the copy is not written.
+    if (const QString same = ShowService::instance().findSameLibraryShow(folder, show); !same.isEmpty()) {
+        if (skippedSame) *skippedSame = true;
+        return same;
+    }
+    // A different song that happens to share a name is "Name (2)", "Name (3)"... in the list as well as on disk.
+    show.name = ShowService::instance().numberedLibraryShowName(folder, qstr(show.name)).toStdString();
     const QString path = ShowService::instance().newLibraryShowPath(folder, qstr(show.name));
     if (path.isEmpty()) {
         if (why) *why = QObject::tr("the shows library is not ready");
@@ -119,16 +128,22 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
         warnings.append(qstr(w));
 
     int saved = 0;
+    int skipped = 0;   // shows already in the library with the same words: kept as they are, not copied again
     QString firstPath;
     for (const bi::ImportedShow &show : result.shows) {
         QString why;
-        const QString path = saveImportedShow(show, applyTemplate, libraryFolder, &why);
+        bool same = false;
+        const QString path = saveImportedShow(show, applyTemplate, libraryFolder, &why, &same);
         if (path.isEmpty()) {
             warnings.append(QObject::tr("%1: %2").arg(qstr(show.name), why));
             continue;
         }
         if (firstPath.isEmpty())
             firstPath = path;
+        if (same) {
+            ++skipped;
+            continue;
+        }
         ++saved;
         emit ImportService::instance().showSaved(saved);   // Qt 6: signals are public; the sweep reports progress as it goes
     }
@@ -142,15 +157,18 @@ QVariantMap finish(const bi::ImportResult &result, const QString &formatName, bo
     if (saved > 0 && bibles > 0) summary = QObject::tr("Imported %n show(s) and %1 Bible(s).", "", saved).arg(bibles);
     else if (saved > 0) summary = QObject::tr("Imported %n show(s) from %1.", "", saved).arg(formatName);
     else if (bibles > 0) summary = QObject::tr("Installed %n Bible(s).", "", bibles);
+    else if (skipped > 0) summary = QObject::tr("Nothing new: every show from %1 is already in your library.").arg(formatName);
     else summary = QObject::tr("Nothing could be imported from %1.").arg(formatName);
+    if (skipped > 0 && (saved > 0 || bibles > 0))
+        summary += QLatin1Char(' ') + QObject::tr("%n show(s) already in your library were not added again.", "", skipped);
     if (!warnings.isEmpty())
         summary += QLatin1Char(' ') + QObject::tr("%n file(s) had a problem: %1", "", static_cast<int>(warnings.size())).arg(warnings.first());
-    EngineBridge::write((saved > 0 || bibles > 0) && warnings.isEmpty() ? QStringLiteral("info") : QStringLiteral("warning"), QStringLiteral("Import"),
+    EngineBridge::write((saved > 0 || bibles > 0 || skipped > 0) && warnings.isEmpty() ? QStringLiteral("info") : QStringLiteral("warning"), QStringLiteral("Import"),
                         summary + (warnings.isEmpty() ? QString() : QStringLiteral(" [") + warnings.join(QStringLiteral("; ")) + QLatin1Char(']')));
-    EventBus::instance().notify(summary, (saved > 0 || bibles > 0) ? (warnings.isEmpty() ? QStringLiteral("success") : QStringLiteral("warning")) : QStringLiteral("error"),
+    EventBus::instance().notify(summary, (saved > 0 || bibles > 0 || skipped > 0) ? (warnings.isEmpty() ? QStringLiteral("success") : QStringLiteral("warning")) : QStringLiteral("error"),
                                 QObject::tr("Import"), QStringLiteral("import.done"));
 
-    return { { QStringLiteral("ok"), saved > 0 || bibles > 0 }, { QStringLiteral("error"), QString() }, { QStringLiteral("shows"), saved },
+    return { { QStringLiteral("ok"), saved > 0 || bibles > 0 || skipped > 0 }, { QStringLiteral("error"), QString() }, { QStringLiteral("shows"), saved },
              { QStringLiteral("bibles"), bibles }, { QStringLiteral("files"), static_cast<int>(result.files) },
              { QStringLiteral("warnings"), warnings }, { QStringLiteral("firstShow"), firstPath } };
 }
@@ -291,7 +309,9 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         result.value().files = total;
 
         const int showCount = static_cast<int>(result.value().shows.size());
-        int saved = 0;
+        int saved = 0;     // attempts while the loop runs (the progress bar), then what was really added
+        int written = 0;
+        int skipped = 0;
         QStringList warnings;
         for (const std::string &w : result.value().warnings)
             warnings.append(qstr(w));
@@ -323,7 +343,8 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
         for (const bi::ImportedShow &show : result.value().shows) {
             QString why;
             const QString folder = !libraryFolder.isEmpty() ? libraryFolder : qstr(show.sourceFolder);
-            const QString path = saveImportedShow(show, /*applyTemplate=*/false, folder, &why);
+            bool same = false;
+            const QString path = saveImportedShow(show, /*applyTemplate=*/false, folder, &why, &same);
             ++saved;   // progress counts attempts, so the bar always reaches the end
             QMetaObject::invokeMethod(this, [this, saved, showCount]() {
                 if (showCount > 0)
@@ -335,10 +356,16 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
             }
             if (firstPath.isEmpty())
                 firstPath = path;
+            if (same) {
+                ++skipped;   // already in the library with the same words: not written again
+                continue;
+            }
+            ++written;
         }
+        saved = written;   // from here on `saved` is what was really added
         const int bibles = static_cast<int>(result.value().bibles.size());
 
-        QMetaObject::invokeMethod(this, [this, warnings = std::move(warnings), firstPath, saved, bibles,
+        QMetaObject::invokeMethod(this, [this, warnings = std::move(warnings), firstPath, saved, skipped, bibles,
                                          files = total, formatName, libraryFolder,
                                          mediaFolders = std::move(mediaFolders), mediaCopied]() mutable {
             // GUI thread: republish the library once and tell the user.
@@ -357,17 +384,20 @@ QVariantMap ImportService::importFiles(const QString &formatId, const QStringLis
             if (saved > 0 && bibles > 0) summary = QObject::tr("Imported %n show(s) and %1 Bible(s).", "", saved).arg(bibles);
             else if (saved > 0) summary = QObject::tr("Imported %n show(s) from %1.", "", saved).arg(formatName);
             else if (bibles > 0) summary = QObject::tr("Installed %n Bible(s).", "", bibles);
+            else if (skipped > 0) summary = QObject::tr("Nothing new: every show from %1 is already in your library.").arg(formatName);
             else summary = QObject::tr("Nothing could be imported from %1.").arg(formatName);
+            if (skipped > 0 && (saved > 0 || bibles > 0))
+                summary += QLatin1Char(' ') + QObject::tr("%n show(s) already in your library were not added again.", "", skipped);
             if (mediaCopied > 0)
                 summary += QLatin1Char(' ') + QObject::tr("Brought in %n media file(s).", "", mediaCopied);
             if (!warnings.isEmpty())
                 summary += QLatin1Char(' ') + QObject::tr("%n file(s) had a problem: %1", "", static_cast<int>(warnings.size())).arg(warnings.first());
-            EngineBridge::write((saved > 0 || bibles > 0) && warnings.isEmpty() ? QStringLiteral("info") : QStringLiteral("warning"), QStringLiteral("Import"),
+            EngineBridge::write((saved > 0 || bibles > 0 || skipped > 0) && warnings.isEmpty() ? QStringLiteral("info") : QStringLiteral("warning"), QStringLiteral("Import"),
                                 summary + (warnings.isEmpty() ? QString() : QStringLiteral(" [") + warnings.join(QStringLiteral("; ")) + QLatin1Char(']')));
-            EventBus::instance().notify(summary, (saved > 0 || bibles > 0) ? (warnings.isEmpty() ? QStringLiteral("success") : QStringLiteral("warning")) : QStringLiteral("error"),
+            EventBus::instance().notify(summary, (saved > 0 || bibles > 0 || skipped > 0) ? (warnings.isEmpty() ? QStringLiteral("success") : QStringLiteral("warning")) : QStringLiteral("error"),
                                         QObject::tr("Import"), QStringLiteral("import.done"));
 
-            QVariantMap answer = { { QStringLiteral("ok"), saved > 0 || bibles > 0 }, { QStringLiteral("error"), QString() }, { QStringLiteral("shows"), saved },
+            QVariantMap answer = { { QStringLiteral("ok"), saved > 0 || bibles > 0 || skipped > 0 },{ QStringLiteral("error"), QString() }, { QStringLiteral("shows"), saved },
                                    { QStringLiteral("bibles"), bibles }, { QStringLiteral("files"), files },
                                    { QStringLiteral("media"), mediaCopied },
                                    { QStringLiteral("warnings"), warnings }, { QStringLiteral("firstShow"), firstPath } };

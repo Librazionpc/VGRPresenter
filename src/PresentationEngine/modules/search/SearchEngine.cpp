@@ -357,6 +357,13 @@ Result<size_t> SearchEngine::IndexDocument(const SearchDocument& doc) {
 
 // Batch scope: while suspended, per-document cache wipes are skipped; the
 // OUTERMOST resume clears once. RAII-safe via explicit Begin/End pairs.
+void SearchEngine::SetVocabulary(std::string_view source, std::vector<std::pair<std::string, uint32_t>> terms) {
+    storage_.SetVocabulary(source, std::move(terms));
+}
+void SearchEngine::ClearVocabulary(std::string_view source) {
+    storage_.ClearVocabulary(source);
+}
+
 void SearchEngine::SuspendCacheInvalidation() {
     std::lock_guard<std::mutex> lock(mutex_);
     ++cacheSuspend_;
@@ -862,7 +869,11 @@ Result<std::vector<SearchResult>> SearchEngine::Search(std::string_view query,
         for (const auto& entry : cache_) {
             if (entry.query == q && entry.filterKey == filterKey) {
                 cacheHits_.fetch_add(1);
-                results = entry.results;
+                // Copy only what the caller asked for, not the whole cached ranked set (up to 500
+                // results with snippets) that is then thrown away under the engine lock.
+                const size_t take = std::min(limit, entry.results.size());
+                results.assign(entry.results.begin(),
+                               entry.results.begin() + static_cast<std::ptrdiff_t>(take));
                 cacheHit = true;
                 break;
             }

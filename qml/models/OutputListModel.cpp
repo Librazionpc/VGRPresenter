@@ -872,12 +872,50 @@ void OutputListModel::screensChangedNow()
     emit screensChanged();
 }
 
+QRect OutputListModel::screenRect(const QString &screenName) const
+{
+    if (screenName.isEmpty() || !qobject_cast<QGuiApplication *>(QCoreApplication::instance()))
+        return {};
+    for (const QScreen *screen : QGuiApplication::screens())
+        if (screen && screen->name() == screenName)
+            return screen->geometry();
+    return {};
+}
+
+// A display is HELD by a row that names it, or names a screen with the very same geometry (a mirrored monitor is two
+// screens in one place — see mirroredBy). Either way a second window there would draw over the first.
 int OutputListModel::rowHoldingScreen(const QString &screenName, int exceptRow) const
 {
     if (screenName.isEmpty())
         return -1;
+    const QRect wanted = screenRect(screenName);
     for (int i = 0; i < m_outputs.size(); ++i) {
-        if (i != exceptRow && m_outputs.at(i).screenName == screenName)
+        if (i == exceptRow)
+            continue;
+        const QString held = m_outputs.at(i).screenName;
+        if (held == screenName)
+            return i;
+        if (!wanted.isNull() && !held.isEmpty() && screenRect(held) == wanted)
+            return i;
+    }
+    return -1;
+}
+
+int OutputListModel::mirroredBy(int index) const
+{
+    if (index < 0 || index >= m_outputs.size())
+        return -1;
+    const OutputItem &me = m_outputs.at(index);
+    if (me.onAirOnly || me.screenName.isEmpty())
+        return -1;
+    const QRect mine = screenRect(me.screenName);
+    if (mine.isNull())
+        return -1;
+    for (int i = 0; i < index; ++i) {
+        const OutputItem &other = m_outputs.at(i);
+        if (other.onAirOnly || !other.isEnabled || other.screenName.isEmpty())
+            continue;
+        if (screenRect(other.screenName) == mine)
             return i;
     }
     return -1;
@@ -1082,6 +1120,7 @@ StyleListModel *OutputListModel::adoptedStyleRoster()
 
 void OutputListModel::styleRosterChanged()
 {
+    styleLayoutCache_.clear();
     if (m_outputs.isEmpty())
         return;
     emit dataChanged(index(0), index(m_outputs.size() - 1),
@@ -1102,6 +1141,7 @@ void OutputListModel::adoptStyleRoster(StyleListModel *styles)
                                 .arg(styles == StyleListModel::instance() ? 1 : 0));
     }
     s_adoptedStyleRoster = styles;
+    styleLayoutCache_.clear();
     if (styles && styleRoster_ == styles)
         return;
     if (styleRosterConn_)
@@ -1119,6 +1159,15 @@ QString OutputListModel::styleLayoutNote(const QString &styleId) const
     const int row = styleRowForId(styleId);
     if (row < 0)
         return {};   // no style on this output: there is no layout to describe
+    if (const auto hit = styleLayoutCache_.constFind(styleId); hit != styleLayoutCache_.constEnd())
+        return hit.value();
+    const QString note = styleLayoutNoteUncached(row);
+    styleLayoutCache_.insert(styleId, note);
+    return note;
+}
+
+QString OutputListModel::styleLayoutNoteUncached(int row) const
+{
     const bps::presentation::OutputStyleSpec spec =
         StyleSpecBuilder::specForStyleRow(row, styleRoster());
     switch (bps::presentation::SlideRules::LayoutScope(spec)) {

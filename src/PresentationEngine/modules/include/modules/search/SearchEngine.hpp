@@ -42,6 +42,10 @@ public:
     // Rebuilds the whole index from a set of documents (called on a pool
     // worker in production; synchronous here so tests are deterministic).
     Result<size_t> Rebuild(const std::vector<SearchDocument>& docs);
+    // A word list for a source whose documents are NOT indexed (the sermon library): typo correction, word splitting
+    // and completion see its words and their document counts, at a few MB instead of hundreds. See IndexStorage.
+    void SetVocabulary(std::string_view source, std::vector<std::pair<std::string, uint32_t>> terms);
+    void ClearVocabulary(std::string_view source);
     void SuspendCacheInvalidation();
     void ResumeCacheInvalidation();
     size_t DocumentCount() const;

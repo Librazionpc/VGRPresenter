@@ -81,6 +81,18 @@ public:
     }
     bool Has(std::string_view dotPath) const { return Find(dotPath) != nullptr; }
 
+    // ---- For a loader that OWNS a parsed tree and is about to drop it ----------------------------------------------
+    // Reading a 100 MB document into a tree and then COPYING every string out of it holds the text twice at the peak,
+    // and the freed half stays scattered through the heap (the process keeps the memory). A loader moves the text out
+    // instead — the string's own heap block changes owner, nothing is copied — and may drop a finished subtree at once.
+    Value* FindMut(std::string_view dotPath) { return const_cast<Value*>(Find(dotPath)); }
+    Array* asArrayMut() { return t_ == Type::Array ? &std::get<Array>(v_) : nullptr; }
+    // The text of a string value, moved out (the value is left empty). "" for anything that is not a string.
+    std::string takeString() {
+        if (t_ != Type::String) return {};
+        return std::move(std::get<std::string>(v_));
+    }
+
     std::string ToString() const;
 
 private:

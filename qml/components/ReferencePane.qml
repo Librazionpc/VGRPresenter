@@ -1431,14 +1431,17 @@ Item {
         }
         // AUTO-CORRECT: what is typed, ignoring spaces, case and punctuation ("1joh", "1 JOH"),
         // is the start of exactly ONE book's name -> the box takes the book's own spelling plus
-        // chapter 1 ("1 John 1"), the chapter digit selected so the next number typed replaces
-        // it. Several books = no guess.
+        // chapter 1 verse 1 ("1 John 1:1"), that "1:1" selected so the next number typed replaces
+        // it. Several books = no guess (a guess would swallow the next letter: "Judges" could not be typed).
         const squash = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, "")
         const squashed = squash(needle)
         if (squashed !== "" && !/^d+$/.test(squashed)) {
             const named = root.books.filter((b) => squash(b.name).indexOf(squashed) === 0)
             if (named.length === 1)
-                return { rows: [], complete: "", replace: named[0].name + " 1", replaceSelect: 1 }
+                // The book is settled, so the box shows the whole reference it means — "1 John 1:1", the colon
+                // included (it used to stop at "1 John 1", which hid the verse separator and read as unfinished).
+                // "1:1" is selected: the next digit replaces it, so the operator edits the chapter/verse themself.
+                return { rows: [], complete: "", replace: named[0].name + " 1:1", replaceSelect: 3 }
         }
         const starts = root.books.filter((b) => b.name.toLowerCase().indexOf(needle) === 0 ||
                                                 needle.indexOf(b.name.toLowerCase()) === 0)
@@ -2042,7 +2045,10 @@ Item {
         const partIndex = rowLow > 0
             ? item.rowStarts[rowLow - 1].partIndex
             : item.partIndex
-        return { number: item.number, partIndex: partIndex }
+        // The chapter offsets this piece covers, so a caller can answer "still the same piece?" without searching again.
+        const from = item.start + (rowLow > 0 ? item.rowStarts[rowLow - 1].start : 0)
+        const to = item.start + (rowLow < item.rowStarts.length ? item.rowStarts[rowLow].start : item.end - item.start)
+        return { number: item.number, partIndex: partIndex, from: from, to: Math.max(to, from + 1) }
     }
 
     function playPicked() {
@@ -2201,6 +2207,7 @@ Item {
             return
         root.scrollSourced = true
         root.lastFollowedScrollChar = -1
+        root.followRangeIndex = null
         root.scrollPages = source.pages
         LiveOutputService.setReadingTextSource(root.lineStepOwnerRef, source.pages, source.index)
     }
@@ -2212,6 +2219,7 @@ Item {
         root.scrollSourced = !!passageSourced
         root.followedScrollPiece = ""
         root.lastFollowedScrollChar = -1
+        root.followRangeIndex = null
         if (passageSourced)
             return
         // In Scroll, a click shows the chapter text from the clicked paragraph on, in
@@ -2295,16 +2303,44 @@ Item {
 
     property string followedScrollPiece: ""
     property int lastFollowedScrollChar: -1
+    // The chapter offsets of the piece the walk is on, and the index they belong to: while the walk stays inside it
+    // there is nothing to look up. followScrollWalk runs on EVERY glide tick (about a dozen per step) and used to
+    // search the chapter each time — the single largest cost of a step in the soak (8 s of 3 minutes).
+    property int followRangeFrom: -1
+    property int followRangeTo: -1
+    property var followRangeIndex: null
     function followScrollWalk() {
+        if (!EngineBridge.perfProbe) {
+            root.followScrollWalkInner()
+            return
+        }
+        const t0 = EngineBridge.perfNow()
+        root.followScrollWalkInner()
+        EngineBridge.perfNote("ReferencePane.followScrollWalk", EngineBridge.perfNow() - t0)
+    }
+    function followScrollWalkInner() {
         if (!root.scrollSourced || root.scrollPages.length === 0 || !root.followSelectorMoves)
             return
+        const probe = EngineBridge.perfProbe
+        const tp = probe ? EngineBridge.perfNow() : 0
         const passage = LiveOutputService.readingPassageChar()
+        if (probe)
+            EngineBridge.perfNote("follow.readingPassageChar", EngineBridge.perfNow() - tp)
         if (passage < 0 || passage === root.lastFollowedScrollChar)
             return
         const origin = Number(root.scrollPages[0].start ?? 0)
-        const piece = root.pieceAtChapterOffset(origin + passage)
+        const at = origin + passage
+        if (root.followRangeIndex !== null && root.followRangeIndex === root.chapterPassageIndex
+                && at >= root.followRangeFrom && at < root.followRangeTo) {
+            root.lastFollowedScrollChar = passage
+            return
+        }
+        const piece = root.pieceAtChapterOffset(at)
         if (!piece)
             return
+        root.followRangeFrom = piece.from
+        root.followRangeTo = piece.to
+        root.followRangeIndex = root.chapterPassageIndex
         root.lastFollowedScrollChar = passage
         const sig = piece.number + "|" + piece.partIndex
         if (sig === root.followedScrollPiece)
@@ -2317,10 +2353,19 @@ Item {
             + " readingPage=" + LiveOutputService.readingPage + "/" + root.scrollPages.length
             + " selectedBefore=" + JSON.stringify(root.selected))
         root.followedScrollPiece = sig
+        const tc = probe ? EngineBridge.perfNow() : 0
         root.selected = [piece.number]
         root.anchorVerse = piece.number
+        if (probe)
+            EngineBridge.perfNote("follow.select", EngineBridge.perfNow() - tc)
+        const tr = probe ? EngineBridge.perfNow() : 0
         root.centerRow(piece.number, piece.partIndex)
+        if (probe)
+            EngineBridge.perfNote("follow.centerRow(call)", EngineBridge.perfNow() - tr)
+        const to = probe ? EngineBridge.perfNow() : 0
         root.followOutputReference(piece.number)
+        if (probe)
+            EngineBridge.perfNote("follow.outputReference", EngineBridge.perfNow() - to)
     }
 
     // THE OUTPUTS' REFERENCE LABEL MOVES WITH THE WALK ("Genesis 1:5" when the screen is on verse 5, not the pick's "1:1"):
@@ -2448,7 +2493,10 @@ Item {
         Flickable {
             id: sourcesFlick
             objectName: "selfTestSourcesList-" + root.paneTag   // (the scroll probe scrolls it by name)
-            x: 8; y: 42; width: parent.width - 16; height: parent.height - 42 - 48
+            x: 8; y: 42; width: parent.width - 16
+            // A pane that offers no add action (The Table: the app supplies its collections)
+            // reclaims the strip those buttons used to sit in.
+            height: parent.height - 42 - (addActions.visible ? 48 : 0)
             clip: true
             contentHeight: sourceList.height
             boundsBehavior: Flickable.StopAtBounds
@@ -2531,6 +2579,13 @@ Item {
 
         Column {
             id: addActions
+            // The pane's add actions are the ADAPTER's to offer (Scripture keeps its folder + add
+            // buttons; The Table's collections are supplied with the app, so it offers none and
+            // the column disappears instead of showing two dead buttons).
+            readonly property bool hasFolder: !!(root.adapter && root.adapter.addFolderLabel
+                                                 && root.adapter.importFolder)
+            readonly property bool hasNew: !!(root.adapter && root.adapter.importNew)
+            visible: hasFolder || hasNew
             x: 8
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 8
@@ -2573,7 +2628,7 @@ Item {
             }
 
             SidebarAddButton {
-                readonly property bool hasFolder: !!(root.adapter && root.adapter.addFolderLabel && root.adapter.importFolder)
+                readonly property bool hasFolder: addActions.hasFolder
                 visible: hasFolder
                 enabled: !(hasFolder && root.adapter.importing && root.adapter.importing())
                 width: parent.width
@@ -2587,12 +2642,21 @@ Item {
                 onClicked: root.adapter.importFolder()
             }
             SidebarAddButton {
+                readonly property bool hasNew: addActions.hasNew
+                visible: hasNew
                 width: parent.width
                 // One install at a time: the button waits out a running import
                 // (the service rejects a second one anyway).
                 enabled: !(root.adapter && root.adapter.importing && root.adapter.importing())
-                text: (root.adapter ? root.adapter.addLabel : qsTr("Add"))
-                onClicked: root.adapter.importNew()
+                text: {
+                    if (!hasNew)
+                        return ""
+                    return (root.adapter.addLabel ? root.adapter.addLabel : qsTr("Add"))
+                }
+                onClicked: {
+                    if (hasNew)
+                        root.adapter.importNew()
+                }
             }
         }
     }

@@ -289,6 +289,39 @@ Result<std::unique_ptr<IFileWriteStream>> QtFilesystem::OpenWriteStream(std::str
     return std::unique_ptr<IFileWriteStream>(std::move(stream));
 }
 
+namespace {
+// The QFile stays open for the life of the mapping (the mapping is released through it).
+class QtMappedFile final : public IMappedFile {
+public:
+    explicit QtMappedFile(QString path) : file_(std::move(path)) {}
+    ~QtMappedFile() override {
+        if (data_) file_.unmap(data_);
+        file_.close();
+    }
+    bool Open() {
+        if (!file_.open(QIODevice::ReadOnly)) return false;
+        size_ = static_cast<size_t>(file_.size());
+        if (size_ == 0) return true;   // nothing to map: an empty view
+        data_ = file_.map(0, static_cast<qint64>(size_));
+        return data_ != nullptr;
+    }
+    const char* Data() const override { return reinterpret_cast<const char*>(data_); }
+    size_t Size() const override { return size_; }
+private:
+    mutable QFile file_;
+    uchar* data_ = nullptr;
+    size_t size_ = 0;
+};
+} // namespace
+
+Result<std::shared_ptr<const IMappedFile>> QtFilesystem::MapReadOnly(std::string_view path) const
+{
+    auto mapped = std::make_shared<QtMappedFile>(Q(path));
+    if (!mapped->Open())
+        return IoError("map", path, QStringLiteral("the file could not be mapped"));
+    return std::shared_ptr<const IMappedFile>(std::move(mapped));
+}
+
 Result<void> QtFilesystem::ReplaceAtomic(std::string_view path, const void *bytes, size_t size)
 {
     if (!bytes && size > 0)

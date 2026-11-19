@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <chrono>
 #include <cstdlib>
 #include <format>
@@ -532,12 +533,13 @@ Result<std::string> ShowLibrary::DuplicateShow(std::string_view path, std::strin
     auto show = LoadShow(from);
     if (!show.ok()) return show.error();
     Presentation& m = show.value().model;
-    m.name = newName.empty() ? m.name + " copy" : std::string(newName);
     m.id = std::format("show-{}", NowMs());          // a copy is a different show
     m.createdAt = m.modifiedAt = std::chrono::system_clock::now();
 
     const std::string dir = ParentOf(from);
     const std::string category = Norm(dir) == Norm(root_) ? std::string() : LeafName(dir);
+    // A copy is "Name (2)", then "Name (3)"... like a file system numbers it (an explicit name is numbered only if taken).
+    m.name = NumberedShowName(category, newName.empty() ? std::string_view(m.name) : newName);
     auto target = NewShowPath(category, m.name);
     if (!target.ok()) return target.error();
     show.value().doc.header.createdMs = NowMs();
@@ -583,5 +585,149 @@ Result<std::string> ShowLibrary::NewShowPath(std::string_view category, std::str
     for (int n = 2; fs.Exists(candidate); ++n)
         candidate = fs.Join(dir, std::format("{} ({}).vgr", base, n));
     return candidate;
+}
+
+std::string ShowLibrary::NumberedShowName(std::string_view category, std::string_view showName) const {
+    std::string name(showName);
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    const std::string dir = CategoryDir(category);
+    const std::string base0 = SafeName(name);
+    if (!fs.Exists(fs.Join(dir, base0 + ".vgr")))
+        return name;
+    // "Name (3)" is numbered from "Name": strip one trailing " (digits)".
+    std::string stem = name;
+    if (stem.size() > 4 && stem.back() == ')') {
+        const size_t open = stem.rfind(" (");
+        if (open != std::string::npos && open + 3 < stem.size()) {
+            const std::string digits = stem.substr(open + 2, stem.size() - open - 3);
+            if (digits.find_first_not_of("0123456789") == std::string::npos)
+                stem.resize(open);
+        }
+    }
+    for (int n = 2;; ++n) {
+        std::string candidate = std::format("{} ({})", stem, n);
+        if (!fs.Exists(fs.Join(dir, SafeName(candidate) + ".vgr")))
+            return candidate;
+    }
+}
+
+namespace {
+// What a slide SAYS — the words, not the ids/timestamps a save stamps on every copy.
+std::string SlideWords(const Slide& s) {
+    std::string w = s.title;
+    w += '\x1f';
+    w += s.text;
+    for (const auto& b : s.blocks) {
+        w += '\x1e';
+        w += b.text;
+    }
+    return w;
+}
+
+// "Name (3).vgr" -> 3; "Name.vgr" (the original) -> 0.
+int CopyNumber(const std::string& path) {
+    const size_t dot = path.rfind(".vgr");
+    if (dot == std::string::npos || dot < 4 || path[dot - 1] != ')')
+        return 0;
+    const size_t open = path.rfind(" (", dot - 1);
+    if (open == std::string::npos)
+        return 0;
+    const std::string digits = path.substr(open + 2, dot - 1 - (open + 2));
+    if (digits.empty() || digits.find_first_not_of("0123456789") != std::string::npos)
+        return 0;
+    return std::atoi(digits.c_str());
+}
+} // namespace
+
+Result<ShowLibrary::DuplicateReport> ShowLibrary::RemoveDuplicates() {
+    auto& fs = platform::PlatformAccessor::Get().Filesystem();
+    DuplicateReport report;
+    const std::vector<ShowEntry> all = Shows();
+
+    // Only shows that share a name AND a slide count can be the same show: both are in the cached index, so
+    // the files of every other song are never opened.
+    std::map<std::pair<std::string, int>, std::vector<const ShowEntry*>> candidates;
+    for (const ShowEntry& e : all)
+        candidates[{e.name, e.slideCount}].push_back(&e);
+
+    std::vector<std::string> doomed;
+    for (auto& [key, group] : candidates) {
+        if (group.size() < 2)
+            continue;
+        std::map<std::string, std::vector<const ShowEntry*>> sameWords;   // words -> the files that say them
+        for (const ShowEntry* e : group) {
+            auto loaded = LoadShow(e->path);
+            if (!loaded.ok()) {
+                ++report.unreadable;
+                continue;
+            }
+            std::string words;
+            for (const Slide& s : loaded.value().model.slides)
+                words += SlideWords(s) + '\x1d';
+            sameWords[std::move(words)].push_back(e);
+        }
+        for (auto& [words, files] : sameWords) {
+            if (files.size() < 2)
+                continue;
+            ++report.groups;
+            // The one to keep, per folder: the original, else the lowest copy number, else the oldest.
+            const auto better = [](const ShowEntry* a, const ShowEntry* b) {
+                const int na = CopyNumber(a->path), nb = CopyNumber(b->path);
+                if (na != nb) return na < nb;
+                if (a->modifiedMs != b->modifiedMs) return a->modifiedMs < b->modifiedMs;
+                return a->path < b->path;
+            };
+            std::map<std::string, std::vector<const ShowEntry*>> byFolder;
+            bool anyNamedFolder = false;
+            for (const ShowEntry* e : files) {
+                byFolder[e->category].push_back(e);
+                if (!e->category.empty()) anyNamedFolder = true;
+            }
+            for (auto& [folder, inFolder] : byFolder) {
+                std::sort(inFolder.begin(), inFolder.end(), better);
+                // An uncategorised copy of a show that also lives in a named folder is the stray one.
+                const size_t firstToRemove = (folder.empty() && anyNamedFolder) ? 0 : 1;
+                for (size_t i = firstToRemove; i < inFolder.size(); ++i)
+                    doomed.push_back(inFolder[i]->path);
+            }
+        }
+    }
+    if (doomed.empty())
+        return report;
+
+    const std::string bin = fs.Join(root_, kDeletedFolder);
+    if (!fs.Exists(bin)) {
+        if (auto c = fs.CreateDirectories(bin); !c.ok()) return c.error();
+    }
+    for (const std::string& from : doomed) {
+        std::string target = fs.Join(bin, LeafName(from));
+        if (fs.Exists(target))
+            target = fs.Join(bin, std::format("{}-{}", NowMs(), LeafName(from)));
+        if (fs.Move(from, target).ok())
+            ++report.removed;
+    }
+    if (auto s = Scan(); !s.ok()) return s.error();
+    return report;
+}
+
+std::string ShowLibrary::FindSameShow(std::string_view category, const Presentation& show) const {
+    // Same name and same slide count first (both are in the cached index, so this opens nothing for the
+    // hundreds of other songs); only those few candidates are read and compared word for word.
+    for (const ShowEntry& e : ShowsIn(category)) {
+        if (e.name != show.name || e.slideCount != static_cast<int>(show.slides.size()))
+            continue;
+        auto loaded = LoadShow(e.path);
+        if (!loaded.ok())
+            continue;
+        const auto& have = loaded.value().model.slides;
+        if (have.size() != show.slides.size())
+            continue;
+        bool same = true;
+        for (size_t i = 0; i < have.size() && same; ++i)
+            same = SlideWords(have[i]) == SlideWords(show.slides[i]);
+        if (same)
+            return e.path;
+    }
+    return {};
 }
 } // namespace bps::presentation

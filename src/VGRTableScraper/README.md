@@ -10,10 +10,10 @@ Nothing here reads or writes `%LOCALAPPDATA%/bps/the_table.json`. Everything lan
 
 ## Where the data comes from
 
-| Half | Host | Call |
-|---|---|---|
+| Half         | Host                  | Call                                                                       |
+| ------------ | --------------------- | -------------------------------------------------------------------------- |
 | books (text) | `table.branham.org` | `POST /rest/index/allSermons`, then `POST /rest/sermons/sermonRequest` |
-| audio | `branham.org` | `POST /branham/messageaudio.aspx/wmSearchByYear` |
+| audio        | `branham.org`       | `POST /branham/messageaudio.aspx/wmSearchByYear`                         |
 
 `table.branham.org` is the web Table: text only — its whole bundle contains no audio at all.
 The M4A files live on `branham.org`'s Message Audio page, in the same year query its own

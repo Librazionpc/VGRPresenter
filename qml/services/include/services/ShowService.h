@@ -160,6 +160,15 @@ public:
     // A free .vgr path for a new show called `name` in `category` — sanitised
     // file name, never an existing file. "" on failure.
     Q_INVOKABLE QString newLibraryShowPath(const QString &category, const QString &name);
+    // The path of a show already in `category` with this show's name AND exactly its words ("" = none):
+    // an import that finds one skips the write instead of adding "Name (2).vgr". Opens only the few
+    // same-named candidates, never the library.
+    QString findSameLibraryShow(const QString &category, const bps::presentation::Presentation &show);
+    // The show name to save under: `name`, or "name (2)", "name (3)"... when that name is taken in `category`.
+    QString numberedLibraryShowName(const QString &category, const QString &name);
+    // Finds shows that exist more than once (same name, same words) and moves the extra copies to the
+    // library's .deleted bin, keeping one of each. Runs on a worker; a toast reports the result.
+    Q_INVOKABLE void removeDuplicateShows();
 
     Q_INVOKABLE int rewriteShowFromText(const QString &path, const QString &text);
     // Quick edit for a slide's existing text blocks. Other blocks (images,
@@ -254,4 +263,5 @@ private:
     bool refreshBusy_ = false;
     bool cachedListPending_ = false;   // the persisted index was loaded and not yet shown
     bool refreshPending_ = false;
+    bool dedupeBusy_ = false;
 };

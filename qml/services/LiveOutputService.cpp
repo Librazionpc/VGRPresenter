@@ -148,9 +148,20 @@ LiveOutputService::LiveOutputService(QObject *parent)
     // set on air keeps its own copy of the slides, so without this the wall went on arming the old pace
     // (0 ms for a slide that had none when it was loaded) and never stepped.
     connect(&ShowService::instance(), &ShowService::documentJobFinished,
-            this, [this](int, const QString &kind, bool ok, const QString &, const QVariantMap &) {
-                if (ok && kind == QLatin1String("timer"))
-                    adoptShowNextTimers();
+            this, [this](int, const QString &kind, bool ok, const QString &, const QVariantMap &payload) {
+                if (!ok || kind != QLatin1String("timer"))
+                    return;
+                const QString showName = payload.value(QStringLiteral("showName")).toString();
+                // Only the show that is ACTUALLY on air may be re-paced, and only when the job names it:
+                // an unnamed payload used to re-key the timer to the on-air SLIDE TITLE ('Verse 1'), so it
+                // disarmed itself after the first step. Go live already recorded the pace for this set.
+                if (showName.isEmpty() || !live_ || lineSetName_ != showName) {
+                    qInfo("LiveOutputService: timer edit for '%s' not adopted (on air '%s' live=%d) — "
+                          "the live set keeps its own pace",
+                          qUtf8Printable(showName), qUtf8Printable(lineSetName_), live_ ? 1 : 0);
+                    return;
+                }
+                adoptShowNextTimers(payload.value(QStringLiteral("slides")).toList(), showName);
             });
 }
 
@@ -214,7 +225,7 @@ void LiveOutputService::goLive()
     if (live_ && !onAirSlideRaw_.isEmpty()) {
         pressTimelineStep("branch: already on air (kept as it is)");
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
         ensurePollTimer();
         startNdiSendClock();
         pollTick();
@@ -243,6 +254,12 @@ void LiveOutputService::goLive()
 void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList &slides)
 {
     VGR_CALL_TRACE("LiveOutputService.goLiveWithSlides");
+    // `name` and `slides` can BE stagedName_ / stagedSlidesRaw_ (the staged pick path), and this
+    // function clears both members below — which emptied the very values the timer adoption at the end
+    // reads, so the timer was recorded against the on-air SLIDE TITLE and disarmed after one step.
+    // Keep copies.
+    const QString nameForAdopt = name;
+    const QVariantList slidesForAdopt = slides;
     readingEngineFlowText_.clear();   // a new commit: the engine's passage is whatever these slides carry
     lastRepublishSig_.clear();
     bps::presentation::Presentation content;
@@ -274,7 +291,7 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         qWarning("LiveOutputService: goLiveWithSlides: no slides in '%s'", name.toUtf8().constData());
         EventBus::instance().notify(QStringLiteral("Nothing selected to put on air"),
                                     QStringLiteral("warning"), QStringLiteral("Go Live"));
-        emit onAirChanged();
+        NotifyOnAirChanged();
         if (g_pressTimeline.armed()) {
             g_pressTimeline.report("press ended: nothing to send");
             g_pressTimeline.close();
@@ -295,7 +312,7 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
         const QString reason = QString::fromStdString(r.error().message);
         qWarning("LiveOutputService: goLiveWithSlides failed: %s", r.error().message.c_str());
         EventBus::instance().notify(reason, QStringLiteral("warning"), QStringLiteral("Go Live"));
-        emit onAirChanged();
+        NotifyOnAirChanged();
         if (g_pressTimeline.armed()) {
             g_pressTimeline.report("press ended: engine refused");
             g_pressTimeline.close();
@@ -325,7 +342,7 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     // makes the fallback the slide that actually went out.
     if (!replacingLiveContent) {
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
     }
     if (!stagedSlidesRaw_.isEmpty() || !stagedSlide_.isEmpty()) {
         stagedName_.clear();
@@ -338,6 +355,12 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
     ensurePollTimer();          // already armed since boot — a no-op here
     startNdiSendClock();        // the NDI feed's own clock, paced by the output's refresh rate
     pollTick();
+    // A show that carries NEXT TIMERs means "advance by itself": record it as the timed set the moment it
+    // goes on air, so the wall's timer lights up and each slide's own pace runs without a second press.
+    qInfo("LiveOutputService: [ADOPT@GOLIVE] name='%s' slides=%d live=%d onAir='%s'",
+          qUtf8Printable(nameForAdopt), static_cast<int>(slidesForAdopt.size()), live_ ? 1 : 0,
+          qUtf8Printable(onAirTitle_));
+    adoptShowNextTimers(slidesForAdopt, nameForAdopt);
     pressTimelineStep("startNdiSendClock + pollTick");
     if (g_pressTimeline.armed()) {
         qInfo("PRESS TIMELINE: done | live=%d onAir='%s' ndiSending=%d '%s' mediaOnAir=%d",
@@ -350,9 +373,19 @@ void LiveOutputService::goLiveWithSlides(const QString &name, const QVariantList
 
 // The one way a staged change is announced. The revision is what a surface memoises on:
 // "is this the pick I already composed?" must not cost a read of the slide itself.
-void LiveOutputService::BumpStaged()
+void LiveOutputService::NotifyOnAirChanged(std::source_location site)
+{
+    ++onAirRev_;
+    if (EngineBridge::instance().perfProbe())
+        EngineBridge::instance().perfNote(QStringLiteral("NotifyOnAir line %1").arg(site.line()), 0.0);
+    emit onAirChanged();
+}
+
+void LiveOutputService::BumpStaged(std::source_location site)
 {
     ++stagedRev_;
+    if (EngineBridge::instance().perfProbe())
+        EngineBridge::instance().perfNote(QStringLiteral("BumpStaged %1:%2").arg(QString::fromLatin1(site.file_name()).section(QLatin1Char('/'), -1).section(QLatin1Char('\\'), -1)).arg(site.line()), 0.0);
     emit stagedChanged();
 }
 
@@ -730,7 +763,7 @@ void LiveOutputService::stop()
     onAirTitle_.clear();
     onAirIndex_ = -1;
     onAirTotal_ = 0;
-    emit onAirChanged();
+    NotifyOnAirChanged();
     stopNdiSendClock();
     stopNdiFeed();
     if (!outputRuntime_.isEmpty()) {
@@ -804,7 +837,7 @@ bool LiveOutputService::next()
     auto r = pl::PresentationEngine::Instance().Next();
     if (r.ok()) {
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
         return true;
     }
     // WHY THE STEP WAS REFUSED, on the record: "the timer isn't moving the slide" is exactly this
@@ -825,7 +858,7 @@ bool LiveOutputService::previous()
     auto r = pl::PresentationEngine::Instance().Previous();
     if (r.ok()) {
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
         return true;
     }
     return false;
@@ -904,7 +937,7 @@ bool LiveOutputService::jumpTo(int index)
     auto r = pl::PresentationEngine::Instance().JumpTo(size_t(index));
     if (r.ok()) {
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
         return true;
     }
     return false;
@@ -917,7 +950,7 @@ bool LiveOutputService::jumpToGroup(const QString &tag)
     auto r = pl::PresentationEngine::Instance().JumpByTag(tag.toStdString());
     if (r.ok()) {
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
         return true;
     }
     return false;
@@ -1425,7 +1458,7 @@ void LiveOutputService::pollTick()
         onAirIndex_ = idx;
         onAirTotal_ = total;
         refreshOnAirSlide();
-        emit onAirChanged();
+        NotifyOnAirChanged();
     } else {
         const QVariantMap next = slide
             ? slideToVariantMap(slide, pl::PresentationEngine::Instance().ActiveOutputStyle())
@@ -1435,7 +1468,7 @@ void LiveOutputService::pollTick()
         if (next != onAirSlide_ || nextRaw != onAirSlideRaw_) {
             onAirSlide_ = next;
             onAirSlideRaw_ = nextRaw;
-            emit onAirChanged();
+            NotifyOnAirChanged();
         }
     }
 

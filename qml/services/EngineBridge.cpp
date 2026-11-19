@@ -27,6 +27,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
@@ -371,6 +372,40 @@ void EngineBridge::write(const QString &level, const QString &source, const QStr
 void EngineBridge::log(const QString &level, const QString &source, const QString &message)
 {
     write(level, source, message);
+}
+
+double EngineBridge::perfNow() const
+{
+    static const QElapsedTimer clock = [] { QElapsedTimer t; t.start(); return t; }();
+    return static_cast<double>(clock.nsecsElapsed()) / 1.0e6;
+}
+
+void EngineBridge::perfNote(const QString &name, double ms)
+{
+    if (!perfProbe_)
+        return;
+    PerfAcc &acc = perfAcc_[name];
+    ++acc.n;
+    acc.total += ms;
+    acc.max = qMax(acc.max, ms);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (perfFlushedAtMs_ == 0)
+        perfFlushedAtMs_ = now;
+    if (now - perfFlushedAtMs_ < 10'000)
+        return;
+    perfFlushedAtMs_ = now;
+    QList<QPair<double, QString>> ranked;
+    for (auto it = perfAcc_.cbegin(); it != perfAcc_.cend(); ++it)
+        ranked.append({ it.value().total, it.key() });
+    std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    for (int i = 0; i < ranked.size() && i < 40; ++i) {
+        const PerfAcc &a = perfAcc_.value(ranked.at(i).second);
+        write(QStringLiteral("info"), QStringLiteral("PerfProbe"),
+              QStringLiteral("%1 n=%2 avg=%3ms max=%4ms total=%5ms")
+                  .arg(ranked.at(i).second).arg(a.n).arg(a.total / double(qMax<qint64>(1, a.n)), 0, 'f', 2)
+                  .arg(a.max, 0, 'f', 1).arg(a.total, 0, 'f', 0));
+    }
+    perfAcc_.clear();
 }
 
 QStringList EngineBridge::bootLog() const

@@ -784,8 +784,10 @@ void StartGuiStallSampler(int thresholdMs)
                 lastCall.clear();
             }
             worstMs = std::max(worstMs, stalledMs);
-            if (samples >= kStallMaxSamples
-                || std::chrono::duration<double, std::milli>(nowPoint - lastSample).count() < 15.0)
+            // The first kStallMaxSamples come 15 ms apart (what the stall STARTED in); after that a long stall keeps
+            // being sampled every 250 ms, up to 40 stacks, so a multi-second freeze names where it spent the time.
+            const double sinceLastMs = std::chrono::duration<double, std::milli>(nowPoint - lastSample).count();
+            if (samples >= kStallMaxSamples + 40 || sinceLastMs < (samples >= kStallMaxSamples ? 250.0 : 15.0))
                 continue;
             const unsigned long long tid = calltrace::guiNativeThreadId();
             if (tid == 0)

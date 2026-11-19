@@ -48,11 +48,14 @@ Rectangle {
             return
         }
         root.onAirSlideBusy = true
+        const t0 = EngineBridge.perfProbe ? EngineBridge.perfNow() : 0
         do {
             root.onAirSlidePending = false
             root.refreshOnAirSlideOnce()
         } while (root.onAirSlidePending)
         root.onAirSlideBusy = false
+        if (EngineBridge.perfProbe)
+            EngineBridge.perfNote("OutputMonitorTile.refreshOnAirSlide[" + root.styleId + "]", EngineBridge.perfNow() - t0)
     }
     function composeFromSlides() {
         const stagedRaw = LiveOutputService.stagedSlideRaw
@@ -74,7 +77,14 @@ Rectangle {
               + "|" + LiveOutputService.live
               + "|" + LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaRev
               + "|" + LiveOutputService.inputLabel
-            : ""
+            // NOT a walk: a picture that has no flow used to have NO key, so each of the tile's seven handlers
+            // recomposed the whole slide for one event (about 500 recomposes in two minutes of stepping, ~10% of
+            // the interface thread). What the composition depends on is scalars too: what is staged, what is on air
+            // (its own revision), live, the media and the taken input.
+            : "slide|" + root.styleId + "|" + root.stylePulse + "|" + LiveOutputService.stagedRev
+              + "|" + LiveOutputService.onAirRev + "|" + LiveOutputService.live
+              + "|" + LiveOutputService.mediaOnAir + "|" + LiveOutputService.mediaRev
+              + "|" + LiveOutputService.inputLabel + "|" + LiveOutputService.readingStageSerial
         const memo = root.slideMemo
         if (key !== "" && key === memo.key) {
             root.onAirSlide = memo.value
@@ -82,16 +92,25 @@ Rectangle {
         }
         // A WALKING PICTURE IS COMPOSED ONCE PER STYLE, FOR EVERY SURFACE OF IT (see composedForStyle): the key is
         // the picture's scalars alone — the style id is the cache's own, and the style roster invalidates it.
+        if (EngineBridge.perfProbe) {
+            // WHICH PART OF THE KEY MOVED (walk|style|pulse|rev|set|serial|page|live|mediaOnAir|mediaRev|input).
+            const now = key.split("|"), was = String(memo.key).split("|")
+            for (let i = 0; i < now.length; ++i)
+                if (now[i] !== was[i])
+                    EngineBridge.perfNote("tile.keyfield" + i + " " + ["walk", "style", "pulse", "rev", "set", "serial", "page", "live", "mediaOnAir", "mediaRev", "input"][i], 0)
+        }
+        const tCompose = EngineBridge.perfProbe ? EngineBridge.perfNow() : 0
         const composed = walking
             ? LiveOutputService.composedForStyle(root.styleId, key.slice(("walk|" + root.styleId + "|" + root.stylePulse + "|").length))
             : root.composeFromSlides()
-        EngineBridge.log("trace", "RefreshOnAirSlide",
-            "tile=" + root.objectName + " recomposed key=" + key.slice(0, 60)
-            + " blocks0Text=" + String((composed.blocks && composed.blocks[0]
-                && composed.blocks[0].text) ?? "").slice(0, 24))
+        if (EngineBridge.perfProbe)
+            EngineBridge.perfNote("tile.composedForStyle[" + root.styleId + "]", EngineBridge.perfNow() - tCompose)
+        const tAssign = EngineBridge.perfProbe ? EngineBridge.perfNow() : 0
         memo.key = key
         memo.value = composed
         root.onAirSlide = composed
+        if (EngineBridge.perfProbe)
+            EngineBridge.perfNote("tile.assignOnAirSlide[" + root.styleId + "]", EngineBridge.perfNow() - tAssign)
     }
     // A plain object mutated in place: its IDENTITY never changes, so writing it
     // cannot re-enter the binding above (a property write there would).

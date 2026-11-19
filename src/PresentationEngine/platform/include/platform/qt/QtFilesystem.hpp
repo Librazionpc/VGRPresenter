@@ -54,6 +54,7 @@ public:
     Result<void> WriteBinary(std::string_view path, const std::vector<uint8_t>& data) override;
     Result<void> Append(std::string_view path, std::string_view data) override;
     Result<std::unique_ptr<IFileWriteStream>> OpenWriteStream(std::string_view path) override;
+    Result<std::shared_ptr<const IMappedFile>> MapReadOnly(std::string_view path) const override;
 
     Result<void> WriteAtomic(std::string_view path, std::string_view data) override;
     Result<void> WriteBinaryAtomic(std::string_view path,

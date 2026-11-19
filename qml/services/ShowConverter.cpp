@@ -5,11 +5,41 @@
 #include <QStringList>
 #include <QVariantList>
 
+#include <array>
+#include <mutex>
+
 namespace bp = bps::presentation;
 
 namespace {
 std::string utf8(const QString &s) { return s.toStdString(); }
 QString qstr(const std::string &s) { return QString::fromStdString(s); }
+
+// THE LAST FEW CONVERSIONS ARE REMEMBERED. A slide's meta carries its passage text (line1 / line2: thousands of
+// characters for a reading pick), and every composition of the same slide — one per output, one per tile, again on
+// every step — converted it to JSON and back. In a 6-minute soak those two functions were ~10% of everything the
+// interface thread was caught doing. The answer depends only on the input, so a small value-compared memo (the same
+// shape as SlideRules::ContentType's) turns the repeats into a comparison. One process-wide table behind a mutex —
+// these run on the interface thread AND the engine's workers — and deliberately never destroyed.
+template <typename Key, typename Value>
+struct ConversionMemo {
+    struct Entry { Key key; Value value; bool used = false; };
+    std::mutex mutex;
+    std::array<Entry, 8> entries;
+    std::size_t next = 0;
+    bool find(const Key &key, Value &out) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (const Entry &e : entries)
+            if (e.used && e.key == key) { out = e.value; return true; }
+        return false;
+    }
+    void put(const Key &key, const Value &value) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        Entry &slot = entries[next++ % entries.size()];
+        slot.key = key;
+        slot.value = value;
+        slot.used = true;
+    }
+};
 
 // JS object -> compact JSON string (what the engine stores as opaque meta).
 std::string metaToJson(const QVariant &meta)
@@ -17,13 +47,25 @@ std::string metaToJson(const QVariant &meta)
     const QVariantMap map = meta.toMap();
     if (map.isEmpty())
         return "{}";
-    return QJsonDocument(QJsonObject::fromVariantMap(map)).toJson(QJsonDocument::Compact).toStdString();
+    static auto *memo = new ConversionMemo<QVariantMap, std::string>;
+    std::string json;
+    if (memo->find(map, json))
+        return json;
+    json = QJsonDocument(QJsonObject::fromVariantMap(map)).toJson(QJsonDocument::Compact).toStdString();
+    memo->put(map, json);
+    return json;
 }
 
 QVariantMap metaFromJson(const std::string &json)
 {
+    static auto *memo = new ConversionMemo<std::string, QVariantMap>;
+    QVariantMap map;
+    if (memo->find(json, map))
+        return map;
     const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(json));
-    return doc.isObject() ? doc.object().toVariantMap() : QVariantMap{};
+    map = doc.isObject() ? doc.object().toVariantMap() : QVariantMap{};
+    memo->put(json, map);
+    return map;
 }
 
 std::vector<std::string> stringList(const QVariant &v)
